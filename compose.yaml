@@ -1,0 +1,13 @@
+services:
+  hub:
+    build: .
+    ports:
+      - "8787:8787"
+    environment:
+      COFFEE_SHOP_TOKEN: ${COFFEE_SHOP_TOKEN:?set COFFEE_SHOP_TOKEN}
+    volumes:
+      - coffee-shop-data:/data
+    restart: unless-stopped
+
+volumes:
+  coffee-shop-data:

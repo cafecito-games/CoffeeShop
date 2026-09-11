@@ -1,0 +1,265 @@
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import {
+  Pulse as Activity, ArrowLeft, ArrowRight, Broadcast, CaretDown, Check, CircleNotch, Cloud, Command,
+  Cpu, Desktop, DotsThree, Gear, HouseLine, Laptop, MagnifyingGlass, PaperPlaneTilt, Plus,
+  Robot, SlidersHorizontal, TerminalWindow, UsersThree, WarningCircle, X, LockKey
+} from "@phosphor-icons/react";
+import type { Agent, AgentState, ChatMessage, ComputeNode, Snapshot, TimelineEvent } from "@coffee-shop/protocol";
+
+type View = "agents" | "activity" | "compute" | "settings";
+
+const emptySnapshot: Snapshot = { agents: [], nodes: [], runs: [], events: [], messages: [], generatedAt: new Date().toISOString() };
+const statusLabels: Record<AgentState, string> = { idle: "Idle", thinking: "Thinking", working: "Working", waiting: "Waiting", blocked: "Blocked", done: "Done" };
+const queryToken = new URLSearchParams(location.search).get("token");
+if (queryToken) { localStorage.setItem("coffee-shop-token", queryToken); history.replaceState({}, "", location.pathname); }
+const accessToken = localStorage.getItem("coffee-shop-token") ?? "";
+const apiFetch = (path: string, init: RequestInit = {}) => fetch(path, { ...init, headers: { ...(accessToken ? { authorization: `Bearer ${accessToken}` } : {}), ...init.headers } });
+
+function timeAgo(date: string) {
+  const seconds = Math.max(1, Math.round((Date.now() - new Date(date).getTime()) / 1000));
+  if (seconds < 60) return "now";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  return `${Math.floor(hours / 24)}d`;
+}
+
+function Avatar({ agent, size = "md" }: { agent: Agent; size?: "sm" | "md" | "lg" }) {
+  return (
+    <div className={`avatar avatar-${size} state-${agent.state}`} aria-label={`${agent.name}: ${statusLabels[agent.state]}`}>
+      <span className="antenna" /><span className="bot-face"><i /><i /></span><b>{agent.glyph}</b>
+    </div>
+  );
+}
+
+function StateMark({ state }: { state: AgentState }) {
+  return <span className={`state-mark state-${state}`}><i />{statusLabels[state]}</span>;
+}
+
+function Roster({ agents, selectedId, onSelect, onCreate }: { agents: Agent[]; selectedId?: string; onSelect: (id: string) => void; onCreate: () => void }) {
+  const [query, setQuery] = useState("");
+  const filtered = agents.filter((agent) => `${agent.name} ${agent.title}`.toLowerCase().includes(query.toLowerCase()));
+  return (
+    <aside className="roster">
+      <div className="brand-row"><div className="brand-mark"><span /><span /></div><strong>Coffee Shop</strong><button className="icon-btn" onClick={onCreate} aria-label="Create agent"><Plus size={17} /></button></div>
+      <label className="search"><MagnifyingGlass size={15} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Find an agent" /></label>
+      <div className="section-label"><span>Agents</span><small>{agents.filter((a) => ["working", "thinking"].includes(a.state)).length} active</small></div>
+      <div className="agent-list">
+        {filtered.map((agent) => (
+          <button key={agent.id} className={`agent-row ${selectedId === agent.id ? "selected" : ""}`} onClick={() => onSelect(agent.id)}>
+            <Avatar agent={agent} />
+            <span className="agent-copy"><span><strong>{agent.name}</strong><time>{timeAgo(agent.updatedAt)}</time></span><em>{agent.currentAction}</em></span>
+            {agent.unread > 0 && <span className="unread">{agent.unread}</span>}
+          </button>
+        ))}
+      </div>
+      <div className="roster-foot"><span><i className="online-dot" /> Control plane</span><small>Local-first</small></div>
+    </aside>
+  );
+}
+
+function EmptyAgents({ agents, onSelect, onCreate }: { agents: Agent[]; onSelect: (id: string) => void; onCreate: () => void }) {
+  const active = agents.filter((agent) => ["working", "thinking", "waiting"].includes(agent.state));
+  return (
+    <main className="mobile-list-view">
+      <header className="mobile-header"><div className="brand-mark"><span /><span /></div><strong>Coffee Shop</strong><button className="icon-btn" onClick={onCreate} aria-label="Create agent"><Plus size={18} /></button></header>
+      <section className="mobile-overview">
+        <div><small>Today</small><h1>Your agents</h1></div>
+        <div className="signal"><Broadcast size={16} weight="fill" />{active.length} in motion</div>
+      </section>
+      <div className="mobile-agent-list">
+        {agents.map((agent) => (
+          <button key={agent.id} className="mobile-agent" onClick={() => onSelect(agent.id)}>
+            <Avatar agent={agent} size="lg" />
+            <span><span className="mobile-agent-heading"><strong>{agent.name}</strong><StateMark state={agent.state} /></span><em>{agent.title}</em><p>{agent.currentAction}</p></span>
+            <ArrowRight size={18} />
+          </button>
+        ))}
+      </div>
+    </main>
+  );
+}
+
+function Chat({ agent, messages, nodes, sending, onBack, onSend, onInspector }: {
+  agent: Agent; messages: ChatMessage[]; nodes: ComputeNode[]; sending: boolean;
+  onBack: () => void; onSend: (body: string) => Promise<void>; onInspector: () => void;
+}) {
+  const [body, setBody] = useState("");
+  const endRef = useRef<HTMLDivElement>(null);
+  const node = nodes.find((item) => item.id === agent.computeNodeId);
+  useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages.length]);
+  async function submit(event: FormEvent) { event.preventDefault(); const value = body.trim(); if (!value || sending) return; setBody(""); await onSend(value); }
+  return (
+    <main className="chat">
+      <header className="chat-header">
+        <button className="back-btn" onClick={onBack}><ArrowLeft size={19} /></button>
+        <Avatar agent={agent} />
+        <div className="chat-identity"><strong>{agent.name}</strong><span><StateMark state={agent.state} /> · {node?.name ?? "Unassigned"}</span></div>
+        <button className="context-btn" onClick={onInspector}><SlidersHorizontal size={18} /><span>Context</span></button>
+      </header>
+      <div className="chat-scroll">
+        <div className="agent-intro"><Avatar agent={agent} size="lg" /><h1>{agent.name}</h1><p>{agent.title}</p><small>{agent.summary}</small></div>
+        <div className="messages">
+          {messages.map((message) => <Message key={message.id} message={message} agent={agent} />)}
+          {sending && <div className="message agent-message pending"><div className="message-meta"><strong>{agent.name}</strong><span>now</span></div><p><CircleNotch className="spin" size={14} /> Dispatching to {node?.name ?? agent.computeNodeId}…</p></div>}
+          <div ref={endRef} />
+        </div>
+      </div>
+      <form className="composer" onSubmit={submit}>
+        <div className="composer-box"><textarea value={body} onChange={(event) => setBody(event.target.value)} placeholder={`Message ${agent.name}`} rows={1} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} /><button disabled={!body.trim() || sending}><PaperPlaneTilt size={17} weight="fill" /></button></div>
+        <small>{agent.harnessId === "claude-cli" ? "Claude Code" : "Codex"} · {agent.model} · runs on {node?.name ?? "unassigned compute"}</small>
+      </form>
+    </main>
+  );
+}
+
+function Message({ message, agent }: { message: ChatMessage; agent: Agent }) {
+  if (message.kind === "handoff") return <div className="handoff-message"><UsersThree size={17} /><div><strong>Agent handoff</strong><p>{message.body}</p></div><time>{timeAgo(message.createdAt)}</time></div>;
+  if (message.author === "system") return <div className="system-message"><WarningCircle size={15} />{message.body}</div>;
+  return (
+    <article className={`message ${message.author === "you" ? "user-message" : "agent-message"}`}>
+      <div className="message-meta"><strong>{message.author === "you" ? "You" : agent.name}</strong><span>{timeAgo(message.createdAt)}</span></div>
+      <p>{message.body}</p>
+      {message.runId && <button className="run-link"><TerminalWindow size={14} /> Inspect run</button>}
+    </article>
+  );
+}
+
+function Inspector({ agent, nodes, open, onClose, onUpdate }: { agent: Agent; nodes: ComputeNode[]; open: boolean; onClose: () => void; onUpdate: (patch: Partial<Agent>) => void }) {
+  const [menu, setMenu] = useState<"harness" | "node" | null>(null);
+  const node = nodes.find((item) => item.id === agent.computeNodeId);
+  const harnesses = Array.from(new Map(nodes.flatMap((item) => item.harnesses).map((h) => [h.id, h])).values());
+  return (
+    <aside className={`inspector ${open ? "open" : ""}`}>
+      <header><span>Agent context</span><button className="icon-btn" onClick={onClose}><X size={17} /></button></header>
+      <section className="identity-block"><Avatar agent={agent} size="lg" /><div><h2>{agent.name}</h2><p>{agent.title}</p></div><button className="icon-btn"><DotsThree size={18} weight="bold" /></button></section>
+      <section className="status-block"><span>Current state</span><StateMark state={agent.state} /><p>{agent.currentAction}</p></section>
+      <section className="config-section">
+        <div className="section-label"><span>Runtime</span></div>
+        <div className="config-field"><label>Harness</label><button onClick={() => setMenu(menu === "harness" ? null : "harness")}><Command size={17} /><span><strong>{harnesses.find((h) => h.id === agent.harnessId)?.label ?? agent.harnessId}</strong><small>{agent.model}</small></span><CaretDown size={14} /></button>
+          {menu === "harness" && <div className="select-menu">{harnesses.map((h) => <button key={h.id} onClick={() => { onUpdate({ harnessId: h.id, model: h.models[0] || agent.model }); setMenu(null); }}><span>{h.label}<small>{h.authMode.replaceAll("-", " ")}</small></span>{agent.harnessId === h.id && <Check size={15} />}</button>)}</div>}
+        </div>
+        <div className="config-field"><label>Compute</label><button onClick={() => setMenu(menu === "node" ? null : "node")}><Cpu size={17} /><span><strong>{node?.name ?? "Unassigned"}</strong><small>{node?.platform ?? "No worker"}</small></span><CaretDown size={14} /></button>
+          {menu === "node" && <div className="select-menu">{nodes.map((item) => <button key={item.id} onClick={() => { onUpdate({ computeNodeId: item.id }); setMenu(null); }}><span>{item.name}<small>{item.status} · {item.activeRuns}/{item.concurrency} runs</small></span>{agent.computeNodeId === item.id && <Check size={15} />}</button>)}</div>}
+        </div>
+        <div className="config-line"><label>Workspace</label><code>{agent.workspace}</code></div>
+      </section>
+      <section className="prompt-section"><div className="section-label"><span>Purpose</span><small>system prompt</small></div><p>{agent.systemPrompt}</p></section>
+      <footer><div><i className={node?.status === "online" || node?.status === "busy" ? "online-dot" : "offline-dot"} /><span>{node?.status ?? "offline"}</span></div><small>Credentials stay on {node?.name ?? "the worker"}</small></footer>
+    </aside>
+  );
+}
+
+function ActivityView({ events, agents }: { events: TimelineEvent[]; agents: Agent[] }) {
+  const name = (id?: string) => agents.find((agent) => agent.id === id)?.name;
+  return <main className="utility-view"><header className="utility-header"><div><small>Across every harness and machine</small><h1>Activity</h1></div><button className="filter-btn"><SlidersHorizontal size={16} /> Filter</button></header><div className="timeline">{events.map((event, index) => <article key={event.id} className={`timeline-event event-${event.type}`}><div className="timeline-rail"><span>{event.type === "handoff" ? <UsersThree size={15} /> : event.type === "node" ? <Cpu size={15} /> : <Activity size={15} />}</span>{index < events.length - 1 && <i />}</div><div><div className="event-heading"><strong>{event.title}</strong><time>{timeAgo(event.createdAt)}</time></div><p>{event.detail}</p>{event.fromAgentId && <small>{name(event.fromAgentId)} handed work to {name(event.toAgentId)}</small>}</div></article>)}</div></main>;
+}
+
+function ComputeView({ nodes }: { nodes: ComputeNode[] }) {
+  const kindIcon = (kind: ComputeNode["kind"]) => kind === "local" ? <Laptop size={20} /> : kind === "home-server" ? <HouseLine size={20} /> : <Cloud size={20} />;
+  return <main className="utility-view"><header className="utility-header"><div><small>Execution fabric</small><h1>Compute</h1></div><button className="primary-btn"><Plus size={16} /> Add worker</button></header><div className="node-list">{nodes.map((node) => <article key={node.id} className="node-row"><div className="node-icon">{kindIcon(node.kind)}</div><div className="node-main"><div><strong>{node.name}</strong><span className={`node-status ${node.status}`}><i />{node.status}</span></div><p>{node.platform} · {node.activeRuns} of {node.concurrency} slots active</p><div className="capacity"><i style={{ width: `${Math.max(3, (node.activeRuns / node.concurrency) * 100)}%` }} /></div><div className="harness-tags">{node.harnesses.map((h) => <span key={h.id} className={h.available ? "" : "unavailable"}><Command size={13} />{h.label}<small>{h.available ? "ready" : "missing"}</small></span>)}</div></div><button className="icon-btn"><ArrowRight size={17} /></button></article>)}</div><section className="worker-callout"><TerminalWindow size={19} /><div><strong>Bring another machine online</strong><code>pnpm worker</code><p>Workers connect outbound to this hub; model credentials never leave the machine.</p></div></section></main>;
+}
+
+function SettingsView() {
+  return <main className="utility-view"><header className="utility-header"><div><small>Control plane</small><h1>Settings</h1></div></header><div className="settings-list"><section><div><Broadcast size={18} /><span><strong>Hub connection</strong><small>WebSocket events and worker dispatch</small></span></div><em className="ok-label"><Check size={13} /> connected</em></section><section><div><Desktop size={18} /><span><strong>Installable app</strong><small>Add Coffee Shop to your home screen</small></span></div><button>Install PWA</button></section><section><div><WarningCircle size={18} /><span><strong>Execution policy</strong><small>Workers enforce workspace allowlists and safe harness modes</small></span></div><button>Review</button></section></div><div className="terms-note"><strong>Claude subscription boundary</strong><p>Coffee Shop invokes Anthropic’s official Claude Code CLI on your worker. It never reads, copies, or proxies Claude credentials. Keep a subscription-backed worker private to its account owner.</p></div></main>;
+}
+
+function BottomNav({ view, onView }: { view: View; onView: (view: View) => void }) {
+  const items: [View, typeof Robot, string][] = [["agents", Robot, "Agents"], ["activity", Activity, "Activity"], ["compute", Cpu, "Compute"], ["settings", Gear, "Settings"]];
+  return <nav className="bottom-nav">{items.map(([key, Icon, label]) => <button key={key} className={view === key ? "active" : ""} onClick={() => onView(key)}><Icon size={21} weight={view === key ? "fill" : "regular"} /><span>{label}</span></button>)}</nav>;
+}
+
+function LockScreen() {
+  const [value, setValue] = useState("");
+  return <main className="lock-screen"><div className="brand-mark"><span /><span /></div><LockKey size={20} /><h1>Connect to your control plane</h1><p>Enter the hub token configured on this deployment. It stays in this browser.</p><form onSubmit={(event) => { event.preventDefault(); if (!value.trim()) return; localStorage.setItem("coffee-shop-token", value.trim()); location.reload(); }}><input type="password" value={value} onChange={(event) => setValue(event.target.value)} placeholder="Hub access token" autoFocus /><button>Connect</button></form></main>;
+}
+
+function CreateAgentDialog({ nodes, onClose, onCreate }: { nodes: ComputeNode[]; onClose: () => void; onCreate: (fields: Record<string, string>) => Promise<void> }) {
+  const [name, setName] = useState("");
+  const [title, setTitle] = useState("");
+  const [harnessId, setHarnessId] = useState("claude-cli");
+  const [computeNodeId, setComputeNodeId] = useState(nodes[0]?.id ?? "");
+  const [workspace, setWorkspace] = useState(nodes[0]?.workspaceRoots[0] ?? "");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  async function submit(event: FormEvent) {
+    event.preventDefault(); setBusy(true); setError("");
+    try { await onCreate({ name, title, harnessId, computeNodeId, workspace }); onClose(); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : "Could not create agent"); }
+    finally { setBusy(false); }
+  }
+  return <div className="dialog-scrim" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+    <form className="create-dialog" onSubmit={submit}>
+      <header><div><small>New teammate</small><h2>Create an agent</h2></div><button type="button" className="icon-btn" onClick={onClose}><X size={17} /></button></header>
+      <p>Give the agent a stable purpose. You can move it between harnesses and machines later without changing who it is.</p>
+      <label>Name<input value={name} onChange={(event) => setName(event.target.value)} placeholder="Ada" autoFocus required /></label>
+      <label>Role<input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="C++ systems engineer" required /></label>
+      <fieldset><legend>Harness</legend><div className="choice-row"><button type="button" className={harnessId === "claude-cli" ? "selected" : ""} onClick={() => setHarnessId("claude-cli")}><Command size={15} />Claude Code</button><button type="button" className={harnessId === "codex-cli" ? "selected" : ""} onClick={() => setHarnessId("codex-cli")}><Command size={15} />Codex</button></div></fieldset>
+      <fieldset><legend>Compute</legend><div className="node-choices">{nodes.map((node) => <button type="button" key={node.id} className={computeNodeId === node.id ? "selected" : ""} onClick={() => { setComputeNodeId(node.id); setWorkspace(node.workspaceRoots[0] ?? ""); }}><span><strong>{node.name}</strong><small>{node.status} · {node.platform}</small></span>{computeNodeId === node.id && <Check size={14} />}</button>)}</div></fieldset>
+      <label>Workspace<input value={workspace} onChange={(event) => setWorkspace(event.target.value)} placeholder="/absolute/project/path" required /></label>
+      {error && <div className="dialog-error">{error}</div>}
+      <footer><button type="button" onClick={onClose}>Cancel</button><button className="create-button" disabled={busy || !name || !title || !computeNodeId}>{busy ? "Creating…" : "Create agent"}</button></footer>
+    </form>
+  </div>;
+}
+
+export default function App() {
+  const [snapshot, setSnapshot] = useState<Snapshot>(emptySnapshot);
+  const [view, setView] = useState<View>("agents");
+  const [selectedId, setSelectedId] = useState<string>();
+  const [inspectorOpen, setInspectorOpen] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [locked, setLocked] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const selected = snapshot.agents.find((agent) => agent.id === selectedId);
+  const selectedMessages = useMemo(() => snapshot.messages.filter((message) => message.agentId === selectedId).sort((a, b) => a.createdAt.localeCompare(b.createdAt)), [snapshot.messages, selectedId]);
+
+  useEffect(() => {
+    apiFetch("/api/snapshot").then(async (response) => { if (!response.ok) { setLocked(true); return; } setSnapshot(await response.json()); }).catch(() => setLocked(true));
+    const socket = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/events${accessToken ? `?token=${encodeURIComponent(accessToken)}` : ""}`);
+    socket.onmessage = (event) => { const message = JSON.parse(event.data); if (message.type === "snapshot") setSnapshot(message.data); };
+    return () => socket.close();
+  }, []);
+
+  async function send(body: string) {
+    if (!selected) return;
+    setSending(true);
+    try { await apiFetch(`/api/agents/${selected.id}/messages`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ body }) }); }
+    finally { setSending(false); }
+  }
+
+  async function updateAgent(patch: Partial<Agent>) {
+    if (!selected) return;
+    setSnapshot((current) => ({ ...current, agents: current.agents.map((agent) => agent.id === selected.id ? { ...agent, ...patch } : agent) }));
+    await apiFetch(`/api/agents/${selected.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(patch) });
+  }
+
+  function selectAgent(id: string) { setSelectedId(id); setView("agents"); setInspectorOpen(false); }
+  function switchView(next: View) { setView(next); if (next !== "agents") setSelectedId(undefined); }
+  async function createAgent(fields: Record<string, string>) {
+    const response = await apiFetch("/api/agents", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(fields) });
+    if (!response.ok) throw new Error((await response.json()).error ?? "Could not create agent");
+    const agent = await response.json() as Agent;
+    setSelectedId(agent.id); setView("agents");
+  }
+
+  if (locked) return <LockScreen />;
+
+  return (
+    <div className="app-shell">
+      <Roster agents={snapshot.agents} selectedId={selectedId} onSelect={selectAgent} onCreate={() => setCreating(true)} />
+      <div className="workspace">
+        {view === "agents" && !selected && <EmptyAgents agents={snapshot.agents} onSelect={selectAgent} onCreate={() => setCreating(true)} />}
+        {view === "agents" && selected && <Chat agent={selected} nodes={snapshot.nodes} messages={selectedMessages} sending={sending} onBack={() => setSelectedId(undefined)} onSend={send} onInspector={() => setInspectorOpen(true)} />}
+        {view === "activity" && <ActivityView events={snapshot.events} agents={snapshot.agents} />}
+        {view === "compute" && <ComputeView nodes={snapshot.nodes} />}
+        {view === "settings" && <SettingsView />}
+      </div>
+      {selected && <Inspector agent={selected} nodes={snapshot.nodes} open={inspectorOpen} onClose={() => setInspectorOpen(false)} onUpdate={updateAgent} />}
+      <nav className="desktop-nav"><button className={view === "agents" ? "active" : ""} onClick={() => switchView("agents")}><Robot size={17} /> Agents</button><button className={view === "activity" ? "active" : ""} onClick={() => switchView("activity")}><Activity size={17} /> Activity</button><button className={view === "compute" ? "active" : ""} onClick={() => switchView("compute")}><Cpu size={17} /> Compute</button><button className={view === "settings" ? "active" : ""} onClick={() => switchView("settings")}><Gear size={17} /> Settings</button></nav>
+      <BottomNav view={view} onView={switchView} />
+      {creating && <CreateAgentDialog nodes={snapshot.nodes} onClose={() => setCreating(false)} onCreate={createAgent} />}
+    </div>
+  );
+}
