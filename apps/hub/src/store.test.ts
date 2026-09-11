@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -23,4 +23,42 @@ test("starts empty, persists state atomically, and loads it again", async () => 
   const second = new Store(path);
   await second.load();
   assert.equal(second.snapshot().events[0].title, "Saved event");
+});
+
+test("removes legacy demo records without removing user-created data", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "coffee-shop-store-"));
+  const path = join(directory, "state.json");
+  await writeFile(path, JSON.stringify({
+    agents: [
+      { id: "cpp-steward", name: "Ada", computeNodeId: "home-linux" },
+      { id: "claude-scout", name: "Claude Scout", computeNodeId: "local-macbook" }
+    ],
+    nodes: [
+      { id: "local-macbook", name: "This laptop", workspaceRoots: ["/Users/christian/Projects"] },
+      { id: "home-linux", name: "Home server", workspaceRoots: ["/srv/workspaces"] },
+      { id: "cloud-runner", name: "Cloud runner", workspaceRoots: ["/workspace"] }
+    ],
+    runs: [
+      { id: "run-benchmark", agentId: "cpp-steward", nodeId: "home-linux" },
+      { id: "real-run", agentId: "claude-scout", nodeId: "local-macbook" }
+    ],
+    events: [
+      { id: "evt-1", agentId: "cpp-steward", runId: "run-benchmark" },
+      { id: "real-event", agentId: "claude-scout", runId: "real-run" }
+    ],
+    messages: [
+      { id: "msg-1", agentId: "cpp-steward", runId: "run-benchmark" },
+      { id: "real-message", agentId: "claude-scout", runId: "real-run" }
+    ]
+  }));
+
+  const store = new Store(path);
+  await store.load();
+  const snapshot = store.snapshot();
+  assert.deepEqual(snapshot.agents.map((agent) => agent.id), ["claude-scout"]);
+  assert.deepEqual(snapshot.nodes.map((node) => node.id), ["local-macbook"]);
+  assert.deepEqual(snapshot.runs.map((run) => run.id), ["real-run"]);
+  assert.deepEqual(snapshot.events.map((event) => event.id), ["real-event"]);
+  assert.deepEqual(snapshot.messages.map((message) => message.id), ["real-message"]);
+  assert.equal(JSON.parse(await readFile(path, "utf8")).agents[0].id, "claude-scout");
 });

@@ -13,6 +13,49 @@ const emptyState = (): State => ({
   messages: []
 });
 
+const legacyDemoAgents = new Map([
+  ["cpp-steward", "Ada"],
+  ["product-engineer", "Lin"],
+  ["release-sentinel", "Sable"],
+  ["research-scout", "Mira"]
+]);
+const legacyDemoRunIds = new Set(["run-benchmark", "run-release"]);
+
+function removeLegacyDemoRecords(state: State) {
+  const agentIds = new Set(state.agents
+    .filter((agent) => legacyDemoAgents.get(agent.id) === agent.name)
+    .map((agent) => agent.id));
+  const runIds = new Set(state.runs
+    .filter((run) => legacyDemoRunIds.has(run.id) || agentIds.has(run.agentId))
+    .map((run) => run.id));
+  const before = [state.agents.length, state.nodes.length, state.runs.length, state.events.length, state.messages.length];
+
+  state.agents = state.agents.filter((agent) => !agentIds.has(agent.id));
+  state.runs = state.runs.filter((run) => !runIds.has(run.id));
+  state.events = state.events.filter((event) =>
+    !agentIds.has(event.agentId ?? "")
+    && !agentIds.has(event.fromAgentId ?? "")
+    && !agentIds.has(event.toAgentId ?? "")
+    && !runIds.has(event.runId ?? ""));
+  state.messages = state.messages.filter((message) =>
+    !agentIds.has(message.agentId)
+    && !runIds.has(message.runId ?? ""));
+
+  const referencedNodeIds = new Set([
+    ...state.agents.map((agent) => agent.computeNodeId),
+    ...state.runs.map((run) => run.nodeId)
+  ]);
+  state.nodes = state.nodes.filter((node) => {
+    const isDemoNode = (node.id === "local-macbook" && node.name === "This laptop" && node.workspaceRoots.includes("/Users/you/Projects"))
+      || (node.id === "home-linux" && node.name === "Home server" && node.workspaceRoots.includes("/srv/workspaces"))
+      || (node.id === "cloud-runner" && node.name === "Cloud runner" && node.workspaceRoots.includes("/workspace"));
+    return !isDemoNode || referencedNodeIds.has(node.id);
+  });
+
+  const after = [state.agents.length, state.nodes.length, state.runs.length, state.events.length, state.messages.length];
+  return before.some((length, index) => length !== after[index]);
+}
+
 export class Store {
   private state: State = emptyState();
   private readonly path: string;
@@ -24,6 +67,7 @@ export class Store {
   async load() {
     try {
       this.state = JSON.parse(await readFile(this.path, "utf8")) as State;
+      if (removeLegacyDemoRecords(this.state)) await this.save();
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       await this.save();
