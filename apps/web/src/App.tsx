@@ -193,8 +193,8 @@ function CreateAgentDialog({ nodes, onClose, onCreate }: { nodes: ComputeNode[];
     <form className="create-dialog" onSubmit={submit}>
       <header><div><small>New teammate</small><h2>Create an agent</h2></div><button type="button" className="icon-btn" onClick={onClose}><X size={17} /></button></header>
       <p>Give the agent a stable purpose. You can move it between harnesses and machines later without changing who it is.</p>
-      <label>Name<input value={name} onChange={(event) => setName(event.target.value)} placeholder="Ada" autoFocus required /></label>
-      <label>Role<input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="C++ systems engineer" required /></label>
+      <label>Name<input value={name} onChange={(event) => setName(event.target.value)} placeholder="Agent name" autoFocus required /></label>
+      <label>Role<input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Agent role" required /></label>
       <fieldset><legend>Harness</legend><div className="choice-row"><button type="button" className={harnessId === "claude-cli" ? "selected" : ""} onClick={() => setHarnessId("claude-cli")}><Command size={15} />Claude Code</button><button type="button" className={harnessId === "codex-cli" ? "selected" : ""} onClick={() => setHarnessId("codex-cli")}><Command size={15} />Codex</button></div></fieldset>
       <fieldset><legend>Compute</legend><div className="node-choices">{nodes.map((node) => <button type="button" key={node.id} className={computeNodeId === node.id ? "selected" : ""} onClick={() => { setComputeNodeId(node.id); setWorkspace(node.workspaceRoots[0] ?? ""); }}><span><strong>{node.name}</strong><small>{node.status} · {node.platform}</small></span>{computeNodeId === node.id && <Check size={14} />}</button>)}</div></fieldset>
       <label>Workspace<input value={workspace} onChange={(event) => setWorkspace(event.target.value)} placeholder="/absolute/project/path" required /></label>

@@ -21,7 +21,7 @@ cp .env.example .env
 pnpm dev
 ```
 
-Open <http://localhost:5173>. The initial data is a deliberately populated operator demo. Sending a message creates a real queued run. Start a worker to execute it:
+Open <http://localhost:5173>. A new hub starts with an empty roster. Start a worker to register a compute node, then create an agent in the app:
 
 ```bash
 COFFEE_SHOP_TOKEN=dev-coffee \
