@@ -223,6 +223,7 @@ button:disabled, textarea:disabled, fieldset:disabled button { cursor: not-allow
 .utility-header { min-height: 120px; padding: 36px 0 24px; border-bottom: 1px solid var(--line); display: flex; align-items: flex-end; justify-content: space-between; }
 .primary-btn { border-color: var(--accent); color: #171209; background: var(--accent); font-weight: 650; }
 .timeline { max-width: 720px; padding-top: 28px; }
+.timeline-summary { max-width: 720px; padding-top: 18px; color: var(--muted); font: 500 8px "DM Mono", monospace; letter-spacing: .04em; text-transform: uppercase; }
 .timeline-event { min-height: 92px; display: grid; grid-template-columns: 32px 1fr; gap: 12px; }
 .timeline-rail { position: relative; display: flex; justify-content: center; }
 .timeline-rail > span { position: relative; z-index: 1; width: 28px; height: 28px; border: 1px solid var(--line); border-radius: 8px; display: grid; place-items: center; color: var(--muted); background: var(--surface-2); }
@@ -233,6 +234,29 @@ button:disabled, textarea:disabled, fieldset:disabled button { cursor: not-allow
 .event-heading time { color: var(--faint); font-size: 8px; }
 .timeline-event p { margin: 4px 0; color: var(--secondary); font-size: 9px; line-height: 1.6; }
 .timeline-event small { color: var(--accent); font-size: 8px; }
+.filter-btn.active { border-color: rgba(223,163,76,.42); color: var(--accent); background: var(--accent-soft); }
+.filter-count { min-width: 17px; height: 17px; padding: 0 4px; border-radius: 999px; display: grid; place-items: center; color: #171209; background: var(--accent); font: 700 8px "DM Mono", monospace; }
+.timeline-empty { max-width: 720px; min-height: 280px; display: grid; place-content: center; justify-items: center; color: var(--muted); text-align: center; }
+.timeline-empty svg { margin-bottom: 10px; color: var(--accent); }
+.timeline-empty strong { color: var(--text); font-size: 11px; }
+.timeline-empty p { max-width: 320px; margin: 7px 0 0; font-size: 9px; line-height: 1.6; }
+.activity-filter-dialog { width: min(100%,420px); max-height: calc(100dvh - 144px); margin: 104px 20px 20px 0; padding: 20px; border: 1px solid var(--line-strong); border-radius: 10px; justify-self: end; align-self: start; overflow-y: auto; background: #111412; box-shadow: 0 20px 60px rgba(0,0,0,.42); animation: dialog-in 220ms cubic-bezier(.25,1,.5,1) both; }
+.activity-filter-dialog > header, .install-dialog > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.activity-filter-dialog header small, .install-dialog header small { color: var(--accent); font: 500 8px "DM Mono", monospace; letter-spacing: .08em; text-transform: uppercase; }
+.activity-filter-dialog h2, .install-dialog h2 { margin: 5px 0 0; font-size: 20px; letter-spacing: -.035em; }
+.activity-filter-dialog fieldset { margin: 24px 0 18px; padding: 0; border: 0; }
+.activity-filter-dialog legend { width: 100%; margin-bottom: 10px; display: flex; justify-content: space-between; color: var(--secondary); font-size: 9px; }
+.activity-filter-dialog legend small { color: var(--faint); font-size: 8px; }
+.activity-type-options { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.activity-type-options label { min-height: 38px; padding: 0 10px; border: 1px solid var(--line); border-radius: 7px; display: flex; align-items: center; gap: 8px; color: var(--secondary); background: var(--surface); font-size: 9px; cursor: pointer; }
+.activity-type-options label:has(input:checked) { border-color: rgba(223,163,76,.42); color: var(--accent); background: var(--accent-soft); }
+.activity-type-options input { accent-color: var(--accent); }
+.activity-agent-filter { display: grid; gap: 7px; color: var(--secondary); font-size: 9px; }
+.activity-agent-filter select { width: 100%; height: 40px; padding: 0 10px; border: 1px solid var(--line); border-radius: 7px; outline: 0; color: var(--text); background: var(--surface); font-size: 9px; }
+.activity-filter-dialog > footer { margin-top: 22px; padding-top: 16px; border-top: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; }
+.activity-filter-dialog > footer span { color: var(--muted); font-size: 8px; }
+.activity-filter-dialog > footer button, .install-dialog > footer button { height: 34px; padding: 0 10px; border: 1px solid var(--line); border-radius: 6px; color: var(--secondary); background: var(--surface-2); font-size: 8px; cursor: pointer; }
+.activity-filter-dialog > footer button:disabled { opacity: .4; cursor: default; }
 .node-list { max-width: 820px; }
 .node-row { width: 100%; padding: 24px 0; border: 0; border-bottom: 1px solid var(--line); display: grid; grid-template-columns: 40px minmax(0,1fr) 32px; align-items: start; gap: 14px; color: inherit; background: transparent; text-align: left; cursor: pointer; }
 .node-row:hover .node-icon { border-color: rgba(223,163,76,.34); color: var(--accent); background: var(--accent-soft); }
@@ -269,6 +293,17 @@ button:disabled, textarea:disabled, fieldset:disabled button { cursor: not-allow
 .settings-list strong { font-size: 10px; }
 .settings-list small { color: var(--muted); font-size: 8px; }
 .settings-list button { padding: 6px 9px; border: 1px solid var(--line); border-radius: 5px; color: var(--secondary); background: var(--surface-2); font-size: 8px; }
+.settings-list button:disabled { opacity: .68; cursor: default; }
+.settings-list .install-control { display: grid; justify-items: end; gap: 5px; }
+.install-context-note { max-width: 220px; color: var(--success) !important; text-align: right; line-height: 1.4; }
+.install-dialog { width: min(100%,460px); max-height: calc(100dvh - 40px); padding: 22px; border: 1px solid var(--line-strong); border-radius: 10px; overflow-y: auto; background: #111412; box-shadow: 0 20px 60px rgba(0,0,0,.42); animation: dialog-in 220ms cubic-bezier(.25,1,.5,1) both; }
+.install-guidance { min-height: 190px; padding: 30px 12px 20px; display: flex; flex-direction: column; align-items: center; justify-content: center; color: var(--muted); text-align: center; }
+.install-guidance > svg { margin-bottom: 12px; color: var(--accent); }
+.install-guidance-accepted > svg { color: var(--success); }
+.install-guidance-insecure > svg { color: var(--danger); }
+.install-guidance h3 { margin: 0; color: var(--text); font-size: 13px; }
+.install-guidance p { max-width: 360px; margin: 8px 0 0; font-size: 9px; line-height: 1.7; }
+.install-dialog > footer { padding-top: 14px; border-top: 1px solid var(--line); display: flex; justify-content: flex-end; }
 .ok-label, .stale-label { display: flex; align-items: center; gap: 4px; color: var(--success); font-size: 8px; font-style: normal; }
 .stale-label { color: var(--danger); }
 .terms-note { max-width: 720px; margin-top: 28px; padding: 16px; border-left: 2px solid var(--accent); color: var(--secondary); background: var(--accent-soft); }
@@ -475,6 +510,9 @@ button:disabled, textarea:disabled, fieldset:disabled button { cursor: not-allow
   .avatar-shapes { gap: 4px; }
   .run-dialog { max-height: calc(100dvh - 24px); padding: 18px; padding-bottom: calc(18px + env(safe-area-inset-bottom)); }
   .experience-dialog { max-height: calc(100dvh - 24px); padding: 16px; padding-bottom: calc(16px + env(safe-area-inset-bottom)); }
+  .activity-filter-dialog, .install-dialog { width: 100%; max-height: calc(100dvh - 24px); margin: 0; padding: 18px; padding-bottom: calc(18px + env(safe-area-inset-bottom)); border-bottom-right-radius: 0; border-bottom-left-radius: 0; justify-self: center; align-self: end; }
+  .activity-type-options { grid-template-columns: 1fr; }
+  .install-setting { align-items: flex-start !important; gap: 12px; }
   .policy-dialog { width: min(94vw,760px); height: calc(100dvh - 24px); }
   .fact-grid { grid-template-columns: 1fr; }
   .kind-picker > div { grid-template-columns: 1fr; }

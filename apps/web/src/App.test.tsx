@@ -142,6 +142,26 @@ describe("connection freshness UI", () => {
   });
 });
 
+describe("install prompt integration", () => {
+  beforeEach(() => prepareBrowser());
+
+  it("captures the browser prompt before Settings is opened", async () => {
+    const prompt = vi.fn(async () => undefined);
+    const installEvent = new Event("beforeinstallprompt", { cancelable: true }) as Event & {
+      prompt: () => Promise<void>;
+      userChoice: Promise<{ outcome: "accepted"; platform: string }>;
+    };
+    installEvent.prompt = prompt;
+    installEvent.userChoice = Promise.resolve({ outcome: "accepted", platform: "web" });
+    const { default: App } = await import("./App.js");
+    render(<App />);
+    fireEvent(window, installEvent);
+    fireEvent.click(screen.getAllByRole("button", { name: "Settings" })[0]);
+    fireEvent.click(screen.getByRole("button", { name: "Install PWA" }));
+    await waitFor(() => expect(prompt).toHaveBeenCalledOnce());
+  });
+});
+
 describe("agent configuration experience", () => {
   beforeEach(() => prepareBrowser());
 
