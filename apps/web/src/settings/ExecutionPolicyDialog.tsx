@@ -1,9 +1,10 @@
 import type { ComputeNode, HarnessProfile } from "@coffee-shop/protocol";
 import { ShieldCheck, WarningCircle, X } from "@phosphor-icons/react";
+import { useEffect, useState } from "react";
 import { AccessibleDialog } from "../AccessibleDialog.js";
 import { HarnessList, NodeFacts, Provenance } from "../compute/ComputeFacts.js";
 import type { ConnectionStatus } from "../hubConnection.js";
-import { isDocumentedHarnessAuthPair, releaseMatch, runtimeAuthModePolicy, runtimeHarnessPolicy } from "./executionPolicy.js";
+import { isDocumentedHarnessAuthPair, isFreshNodeReport, NODE_REPORT_FRESHNESS_MS, releaseMatch, runtimeAuthModePolicy, runtimeHarnessPolicy } from "./executionPolicy.js";
 
 const bundledDocumentedVersion = import.meta.env.VITE_BARISTA_VERSION?.trim() || "dev";
 
@@ -41,6 +42,11 @@ export function ExecutionPolicyDialog({ nodes, connection, generatedAt, document
   onClose: () => void;
 }) {
   const stale = connection !== "connected";
+  const [observedAt, setObservedAt] = useState(() => Date.now());
+  useEffect(() => {
+    const interval = window.setInterval(() => setObservedAt(Date.now()), NODE_REPORT_FRESHNESS_MS / 3);
+    return () => window.clearInterval(interval);
+  }, []);
   return (
     <AccessibleDialog labelledBy="execution-policy-title" onClose={onClose} className="experience-dialog policy-dialog">
       <header className="experience-header">
@@ -63,14 +69,16 @@ export function ExecutionPolicyDialog({ nodes, connection, generatedAt, document
         <div className="experience-empty"><ShieldCheck size={22} /><strong>No Baristas registered</strong><p>Reported policy details appear after a Barista connects. No effective execution policy can be verified yet.</p></div>
       ) : nodes.map((node, index) => {
         const match = releaseMatch(node?.version, documentedVersion);
+        const reportAgeFresh = isFreshNodeReport(node?.lastSeen, observedAt);
         return (
           <section className="policy-node" key={typeof node?.id === "string" ? node.id : `node-${index}`}>
             <div className="policy-node-heading"><div><small>Barista {index + 1}</small><h3>{typeof node?.name === "string" && node.name ? node.name : "Unnamed Barista"}</h3></div><span className={match.matches ? "match-label" : "mismatch-label"}>{match.label}</span></div>
             {node.status === "offline" && <p className="qualification"><WarningCircle size={15} /> Offline node: reported values are retained history, not current proof.</p>}
+            {node.status !== "offline" && !reportAgeFresh && <p className="qualification"><WarningCircle size={15} /> Stale heartbeat: the last node report is too old or has an invalid timestamp, so its policy is not verified as current.</p>}
             <div className="experience-section-heading"><h4>Node configuration</h4><Provenance kind="reported" /></div>
             <NodeFacts node={node} statusProvenance="observed" />
             <div className="experience-section-heading"><h4>Harness configuration</h4><Provenance kind="reported" /></div>
-            <HarnessList harnesses={node.harnesses}>{(harness) => <PolicyQualification harness={harness} versionMatches={match.matches} reportFresh={!stale && node.status !== "offline"} />}</HarnessList>
+            <HarnessList harnesses={node.harnesses}>{(harness) => <PolicyQualification harness={harness} versionMatches={match.matches} reportFresh={!stale && node.status !== "offline" && reportAgeFresh} />}</HarnessList>
           </section>
         );
       })}

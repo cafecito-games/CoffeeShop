@@ -15,6 +15,7 @@ describe("Barista onboarding configuration", () => {
   it("uses configured, development, and production endpoint precedence", () => {
     expect(defaultControlEndpoint("https://configured.example", true, "http://localhost:5173")).toBe("https://configured.example");
     expect(defaultControlEndpoint("", true, "http://localhost:5173")).toBe("http://localhost:8787");
+    expect(defaultControlEndpoint(undefined, true, "http://192.168.1.20:5173")).toBe("http://192.168.1.20:8787");
     expect(defaultControlEndpoint(undefined, false, "https://coffee.example")).toBe("https://coffee.example");
   });
 

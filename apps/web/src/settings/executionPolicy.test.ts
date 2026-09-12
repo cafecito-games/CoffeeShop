@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { authModePolicy, harnessPolicy, isDocumentedHarnessAuthPair, releaseMatch } from "./executionPolicy.js";
+import { authModePolicy, harnessPolicy, isDocumentedHarnessAuthPair, isFreshNodeReport, NODE_REPORT_FRESHNESS_MS, releaseMatch } from "./executionPolicy.js";
 
 describe("execution policy copy", () => {
   it("maps every protocol harness deliberately", () => {
@@ -36,5 +36,14 @@ describe("execution policy copy", () => {
     expect(releaseMatch("0.1.0+dev.snapshot", "0.1.0+dev.snapshot")).toEqual({ matches: false, label: "Development version; effective policy is not verified" });
     expect(releaseMatch("older", "abc123")).toEqual({ matches: false, label: "Version differs; effective policy is not verified" });
     expect(releaseMatch("", "abc123")).toEqual({ matches: false, label: "Version unavailable; effective policy is not verified" });
+  });
+
+  it("accepts only recent, parseable heartbeat timestamps", () => {
+    const observedAt = Date.parse("2026-09-12T06:00:00Z");
+    expect(isFreshNodeReport("2026-09-12T05:59:31Z", observedAt)).toBe(true);
+    expect(isFreshNodeReport("2026-09-12T05:59:29Z", observedAt)).toBe(false);
+    expect(isFreshNodeReport("2026-09-12T06:00:31Z", observedAt)).toBe(false);
+    expect(isFreshNodeReport("not-a-date", observedAt)).toBe(false);
+    expect(NODE_REPORT_FRESHNESS_MS).toBe(30_000);
   });
 });

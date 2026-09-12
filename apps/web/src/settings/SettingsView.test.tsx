@@ -1,6 +1,6 @@
 import type { ComputeNode } from "@coffee-shop/protocol";
-import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { act, fireEvent, render, screen } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
 import { SettingsView } from "./SettingsView.js";
 
 const node: ComputeNode = {
@@ -9,7 +9,7 @@ const node: ComputeNode = {
   kind: "home-server",
   platform: "linux · arm64",
   status: "offline",
-  lastSeen: "2026-09-11T20:00:00Z",
+  lastSeen: new Date().toISOString(),
   activeRuns: 0,
   concurrency: 4,
   workspaceRoots: ["/srv/workspaces"],
@@ -107,6 +107,24 @@ describe("execution policy review", () => {
     expect(screen.getByText(/--permission-mode auto/)).toBeInTheDocument();
     expect(screen.getByText(/starts the official Claude CLI directly/)).toBeInTheDocument();
     expect(screen.getByText(/Authentication is held by the vendor CLI/)).toBeInTheDocument();
+  });
+
+  it("withdraws qualification when an open review misses heartbeats", () => {
+    vi.useFakeTimers();
+    try {
+      const observedAt = Date.parse("2026-09-12T06:00:00Z");
+      vi.setSystemTime(observedAt);
+      const rendered = render(<SettingsView connection="connected" nodes={[{ ...node, status: "online", lastSeen: new Date(observedAt).toISOString(), harnesses: [node.harnesses[0]] }]} generatedAt="now" documentedVersion={documentedVersion} />);
+      fireEvent.click(screen.getByRole("button", { name: "Review" }));
+      expect(screen.getByText("Documented for matching release")).toBeInTheDocument();
+      act(() => vi.advanceTimersByTime(40_000));
+      expect(screen.getByText(/Stale heartbeat/)).toBeInTheDocument();
+      expect(screen.getByText("Unrecognized / not verified")).toBeInTheDocument();
+      expect(screen.queryByText(/--permission-mode auto/)).not.toBeInTheDocument();
+      rendered.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("fails closed for cross-paired Claude and Codex authentication reports", () => {

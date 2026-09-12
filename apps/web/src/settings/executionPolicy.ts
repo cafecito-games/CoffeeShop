@@ -2,6 +2,8 @@ import type { HarnessId, HarnessProfile } from "@coffee-shop/protocol";
 
 type AuthMode = HarnessProfile["authMode"];
 
+export const NODE_REPORT_FRESHNESS_MS = 30_000;
+
 interface PolicyCopy {
   label: string;
   detail: string;
@@ -86,4 +88,10 @@ export function runtimeAuthModePolicy(mode: unknown): PolicyCopy {
 
 export function isDocumentedHarnessAuthPair(harnessId: unknown, authMode: unknown): boolean {
   return runtimeHarnessPolicy(harnessId).documentedAuthMode === authMode;
+}
+
+export function isFreshNodeReport(lastSeen: unknown, observedAt: number): boolean {
+  if (typeof lastSeen !== "string") return false;
+  const reportedAt = Date.parse(lastSeen);
+  return Number.isFinite(reportedAt) && Math.abs(observedAt - reportedAt) <= NODE_REPORT_FRESHNESS_MS;
 }

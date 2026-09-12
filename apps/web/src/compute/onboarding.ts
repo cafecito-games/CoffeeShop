@@ -24,7 +24,17 @@ export interface OnboardingValues {
 export function defaultControlEndpoint(configured: string | undefined, development: boolean, origin: string): string {
   const explicit = configured?.trim();
   if (explicit) return explicit;
-  return development ? "http://localhost:8787" : origin;
+  if (!development) return origin;
+  try {
+    const endpoint = new URL(origin);
+    endpoint.port = "8787";
+    endpoint.pathname = "";
+    endpoint.search = "";
+    endpoint.hash = "";
+    return endpoint.origin;
+  } catch {
+    return "http://localhost:8787";
+  }
 }
 
 export function workspaceRoots(value: string): string[] {
