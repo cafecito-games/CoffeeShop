@@ -1,6 +1,6 @@
 import { nodeKinds, type NodeKind } from "@coffee-shop/protocol";
 import { Check, Copy, WarningCircle, X } from "@phosphor-icons/react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { AccessibleDialog } from "../AccessibleDialog.js";
 import { buildBaristaCommand, defaultControlEndpoint, validateOnboarding, type OnboardingValues } from "./onboarding.js";
 
@@ -16,19 +16,28 @@ export function OnboardingDialog({ onClose }: { onClose: () => void }) {
     workspaceRoots: ""
   });
   const [copyState, setCopyState] = useState<"idle" | "success" | "failure">("idle");
+  const copyGenerationRef = useRef(0);
   const errors = useMemo(() => validateOnboarding(values), [values]);
   const command = errors.length ? "Complete the valid configuration fields to generate a command." : buildBaristaCommand(values);
   const update = <K extends keyof OnboardingValues>(key: K, value: OnboardingValues[K]) => {
+    copyGenerationRef.current += 1;
     setValues((current) => ({ ...current, [key]: value }));
     setCopyState("idle");
   };
+  useEffect(() => () => {
+    copyGenerationRef.current += 1;
+  }, []);
   async function copy() {
     if (errors.length) return;
+    const generation = ++copyGenerationRef.current;
+    setCopyState("idle");
     try {
       if (!navigator.clipboard?.writeText) throw new Error("Clipboard unavailable");
       await navigator.clipboard.writeText(command);
+      if (generation !== copyGenerationRef.current) return;
       setCopyState("success");
     } catch {
+      if (generation !== copyGenerationRef.current) return;
       setCopyState("failure");
     }
   }

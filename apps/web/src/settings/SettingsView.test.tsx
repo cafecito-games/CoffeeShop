@@ -76,4 +76,21 @@ describe("execution policy review", () => {
     expect(screen.getByText(/Current-release flags are withheld/)).toBeInTheDocument();
     expect(screen.queryByText(/--permission-mode auto/)).not.toBeInTheDocument();
   });
+
+  it("fails closed for cross-paired Claude and Codex authentication reports", () => {
+    const mismatched = {
+      ...node,
+      status: "online" as const,
+      harnesses: [
+        { ...node.harnesses[0], authMode: "local-account" as const },
+        { ...node.harnesses[0], id: "codex-cli" as const, label: "Codex", authMode: "local-subscription" as const }
+      ]
+    };
+    render(<SettingsView connection="connected" nodes={[mismatched]} generatedAt="now" />);
+    fireEvent.click(screen.getByRole("button", { name: "Review" }));
+    expect(screen.getAllByText("Unrecognized / not verified")).toHaveLength(2);
+    expect(screen.queryByText("Documented for matching release")).not.toBeInTheDocument();
+    expect(screen.queryByText(/--permission-mode auto/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/--sandbox workspace-write/)).not.toBeInTheDocument();
+  });
 });

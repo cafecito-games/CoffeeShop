@@ -6,6 +6,7 @@ interface PolicyCopy {
   label: string;
   detail: string;
   verified: boolean;
+  documentedAuthMode?: AuthMode;
   documentedFlags?: string;
 }
 
@@ -14,12 +15,14 @@ export const harnessPolicy = {
     label: "Claude Code",
     detail: "Barista starts the official Claude CLI directly. Prompts are not answered interactively.",
     verified: true,
+    documentedAuthMode: "local-subscription",
     documentedFlags: "-p … --output-format stream-json --verbose --permission-mode auto --permission-prompts none --model …"
   },
   "codex-cli": {
     label: "Codex",
     detail: "Barista starts Codex directly with workspace-scoped writes.",
     verified: true,
+    documentedAuthMode: "local-account",
     documentedFlags: "exec --json --sandbox workspace-write [--model …] …"
   },
   shell: {
@@ -75,4 +78,8 @@ export function runtimeHarnessPolicy(id: unknown): PolicyCopy {
 export function runtimeAuthModePolicy(mode: unknown): PolicyCopy {
   if (typeof mode === "string" && Object.hasOwn(authModePolicy, mode)) return authModePolicy[mode as AuthMode];
   return { label: "Unrecognized authentication", detail: "No credential handling behavior is documented or verified for this reported mode.", verified: false };
+}
+
+export function isDocumentedHarnessAuthPair(harnessId: unknown, authMode: unknown): boolean {
+  return runtimeHarnessPolicy(harnessId).documentedAuthMode === authMode;
 }

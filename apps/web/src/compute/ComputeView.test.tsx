@@ -1,5 +1,5 @@
 import type { ComputeNode } from "@coffee-shop/protocol";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ComputeView } from "./ComputeView.js";
@@ -115,5 +115,30 @@ describe("compute experience", () => {
     fireEvent.click(screen.getByRole("button", { name: "Copy command" }));
     expect(await screen.findByText(/Clipboard access failed/)).toBeInTheDocument();
     expect(screen.getByText(/CONTROL_ENDPOINT=/)).toHaveAttribute("tabindex", "0");
+  });
+
+  it.each(["resolve", "reject"] as const)("ignores a delayed clipboard %s after the command changes", async (outcome) => {
+    let resolveCopy!: () => void;
+    let rejectCopy!: (error: Error) => void;
+    const pendingCopy = new Promise<void>((resolve, reject) => {
+      resolveCopy = resolve;
+      rejectCopy = reject;
+    });
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: vi.fn().mockReturnValue(pendingCopy) } });
+    render(<ComputeView nodes={[node]} />);
+    fireEvent.click(screen.getByRole("button", { name: "Add compute" }));
+    fireEvent.change(screen.getByLabelText(/Workspace roots/), { target: { value: "/Users/me/Old" } });
+    fireEvent.click(screen.getByRole("button", { name: "Copy command" }));
+    fireEvent.change(screen.getByLabelText(/Workspace roots/), { target: { value: "/Users/me/New" } });
+
+    await act(async () => {
+      if (outcome === "resolve") resolveCopy();
+      else rejectCopy(new Error("denied"));
+      await pendingCopy.catch(() => undefined);
+    });
+
+    expect(screen.queryByText("Copied safe setup command.")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Clipboard access failed/)).not.toBeInTheDocument();
+    expect(screen.getByText(/WORKSPACE_ROOTS='\/Users\/me\/New'/)).toBeInTheDocument();
   });
 });

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { authModePolicy, harnessPolicy, releaseMatch } from "./executionPolicy.js";
+import { authModePolicy, harnessPolicy, isDocumentedHarnessAuthPair, releaseMatch } from "./executionPolicy.js";
 
 describe("execution policy copy", () => {
   it("maps every protocol harness deliberately", () => {
@@ -14,6 +14,14 @@ describe("execution policy copy", () => {
     expect(Object.keys(authModePolicy).sort()).toEqual(["api", "local-account", "local-subscription", "none"]);
     expect(authModePolicy.api.verified).toBe(false);
     expect(authModePolicy.none.verified).toBe(false);
+  });
+
+  it("accepts only the auth mode documented for each executable harness", () => {
+    expect(isDocumentedHarnessAuthPair("claude-cli", "local-subscription")).toBe(true);
+    expect(isDocumentedHarnessAuthPair("codex-cli", "local-account")).toBe(true);
+    expect(isDocumentedHarnessAuthPair("claude-cli", "local-account")).toBe(false);
+    expect(isDocumentedHarnessAuthPair("codex-cli", "local-subscription")).toBe(false);
+    expect(isDocumentedHarnessAuthPair("future-harness", "local-account")).toBe(false);
   });
 
   it("fails closed for unknown runtime values and version mismatches", () => {

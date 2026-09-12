@@ -3,21 +3,25 @@ import { ShieldCheck, WarningCircle, X } from "@phosphor-icons/react";
 import { AccessibleDialog } from "../AccessibleDialog.js";
 import { HarnessList, NodeFacts, Provenance } from "../compute/ComputeFacts.js";
 import type { ConnectionStatus } from "../hubConnection.js";
-import { releaseMatch, runtimeAuthModePolicy, runtimeHarnessPolicy } from "./executionPolicy.js";
+import { isDocumentedHarnessAuthPair, releaseMatch, runtimeAuthModePolicy, runtimeHarnessPolicy } from "./executionPolicy.js";
 
 const documentedVersion = import.meta.env.VITE_BARISTA_VERSION?.trim() || "dev";
 
 function PolicyQualification({ harness, versionMatches }: { harness: HarnessProfile; versionMatches: boolean }) {
   const harnessCopy = runtimeHarnessPolicy(harness?.id);
   const authCopy = runtimeAuthModePolicy(harness?.authMode);
-  const verified = versionMatches && harness?.available === true && harnessCopy.verified && authCopy.verified;
+  const verified = versionMatches
+    && harness?.available === true
+    && harnessCopy.verified
+    && authCopy.verified
+    && isDocumentedHarnessAuthPair(harness?.id, harness?.authMode);
   return (
     <div className={`policy-qualification ${verified ? "verified" : "not-verified"}`}>
       <strong>{verified ? <ShieldCheck size={14} /> : <WarningCircle size={14} />}{verified ? "Documented for matching release" : "Unrecognized / not verified"}</strong>
       <p>{harnessCopy.detail}</p>
       <p>{authCopy.detail}</p>
-      {versionMatches && harnessCopy.documentedFlags && <div><Provenance kind="documented" /><code>{harnessCopy.documentedFlags}</code></div>}
-      {!versionMatches && harnessCopy.documentedFlags && <p>Current-release flags are withheld because this worker version does not match.</p>}
+      {verified && harnessCopy.documentedFlags && <div><Provenance kind="documented" /><code>{harnessCopy.documentedFlags}</code></div>}
+      {!verified && harnessCopy.documentedFlags && <p>Current-release flags are withheld because this report is unavailable, mismatched, or unrecognized.</p>}
     </div>
   );
 }
