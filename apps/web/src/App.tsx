@@ -225,6 +225,7 @@ function RunInspector({ selectedRunId, run, agents, nodes, onClose, canMutate }:
             <div><dt>Parent run</dt><dd>{run.parentRunId ?? "No parent run"}</dd></div>
             <div><dt>Handoff depth</dt><dd>{run.depth}</dd></div>
             <div><dt>Created</dt><dd><time>{run.createdAt || "Timestamp unavailable"}</time></dd></div>
+            <div><dt>Dispatched</dt><dd><time>{run.dispatchedAt ?? "Not dispatched yet"}</time></dd></div>
             <div><dt>Started</dt><dd><time>{run.startedAt ?? "Not started yet"}</time></dd></div>
             <div><dt>Finished</dt><dd><time>{run.finishedAt ?? "Not finished yet"}</time></dd></div>
           </dl>

@@ -20,10 +20,29 @@ export interface CancellationResult {
 
 export function serializeAsync<T>(handler: (value: T) => Promise<void>, onError: (error: unknown) => void) {
   let queue = Promise.resolve();
+  let stopped = false;
   return (value: T) => {
-    queue = queue.then(() => handler(value)).catch(onError);
+    queue = queue.then(async () => {
+      if (!stopped) await handler(value);
+    }).catch((error) => {
+      stopped = true;
+      onError(error);
+    });
     return queue;
   };
+}
+
+export async function retryAsync<T>(operation: () => Promise<T>, attempts = 3): Promise<T> {
+  let failure: unknown;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      failure = error;
+      if (attempt + 1 < attempts) await new Promise((resolve) => setTimeout(resolve, 10 * (attempt + 1)));
+    }
+  }
+  throw failure;
 }
 
 export function queuedRunsForNode(snapshot: Snapshot, nodeId: string, activeRunIds: readonly string[], protocolVersion: "1" | "2") {
@@ -52,8 +71,7 @@ function updateAgentAfterCancellation(state: State, cancelledRun: Run, at: strin
     agent.state = "working";
     agent.currentAction = active.output.trim().slice(-90) || "Working";
   } else {
-    const node = state.nodes.find((item) => item.id === active.nodeId);
-    const dispatched = node?.status === "online" || node?.status === "busy";
+    const dispatched = Boolean(active.dispatchedAt);
     agent.state = dispatched ? "thinking" : "waiting";
     agent.currentAction = dispatched ? "Starting work" : "Waiting for compute";
   }

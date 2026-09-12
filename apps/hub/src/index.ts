@@ -6,7 +6,7 @@ import cors from "cors";
 import express from "express";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
 import { agentAvatarColors, agentAvatarShapes, type Agent, type ComputeNode, type ControlAgentToHub, type HubToControlAgent, type Run } from "@coffee-shop/protocol";
-import { applyRunLifecycle, cancelPersistedRun, queuedRunsForNode, serializeAsync } from "./lifecycle.js";
+import { applyRunLifecycle, cancelPersistedRun, queuedRunsForNode, retryAsync, serializeAsync } from "./lifecycle.js";
 import { newEvent, newId, newMessage, Store } from "./store.js";
 
 const app = express();
@@ -54,6 +54,7 @@ async function queueRun(agent: Agent, prompt: string, options: { parentRunId?: s
   };
   const controlAgent = controlAgents.get(agent.computeNodeId);
   const dispatched = Boolean(controlAgent && controlAgent.readyState === WebSocket.OPEN);
+  if (dispatched) run.dispatchedAt = new Date().toISOString();
   await store.transact((state) => {
     state.runs.unshift(run);
     agent = state.agents.find((item) => item.id === agent.id)!;
@@ -177,11 +178,24 @@ wss.on("connection", (socket, request) => {
 
   let nodeId = "";
   let protocolVersion: "1" | "2" = "1";
-  const dispatchQueuedRuns = (activeRunIds: readonly string[] = []) => {
+  const dispatchQueuedRuns = async (activeRunIds: readonly string[] = []) => {
     const queued = queuedRunsForNode(store.snapshot(), nodeId, activeRunIds, protocolVersion);
     for (const run of queued) {
-      const agent = store.getAgent(run.agentId);
-      if (agent) sendToControlAgent(nodeId, { type: "dispatch", run, agent });
+      let dispatchRun: Run | undefined;
+      await store.transact((state) => {
+        const target = state.runs.find((item) => item.id === run.id && item.status === "queued");
+        if (!target) return false;
+        target.dispatchedAt = new Date().toISOString();
+        const targetAgent = state.agents.find((item) => item.id === target.agentId);
+        if (targetAgent) {
+          targetAgent.state = "thinking";
+          targetAgent.currentAction = "Starting work";
+          targetAgent.updatedAt = target.dispatchedAt;
+        }
+        dispatchRun = target;
+      });
+      const agent = dispatchRun && store.getAgent(dispatchRun.agentId);
+      if (agent && dispatchRun) sendToControlAgent(nodeId, { type: "dispatch", run: dispatchRun, agent });
     }
   };
   const handleMessage = serializeAsync(async (raw: RawData) => {
@@ -207,7 +221,7 @@ wss.on("connection", (socket, request) => {
       broadcast();
     } else if (message.type === "sync.complete") {
       if (protocolVersion !== "2" || !nodeId || message.nodeId !== nodeId || typeof message.at !== "string" || (message.activeRunIds !== undefined && (!Array.isArray(message.activeRunIds) || !message.activeRunIds.every((id) => typeof id === "string")))) return;
-      dispatchQueuedRuns(message.activeRunIds ?? []);
+      await dispatchQueuedRuns(message.activeRunIds ?? []);
     } else if (message.type === "heartbeat") {
       await store.transact((state) => { const node = state.nodes.find((item) => item.id === message.nodeId); if (node) { node.lastSeen = message.at; node.activeRuns = message.activeRuns; node.status = message.activeRuns ? "busy" : "online"; } });
       broadcast();
@@ -216,9 +230,12 @@ wss.on("connection", (socket, request) => {
       const current = store.getRun(runId);
       if (!current) return;
       let accepted = false;
-      await store.transact((state) => {
-        accepted = applyRunLifecycle(state, message);
-        return accepted;
+      await retryAsync(async () => {
+        accepted = false;
+        await store.transact((state) => {
+          accepted = applyRunLifecycle(state, message);
+          return accepted;
+        });
       });
       if (!accepted) return;
       if (message.type === "run.completed" && current.depth < 3) {

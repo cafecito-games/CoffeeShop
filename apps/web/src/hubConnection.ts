@@ -110,6 +110,7 @@ function isRun(value: unknown): boolean {
     && isOptionalString(value.error)
     && isNumber(value.depth)
     && isOptionalString(value.parentRunId)
+    && isOptionalString(value.dispatchedAt)
     && isOptionalString(value.startedAt)
     && isOptionalString(value.finishedAt)
     && isString(value.createdAt);

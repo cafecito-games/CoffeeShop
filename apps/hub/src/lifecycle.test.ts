@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import type { Agent, ComputeNode, HubToControlAgent, Run } from "@coffee-shop/protocol";
-import { applyRunLifecycle, cancelPersistedRun, cancelRunInState, queuedRunsForNode, serializeAsync } from "./lifecycle.js";
+import { applyRunLifecycle, cancelPersistedRun, cancelRunInState, queuedRunsForNode, retryAsync, serializeAsync } from "./lifecycle.js";
 import { type State, Store } from "./store.js";
 
 const at = "2026-09-11T12:00:00.000Z";
@@ -81,6 +81,12 @@ test("cancelling recalculates agent state from another active run", () => {
   cancelRunInState(current, "run-one", at);
   assert.equal(current.agents[0].state, "waiting");
   assert.equal(current.agents[0].currentAction, "Waiting for compute");
+
+  current.runs[2].dispatchedAt = at;
+  current.runs[0].status = "running";
+  cancelRunInState(current, "run-one", at);
+  assert.equal(current.agents[0].state, "thinking");
+  assert.equal(current.agents[0].currentAction, "Starting work");
 });
 
 test("persisted cancellation finishes before best-effort delivery and works disconnected", async () => {
@@ -190,6 +196,31 @@ test("serial message handling settles lifecycle work before reconnect reconcilia
   releaseLifecycle?.();
   await Promise.all([lifecycle, reconciliation]);
   assert.deepEqual(entered, ["start:lifecycle", "finish:lifecycle", "start:reconciliation", "finish:reconciliation"]);
+});
+
+test("serial handling stops before a replay barrier after an unrecoverable message", async () => {
+  const entered: string[] = [];
+  const errors: string[] = [];
+  const handle = serializeAsync(async (message: string) => {
+    entered.push(message);
+    if (message === "run.started") throw new Error("disk unavailable");
+  }, (error) => errors.push((error as Error).message));
+
+  await handle("run.started");
+  await handle("sync.complete");
+  assert.deepEqual(entered, ["run.started"]);
+  assert.deepEqual(errors, ["disk unavailable"]);
+});
+
+test("bounded retry settles a transient persistence failure before continuing", async () => {
+  let attempts = 0;
+  const result = await retryAsync(async () => {
+    attempts += 1;
+    if (attempts === 1) throw new Error("transient write failure");
+    return "persisted";
+  });
+  assert.equal(result, "persisted");
+  assert.equal(attempts, 2);
 });
 
 test("reconnect reconciliation does not redispatch runs Barista reports active", () => {

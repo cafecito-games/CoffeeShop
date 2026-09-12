@@ -78,6 +78,7 @@ export interface Run {
   error?: string;
   depth: number;
   parentRunId?: string;
+  dispatchedAt?: string;
   startedAt?: string;
   finishedAt?: string;
   createdAt: string;
