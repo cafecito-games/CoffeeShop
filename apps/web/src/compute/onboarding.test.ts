@@ -28,6 +28,7 @@ describe("Barista onboarding configuration", () => {
 
   it("quotes operator input and always uses the literal safe token placeholder", () => {
     const command = buildBaristaCommand({ ...valid, name: "Desk'; touch /tmp/nope; echo '" });
+    expect(command).toContain("CONTROL_ENDPOINT='https://coffee.example.com/'");
     expect(command).toContain("BARISTA_NAME='Desk'\"'\"'; touch /tmp/nope; echo '\"'\"'' \\");
     expect(command).toContain("COFFEE_SHOP_TOKEN='replace-with-hub-token' \\");
     expect(command).toContain("WORKSPACE_ROOTS='/Users/me/Code,/Users/me/Notes' \\");
@@ -39,6 +40,7 @@ describe("Barista onboarding configuration", () => {
     const escapedPath = { ...valid, controlEndpoint: "https://coffee.example/%63ontrol" };
     expect(validateOnboarding(escapedPath)).toEqual([]);
     expect(buildBaristaCommand(escapedPath)).toContain("CONTROL_ENDPOINT='https://coffee.example/%63ontrol'");
+    expect(buildBaristaCommand({ ...valid, controlEndpoint: "HTTPS://Coffee.Example" })).toContain("CONTROL_ENDPOINT='https://coffee.example/'");
   });
 
   it.each([
@@ -46,6 +48,7 @@ describe("Barista onboarding configuration", () => {
     [{ ...valid, controlEndpoint: "not a url" }, "Use an HTTP or HTTPS hub URL."],
     [{ ...valid, controlEndpoint: "https://coffee.example/%zz" }, "Use an HTTP or HTTPS hub URL."],
     [{ ...valid, controlEndpoint: "https://%63offee.example" }, "Use an HTTP or HTTPS hub URL."],
+    [{ ...valid, controlEndpoint: "https://u|x@coffee.example" }, "Use an HTTP or HTTPS hub URL."],
     [{ ...valid, controlEndpoint: "https:coffee.example" }, "Use an HTTP or HTTPS hub URL."],
     [{ ...valid, name: "  " }, "Enter a Barista name."],
     [{ ...valid, nodeId: "Bad ID" }, "Use a lowercase ID containing only letters, numbers, and hyphens."],

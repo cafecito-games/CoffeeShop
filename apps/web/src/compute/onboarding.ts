@@ -31,10 +31,9 @@ export function workspaceRoots(value: string): string[] {
   return value.split(/\r?\n/).map((root) => root.trim()).filter(Boolean);
 }
 
-export function validateOnboarding(values: OnboardingValues): string[] {
-  const errors: string[] = [];
+function normalizedControlEndpoint(value: string): string | undefined {
   try {
-    const endpointValue = values.controlEndpoint.trim();
+    const endpointValue = value.trim();
     const authority = /^https?:\/\/([^/?#]+)/i.exec(endpointValue)?.[1];
     if (!/^https?:\/\//i.test(endpointValue) || /%(?![0-9a-f]{2})/i.test(endpointValue) || /[\u0000-\u001f\u007f]/.test(endpointValue)) {
       throw new Error("unsupported URL");
@@ -42,7 +41,16 @@ export function validateOnboarding(values: OnboardingValues): string[] {
     if (!authority || authority.includes("%") || authority.includes("\\")) throw new Error("unsupported URL authority");
     const endpoint = new URL(endpointValue);
     if (!(["http:", "https:"] as string[]).includes(endpoint.protocol) || !endpoint.hostname) throw new Error("unsupported URL");
+    if (endpoint.username || endpoint.password) throw new Error("embedded credentials are unsupported");
+    return endpoint.toString();
   } catch {
+    return undefined;
+  }
+}
+
+export function validateOnboarding(values: OnboardingValues): string[] {
+  const errors: string[] = [];
+  if (!normalizedControlEndpoint(values.controlEndpoint)) {
     errors.push("Use an HTTP or HTTPS hub URL.");
   }
   if (!values.name.trim()) errors.push("Enter a Barista name.");
@@ -71,7 +79,7 @@ export function buildBaristaCommand(values: OnboardingValues): string {
   const errors = validateOnboarding(values);
   if (errors.length) throw new Error(errors.join(" "));
   const environment: Record<typeof BARISTA_ENVIRONMENT_FIELDS[number], string> = {
-    CONTROL_ENDPOINT: values.controlEndpoint.trim(),
+    CONTROL_ENDPOINT: normalizedControlEndpoint(values.controlEndpoint)!,
     BARISTA_NAME: values.name.trim(),
     BARISTA_ID: values.nodeId,
     BARISTA_KIND: values.kind,
