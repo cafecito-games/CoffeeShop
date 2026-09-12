@@ -20,6 +20,13 @@ interface ConnectedNodeLookup {
   has(id: string): boolean;
 }
 
+export function openConnectionLookup<T extends { readyState: number }>(
+  connections: { get(id: string): T | undefined },
+  openReadyState: number
+): ConnectedNodeLookup {
+  return { has: (id) => connections.get(id)?.readyState === openReadyState };
+}
+
 type EditableAgentConfiguration = Pick<Agent,
   "name" | "title" | "summary" | "harnessId" | "model" | "computeNodeId" |
   "workspace" | "systemPrompt" | "avatarShape" | "avatarColor" | "glyph">;

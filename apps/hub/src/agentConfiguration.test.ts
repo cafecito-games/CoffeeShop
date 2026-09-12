@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { Agent, ComputeNode, Run } from "@coffee-shop/protocol";
-import { createConfiguredAgent, markDisconnectedNodesOffline, updateConfiguredAgent, type AgentConfigurationState } from "./agentConfiguration.js";
+import { createConfiguredAgent, markDisconnectedNodesOffline, openConnectionLookup, updateConfiguredAgent, type AgentConfigurationState } from "./agentConfiguration.js";
 
 const node = (overrides: Partial<ComputeNode> = {}): ComputeNode => ({
   id: "node-one",
@@ -207,4 +207,15 @@ test("fails closed after restart when persisted online nodes have no live connec
   assert.equal(updated.ok, false);
   assert.deepEqual(current.runs, runs);
   assert.equal(current.agents[0].title, "Builder");
+});
+
+test("treats mapped non-open sockets as disconnected for configuration saves", () => {
+  const current = state([node({ status: "online" })]);
+  const connections = new Map([["node-one", { readyState: 2 }]]);
+  const liveNodes = openConnectionLookup(connections, 1);
+  const before = structuredClone(current);
+
+  assert.equal(createConfiguredAgent(current, createInput, "later", liveNodes, () => "scout").ok, false);
+  assert.equal(updateConfiguredAgent(current, "milo", { title: "Changed" }, "later", liveNodes).ok, false);
+  assert.deepEqual(current, before);
 });
