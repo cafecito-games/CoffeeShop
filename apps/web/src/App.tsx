@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import {
-  Pulse as Activity, ArrowLeft, ArrowRight, Broadcast, CaretDown, Check, CircleNotch, Cloud, Command,
+  Pulse as Activity, ArrowLeft, ArrowRight, Broadcast, Check, CircleNotch, Cloud, Command,
   Coffee, Cpu, Desktop, Gear, HouseLine, Laptop, MagnifyingGlass, PaperPlaneTilt, Plus,
   Robot, SlidersHorizontal, TerminalWindow, UsersThree, WarningCircle, X, LockKey
 } from "@phosphor-icons/react";
-import { isActiveRunStatus, type Agent, type AgentAvatarColor, type AgentAvatarShape, type AgentState, type ChatMessage, type ComputeNode, type Run, type RunStatus, type TimelineEvent } from "@coffee-shop/protocol";
+import { isActiveRunStatus, type Agent, type AgentState, type ChatMessage, type ComputeNode, type Run, type RunStatus, type TimelineEvent } from "@coffee-shop/protocol";
 import { AccessibleDialog } from "./AccessibleDialog.js";
-import { AvatarPicker, CoffeeAvatar } from "./CoffeeAvatar.js";
+import { AgentConfigurationForm, CreateAgentDialog, type AgentConfigurationPayload } from "./AgentConfiguration.js";
+import { CoffeeAvatar } from "./CoffeeAvatar.js";
 import { useHubConnection, type ConnectionStatus } from "./hubConnection.js";
 
 type View = "agents" | "activity" | "compute" | "settings";
@@ -86,8 +87,9 @@ function EmptyAgents({ agents, onSelect, onCreate, canMutate }: { agents: Agent[
   );
 }
 
-function Chat({ agent, messages, nodes, sending, onBack, onSend, onInspector, onInspectRun, canMutate }: {
+function Chat({ agent, messages, nodes, sending, inspectorOpen, onBack, onSend, onInspector, onInspectRun, canMutate }: {
   agent: Agent; messages: ChatMessage[]; nodes: ComputeNode[]; sending: boolean;
+  inspectorOpen: boolean;
   onBack: () => void; onSend: (body: string) => Promise<void>; onInspector: () => void; onInspectRun: (id: string) => void; canMutate: boolean;
 }) {
   const [body, setBody] = useState("");
@@ -101,7 +103,7 @@ function Chat({ agent, messages, nodes, sending, onBack, onSend, onInspector, on
         <button className="back-btn" onClick={onBack}><ArrowLeft size={19} /></button>
         <Avatar agent={agent} />
         <div className="chat-identity"><strong>{agent.name}</strong><span><StateMark state={agent.state} /> · {node?.name ?? "Unassigned"}</span></div>
-        <button className="context-btn" onClick={onInspector}><SlidersHorizontal size={18} /><span>Context</span></button>
+        <button className="context-btn" onClick={onInspector} aria-expanded={inspectorOpen} aria-haspopup="dialog"><SlidersHorizontal size={18} /><span>Context</span></button>
       </header>
       <div className="chat-scroll">
         <div className="agent-intro"><Avatar agent={agent} size="lg" /><h1>{agent.name}</h1><p>{agent.title}</p><small>{agent.summary}</small></div>
@@ -131,35 +133,49 @@ function Message({ message, agent, onInspectRun }: { message: ChatMessage; agent
   );
 }
 
-function Inspector({ agent, nodes, open, onClose, onUpdate, canMutate }: { agent: Agent; nodes: ComputeNode[]; open: boolean; onClose: () => void; onUpdate: (patch: Partial<Agent>) => void; canMutate: boolean }) {
-  const [menu, setMenu] = useState<"harness" | "node" | null>(null);
+function Inspector({ agent, nodes, onClose, onSave, onReconcile, canMutate }: {
+  agent: Agent;
+  nodes: ComputeNode[];
+  onClose: () => void;
+  onSave: (payload: AgentConfigurationPayload) => Promise<Agent>;
+  onReconcile: () => void;
+  canMutate: boolean;
+}) {
+  const [editing, setEditing] = useState(false);
   const node = nodes.find((item) => item.id === agent.computeNodeId);
-  const harnesses = Array.from(new Map(nodes.flatMap((item) => item.harnesses).map((h) => [h.id, h])).values());
+  const harness = node?.harnesses.find((item) => item.id === agent.harnessId);
   return (
-    <aside className={`inspector ${open ? "open" : ""}`}>
-      <header><span>Agent context</span><button className="icon-btn" onClick={onClose}><X size={17} /></button></header>
-      <fieldset className="inspector-fields" disabled={!canMutate}>
-      <section className="avatar-editor">
-        <div className="section-label"><span>Identity mark</span><small>editable</small></div>
-        <CoffeeAvatar shape={agent.avatarShape} color={agent.avatarColor} size="xl" />
-        <AvatarPicker compact shape={agent.avatarShape} color={agent.avatarColor} onShape={(avatarShape) => onUpdate({ avatarShape })} onColor={(avatarColor) => onUpdate({ avatarColor })} />
-      </section>
-      <section className="identity-block"><div><h2>{agent.name}</h2><p>{agent.title}</p></div></section>
-      <section className="status-block"><span>Current state</span><StateMark state={agent.state} /><p>{agent.currentAction}</p></section>
-      <section className="config-section">
-        <div className="section-label"><span>Runtime</span></div>
-        <div className="config-field"><label>Harness</label><button onClick={() => setMenu(menu === "harness" ? null : "harness")}><Command size={17} /><span><strong>{harnesses.find((h) => h.id === agent.harnessId)?.label ?? agent.harnessId}</strong><small>{agent.model}</small></span><CaretDown size={14} /></button>
-          {menu === "harness" && <div className="select-menu">{harnesses.map((h) => <button key={h.id} onClick={() => { onUpdate({ harnessId: h.id, model: h.models[0] || agent.model }); setMenu(null); }}><span>{h.label}<small>{h.authMode.replaceAll("-", " ")}</small></span>{agent.harnessId === h.id && <Check size={15} />}</button>)}</div>}
-        </div>
-        <div className="config-field"><label>Compute</label><button onClick={() => setMenu(menu === "node" ? null : "node")}><Cpu size={17} /><span><strong>{node?.name ?? "Unassigned"}</strong><small>{node?.platform ?? "No Barista"}</small></span><CaretDown size={14} /></button>
-          {menu === "node" && <div className="select-menu">{nodes.map((item) => <button key={item.id} onClick={() => { onUpdate({ computeNodeId: item.id }); setMenu(null); }}><span>{item.name}<small>{item.status} · {item.activeRuns}/{item.concurrency} runs</small></span>{agent.computeNodeId === item.id && <Check size={15} />}</button>)}</div>}
-        </div>
-        <div className="config-line"><label>Workspace</label><code>{agent.workspace}</code></div>
-      </section>
-      <section className="prompt-section"><div className="section-label"><span>Purpose</span><small>system prompt</small></div><p>{agent.systemPrompt}</p></section>
-      </fieldset>
-      <footer><div><i className={node?.status === "online" || node?.status === "busy" ? "online-dot" : "offline-dot"} /><span>{node?.status ?? "offline"}</span></div><small>Credentials stay on {node?.name ?? "the compute node"}</small></footer>
-    </aside>
+    <AccessibleDialog labelledBy="agent-context-title" onClose={onClose} className="inspector-dialog">
+      <aside className="inspector">
+        <header>
+          <span id="agent-context-title">{editing ? "Edit agent" : "Agent context"}</span>
+          <div className="inspector-actions">
+            {!editing && <button className="edit-agent-button" onClick={() => setEditing(true)} disabled={!canMutate}>Edit</button>}
+            <button className="icon-btn" onClick={onClose} aria-label="Close agent context" data-dialog-initial-focus><X size={17} /></button>
+          </div>
+        </header>
+        {editing ? (
+          <AgentConfigurationForm mode="edit" agent={agent} nodes={nodes} canMutate={canMutate} onSave={onSave} onCancel={() => setEditing(false)} onReconcile={onReconcile} onSuccess={() => setEditing(false)} />
+        ) : (
+          <>
+            <section className="avatar-editor"><div className="section-label"><span>Identity mark</span></div><CoffeeAvatar shape={agent.avatarShape} color={agent.avatarColor} size="xl" /></section>
+            <section className="identity-block"><div><h2>{agent.name}</h2><p>{agent.title}</p><small>{agent.summary || "No summary"}</small></div></section>
+            <section className="status-block"><span>Current state</span><StateMark state={agent.state} /><p>{agent.currentAction}</p></section>
+            <section className="config-section">
+              <div className="section-label"><span>Runtime</span></div>
+              <dl className="context-details">
+                <div><dt>Compute</dt><dd>{node?.name ?? `${agent.computeNodeId} (unavailable)`}</dd></div>
+                <div><dt>Harness</dt><dd>{harness?.label ?? agent.harnessId}</dd></div>
+                <div><dt>Model</dt><dd>{agent.model}</dd></div>
+                <div><dt>Workspace</dt><dd><code>{agent.workspace}</code></dd></div>
+              </dl>
+            </section>
+            <section className="prompt-section"><div className="section-label"><span>Purpose</span><small>system prompt</small></div><p>{agent.systemPrompt}</p></section>
+            <footer><div><i className={node?.status === "online" || node?.status === "busy" ? "online-dot" : "offline-dot"} /><span>{node?.status ?? "offline"}</span></div><small>Credentials stay on {node?.name ?? "the compute node"}</small></footer>
+          </>
+        )}
+      </aside>
+    </AccessibleDialog>
   );
 }
 
@@ -269,43 +285,6 @@ function LockScreen() {
   return <main className="lock-screen"><div className="brand-mark"><span /><span /></div><LockKey size={20} /><h1>Connect to your control plane</h1><p>Enter the hub token configured on this deployment. It stays in this browser.</p><form onSubmit={(event) => { event.preventDefault(); if (!value.trim()) return; localStorage.setItem("coffee-shop-token", value.trim()); location.reload(); }}><input type="password" value={value} onChange={(event) => setValue(event.target.value)} placeholder="Hub access token" autoFocus /><button>Connect</button></form></main>;
 }
 
-function CreateAgentDialog({ nodes, onClose, onCreate, canMutate }: { nodes: ComputeNode[]; onClose: () => void; onCreate: (fields: Record<string, string>) => Promise<void>; canMutate: boolean }) {
-  const [name, setName] = useState("");
-  const [title, setTitle] = useState("");
-  const [harnessId, setHarnessId] = useState("claude-cli");
-  const [computeNodeId, setComputeNodeId] = useState(nodes[0]?.id ?? "");
-  const [workspace, setWorkspace] = useState(nodes[0]?.workspaceRoots[0] ?? "");
-  const [avatarShape, setAvatarShape] = useState<AgentAvatarShape>("cup");
-  const [avatarColor, setAvatarColor] = useState<AgentAvatarColor>("amber");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  async function submit(event: FormEvent) {
-    event.preventDefault();
-    if (!canMutate) return;
-    setBusy(true); setError("");
-    try { await onCreate({ name, title, harnessId, computeNodeId, workspace, avatarShape, avatarColor }); onClose(); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : "Could not create agent"); }
-    finally { setBusy(false); }
-  }
-  return <AccessibleDialog labelledBy="create-agent-title" onClose={onClose} className="dialog-content-reset">
-    <form className="create-dialog" onSubmit={submit}>
-      <header><div><small>New teammate</small><h2 id="create-agent-title">Create an agent</h2></div><button type="button" className="icon-btn" onClick={onClose} aria-label="Close create agent dialog"><X size={17} /></button></header>
-      <p>Give the agent a stable purpose. You can move it between harnesses and machines later without changing who it is.</p>
-      <fieldset className="create-fields" disabled={!canMutate}>
-      <AvatarPicker shape={avatarShape} color={avatarColor} onShape={setAvatarShape} onColor={setAvatarColor} />
-      <label>Name<input value={name} onChange={(event) => setName(event.target.value)} placeholder="Agent name" autoFocus required /></label>
-      <label>Role<input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Agent role" required /></label>
-      <fieldset><legend>Harness</legend><div className="choice-row"><button type="button" className={harnessId === "claude-cli" ? "selected" : ""} onClick={() => setHarnessId("claude-cli")}><Command size={15} />Claude Code</button><button type="button" className={harnessId === "codex-cli" ? "selected" : ""} onClick={() => setHarnessId("codex-cli")}><Command size={15} />Codex</button></div></fieldset>
-      <fieldset><legend>Compute</legend><div className="node-choices">{nodes.map((node) => <button type="button" key={node.id} className={computeNodeId === node.id ? "selected" : ""} onClick={() => { setComputeNodeId(node.id); setWorkspace(node.workspaceRoots[0] ?? ""); }}><span><strong>{node.name}</strong><small>{node.status} · {node.platform}</small></span>{computeNodeId === node.id && <Check size={14} />}</button>)}</div></fieldset>
-      <label>Workspace<input value={workspace} onChange={(event) => setWorkspace(event.target.value)} placeholder="/absolute/project/path" required /></label>
-      </fieldset>
-      {!canMutate && <div className="dialog-error">Reconnect before creating an agent.</div>}
-      {error && <div className="dialog-error">{error}</div>}
-      <footer><button type="button" onClick={onClose}>Cancel</button><button className="create-button" disabled={!canMutate || busy || !name || !title || !computeNodeId}>{busy ? "Creating…" : "Create agent"}</button></footer>
-    </form>
-  </AccessibleDialog>;
-}
-
 export default function App() {
   const { snapshot, status: connection, canMutate, retry } = useHubConnection(accessToken);
   const [view, setView] = useState<View>("agents");
@@ -324,19 +303,28 @@ export default function App() {
     finally { setSending(false); }
   }
 
-  async function updateAgent(patch: Partial<Agent>) {
-    if (!selected || !canMutate) return;
-    await apiFetch(`/api/agents/${selected.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(patch) });
+  async function updateAgent(payload: AgentConfigurationPayload) {
+    if (!selected || !canMutate) throw new Error("Reconnect before saving agent configuration");
+    const response = await apiFetch(`/api/agents/${encodeURIComponent(selected.id)}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({})) as { error?: string };
+      throw new Error(body.error ?? `Could not save agent (${response.status})`);
+    }
+    return response.json() as Promise<Agent>;
   }
 
   function selectAgent(id: string) { setSelectedId(id); setView("agents"); setInspectorOpen(false); setSelectedRunId(undefined); }
   function switchView(next: View) { setView(next); if (next !== "agents") setSelectedId(undefined); }
-  async function createAgent(fields: Record<string, string>) {
+  async function createAgent(fields: AgentConfigurationPayload) {
     if (!canMutate) throw new Error("Reconnect before creating an agent");
     const response = await apiFetch("/api/agents", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(fields) });
-    if (!response.ok) throw new Error((await response.json()).error ?? "Could not create agent");
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({})) as { error?: string };
+      throw new Error(body.error ?? `Could not create agent (${response.status})`);
+    }
     const agent = await response.json() as Agent;
     setSelectedId(agent.id); setView("agents");
+    return agent;
   }
 
   if (connection === "authentication-required") return <LockScreen />;
@@ -347,12 +335,12 @@ export default function App() {
       <div className="workspace">
         <FreshnessNotice connection={connection} onRetry={retry} />
         {view === "agents" && !selected && <EmptyAgents agents={snapshot.agents} onSelect={selectAgent} onCreate={() => { if (canMutate) setCreating(true); }} canMutate={canMutate} />}
-        {view === "agents" && selected && <Chat agent={selected} nodes={snapshot.nodes} messages={selectedMessages} sending={sending} onBack={() => setSelectedId(undefined)} onSend={send} onInspector={() => setInspectorOpen(true)} onInspectRun={setSelectedRunId} canMutate={canMutate} />}
+        {view === "agents" && selected && <Chat agent={selected} nodes={snapshot.nodes} messages={selectedMessages} sending={sending} inspectorOpen={inspectorOpen} onBack={() => setSelectedId(undefined)} onSend={send} onInspector={() => setInspectorOpen((open) => !open)} onInspectRun={setSelectedRunId} canMutate={canMutate} />}
         {view === "activity" && <ActivityView events={snapshot.events} agents={snapshot.agents} onInspectRun={setSelectedRunId} />}
         {view === "compute" && <ComputeView nodes={snapshot.nodes} />}
         {view === "settings" && <SettingsView connection={connection} />}
       </div>
-      {selected && <Inspector agent={selected} nodes={snapshot.nodes} open={inspectorOpen} onClose={() => setInspectorOpen(false)} onUpdate={updateAgent} canMutate={canMutate} />}
+      {selected && inspectorOpen && <Inspector agent={selected} nodes={snapshot.nodes} onClose={() => setInspectorOpen(false)} onSave={updateAgent} onReconcile={retry} canMutate={canMutate} />}
       {selectedRunId && <RunInspector selectedRunId={selectedRunId} run={snapshot.runs.find((run) => run.id === selectedRunId)} agents={snapshot.agents} nodes={snapshot.nodes} onClose={() => setSelectedRunId(undefined)} canMutate={canMutate} />}
       <nav className="desktop-nav" aria-label="Primary">
         <div className="rail-brand" aria-label="Coffee Shop"><Coffee size={21} /></div>
@@ -363,7 +351,7 @@ export default function App() {
         <div className="rail-user">CS</div>
       </nav>
       <BottomNav view={view} onView={switchView} />
-      {creating && <CreateAgentDialog nodes={snapshot.nodes} onClose={() => setCreating(false)} onCreate={createAgent} canMutate={canMutate} />}
+      {creating && <CreateAgentDialog nodes={snapshot.nodes} onClose={() => setCreating(false)} onSave={createAgent} onReconcile={retry} canMutate={canMutate} />}
     </div>
   );
 }
