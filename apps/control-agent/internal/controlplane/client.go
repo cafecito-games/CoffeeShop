@@ -8,6 +8,7 @@ import (
 	"log"
 	"math/rand/v2"
 	"net/http"
+	"sort"
 	"sync"
 	"time"
 
@@ -126,7 +127,7 @@ func (client *Client) attach(ctx context.Context, connection *websocket.Conn) er
 		}
 		client.outbox = client.outbox[1:]
 	}
-	return nil
+	return write(ctx, connection, protocol.Outbound{Type: "sync.complete", NodeID: client.node.ID, ActiveRunIDs: client.activeRunIDs(), At: now()})
 }
 
 func (client *Client) detach(connection *websocket.Conn) {
@@ -181,8 +182,9 @@ func (client *Client) handle(ctx context.Context, message protocol.Inbound) {
 		client.runsMu.Unlock()
 		if cancel != nil {
 			cancel()
+		} else {
+			client.send(protocol.Outbound{Type: "run.cancelled", RunID: message.RunID, At: now()})
 		}
-		client.send(protocol.Outbound{Type: "run.cancelled", RunID: message.RunID, At: now()})
 	case "dispatch":
 		client.dispatch(ctx, message.Run, message.Agent)
 	default:
@@ -213,8 +215,12 @@ func (client *Client) dispatch(ctx context.Context, run protocol.Run, agent prot
 		defer func() {
 			client.runsMu.Lock()
 			delete(client.runs, run.ID)
+			_, cancelled := client.cancelled[run.ID]
 			client.runsMu.Unlock()
 			cancel()
+			if cancelled {
+				client.send(protocol.Outbound{Type: "run.cancelled", RunID: run.ID, At: now()})
+			}
 		}()
 		workspace, err := harness.AuthorizeWorkspace(run.Workspace, client.config.WorkspaceRoots)
 		if err != nil {
@@ -248,6 +254,17 @@ func (client *Client) activeRuns() int {
 	client.runsMu.Lock()
 	defer client.runsMu.Unlock()
 	return len(client.runs)
+}
+
+func (client *Client) activeRunIDs() []string {
+	client.runsMu.Lock()
+	defer client.runsMu.Unlock()
+	ids := make([]string, 0, len(client.runs))
+	for id := range client.runs {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
 }
 
 func (client *Client) cancelRuns() {

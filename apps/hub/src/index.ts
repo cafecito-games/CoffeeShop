@@ -4,9 +4,9 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import cors from "cors";
 import express from "express";
-import { WebSocket, WebSocketServer } from "ws";
+import { WebSocket, WebSocketServer, type RawData } from "ws";
 import { agentAvatarColors, agentAvatarShapes, type Agent, type ComputeNode, type ControlAgentToHub, type HubToControlAgent, type Run } from "@coffee-shop/protocol";
-import { applyRunLifecycle, cancelPersistedRun } from "./lifecycle.js";
+import { applyRunLifecycle, cancelPersistedRun, queuedRunsForNode, serializeAsync } from "./lifecycle.js";
 import { newEvent, newId, newMessage, Store } from "./store.js";
 
 const app = express();
@@ -176,7 +176,15 @@ wss.on("connection", (socket, request) => {
   }
 
   let nodeId = "";
-  socket.on("message", async (raw) => {
+  let protocolVersion: "1" | "2" = "1";
+  const dispatchQueuedRuns = (activeRunIds: readonly string[] = []) => {
+    const queued = queuedRunsForNode(store.snapshot(), nodeId, activeRunIds);
+    for (const run of queued) {
+      const agent = store.getAgent(run.agentId);
+      if (agent) sendToControlAgent(nodeId, { type: "dispatch", run, agent });
+    }
+  };
+  const handleMessage = serializeAsync(async (raw: RawData) => {
     let decoded: unknown;
     try {
       decoded = JSON.parse(raw.toString());
@@ -186,8 +194,9 @@ wss.on("connection", (socket, request) => {
     if (typeof decoded !== "object" || decoded === null || !("type" in decoded) || typeof decoded.type !== "string") return;
     const message = decoded as ControlAgentToHub;
     if (message.type === "register") {
-      if (message.protocolVersion && message.protocolVersion !== "1") return socket.close(1002, "unsupported control protocol");
+      if (message.protocolVersion && message.protocolVersion !== "1" && message.protocolVersion !== "2") return socket.close(1002, "unsupported control protocol");
       nodeId = message.node.id;
+      protocolVersion = message.protocolVersion ?? "1";
       controlAgents.set(nodeId, socket);
       await store.transact((state) => {
         const index = state.nodes.findIndex((node) => node.id === nodeId);
@@ -195,12 +204,11 @@ wss.on("connection", (socket, request) => {
         if (index >= 0) state.nodes[index] = online; else state.nodes.push(online);
         state.events.unshift(newEvent({ type: "node", title: `${online.name} connected`, detail: `${online.platform} · ${online.harnesses.filter((h) => h.available).map((h) => h.label).join(" + ")}` }));
       });
-      const queued = store.snapshot().runs.filter((run) => run.nodeId === nodeId && run.status === "queued");
-      for (const run of queued) {
-        const agent = store.getAgent(run.agentId);
-        if (agent) sendToControlAgent(nodeId, { type: "dispatch", run, agent });
-      }
+      if (protocolVersion === "1") dispatchQueuedRuns();
       broadcast();
+    } else if (message.type === "sync.complete") {
+      if (protocolVersion !== "2" || !nodeId || message.nodeId !== nodeId || typeof message.at !== "string" || (message.activeRunIds !== undefined && (!Array.isArray(message.activeRunIds) || !message.activeRunIds.every((id) => typeof id === "string")))) return;
+      dispatchQueuedRuns(message.activeRunIds ?? []);
     } else if (message.type === "heartbeat") {
       await store.transact((state) => { const node = state.nodes.find((item) => item.id === message.nodeId); if (node) { node.lastSeen = message.at; node.activeRuns = message.activeRuns; node.status = message.activeRuns ? "busy" : "online"; } });
       broadcast();
@@ -229,7 +237,8 @@ wss.on("connection", (socket, request) => {
       }
       broadcast();
     }
-  });
+  }, (error) => console.error("control-agent message failed", error));
+  socket.on("message", (raw) => { void handleMessage(raw); });
   socket.on("close", async () => {
     if (!nodeId) return;
     if (controlAgents.get(nodeId) !== socket) return;

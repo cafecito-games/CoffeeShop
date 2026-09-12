@@ -36,7 +36,7 @@ The UI presents agents first, matching Grok Bot's useful primitive: you return t
 6. The hub persists output and state, then pushes a fresh snapshot to every UI.
 7. A typed handoff directive becomes a new event and child run, capped at three levels.
 
-Queued and running runs may also transition to `cancelled`. The hub persists that terminal state and its timestamp before attempting best-effort delivery to Barista. Late lifecycle messages cannot move a terminal run or produce output, messages, events, or handoffs. Barista keeps an in-memory cancellation tombstone for each received cancel, acknowledges it with `run.cancelled`, and suppresses both a not-yet-started dispatch and terminal output from an actively cancelled process. The persisted hub run remains the authority across a Barista disconnect.
+Queued and running runs may also transition to `cancelled`. The hub persists that terminal state and its timestamp before attempting best-effort delivery to Barista. Late lifecycle messages cannot move a terminal run or produce output, messages, events, or handoffs. Barista keeps an in-memory cancellation tombstone for each received cancel, terminates the harness process tree, acknowledges active cancellation after that tree exits, and suppresses both a not-yet-started dispatch and terminal output from cancelled work. The persisted hub run remains the authority across a Barista disconnect.
 
 ## Security boundaries in the MVP
 
@@ -55,7 +55,7 @@ The shared hub token is suitable for a private single-user tailnet, not an inter
 
 The repository is polyglot by application boundary. `apps/web` and `apps/hub` participate in the pnpm workspace. `apps/control-agent` is an independent Go 1.26 module joined by the root `go.work`. Root Task targets compose builds and tests without making a compute host install the TypeScript toolchain.
 
-The hub and frontend deploy together. Barista is built and distributed separately as a native executable. Its outbound `/control-agent` WebSocket uses protocol version `1`; the TypeScript and Go representations intentionally live on opposite sides of the deployment boundary.
+The hub and frontend deploy together. Barista is built and distributed separately as a native executable. Its outbound `/control-agent` WebSocket uses protocol version `2`; the TypeScript and Go representations intentionally live on opposite sides of the deployment boundary. Version 2 ends reconnect replay with `sync.complete`, allowing the hub to apply queued lifecycle messages before redispatching work. The hub still accepts version 1 registrations during rolling upgrades.
 
 ## What to build next
 

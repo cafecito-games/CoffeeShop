@@ -40,6 +40,7 @@ func (r *Runner) Run(ctx context.Context, run protocol.Run, agent protocol.Agent
 		binary = profile.Binary
 	}
 	command := exec.CommandContext(ctx, binary, args...)
+	configureProcessCancellation(command)
 	command.Dir = cwd
 	command.Env = os.Environ()
 	stdout, err := command.StdoutPipe()

@@ -45,11 +45,14 @@ The control plane sends these JSON messages:
 Barista sends:
 
 - `register`: protocol version and compute-node inventory;
+- `sync.complete`: version 2 reconnect barrier sent after queued lifecycle messages;
 - `heartbeat`: node ID, active run count, and timestamp;
 - `run.started`, `run.output`, `run.completed`, and `run.failed`: run lifecycle;
-- `run.cancelled`: acknowledgement that Barista recorded a cancellation tombstone and cancelled any active process.
+- `run.cancelled`: acknowledgement that Barista recorded a cancellation tombstone and, for active work, terminated the harness process tree.
 
-Cancellation commands are idempotent from Barista's perspective. A cancel received before its matching dispatch prevents the process from starting; a cancel received during execution terminates the process without translating that intentional termination into `run.failed`. Tombstones survive control-plane reconnects for the lifetime of the Barista process, so a replayed dispatch cannot resurrect cancelled work. The hub persists cancellation before sending the command and remains authoritative if Barista is offline.
+Cancellation commands are idempotent from Barista's perspective. A cancel received before its matching dispatch prevents the process from starting and is acknowledged immediately; a cancel received during execution terminates the process tree and is acknowledged after cleanup without translating that intentional termination into `run.failed`. Tombstones survive control-plane reconnects for the lifetime of the Barista process, so a replayed dispatch cannot resurrect cancelled work. The hub persists cancellation before sending the command and remains authoritative if Barista is offline.
+
+On reconnect, protocol version 2 sends `register`, flushes its lifecycle outbox, and then sends `sync.complete` with any run IDs still active on Barista. The hub processes those messages in socket order and waits for the barrier before redispatching queued runs, excluding work Barista reports as active. Version 1 remains accepted for rolling compatibility and retains immediate queued-run reconciliation.
 
 The TypeScript source of truth is `packages/protocol/src/index.ts`; Go wire structs are deliberately isolated in `apps/control-agent/internal/protocol`. Changes to the wire contract must update both and should retain compatibility across rolling deployments.
 

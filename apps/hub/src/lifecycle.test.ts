@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import type { Agent, ComputeNode, HubToControlAgent, Run } from "@coffee-shop/protocol";
-import { applyRunLifecycle, cancelPersistedRun, cancelRunInState } from "./lifecycle.js";
+import { applyRunLifecycle, cancelPersistedRun, cancelRunInState, queuedRunsForNode, serializeAsync } from "./lifecycle.js";
 import { type State, Store } from "./store.js";
 
 const at = "2026-09-11T12:00:00.000Z";
@@ -171,4 +171,29 @@ test("canonical transitions reject malformed ordering and accept normal lifecycl
   assert.equal(queued.runs[0].status, "completed");
   assert.equal(queued.messages[0].body, "done");
   assert.equal(applyRunLifecycle(queued, { type: "run.failed", runId: "run-one", error: "late", at }), false);
+});
+
+test("serial message handling settles lifecycle work before reconnect reconciliation", async () => {
+  const entered: string[] = [];
+  let releaseLifecycle: (() => void) | undefined;
+  const lifecycleGate = new Promise<void>((resolve) => { releaseLifecycle = resolve; });
+  const handle = serializeAsync(async (message: string) => {
+    entered.push(`start:${message}`);
+    if (message === "lifecycle") await lifecycleGate;
+    entered.push(`finish:${message}`);
+  }, (error) => { throw error; });
+
+  const lifecycle = handle("lifecycle");
+  const reconciliation = handle("reconciliation");
+  await Promise.resolve();
+  assert.deepEqual(entered, ["start:lifecycle"]);
+  releaseLifecycle?.();
+  await Promise.all([lifecycle, reconciliation]);
+  assert.deepEqual(entered, ["start:lifecycle", "finish:lifecycle", "start:reconciliation", "finish:reconciliation"]);
+});
+
+test("reconnect reconciliation does not redispatch runs Barista reports active", () => {
+  const snapshot = { ...state("queued"), generatedAt: at };
+  snapshot.runs.push(run("queued", "run-two"));
+  assert.deepEqual(queuedRunsForNode(snapshot, "node-one", ["run-one"]).map((item) => item.id), ["run-two"]);
 });

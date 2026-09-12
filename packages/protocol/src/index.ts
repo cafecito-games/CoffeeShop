@@ -120,7 +120,8 @@ export type HubToControlAgent =
   | { type: "ping" };
 
 export type ControlAgentToHub =
-  | { type: "register"; protocolVersion?: "1"; node: ComputeNode }
+  | { type: "register"; protocolVersion?: "1" | "2"; node: ComputeNode }
+  | { type: "sync.complete"; nodeId: string; activeRunIds?: string[]; at: string }
   | { type: "heartbeat"; nodeId: string; activeRuns: number; at: string }
   | { type: "run.started"; runId: string; at: string }
   | { type: "run.output"; runId: string; chunk: string; at: string }

@@ -94,6 +94,38 @@ func TestRunOnceAuthenticatesAndRegisters(t *testing.T) {
 	require.Equal(t, "worker-1", got.message.Node.ID)
 }
 
+func TestReconnectFlushesLifecycleBeforeCompletingSync(t *testing.T) {
+	messages := make(chan []protocol.Outbound, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		connection, err := websocket.Accept(writer, request, nil)
+		require.NoError(t, err)
+		defer connection.Close(websocket.StatusNormalClosure, "test complete")
+		got := make([]protocol.Outbound, 0, 3)
+		for len(got) < 3 {
+			_, data, readErr := connection.Read(request.Context())
+			require.NoError(t, readErr)
+			var message protocol.Outbound
+			require.NoError(t, json.Unmarshal(data, &message))
+			got = append(got, message)
+		}
+		messages <- got
+	}))
+	defer server.Close()
+
+	client := NewClient(config.Config{
+		ControlEndpoint: strings.Replace(server.URL, "http://", "ws://", 1), Concurrency: 1,
+	}, protocol.ComputeNode{ID: "node-one"}, nil)
+	client.send(protocol.Outbound{Type: "run.completed", RunID: "run-one", Output: "done", At: now()})
+	connected, err := client.runOnce(context.Background())
+	require.Error(t, err)
+	require.True(t, connected)
+
+	got := <-messages
+	require.Equal(t, []string{"register", "run.completed", "sync.complete"}, []string{got[0].Type, got[1].Type, got[2].Type})
+	require.Equal(t, protocol.Version, got[0].ProtocolVersion)
+	require.Equal(t, "node-one", got[2].NodeID)
+}
+
 func TestCancelBeforeDispatchCreatesTombstoneAndAcknowledgesDuplicates(t *testing.T) {
 	client := NewClient(config.Config{Concurrency: 1}, protocol.ComputeNode{ID: "node-one"}, nil)
 	client.handle(context.Background(), protocol.Inbound{Type: "cancel", RunID: "run-one"})
@@ -124,7 +156,7 @@ func TestActiveCancellationAcknowledgesWithoutFailureOrCompletion(t *testing.T) 
 
 	client.handle(context.Background(), protocol.Inbound{Type: "cancel", RunID: "run-one"})
 	waitForMessage(t, client, "run.cancelled")
-	require.Eventually(t, func() bool { return client.activeRuns() == 0 }, 3*time.Second, 5*time.Millisecond)
+	require.Zero(t, client.activeRuns(), "active cancellation is acknowledged after process-tree cleanup")
 	for _, message := range outboundMessages(t, client) {
 		require.NotEqual(t, "run.failed", message.Type)
 		require.NotEqual(t, "run.completed", message.Type)

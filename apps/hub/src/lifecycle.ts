@@ -3,7 +3,8 @@ import {
   isActiveRunStatus,
   type ControlAgentToHub,
   type HubToControlAgent,
-  type Run
+  type Run,
+  type Snapshot
 } from "@coffee-shop/protocol";
 import { newEvent, newMessage, type State, type Store } from "./store.js";
 
@@ -15,6 +16,19 @@ const runLifecycleMessageTypes = new Set<string>([
 export interface CancellationResult {
   kind: "cancelled" | "already-cancelled" | "not-found" | "conflict";
   run?: Run;
+}
+
+export function serializeAsync<T>(handler: (value: T) => Promise<void>, onError: (error: unknown) => void) {
+  let queue = Promise.resolve();
+  return (value: T) => {
+    queue = queue.then(() => handler(value)).catch(onError);
+    return queue;
+  };
+}
+
+export function queuedRunsForNode(snapshot: Snapshot, nodeId: string, activeRunIds: readonly string[]) {
+  const active = new Set(activeRunIds);
+  return snapshot.runs.filter((run) => run.nodeId === nodeId && run.status === "queued" && !active.has(run.id));
 }
 
 function activeRunForAgent(state: State, agentId: string, excludedRunId: string) {
