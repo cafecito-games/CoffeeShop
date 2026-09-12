@@ -3,8 +3,9 @@ version: "3"
 dotenv: [".env"]
 
 vars:
+  COFFEE_SHOP_VERSION: 0.1.0
   BARISTA_VERSION:
-    sh: git describe --tags --always --dirty
+    sh: echo "{{.COFFEE_SHOP_VERSION}}+$(git describe --tags --always --dirty)"
 
 tasks:
   default:
@@ -36,6 +37,11 @@ tasks:
       - task: control-plane:build
       - task: frontend:build
       - task: control-agent:build
+
+  container:build:
+    desc: Build the hub image with exact Barista release provenance
+    cmds:
+      - docker build --build-arg BARISTA_VERSION="{{.BARISTA_VERSION}}" -t coffee-shop:local .
 
   test:
     desc: Run every test suite
@@ -93,7 +99,7 @@ tasks:
     desc: Build the production frontend
     deps: [protocol:build]
     cmds:
-      - pnpm --filter @coffee-shop/web build
+      - VITE_BARISTA_VERSION={{.BARISTA_VERSION}} pnpm --filter @coffee-shop/web build
 
   frontend:test:
     desc: Run frontend tests

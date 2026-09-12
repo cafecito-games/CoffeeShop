@@ -1,7 +1,9 @@
 package config
 
 import (
+	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -21,6 +23,88 @@ func TestWebSocketEndpoint(t *testing.T) {
 			require.Equal(t, expected, actual)
 		})
 	}
+}
+
+func TestParseRejectsRelativeConfiguredWorkspaceRoot(t *testing.T) {
+	t.Setenv("WORKSPACE_ROOTS", "relative/workspace")
+	t.Setenv("CONTROL_ENDPOINT", "http://localhost:8787")
+
+	_, err := Parse([]string{"--name", "Worker 1", "--id", "worker-1"})
+	require.EqualError(t, err, `workspace root "relative/workspace" must be an absolute path`)
+}
+
+func TestParseRejectsRelativeWorkspaceRootFlag(t *testing.T) {
+	t.Setenv("WORKSPACE_ROOTS", "")
+
+	_, err := Parse([]string{"--name", "Worker 1", "--id", "worker-1", "--workspace-root", "relative/workspace"})
+	require.EqualError(t, err, `workspace root "relative/workspace" must be an absolute path`)
+}
+
+func TestParseRejectsInvalidConfiguredConcurrency(t *testing.T) {
+	t.Setenv("WORKSPACE_ROOTS", absoluteExistingRoot(t))
+	t.Setenv("BARISTA_CONCURRENCY", "many")
+
+	_, err := Parse([]string{"--name", "Worker 1", "--id", "worker-1"})
+	require.EqualError(t, err, `BARISTA_CONCURRENCY must be a positive integer`)
+}
+
+func TestWorkspaceRootEnvironmentUsesOnlyCommaAsDelimiter(t *testing.T) {
+	t.Setenv("WORKSPACE_ROOTS", "/srv/with:colon,/srv/other")
+	require.Equal(t, []string{"/srv/with:colon", "/srv/other"}, splitEnv("WORKSPACE_ROOTS"))
+}
+
+func TestWorkspaceRootFlagPreservesCommaInPath(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "root,one")
+	require.NoError(t, os.Mkdir(root, 0o755))
+	t.Setenv("WORKSPACE_ROOTS", "")
+
+	cfg, err := Parse([]string{"--name", "Worker 1", "--id", "worker-1", "--workspace-root", root})
+	require.NoError(t, err)
+	canonical, err := filepath.EvalSymlinks(root)
+	require.NoError(t, err)
+	require.Equal(t, []string{canonical}, cfg.WorkspaceRoots)
+}
+
+func TestParseAcceptsEverySupportedKindFromEnvironment(t *testing.T) {
+	for _, kind := range []string{"local", "home-server", "cloud"} {
+		t.Run(kind, func(t *testing.T) {
+			t.Setenv("WORKSPACE_ROOTS", absoluteExistingRoot(t))
+			t.Setenv("BARISTA_KIND", kind)
+			cfg, err := Parse([]string{"--name", "Worker 1", "--id", "worker-1"})
+			require.NoError(t, err)
+			require.Equal(t, kind, cfg.Kind)
+		})
+	}
+}
+
+func TestParseRejectsInvalidIdentityEndpointKindAndConcurrency(t *testing.T) {
+	root := absoluteExistingRoot(t)
+	tests := []struct {
+		name    string
+		args    []string
+		message string
+	}{
+		{"endpoint", []string{"--control-endpoint", "ftp://coffee.example", "--name", "Worker", "--id", "worker", "--workspace-root", root}, "control endpoint must use"},
+		{"name", []string{"--name", " ", "--id", "worker", "--workspace-root", root}, "name must not be empty"},
+		{"id", []string{"--name", "Worker", "--id", "Bad ID", "--workspace-root", root}, "id must contain only"},
+		{"kind", []string{"--name", "Worker", "--id", "worker", "--kind", "edge", "--workspace-root", root}, "kind must be local"},
+		{"concurrency", []string{"--name", "Worker", "--id", "worker", "--concurrency", "0", "--workspace-root", root}, "concurrency must be at least one"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := Parse(test.args)
+			require.ErrorContains(t, err, test.message)
+		})
+	}
+}
+
+func absoluteExistingRoot(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	if runtime.GOOS == "windows" {
+		return filepath.Clean(root)
+	}
+	return root
 }
 
 func TestParseUsesWorkingDirectoryAsTheDefaultRoot(t *testing.T) {

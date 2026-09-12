@@ -1,6 +1,9 @@
 services:
   hub:
-    build: .
+    build:
+      context: .
+      args:
+        BARISTA_VERSION: ${BARISTA_VERSION:-dev}
     ports:
       - "8787:8787"
     environment:

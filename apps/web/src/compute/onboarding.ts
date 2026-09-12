@@ -1,0 +1,104 @@
+import { nodeKinds, type NodeKind } from "@coffee-shop/protocol";
+
+export const BARISTA_ENVIRONMENT_FIELDS = [
+  "CONTROL_ENDPOINT",
+  "BARISTA_NAME",
+  "BARISTA_ID",
+  "BARISTA_KIND",
+  "BARISTA_CONCURRENCY",
+  "WORKSPACE_ROOTS",
+  "COFFEE_SHOP_TOKEN"
+] as const;
+
+export const MAX_BARISTA_CONCURRENCY = 2_147_483_647;
+
+export interface OnboardingValues {
+  controlEndpoint: string;
+  name: string;
+  nodeId: string;
+  kind: NodeKind;
+  concurrency: string;
+  workspaceRoots: string;
+}
+
+export function defaultControlEndpoint(configured: string | undefined, development: boolean, origin: string): string {
+  const explicit = configured?.trim();
+  if (explicit) return explicit;
+  if (!development) return origin;
+  try {
+    const endpoint = new URL(origin);
+    endpoint.port = "8787";
+    endpoint.pathname = "";
+    endpoint.search = "";
+    endpoint.hash = "";
+    return endpoint.origin;
+  } catch {
+    return "http://localhost:8787";
+  }
+}
+
+export function workspaceRoots(value: string): string[] {
+  return value.split(/\r?\n/).map((root) => root.trim()).filter(Boolean);
+}
+
+function normalizedControlEndpoint(value: string): string | undefined {
+  try {
+    const endpointValue = value.trim();
+    const authority = /^https?:\/\/([^/?#]+)/i.exec(endpointValue)?.[1];
+    if (!/^https?:\/\//i.test(endpointValue) || /%(?![0-9a-f]{2})/i.test(endpointValue) || /[\u0000-\u001f\u007f]/.test(endpointValue)) {
+      throw new Error("unsupported URL");
+    }
+    if (!authority || authority.includes("%") || authority.includes("\\")) throw new Error("unsupported URL authority");
+    const endpoint = new URL(endpointValue);
+    if (!(["http:", "https:"] as string[]).includes(endpoint.protocol) || !endpoint.hostname) throw new Error("unsupported URL");
+    if (endpoint.username || endpoint.password) throw new Error("embedded credentials are unsupported");
+    return endpoint.toString();
+  } catch {
+    return undefined;
+  }
+}
+
+export function validateOnboarding(values: OnboardingValues): string[] {
+  const errors: string[] = [];
+  if (!normalizedControlEndpoint(values.controlEndpoint)) {
+    errors.push("Use an HTTP or HTTPS hub URL.");
+  }
+  if (!values.name.trim()) errors.push("Enter a Barista name.");
+  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(values.nodeId)) errors.push("Use a lowercase ID containing only letters, numbers, and hyphens.");
+  if (!(nodeKinds as readonly string[]).includes(values.kind)) errors.push("Choose a supported compute kind.");
+  const concurrency = Number(values.concurrency);
+  if (!/^[1-9]\d*$/.test(values.concurrency) || !Number.isSafeInteger(concurrency) || concurrency > MAX_BARISTA_CONCURRENCY) {
+    errors.push(`Concurrency must be an integer from 1 to ${MAX_BARISTA_CONCURRENCY}.`);
+  }
+  const roots = workspaceRoots(values.workspaceRoots);
+  if (!roots.length) errors.push("Enter at least one absolute workspace root.");
+  else if (roots.some((root) => !isAbsolutePath(root))) errors.push("Every workspace root must be absolute.");
+  else if (roots.some((root) => root.includes(","))) errors.push("Workspace roots cannot contain commas.");
+  return errors;
+}
+
+function isAbsolutePath(value: string): boolean {
+  return value.startsWith("/") || /^[A-Za-z]:[\\/]/.test(value) || /^\\\\[^\\]+\\[^\\]+/.test(value);
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+export function buildBaristaCommand(values: OnboardingValues): string {
+  const errors = validateOnboarding(values);
+  if (errors.length) throw new Error(errors.join(" "));
+  const environment: Record<typeof BARISTA_ENVIRONMENT_FIELDS[number], string> = {
+    CONTROL_ENDPOINT: normalizedControlEndpoint(values.controlEndpoint)!,
+    BARISTA_NAME: values.name.trim(),
+    BARISTA_ID: values.nodeId,
+    BARISTA_KIND: values.kind,
+    BARISTA_CONCURRENCY: values.concurrency,
+    WORKSPACE_ROOTS: workspaceRoots(values.workspaceRoots).join(","),
+    COFFEE_SHOP_TOKEN: "replace-with-hub-token"
+  };
+  return [
+    ...BARISTA_ENVIRONMENT_FIELDS.map((name) => `${name}=${shellQuote(environment[name])} \\`),
+    "./bin/barista"
+  ].join("\n");
+}

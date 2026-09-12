@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   activeRunStatuses,
   canTransitionRun,
+  harnessIds,
   isActiveRunStatus,
   isTerminalRunStatus,
   runStatuses,
@@ -22,4 +23,8 @@ test("run status vocabulary and canonical transitions stay aligned", () => {
   for (const terminal of terminalRunStatuses) {
     for (const next of runStatuses) assert.equal(canTransitionRun(terminal, next), false);
   }
+});
+
+test("agent harness identities remain a closed mutation vocabulary", () => {
+  assert.deepEqual(harnessIds, ["claude-cli", "codex-cli", "shell", "ag-ui"]);
 });

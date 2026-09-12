@@ -32,7 +32,22 @@ COFFEE_SHOP_TOKEN=… barista \
   --concurrency 4
 ```
 
-Repeat `--workspace-root` to enroll multiple trees. `WORKSPACE_ROOTS` accepts comma-separated values or an OS path-list (colon-separated on Unix and semicolon-separated on Windows).
+Repeat `--workspace-root` to enroll multiple trees. `WORKSPACE_ROOTS` accepts comma-separated values. Commas cannot be represented inside an environment-configured root; use repeated `--workspace-root` flags when a path contains one.
+Every explicitly configured root must be absolute and must exist so Barista can resolve it before opening a WebSocket. Invalid roots and invalid `BARISTA_CONCURRENCY` values stop startup without a partial registration.
+
+The web app’s **Compute → Add compute** flow generates a shell-quoted equivalent using every supported environment variable:
+
+| Environment variable | Meaning |
+|---|---|
+| `CONTROL_ENDPOINT` | HTTP(S) Coffee Shop URL; Barista converts it to the outbound WebSocket endpoint |
+| `BARISTA_NAME` | Human-readable compute name |
+| `BARISTA_ID` | Stable lowercase kebab-case node identity |
+| `BARISTA_KIND` | `local`, `home-server`, or `cloud` |
+| `BARISTA_CONCURRENCY` | Positive maximum simultaneous run count |
+| `WORKSPACE_ROOTS` | Absolute allowlisted roots |
+| `COFFEE_SHOP_TOKEN` | Coffee Shop hub secret, never a provider credential |
+
+The UI deliberately emits `COFFEE_SHOP_TOKEN='replace-with-hub-token'`; it never reads the browser’s stored hub token into setup guidance. Replace the placeholder locally on the compute machine, or use a protected environment file when installing Barista as a service.
 
 ## Control API
 
@@ -69,3 +84,9 @@ The token authenticates a Barista to the current single-user control plane; it i
 Copy the binary to a stable location and run it under the platform service manager with a dedicated environment file. The service account must be able to read/write the enrolled workspaces and access the locally authenticated CLI state. It should not have broader filesystem permissions than the agents need.
 
 Barista logs discovery, connection state, enrolled roots, and failures to stdout/stderr so systemd, launchd, or the Windows Service wrapper can collect them.
+
+## Reviewing reported policy
+
+The web app’s **Settings → Execution policy → Review** view is read-only. It classifies node and harness inventory as worker-reported, connection/freshness as hub-observed, and workspace/harness behavior as documentation for the Barista release built alongside the UI. Task builds stamp Barista with the Coffee Shop release plus Git description. Use `task container:build` to stamp the container UI with that exact same version; direct Docker/Compose builds default to `dev` and deliberately withhold release qualification unless `BARISTA_VERSION` is supplied. A matching clean release is still not runtime attestation. Development, dirty, older, custom, unavailable, protocol-only, or unknown harness/auth values remain explicitly unverified.
+
+For this release, Claude is documented with `--permission-mode auto` and `--permission-prompts none`; Codex is documented with `--sandbox workspace-write`. The actual invocation remains owned by the Barista binary on the compute machine.

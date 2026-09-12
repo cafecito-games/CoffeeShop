@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { runStatuses, type Snapshot } from "@coffee-shop/protocol";
+import { harnessIds, runStatuses, type Snapshot } from "@coffee-shop/protocol";
 
 export type ConnectionStatus = "connecting" | "connected" | "reconnecting" | "disconnected" | "authentication-required";
 
@@ -45,19 +45,18 @@ const isOptionalString = (value: unknown) => value === undefined || isString(val
 const isOneOf = <T extends string>(value: unknown, options: readonly T[]): value is T => isString(value) && options.includes(value as T);
 const isArrayOf = (value: unknown, validator: (item: unknown) => boolean) => Array.isArray(value) && value.every(validator);
 
-const harnessIds = ["claude-cli", "codex-cli", "shell", "ag-ui"] as const;
 const agentStates = ["idle", "thinking", "working", "waiting", "blocked", "done"] as const;
 const avatarShapes = ["cup", "bean", "moka", "kettle", "grinder", "pour-over"] as const;
 const avatarColors = ["amber", "sage", "clay", "sky", "plum", "rose"] as const;
 
 function isHarness(value: unknown): boolean {
   return isObject(value)
-    && isOneOf(value.id, harnessIds)
+    && isString(value.id)
     && isString(value.label)
     && isString(value.description)
     && isOptionalString(value.binary)
     && typeof value.available === "boolean"
-    && isOneOf(value.authMode, ["local-subscription", "local-account", "api", "none"])
+    && isString(value.authMode)
     && isArrayOf(value.models, isString);
 }
 

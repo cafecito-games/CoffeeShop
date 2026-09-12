@@ -9,9 +9,10 @@ const focusableSelector = [
   "[tabindex]:not([tabindex='-1'])"
 ].join(",");
 
-export function AccessibleDialog({ labelledBy, onClose, className, children }: {
+export function AccessibleDialog({ labelledBy, onClose, fallbackFocus, className, children }: {
   labelledBy: string;
   onClose: () => void;
+  fallbackFocus?: () => HTMLElement | null;
   className: string;
   children: ReactNode;
 }) {
@@ -56,7 +57,11 @@ export function AccessibleDialog({ labelledBy, onClose, className, children }: {
     document.addEventListener("keydown", onKeyDown);
     return () => {
       document.removeEventListener("keydown", onKeyDown);
-      previouslyFocused?.focus();
+      const restoreFocus = () => {
+        if (previouslyFocused?.isConnected) previouslyFocused.focus();
+        else fallbackFocus?.()?.focus();
+      };
+      restoreFocus();
     };
   }, []);
 

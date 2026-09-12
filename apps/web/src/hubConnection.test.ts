@@ -106,6 +106,16 @@ describe("snapshot validation", () => {
     expect(isSnapshot({ ...snapshot("bad"), messages: [{ author: "intruder" }] })).toBe(false);
     expect(isSnapshot({ ...snapshot("bad"), generatedAt: 42 })).toBe(false);
   });
+
+  it("preserves well-formed unknown harness and authentication strings for fail-closed presentation", () => {
+    const node = {
+      id: "future-node", name: "Future", kind: "local", platform: "linux", status: "online",
+      lastSeen: "now", activeRuns: 0, concurrency: 1, workspaceRoots: ["/srv/workspaces"], version: "custom",
+      harnesses: [{ id: "future-harness", label: "Future", description: "External adapter", available: true, authMode: "future-auth", models: [] }]
+    };
+    expect(isSnapshot({ ...snapshot("future"), nodes: [node] })).toBe(true);
+    expect(isSnapshot({ ...snapshot("bad"), nodes: [{ ...node, harnesses: [{ ...node.harnesses[0], authMode: 42 }] }] })).toBe(false);
+  });
 });
 
 describe("HubConnection", () => {

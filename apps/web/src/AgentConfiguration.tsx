@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { CircleNotch, X } from "@phosphor-icons/react";
-import type { Agent, AgentAvatarColor, AgentAvatarShape, ComputeNode, HarnessId } from "@coffee-shop/protocol";
+import { harnessIds, type Agent, type AgentAvatarColor, type AgentAvatarShape, type ComputeNode, type HarnessId } from "@coffee-shop/protocol";
 import { AccessibleDialog } from "./AccessibleDialog.js";
 import { AvatarPicker } from "./CoffeeAvatar.js";
 import "./AgentConfiguration.css";
@@ -24,8 +24,12 @@ interface Draft extends AgentConfigurationPayload {
   avatarColor: AgentAvatarColor;
 }
 
+function recognizedHarnesses(node?: ComputeNode) {
+  return node?.harnesses.filter((harness) => (harnessIds as readonly string[]).includes(harness.id)) ?? [];
+}
+
 function availableHarnesses(node?: ComputeNode) {
-  return node && node.status !== "offline" ? node.harnesses.filter((harness) => harness.available) : [];
+  return node && node.status !== "offline" ? recognizedHarnesses(node).filter((harness) => harness.available) : [];
 }
 
 function initialDraft(nodes: readonly ComputeNode[], agent?: Agent): Draft {
@@ -82,7 +86,7 @@ function runtimeSignature(node: ComputeNode | undefined, selectedId: string, nod
     id: node.id,
     eligible: node.status !== "offline",
     roots: node.workspaceRoots,
-    harnesses: node.harnesses.map((harness) => ({ id: harness.id, available: harness.available, models: harness.models }))
+    harnesses: recognizedHarnesses(node).map((harness) => ({ id: harness.id, available: harness.available, models: harness.models }))
   });
 }
 
@@ -113,7 +117,7 @@ export function AgentConfigurationForm({
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const selectedNode = nodes.find((node) => node.id === draft.computeNodeId);
-  const harnesses = selectedNode?.harnesses ?? [];
+  const harnesses = recognizedHarnesses(selectedNode);
   const selectedHarness = availableHarnesses(selectedNode).find((harness) => harness.id === draft.harnessId);
   const models = selectedHarness ? selectedHarness.models.length ? selectedHarness.models : ["default"] : [];
   const selectedRuntimeSignature = runtimeSignature(selectedNode, draft.computeNodeId, nodes);

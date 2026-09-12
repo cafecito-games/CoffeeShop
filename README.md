@@ -34,6 +34,7 @@ task control-agent:run -- \
 ```
 
 `task dev:full` starts all three applications. By default, Barista allows only the directory it was started from; pass one or more `--workspace-root` flags for other locations.
+The PWA’s **Compute → Add compute** dialog also walks through build/authentication prerequisites and creates a validated, shell-quoted environment command. In development it correctly targets the hub on port 8787 rather than the Vite origin on port 5173.
 
 ## Install Barista on a compute machine
 
@@ -73,6 +74,7 @@ task dev                    control plane + frontend with reload
 task dev:full               control plane + frontend + local Barista
 task frontend:dev           frontend only
 task frontend:build         production frontend bundle
+task container:build        hub image with exact Barista version provenance
 task control-plane:dev      hub only
 task control-plane:build    production hub bundle
 task control-agent:run -- … run Barista from source
@@ -91,6 +93,8 @@ Control agents initiate the connection, so compute hosts do not need a public in
 
 Before starting a harness, Barista canonicalizes the requested absolute workspace and confirms it remains within an enrolled root, including through symlinks. Claude Code runs in auto permission mode with unanswered prompts denied. Codex runs with `workspace-write` sandboxing. Vendor credentials remain in vendor-owned CLI storage and are never sent to the hub.
 
+Compute rows expose the latest reported node and harness inventory. The Settings policy review distinguishes that self-report from hub-observed freshness and release documentation; it does not claim that a worker’s runtime or flags have been attested.
+
 Keep a subscription-backed compute node private to the account owner. Do not expose it as a resale or credential-sharing service. See [the provider note](docs/anthropic-usage.md), [the Barista operational guide](docs/control-agent.md), and [the architecture](docs/architecture.md).
 
 ## Repository map
@@ -107,4 +111,4 @@ go.work                Go workspace for Go applications in the monorepo
 
 ## Production control plane
 
-Build the web/hub container with `docker compose build`, set a strong `COFFEE_SHOP_TOKEN`, and terminate TLS in front of the hub. The shared token remains appropriate only for a private, single-user deployment. Per-node enrollment grants, rotation, and revocation are the next security boundary before a public or multi-user rollout.
+Build the web/hub container with `task container:build`, set a strong `COFFEE_SHOP_TOKEN`, and terminate TLS in front of the hub. This injects the same clean source-derived version used by `task control-agent:build`, allowing exact release-policy comparison. Direct `docker compose build` defaults the UI provenance to `dev` and therefore fails closed unless `BARISTA_VERSION` is supplied explicitly. The shared token remains appropriate only for a private, single-user deployment. Per-node enrollment grants, rotation, and revocation are the next security boundary before a public or multi-user rollout.
