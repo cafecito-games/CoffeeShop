@@ -2,6 +2,7 @@ import { posix, win32 } from "node:path";
 import {
   agentAvatarColors,
   agentAvatarShapes,
+  harnessIds,
   type Agent,
   type AgentAvatarColor,
   type AgentAvatarShape,
@@ -99,6 +100,7 @@ function validateConfiguration(body: unknown, nodes: readonly ComputeNode[], con
   const node = nodes.find((item) => item.id === computeNodeId);
   if (!node) return invalid("Select a compute node that is still available");
   if (node.status === "offline" || !connectedNodeIds.has(node.id)) return invalid("Select a compute node that is online and not stale");
+  if (!(harnessIds as readonly string[]).includes(harnessId)) return invalid("Select a recognized harness identity");
   const harness = node.harnesses.find((item) => item.id === harnessId && item.available);
   if (!harness) return invalid("Select a harness advertised as available by the compute node");
   if (harness.models.length ? !harness.models.includes(model) : model !== "default") {

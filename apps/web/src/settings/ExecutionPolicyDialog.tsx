@@ -5,7 +5,7 @@ import { HarnessList, NodeFacts, Provenance } from "../compute/ComputeFacts.js";
 import type { ConnectionStatus } from "../hubConnection.js";
 import { isDocumentedHarnessAuthPair, releaseMatch, runtimeAuthModePolicy, runtimeHarnessPolicy } from "./executionPolicy.js";
 
-const documentedVersion = import.meta.env.VITE_BARISTA_VERSION?.trim() || "dev";
+const bundledDocumentedVersion = import.meta.env.VITE_BARISTA_VERSION?.trim() || "dev";
 
 function PolicyQualification({ harness, versionMatches, reportFresh }: { harness: HarnessProfile; versionMatches: boolean; reportFresh: boolean }) {
   const harnessCopy = runtimeHarnessPolicy(harness?.id);
@@ -27,10 +27,11 @@ function PolicyQualification({ harness, versionMatches, reportFresh }: { harness
   );
 }
 
-export function ExecutionPolicyDialog({ nodes, connection, generatedAt, onClose }: {
+export function ExecutionPolicyDialog({ nodes, connection, generatedAt, documentedVersion = bundledDocumentedVersion, onClose }: {
   nodes: ComputeNode[];
   connection: ConnectionStatus;
   generatedAt: string;
+  documentedVersion?: string;
   onClose: () => void;
 }) {
   const stale = connection !== "connected";

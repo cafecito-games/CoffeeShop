@@ -65,6 +65,19 @@ describe("AgentConfigurationForm", () => {
     expect(screen.getByLabelText("Workspace")).toHaveValue("/srv/projects");
   });
 
+  it("never offers a structurally valid unknown runtime harness for mutation", () => {
+    const unknownHarnessNode = {
+      ...nodes[0],
+      harnesses: [
+        { ...nodes[0].harnesses[0], id: "future-harness", label: "Future harness" },
+        nodes[0].harnesses[0]
+      ]
+    } as unknown as ComputeNode;
+    render(<AgentConfigurationForm mode="create" nodes={[unknownHarnessNode]} canMutate onSave={vi.fn()} onCancel={vi.fn()} onReconcile={vi.fn()} />);
+    expect(screen.queryByRole("option", { name: "Future harness" })).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Harness")).toHaveValue("codex-cli");
+  });
+
   it("saves the complete normalized draft, reports progress, and retains server errors", async () => {
     let reject!: (reason: Error) => void;
     const pending = new Promise<Agent>((_resolve, rejectPromise) => { reject = rejectPromise; });

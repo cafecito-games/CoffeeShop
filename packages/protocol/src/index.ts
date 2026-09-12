@@ -1,4 +1,5 @@
-export type HarnessId = "claude-cli" | "codex-cli" | "shell" | "ag-ui";
+export const harnessIds = ["claude-cli", "codex-cli", "shell", "ag-ui"] as const;
+export type HarnessId = typeof harnessIds[number];
 export type AgentState = "idle" | "thinking" | "working" | "waiting" | "blocked" | "done";
 export const runStatuses = ["queued", "running", "completed", "failed", "cancelled"] as const;
 export type RunStatus = typeof runStatuses[number];

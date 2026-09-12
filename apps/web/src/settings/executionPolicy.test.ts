@@ -28,8 +28,11 @@ describe("execution policy copy", () => {
     expect(harnessPolicy["future-harness" as keyof typeof harnessPolicy]).toBeUndefined();
     expect(authModePolicy["future-auth" as keyof typeof authModePolicy]).toBeUndefined();
     expect(releaseMatch("abc123", "abc123")).toEqual({ matches: true, label: "Matches this documented Barista release" });
-    expect(releaseMatch("0.1.0+abc123", "0.1.0")).toEqual({ matches: true, label: "Matches this documented Barista release" });
-    expect(releaseMatch("dev+custom", "dev")).toEqual({ matches: false, label: "Version differs; effective policy is not verified" });
+    expect(releaseMatch("0.1.0+abc123", "0.1.0")).toEqual({ matches: false, label: "Version differs; effective policy is not verified" });
+    expect(releaseMatch("0.1.0+abc123", "0.1.0+abc123")).toEqual({ matches: true, label: "Matches this documented Barista release" });
+    expect(releaseMatch("0.1.0+abc123-dirty", "0.1.0+abc123-dirty")).toEqual({ matches: false, label: "Development version; effective policy is not verified" });
+    expect(releaseMatch("dev", "dev")).toEqual({ matches: false, label: "Development version; effective policy is not verified" });
+    expect(releaseMatch("dev+custom", "dev")).toEqual({ matches: false, label: "Development version; effective policy is not verified" });
     expect(releaseMatch("older", "abc123")).toEqual({ matches: false, label: "Version differs; effective policy is not verified" });
     expect(releaseMatch("", "abc123")).toEqual({ matches: false, label: "Version unavailable; effective policy is not verified" });
   });

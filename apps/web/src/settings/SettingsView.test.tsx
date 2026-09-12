@@ -17,12 +17,14 @@ const node: ComputeNode = {
     { id: "claude-cli", label: "Claude", description: "Claude Code", available: true, authMode: "local-subscription", models: ["sonnet"] },
     { id: "shell", label: "Shell", description: "Protocol only", available: false, authMode: "none", models: [] }
   ],
-  version: "dev"
+  version: "0.1.0+test"
 };
+
+const documentedVersion = "0.1.0+test";
 
 describe("execution policy review", () => {
   it("separates provenance and renders current, offline, unsupported, and stale policy truthfully", () => {
-    render(<SettingsView connection="reconnecting" nodes={[node]} generatedAt="2026-09-11T20:01:00Z" />);
+    render(<SettingsView connection="reconnecting" nodes={[node]} generatedAt="2026-09-11T20:01:00Z" documentedVersion={documentedVersion} />);
     const trigger = screen.getByRole("button", { name: "Review" });
     trigger.focus();
     fireEvent.click(trigger);
@@ -51,27 +53,27 @@ describe("execution policy review", () => {
       version: "custom-build",
       harnesses: [{ ...node.harnesses[0], id: "future-harness", authMode: "future-auth" }]
     } as unknown as ComputeNode;
-    const rendered = render(<SettingsView connection="connected" nodes={[unknownNode]} generatedAt="first" />);
+    const rendered = render(<SettingsView connection="connected" nodes={[unknownNode]} generatedAt="first" documentedVersion={documentedVersion} />);
     fireEvent.click(screen.getByRole("button", { name: "Review" }));
     expect(screen.getByText("Live snapshot connection")).toBeInTheDocument();
     expect(screen.getByText("Version differs; effective policy is not verified")).toBeInTheDocument();
     expect(screen.getByText(/No execution behavior is documented/)).toBeInTheDocument();
     expect(screen.getByText(/No credential handling behavior is documented/)).toBeInTheDocument();
 
-    rendered.rerender(<SettingsView connection="disconnected" nodes={[]} generatedAt="second" />);
+    rendered.rerender(<SettingsView connection="disconnected" nodes={[]} generatedAt="second" documentedVersion={documentedVersion} />);
     expect(screen.getByText("No Baristas registered")).toBeInTheDocument();
     expect(screen.getByText(/Snapshot generated second/)).toBeInTheDocument();
   });
 
   it("withholds positive qualification and current flags for unavailable or mismatched harnesses", () => {
     const unavailable = { ...node, status: "online" as const, harnesses: [{ ...node.harnesses[0], available: false }] };
-    const first = render(<SettingsView connection="connected" nodes={[unavailable]} generatedAt="now" />);
+    const first = render(<SettingsView connection="connected" nodes={[unavailable]} generatedAt="now" documentedVersion={documentedVersion} />);
     fireEvent.click(screen.getByRole("button", { name: "Review" }));
     expect(screen.getByText("Unrecognized / not verified")).toBeInTheDocument();
     expect(screen.queryByText("Documented for matching release")).not.toBeInTheDocument();
     first.unmount();
 
-    render(<SettingsView connection="connected" nodes={[{ ...node, status: "online", version: "0.0.9" }]} generatedAt="now" />);
+    render(<SettingsView connection="connected" nodes={[{ ...node, status: "online", version: "0.0.9" }]} generatedAt="now" documentedVersion={documentedVersion} />);
     fireEvent.click(screen.getByRole("button", { name: "Review" }));
     expect(screen.getByText(/Current-release flags are withheld/)).toBeInTheDocument();
     expect(screen.queryByText(/--permission-mode auto/)).not.toBeInTheDocument();
@@ -81,7 +83,7 @@ describe("execution policy review", () => {
     ["stale connection", "reconnecting" as const, "online" as const],
     ["offline node", "connected" as const, "offline" as const]
   ])("withholds positive qualification for a %s", (_scenario, connection, status) => {
-    render(<SettingsView connection={connection} nodes={[{ ...node, status, harnesses: [node.harnesses[0]] }]} generatedAt="now" />);
+    render(<SettingsView connection={connection} nodes={[{ ...node, status, harnesses: [node.harnesses[0]] }]} generatedAt="now" documentedVersion={documentedVersion} />);
     fireEvent.click(screen.getByRole("button", { name: "Review" }));
     expect(screen.getByText("Unrecognized / not verified")).toBeInTheDocument();
     expect(screen.queryByText("Documented for matching release")).not.toBeInTheDocument();
@@ -89,7 +91,7 @@ describe("execution policy review", () => {
   });
 
   it("shows documented flags only for a fresh available matching report", () => {
-    render(<SettingsView connection="connected" nodes={[{ ...node, status: "online", harnesses: [node.harnesses[0]] }]} generatedAt="now" />);
+    render(<SettingsView connection="connected" nodes={[{ ...node, status: "online", harnesses: [node.harnesses[0]] }]} generatedAt="now" documentedVersion={documentedVersion} />);
     fireEvent.click(screen.getByRole("button", { name: "Review" }));
     expect(screen.getByText("Documented for matching release")).toBeInTheDocument();
     expect(screen.getByText(/--permission-mode auto/)).toBeInTheDocument();
@@ -104,7 +106,7 @@ describe("execution policy review", () => {
         { ...node.harnesses[0], id: "codex-cli" as const, label: "Codex", authMode: "local-subscription" as const }
       ]
     };
-    render(<SettingsView connection="connected" nodes={[mismatched]} generatedAt="now" />);
+    render(<SettingsView connection="connected" nodes={[mismatched]} generatedAt="now" documentedVersion={documentedVersion} />);
     fireEvent.click(screen.getByRole("button", { name: "Review" }));
     expect(screen.getAllByText("Unrecognized / not verified")).toHaveLength(2);
     expect(screen.queryByText("Documented for matching release")).not.toBeInTheDocument();
