@@ -178,7 +178,7 @@ wss.on("connection", (socket, request) => {
   let nodeId = "";
   let protocolVersion: "1" | "2" = "1";
   const dispatchQueuedRuns = (activeRunIds: readonly string[] = []) => {
-    const queued = queuedRunsForNode(store.snapshot(), nodeId, activeRunIds);
+    const queued = queuedRunsForNode(store.snapshot(), nodeId, activeRunIds, protocolVersion);
     for (const run of queued) {
       const agent = store.getAgent(run.agentId);
       if (agent) sendToControlAgent(nodeId, { type: "dispatch", run, agent });
@@ -204,7 +204,6 @@ wss.on("connection", (socket, request) => {
         if (index >= 0) state.nodes[index] = online; else state.nodes.push(online);
         state.events.unshift(newEvent({ type: "node", title: `${online.name} connected`, detail: `${online.platform} · ${online.harnesses.filter((h) => h.available).map((h) => h.label).join(" + ")}` }));
       });
-      if (protocolVersion === "1") dispatchQueuedRuns();
       broadcast();
     } else if (message.type === "sync.complete") {
       if (protocolVersion !== "2" || !nodeId || message.nodeId !== nodeId || typeof message.at !== "string" || (message.activeRunIds !== undefined && (!Array.isArray(message.activeRunIds) || !message.activeRunIds.every((id) => typeof id === "string")))) return;

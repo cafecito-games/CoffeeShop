@@ -52,7 +52,7 @@ Barista sends:
 
 Cancellation commands are idempotent from Barista's perspective. A cancel received before its matching dispatch prevents the process from starting and is acknowledged immediately; a cancel received during execution terminates the process tree and is acknowledged after cleanup without translating that intentional termination into `run.failed`. Tombstones survive control-plane reconnects for the lifetime of the Barista process, so a replayed dispatch cannot resurrect cancelled work. The hub persists cancellation before sending the command and remains authoritative if Barista is offline.
 
-On reconnect, protocol version 2 sends `register`, flushes its lifecycle outbox, and then sends `sync.complete` with any run IDs still active on Barista. The hub processes those messages in socket order and waits for the barrier before redispatching queued runs, excluding work Barista reports as active. Version 1 remains accepted for rolling compatibility and retains immediate queued-run reconciliation.
+On reconnect, protocol version 2 sends `register`, flushes its lifecycle outbox, and then sends `sync.complete` with any run IDs still active on Barista. The hub processes those messages in socket order and waits for the barrier before redispatching queued runs, excluding work Barista reports as active. Version 1 remains accepted during rolling upgrades so existing lifecycle events can settle, but queued-run redispatch is disabled for v1; upgrade that Barista to resume queued work safely.
 
 The TypeScript source of truth is `packages/protocol/src/index.ts`; Go wire structs are deliberately isolated in `apps/control-agent/internal/protocol`. Changes to the wire contract must update both and should retain compatibility across rolling deployments.
 

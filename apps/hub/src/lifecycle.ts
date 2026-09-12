@@ -26,7 +26,8 @@ export function serializeAsync<T>(handler: (value: T) => Promise<void>, onError:
   };
 }
 
-export function queuedRunsForNode(snapshot: Snapshot, nodeId: string, activeRunIds: readonly string[]) {
+export function queuedRunsForNode(snapshot: Snapshot, nodeId: string, activeRunIds: readonly string[], protocolVersion: "1" | "2") {
+  if (protocolVersion !== "2") return [];
   const active = new Set(activeRunIds);
   return snapshot.runs.filter((run) => run.nodeId === nodeId && run.status === "queued" && !active.has(run.id));
 }

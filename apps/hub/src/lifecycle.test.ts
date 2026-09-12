@@ -195,5 +195,6 @@ test("serial message handling settles lifecycle work before reconnect reconcilia
 test("reconnect reconciliation does not redispatch runs Barista reports active", () => {
   const snapshot = { ...state("queued"), generatedAt: at };
   snapshot.runs.push(run("queued", "run-two"));
-  assert.deepEqual(queuedRunsForNode(snapshot, "node-one", ["run-one"]).map((item) => item.id), ["run-two"]);
+  assert.deepEqual(queuedRunsForNode(snapshot, "node-one", ["run-one"], "2").map((item) => item.id), ["run-two"]);
+  assert.deepEqual(queuedRunsForNode(snapshot, "node-one", [], "1"), [], "v1 has no safe replay barrier and must fail closed");
 });

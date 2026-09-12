@@ -55,7 +55,7 @@ The shared hub token is suitable for a private single-user tailnet, not an inter
 
 The repository is polyglot by application boundary. `apps/web` and `apps/hub` participate in the pnpm workspace. `apps/control-agent` is an independent Go 1.26 module joined by the root `go.work`. Root Task targets compose builds and tests without making a compute host install the TypeScript toolchain.
 
-The hub and frontend deploy together. Barista is built and distributed separately as a native executable. Its outbound `/control-agent` WebSocket uses protocol version `2`; the TypeScript and Go representations intentionally live on opposite sides of the deployment boundary. Version 2 ends reconnect replay with `sync.complete`, allowing the hub to apply queued lifecycle messages before redispatching work. The hub still accepts version 1 registrations during rolling upgrades.
+The hub and frontend deploy together. Barista is built and distributed separately as a native executable. Its outbound `/control-agent` WebSocket uses protocol version `2`; the TypeScript and Go representations intentionally live on opposite sides of the deployment boundary. Version 2 ends reconnect replay with `sync.complete`, allowing the hub to apply queued lifecycle messages before redispatching work. The hub accepts version 1 lifecycle reporting during rolling upgrades, but fail-closes queued-run redispatch until that Barista is upgraded because v1 has no safe replay barrier.
 
 ## What to build next
 
