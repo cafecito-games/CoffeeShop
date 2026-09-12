@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import {
   Pulse as Activity, ArrowLeft, ArrowRight, Broadcast, CaretDown, Check, CircleNotch, Cloud, Command,
-  Cpu, Desktop, DotsThree, Gear, HouseLine, Laptop, MagnifyingGlass, PaperPlaneTilt, Plus,
+  Coffee, Cpu, Desktop, Gear, HouseLine, Laptop, MagnifyingGlass, PaperPlaneTilt, Plus,
   Robot, SlidersHorizontal, TerminalWindow, UsersThree, WarningCircle, X, LockKey
 } from "@phosphor-icons/react";
-import type { Agent, AgentState, ChatMessage, ComputeNode, Snapshot, TimelineEvent } from "@coffee-shop/protocol";
+import type { Agent, AgentAvatarColor, AgentAvatarShape, AgentState, ChatMessage, ComputeNode, Snapshot, TimelineEvent } from "@coffee-shop/protocol";
+import { AvatarPicker, CoffeeAvatar } from "./CoffeeAvatar.js";
 
 type View = "agents" | "activity" | "compute" | "settings";
 
@@ -26,11 +27,7 @@ function timeAgo(date: string) {
 }
 
 function Avatar({ agent, size = "md" }: { agent: Agent; size?: "sm" | "md" | "lg" }) {
-  return (
-    <div className={`avatar avatar-${size} state-${agent.state}`} aria-label={`${agent.name}: ${statusLabels[agent.state]}`}>
-      <span className="antenna" /><span className="bot-face"><i /><i /></span><b>{agent.glyph}</b>
-    </div>
-  );
+  return <CoffeeAvatar shape={agent.avatarShape} color={agent.avatarColor} size={size} state={agent.state} label={`${agent.name}: ${statusLabels[agent.state]}`} />;
 }
 
 function StateMark({ state }: { state: AgentState }) {
@@ -42,7 +39,7 @@ function Roster({ agents, selectedId, onSelect, onCreate }: { agents: Agent[]; s
   const filtered = agents.filter((agent) => `${agent.name} ${agent.title}`.toLowerCase().includes(query.toLowerCase()));
   return (
     <aside className="roster">
-      <div className="brand-row"><div className="brand-mark"><span /><span /></div><strong>Coffee Shop</strong><button className="icon-btn" onClick={onCreate} aria-label="Create agent"><Plus size={17} /></button></div>
+      <div className="brand-row"><strong>Agent roster</strong><button className="icon-btn" onClick={onCreate} aria-label="Create agent"><Plus size={17} /></button></div>
       <label className="search"><MagnifyingGlass size={15} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Find an agent" /></label>
       <div className="section-label"><span>Agents</span><small>{agents.filter((a) => ["working", "thinking"].includes(a.state)).length} active</small></div>
       <div className="agent-list">
@@ -133,7 +130,12 @@ function Inspector({ agent, nodes, open, onClose, onUpdate }: { agent: Agent; no
   return (
     <aside className={`inspector ${open ? "open" : ""}`}>
       <header><span>Agent context</span><button className="icon-btn" onClick={onClose}><X size={17} /></button></header>
-      <section className="identity-block"><Avatar agent={agent} size="lg" /><div><h2>{agent.name}</h2><p>{agent.title}</p></div><button className="icon-btn"><DotsThree size={18} weight="bold" /></button></section>
+      <section className="avatar-editor">
+        <div className="section-label"><span>Identity mark</span><small>editable</small></div>
+        <CoffeeAvatar shape={agent.avatarShape} color={agent.avatarColor} size="xl" />
+        <AvatarPicker compact shape={agent.avatarShape} color={agent.avatarColor} onShape={(avatarShape) => onUpdate({ avatarShape })} onColor={(avatarColor) => onUpdate({ avatarColor })} />
+      </section>
+      <section className="identity-block"><div><h2>{agent.name}</h2><p>{agent.title}</p></div></section>
       <section className="status-block"><span>Current state</span><StateMark state={agent.state} /><p>{agent.currentAction}</p></section>
       <section className="config-section">
         <div className="section-label"><span>Runtime</span></div>
@@ -181,11 +183,13 @@ function CreateAgentDialog({ nodes, onClose, onCreate }: { nodes: ComputeNode[];
   const [harnessId, setHarnessId] = useState("claude-cli");
   const [computeNodeId, setComputeNodeId] = useState(nodes[0]?.id ?? "");
   const [workspace, setWorkspace] = useState(nodes[0]?.workspaceRoots[0] ?? "");
+  const [avatarShape, setAvatarShape] = useState<AgentAvatarShape>("cup");
+  const [avatarColor, setAvatarColor] = useState<AgentAvatarColor>("amber");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   async function submit(event: FormEvent) {
     event.preventDefault(); setBusy(true); setError("");
-    try { await onCreate({ name, title, harnessId, computeNodeId, workspace }); onClose(); }
+    try { await onCreate({ name, title, harnessId, computeNodeId, workspace, avatarShape, avatarColor }); onClose(); }
     catch (cause) { setError(cause instanceof Error ? cause.message : "Could not create agent"); }
     finally { setBusy(false); }
   }
@@ -193,6 +197,7 @@ function CreateAgentDialog({ nodes, onClose, onCreate }: { nodes: ComputeNode[];
     <form className="create-dialog" onSubmit={submit}>
       <header><div><small>New teammate</small><h2>Create an agent</h2></div><button type="button" className="icon-btn" onClick={onClose}><X size={17} /></button></header>
       <p>Give the agent a stable purpose. You can move it between harnesses and machines later without changing who it is.</p>
+      <AvatarPicker shape={avatarShape} color={avatarColor} onShape={setAvatarShape} onColor={setAvatarColor} />
       <label>Name<input value={name} onChange={(event) => setName(event.target.value)} placeholder="Agent name" autoFocus required /></label>
       <label>Role<input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Agent role" required /></label>
       <fieldset><legend>Harness</legend><div className="choice-row"><button type="button" className={harnessId === "claude-cli" ? "selected" : ""} onClick={() => setHarnessId("claude-cli")}><Command size={15} />Claude Code</button><button type="button" className={harnessId === "codex-cli" ? "selected" : ""} onClick={() => setHarnessId("codex-cli")}><Command size={15} />Codex</button></div></fieldset>
@@ -257,7 +262,14 @@ export default function App() {
         {view === "settings" && <SettingsView />}
       </div>
       {selected && <Inspector agent={selected} nodes={snapshot.nodes} open={inspectorOpen} onClose={() => setInspectorOpen(false)} onUpdate={updateAgent} />}
-      <nav className="desktop-nav"><button className={view === "agents" ? "active" : ""} onClick={() => switchView("agents")}><Robot size={17} /> Agents</button><button className={view === "activity" ? "active" : ""} onClick={() => switchView("activity")}><Activity size={17} /> Activity</button><button className={view === "compute" ? "active" : ""} onClick={() => switchView("compute")}><Cpu size={17} /> Compute</button><button className={view === "settings" ? "active" : ""} onClick={() => switchView("settings")}><Gear size={17} /> Settings</button></nav>
+      <nav className="desktop-nav" aria-label="Primary">
+        <div className="rail-brand" aria-label="Coffee Shop"><Coffee size={21} /></div>
+        <button aria-label="Agents" className={view === "agents" ? "active" : ""} onClick={() => switchView("agents")}><Robot size={18} /><span>Agents</span></button>
+        <button aria-label="Activity" className={view === "activity" ? "active" : ""} onClick={() => switchView("activity")}><Activity size={18} /><span>Activity</span></button>
+        <button aria-label="Compute" className={view === "compute" ? "active" : ""} onClick={() => switchView("compute")}><Cpu size={18} /><span>Compute</span></button>
+        <button aria-label="Settings" className={view === "settings" ? "active" : ""} onClick={() => switchView("settings")}><Gear size={18} /><span>Settings</span></button>
+        <div className="rail-user">CS</div>
+      </nav>
       <BottomNav view={view} onView={switchView} />
       {creating && <CreateAgentDialog nodes={snapshot.nodes} onClose={() => setCreating(false)} onCreate={createAgent} />}
     </div>

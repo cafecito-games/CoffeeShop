@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import cors from "cors";
 import express from "express";
 import { WebSocket, WebSocketServer } from "ws";
-import type { Agent, ComputeNode, HubToWorker, Run, WorkerToHub } from "@coffee-shop/protocol";
+import { agentAvatarColors, agentAvatarShapes, type Agent, type ComputeNode, type HubToWorker, type Run, type WorkerToHub } from "@coffee-shop/protocol";
 import { newEvent, newId, newMessage, Store } from "./store.js";
 
 const app = express();
@@ -70,11 +70,13 @@ app.post("/api/agents", async (req, res) => {
   const title = typeof req.body?.title === "string" ? req.body.title.trim() : "";
   const node = store.snapshot().nodes.find((item) => item.id === req.body?.computeNodeId);
   const harnessId = req.body?.harnessId === "codex-cli" ? "codex-cli" : "claude-cli";
+  const avatarShape = agentAvatarShapes.find((shape) => shape === req.body?.avatarShape) ?? "cup";
+  const avatarColor = agentAvatarColors.find((color) => color === req.body?.avatarColor) ?? "amber";
   if (!name || !title || !node) return res.status(400).json({ error: "Name, title, and a valid compute node are required" });
   const baseId = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "agent";
   const id = store.getAgent(baseId) ? `${baseId}-${Math.random().toString(36).slice(2, 6)}` : baseId;
   const agent: Agent = {
-    id, name, title, summary: req.body?.summary?.trim() || `Purpose-built for ${title.toLowerCase()}.`, glyph: name[0].toUpperCase(),
+    id, name, title, summary: req.body?.summary?.trim() || `Purpose-built for ${title.toLowerCase()}.`, glyph: name[0].toUpperCase(), avatarShape, avatarColor,
     state: "idle", currentAction: "Available", harnessId, model: harnessId === "claude-cli" ? "sonnet" : "default",
     computeNodeId: node.id, workspace: req.body?.workspace?.trim() || node.workspaceRoots[0] || "/workspace",
     systemPrompt: req.body?.systemPrompt?.trim() || `You are ${name}, a ${title}. Work carefully, report evidence, and leave durable results.`,
@@ -112,12 +114,17 @@ app.post("/api/handoffs", async (req, res) => {
 });
 
 app.patch("/api/agents/:id", async (req, res) => {
-  const allowed = ["name", "title", "summary", "harnessId", "model", "computeNodeId", "workspace", "systemPrompt"] as const;
+  const allowed = ["name", "title", "summary", "harnessId", "model", "computeNodeId", "workspace", "systemPrompt", "avatarShape", "avatarColor"] as const;
   let updated: Agent | undefined;
   await store.transact((state) => {
     updated = state.agents.find((agent) => agent.id === req.params.id);
     if (!updated) return;
-    for (const key of allowed) if (typeof req.body?.[key] === "string") (updated as unknown as Record<string, string>)[key] = req.body[key];
+    for (const key of allowed) {
+      if (typeof req.body?.[key] !== "string") continue;
+      if (key === "avatarShape" && !agentAvatarShapes.some((value) => value === req.body[key])) continue;
+      if (key === "avatarColor" && !agentAvatarColors.some((value) => value === req.body[key])) continue;
+      (updated as unknown as Record<string, string>)[key] = req.body[key];
+    }
     updated.updatedAt = new Date().toISOString();
   });
   if (!updated) return res.status(404).json({ error: "Agent not found" });

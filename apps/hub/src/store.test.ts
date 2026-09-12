@@ -56,9 +56,14 @@ test("removes legacy demo records without removing user-created data", async () 
   await store.load();
   const snapshot = store.snapshot();
   assert.deepEqual(snapshot.agents.map((agent) => agent.id), ["claude-scout"]);
+  assert.equal(snapshot.agents[0].avatarShape, "cup");
+  assert.equal(snapshot.agents[0].avatarColor, "amber");
   assert.deepEqual(snapshot.nodes.map((node) => node.id), ["local-macbook"]);
   assert.deepEqual(snapshot.runs.map((run) => run.id), ["real-run"]);
   assert.deepEqual(snapshot.events.map((event) => event.id), ["real-event"]);
   assert.deepEqual(snapshot.messages.map((message) => message.id), ["real-message"]);
-  assert.equal(JSON.parse(await readFile(path, "utf8")).agents[0].id, "claude-scout");
+  const persisted = JSON.parse(await readFile(path, "utf8"));
+  assert.equal(persisted.agents[0].id, "claude-scout");
+  assert.equal(persisted.agents[0].avatarShape, "cup");
+  assert.equal(persisted.agents[0].avatarColor, "amber");
 });

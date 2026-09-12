@@ -1,7 +1,7 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ChatMessage, Snapshot, TimelineEvent } from "@coffee-shop/protocol";
+import { agentAvatarColors, agentAvatarShapes, type ChatMessage, type Snapshot, type TimelineEvent } from "@coffee-shop/protocol";
 
 type State = Omit<Snapshot, "generatedAt">;
 
@@ -56,6 +56,21 @@ function removeLegacyDemoRecords(state: State) {
   return before.some((length, index) => length !== after[index]);
 }
 
+function addMissingAgentAvatars(state: State) {
+  let changed = false;
+  for (const agent of state.agents) {
+    if (!agentAvatarShapes.includes(agent.avatarShape)) {
+      agent.avatarShape = "cup";
+      changed = true;
+    }
+    if (!agentAvatarColors.includes(agent.avatarColor)) {
+      agent.avatarColor = "amber";
+      changed = true;
+    }
+  }
+  return changed;
+}
+
 export class Store {
   private state: State = emptyState();
   private readonly path: string;
@@ -67,7 +82,9 @@ export class Store {
   async load() {
     try {
       this.state = JSON.parse(await readFile(this.path, "utf8")) as State;
-      if (removeLegacyDemoRecords(this.state)) await this.save();
+      const removedDemoRecords = removeLegacyDemoRecords(this.state);
+      const addedAgentAvatars = addMissingAgentAvatars(this.state);
+      if (removedDemoRecords || addedAgentAvatars) await this.save();
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       await this.save();

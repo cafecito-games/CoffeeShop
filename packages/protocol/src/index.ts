@@ -2,6 +2,10 @@ export type HarnessId = "claude-cli" | "codex-cli" | "shell" | "ag-ui";
 export type AgentState = "idle" | "thinking" | "working" | "waiting" | "blocked" | "done";
 export type RunStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
 export type NodeKind = "local" | "home-server" | "cloud";
+export const agentAvatarShapes = ["cup", "bean", "moka", "kettle", "grinder", "pour-over"] as const;
+export const agentAvatarColors = ["amber", "sage", "clay", "sky", "plum", "rose"] as const;
+export type AgentAvatarShape = typeof agentAvatarShapes[number];
+export type AgentAvatarColor = typeof agentAvatarColors[number];
 
 export interface HarnessProfile {
   id: HarnessId;
@@ -33,6 +37,8 @@ export interface Agent {
   title: string;
   summary: string;
   glyph: string;
+  avatarShape: AgentAvatarShape;
+  avatarColor: AgentAvatarColor;
   state: AgentState;
   currentAction: string;
   harnessId: HarnessId;
