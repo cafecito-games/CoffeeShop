@@ -1,6 +1,6 @@
 import type { ComputeNode } from "@coffee-shop/protocol";
 import { ArrowRight, Cloud, Command, HouseLine, Laptop, Plus, TerminalWindow } from "@phosphor-icons/react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { NodeDetailDialog } from "./NodeDetailDialog.js";
 import { OnboardingDialog } from "./OnboardingDialog.js";
 
@@ -11,10 +11,25 @@ function KindIcon({ kind }: { kind: ComputeNode["kind"] }) {
 export function ComputeView({ nodes }: { nodes: ComputeNode[] }) {
   const [selectedNodeId, setSelectedNodeId] = useState<string>();
   const [onboarding, setOnboarding] = useState(false);
+  const addComputeRef = useRef<HTMLButtonElement>(null);
+  const restoreFallbackFocusRef = useRef(false);
   const selectedNode = nodes.find((node) => node.id === selectedNodeId);
+
+  useEffect(() => {
+    if (!selectedNodeId && restoreFallbackFocusRef.current) {
+      restoreFallbackFocusRef.current = false;
+      addComputeRef.current?.focus();
+    }
+  }, [selectedNodeId]);
+
+  function closeNodeDetail() {
+    restoreFallbackFocusRef.current = selectedNode === undefined;
+    setSelectedNodeId(undefined);
+  }
+
   return (
     <main className="utility-view">
-      <header className="utility-header"><div><small>Execution fabric</small><h1>Compute</h1></div><button className="primary-btn" onClick={() => setOnboarding(true)}><Plus size={16} /> Add compute</button></header>
+      <header className="utility-header"><div><small>Execution fabric</small><h1>Compute</h1></div><button ref={addComputeRef} className="primary-btn" onClick={() => setOnboarding(true)}><Plus size={16} /> Add compute</button></header>
       <div className="node-list">
         {nodes.length === 0 && <div className="compute-empty"><Laptop size={22} /><strong>No Baristas registered</strong><p>Add a local, home-server, or cloud machine to make compute available.</p></div>}
         {nodes.map((node) => {
@@ -30,7 +45,7 @@ export function ComputeView({ nodes }: { nodes: ComputeNode[] }) {
         })}
       </div>
       <section className="worker-callout"><TerminalWindow size={19} /><div><strong>Bring another machine online</strong><p>Barista connects outbound; model credentials never leave the compute machine. Use Add compute for validated setup.</p></div></section>
-      {selectedNodeId && <NodeDetailDialog selectedNodeId={selectedNodeId} node={selectedNode} onClose={() => setSelectedNodeId(undefined)} />}
+      {selectedNodeId && <NodeDetailDialog selectedNodeId={selectedNodeId} node={selectedNode} onClose={closeNodeDetail} fallbackFocus={() => addComputeRef.current} />}
       {onboarding && <OnboardingDialog onClose={() => setOnboarding(false)} />}
     </main>
   );

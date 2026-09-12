@@ -52,12 +52,12 @@ const avatarColors = ["amber", "sage", "clay", "sky", "plum", "rose"] as const;
 
 function isHarness(value: unknown): boolean {
   return isObject(value)
-    && isOneOf(value.id, harnessIds)
+    && isString(value.id)
     && isString(value.label)
     && isString(value.description)
     && isOptionalString(value.binary)
     && typeof value.available === "boolean"
-    && isOneOf(value.authMode, ["local-subscription", "local-account", "api", "none"])
+    && isString(value.authMode)
     && isArrayOf(value.models, isString);
 }
 

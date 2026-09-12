@@ -1,5 +1,5 @@
 import type { ComputeNode } from "@coffee-shop/protocol";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ComputeView } from "./ComputeView.js";
@@ -26,7 +26,7 @@ describe("compute experience", () => {
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: vi.fn().mockResolvedValue(undefined) } });
   });
 
-  it("opens the exact node, renders all node and harness fields, and follows replacement snapshots", () => {
+  it("opens the exact node, renders all node and harness fields, and follows replacement snapshots", async () => {
     const other = { ...node, id: "node-two", name: "Cloud", kind: "cloud" as const, platform: "linux · amd64" };
     const rendered = render(<ComputeView nodes={[node, other]} />);
     fireEvent.click(screen.getByRole("button", { name: "View Cloud compute details" }));
@@ -50,6 +50,8 @@ describe("compute experience", () => {
     rendered.rerender(<ComputeView nodes={[node]} />);
     expect(screen.getByText("Node unavailable")).toBeInTheDocument();
     expect(screen.getByText(/No other node was substituted/)).toBeInTheDocument();
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Add compute" })).toHaveFocus());
   });
 
   it("shows explicit empty and offline states and restores focus after Escape", async () => {

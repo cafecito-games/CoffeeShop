@@ -30,10 +30,8 @@ type stringList []string
 func (values *stringList) String() string { return strings.Join(*values, ",") }
 
 func (values *stringList) Set(value string) error {
-	for _, item := range strings.Split(value, ",") {
-		if item = strings.TrimSpace(item); item != "" {
-			*values = append(*values, item)
-		}
+	if item := strings.TrimSpace(value); item != "" {
+		*values = append(*values, item)
 	}
 	return nil
 }
@@ -59,7 +57,7 @@ func Parse(args []string) (Config, error) {
 	name := set.String("name", env("BARISTA_NAME", host), "display name for this compute node")
 	nodeID := set.String("id", env("BARISTA_ID", slug(host)), "stable compute node id")
 	kind := set.String("kind", env("BARISTA_KIND", "local"), "compute node kind: local, home-server, or cloud")
-	set.Var(&roots, "workspace-root", "allowed workspace root; repeat the flag or use a comma-separated value")
+	set.Var(&roots, "workspace-root", "allowed workspace root; repeat the flag for multiple roots")
 	limit := set.Int("concurrency", concurrency, "maximum number of simultaneous runs")
 	token := set.String("token", os.Getenv("COFFEE_SHOP_TOKEN"), "control-plane token (prefer COFFEE_SHOP_TOKEN)")
 	versionOnly := set.Bool("version", false, "print the Barista version")
@@ -196,7 +194,7 @@ func splitEnv(key string) []string {
 		return nil
 	}
 	return strings.FieldsFunc(value, func(char rune) bool {
-		return char == ',' || char == rune(os.PathListSeparator)
+		return char == ','
 	})
 }
 

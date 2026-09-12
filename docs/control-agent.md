@@ -32,7 +32,7 @@ COFFEE_SHOP_TOKEN=… barista \
   --concurrency 4
 ```
 
-Repeat `--workspace-root` to enroll multiple trees. `WORKSPACE_ROOTS` accepts comma-separated values or an OS path-list (colon-separated on Unix and semicolon-separated on Windows).
+Repeat `--workspace-root` to enroll multiple trees. `WORKSPACE_ROOTS` accepts comma-separated values. Commas cannot be represented inside an environment-configured root; use repeated `--workspace-root` flags when a path contains one.
 Every explicitly configured root must be absolute and must exist so Barista can resolve it before opening a WebSocket. Invalid roots and invalid `BARISTA_CONCURRENCY` values stop startup without a partial registration.
 
 The web app’s **Compute → Add compute** flow generates a shell-quoted equivalent using every supported environment variable:

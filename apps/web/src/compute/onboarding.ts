@@ -44,6 +44,7 @@ export function validateOnboarding(values: OnboardingValues): string[] {
   const roots = workspaceRoots(values.workspaceRoots);
   if (!roots.length) errors.push("Enter at least one absolute workspace root.");
   else if (roots.some((root) => !isAbsolutePath(root))) errors.push("Every workspace root must be absolute.");
+  else if (roots.some((root) => root.includes(","))) errors.push("Workspace roots cannot contain commas.");
   return errors;
 }
 

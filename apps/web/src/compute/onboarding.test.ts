@@ -44,6 +44,7 @@ describe("Barista onboarding configuration", () => {
     [{ ...valid, concurrency: "0" }, "Concurrency must be a positive integer."],
     [{ ...valid, concurrency: "1.5" }, "Concurrency must be a positive integer."],
     [{ ...valid, workspaceRoots: "relative/path" }, "Every workspace root must be absolute."],
+    [{ ...valid, workspaceRoots: "/srv/intended,/" }, "Workspace roots cannot contain commas."],
     [{ ...valid, workspaceRoots: "" }, "Enter at least one absolute workspace root."]
   ])("fails closed for invalid configuration", (values, message) => {
     expect(validateOnboarding(values)).toContain(message);
