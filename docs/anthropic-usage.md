@@ -19,8 +19,8 @@ Anthropic's Consumer Terms prohibit automated/non-human access except through an
 The conservative use case is therefore:
 
 - one account owner;
-- their own private workers;
-- official CLI authentication on each worker;
+- their own private compute nodes;
+- official CLI authentication on each compute node;
 - normal plan rate limits;
 - no downstream users consuming the account;
 - no credential extraction or forwarding;
@@ -30,7 +30,7 @@ For a shared company deployment, use a Claude Team/Enterprise offering that incl
 
 ## Supported alternatives
 
-1. **Private Claude Code worker (implemented):** subscription limits, official CLI, best fit for personal use.
+1. **Private Claude Code through Barista (implemented):** subscription limits, official CLI, best fit for personal use.
 2. **Claude Code routines API:** subscription-billed and designed to be triggered programmatically, but applies to saved cloud routines rather than arbitrary local interactive chats.
 3. **Anthropic API / Agent SDK:** clear commercial integration path and metered usage.
 4. **Bedrock or Vertex AI:** commercial cloud billing, IAM, and organizational controls.

@@ -1,93 +1,110 @@
 # Coffee Shop
 
-Coffee Shop is a local-first control plane for persistent, purpose-built agents. An agent has a stable identity and purpose; a harness decides how it works; a compute worker decides where it works. The PWA makes that system visible from one place.
+Coffee Shop is a local-first control plane for persistent, purpose-built coding agents. An agent has a stable identity and purpose; a harness decides how it works; a compute node decides where it works. The PWA makes that system visible from one place.
 
-This repository is an executable MVP. It ships with:
+This repository contains three deployable applications:
 
-- a mobile-first installable React PWA;
-- a TypeScript hub with a durable JSON event store and live WebSocket updates;
-- outbound-connecting workers for a laptop, home server, or cloud host;
-- first-party CLI adapters for Claude Code and Codex;
-- explicit, visible agent-to-agent handoffs with depth limits;
-- workspace allowlists, per-worker concurrency, cancellation, and no credential forwarding.
+- `apps/web`: the React/Vite operator PWA;
+- `apps/hub`: the TypeScript control plane, REST API, WebSocket gateway, and durable JSON store;
+- `apps/control-agent`: **Barista**, a Go 1.26 system agent for every compute machine.
 
-## Start locally
+Barista is a single binary. It discovers installed Claude Code and Codex CLIs, keeps their credentials on the compute machine, connects outbound to Coffee Shop, enforces workspace allowlists, and runs dispatched work. A compute host does not need Node, pnpm, a repository clone, or an inbound port.
 
-Requires Node 22+ and pnpm.
+## Develop locally
+
+Requirements:
+
+- Node 24+ and pnpm for the frontend and control plane;
+- Go 1.26 for Barista;
+- [Task](https://taskfile.dev/) for repository commands.
 
 ```bash
-pnpm install
+task install
 cp .env.example .env
-pnpm dev
+task dev
 ```
 
-Open <http://localhost:5173>. A new hub starts with an empty roster. Start a worker to register a compute node, then create an agent in the app:
+Open <http://localhost:5173>. In another terminal, authenticate at least one supported harness and start a local Barista:
 
 ```bash
-COFFEE_SHOP_TOKEN=dev-coffee \
-NODE_ID=local-macbook \
-NODE_NAME="This laptop" \
-WORKSPACE_ROOTS=/Users/you/Projects \
-pnpm worker
+claude # complete /login if needed; alternatively run: codex login
+task control-agent:run -- \
+  --name "This laptop" \
+  --workspace-root /Users/you/Projects
 ```
 
-For a single production process:
+`task dev:full` starts all three applications. By default, Barista allows only the directory it was started from; pass one or more `--workspace-root` flags for other locations.
+
+## Install Barista on a compute machine
+
+Build the binary for the current platform:
 
 ```bash
-pnpm build
-NODE_ENV=production COFFEE_SHOP_TOKEN="$(openssl rand -hex 24)" pnpm start
+task control-agent:build
 ```
 
-The hub serves the built PWA from port `8787`. Put it behind HTTPS (Tailscale Serve, Caddy, or your existing reverse proxy) before installing it on a phone.
-
-## Connect a second machine
-
-Clone the repository on that machine, install dependencies, install and authenticate the harnesses you want there, then run:
+Copy `bin/barista` to the compute machine and run it:
 
 ```bash
-HUB_URL=https://coffee-shop.your-tailnet.ts.net \
-COFFEE_SHOP_TOKEN=the-same-hub-secret \
-NODE_ID=home-linux \
-NODE_NAME="Home server" \
-NODE_KIND=home-server \
-WORKSPACE_ROOTS=/srv/workspaces,/opt/sandboxes \
-WORKER_CONCURRENCY=4 \
-pnpm worker
+barista \
+  --control-endpoint coffeeshop.rednaskela.io \
+  --name "Worker 1" \
+  --workspace-root /srv/workspaces
 ```
 
-Workers initiate the connection, so the compute host does not need an inbound public port. `WORKSPACE_ROOTS` is an enforced comma-separated allowlist; a run outside it is rejected before a harness starts.
+Bare hostnames are normalized to `wss://<host>/control-agent`; local `http://` endpoints become `ws://`. Barista derives a stable kebab-case node ID from the machine hostname unless `--id` is provided, inspects `claude --version` and `codex --version`, registers the available harnesses, and reconnects with exponential backoff.
 
-## Claude without API token billing
-
-Coffee Shop invokes the official `claude` binary in documented print/streaming mode. On each worker machine:
+For a secured control plane, provide the Coffee Shop secret through the environment rather than shell history:
 
 ```bash
-claude
-# choose Claude App / Pro or Max during login, or run /login if already authenticated
+COFFEE_SHOP_TOKEN="$(cat /secure/path/coffee-shop-token)" \
+  barista --control-endpoint coffeeshop.rednaskela.io --name "Worker 1" \
+  --workspace-root /srv/workspaces
 ```
 
-The worker never reads Claude's stored OAuth credentials and the hub never receives them. It spawns `claude -p` with structured streaming, `--permission-mode auto`, and unattended prompts set to deny. This uses the limits included in the signed-in Claude plan, not an `ANTHROPIC_API_KEY`.
+An unconfigured development hub accepts local enrollment without a token. Production mode requires `COFFEE_SHOP_TOKEN` and rejects unauthenticated enrollment; Barista sends no implicit production credential.
 
-Important boundary: keep a subscription-backed worker private to the person who owns that Claude account. Do not expose it as a service to other users, share credentials, resell access, scrape private endpoints, or attempt to bypass rate limits. Anthropic's terms and product behavior can change; see [the detailed note](docs/anthropic-usage.md) and re-check it before a public or multi-user deployment.
+Run `barista --help` for the full command line. Environment equivalents are `CONTROL_ENDPOINT`, `BARISTA_NAME`, `BARISTA_ID`, `BARISTA_KIND`, `BARISTA_CONCURRENCY`, `WORKSPACE_ROOTS`, and `COFFEE_SHOP_TOKEN`.
 
-## Agent handoffs
-
-Coffee Shop makes coordination a first-class, inspectable event. A harness can return:
-
-```xml
-<handoff to="release-sentinel">Review the batching fix and run the focused release checks.</handoff>
-```
-
-The hub records the sender, receiver, task, parent run, and time, then dispatches the receiving agent on its configured harness and compute node. Automatic chains are capped at three hops. You can also create a handoff with `POST /api/handoffs`.
-
-## Project map
+## Task catalog
 
 ```text
-apps/web       React PWA and responsive operator interface
-apps/hub       REST API, WebSocket gateway, scheduler, persistence
-apps/worker    Machine daemon and harness adapters
-packages/protocol  Shared wire and domain types
-docs           Architecture, security, and provider notes
+task dev                    control plane + frontend with reload
+task dev:full               control plane + frontend + local Barista
+task frontend:dev           frontend only
+task frontend:build         production frontend bundle
+task control-plane:dev      hub only
+task control-plane:build    production hub bundle
+task control-agent:run -- … run Barista from source
+task control-agent:build    write the current-platform binary to bin/barista
+task control-agent:build:all cross-compile release binaries to dist/barista
+task test                   TypeScript and Go tests
+task typecheck              all TypeScript workspaces
+task ci                     format checks, tests, types, vet, and builds
 ```
 
-Read [docs/architecture.md](docs/architecture.md) for the runtime design and the production roadmap.
+The pnpm workspace contains only JavaScript/TypeScript packages. Barista owns its Go module under `apps/control-agent`, and the root `go.work` makes Go tooling work from the repository root. Task is the shared interface across both ecosystems.
+
+## Runtime and security model
+
+Control agents initiate the connection, so compute hosts do not need a public inbound port. The hub sends typed dispatch/cancel messages over the authenticated WebSocket; Barista returns lifecycle and normalized output messages.
+
+Before starting a harness, Barista canonicalizes the requested absolute workspace and confirms it remains within an enrolled root, including through symlinks. Claude Code runs in auto permission mode with unanswered prompts denied. Codex runs with `workspace-write` sandboxing. Vendor credentials remain in vendor-owned CLI storage and are never sent to the hub.
+
+Keep a subscription-backed compute node private to the account owner. Do not expose it as a resale or credential-sharing service. See [the provider note](docs/anthropic-usage.md), [the Barista operational guide](docs/control-agent.md), and [the architecture](docs/architecture.md).
+
+## Repository map
+
+```text
+apps/web               React PWA and responsive operator interface
+apps/hub               REST API, WebSocket gateway, scheduler, persistence
+apps/control-agent     Go Barista daemon and harness adapters
+packages/protocol      Shared TypeScript domain and wire contracts
+docs                   Architecture, operations, security, and provider notes
+Taskfile.yml           Language-neutral development and CI entry points
+go.work                Go workspace for Go applications in the monorepo
+```
+
+## Production control plane
+
+Build the web/hub container with `docker compose build`, set a strong `COFFEE_SHOP_TOKEN`, and terminate TLS in front of the hub. The shared token remains appropriate only for a private, single-user deployment. Per-node enrollment grants, rotation, and revocation are the next security boundary before a public or multi-user rollout.

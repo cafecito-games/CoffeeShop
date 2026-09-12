@@ -99,15 +99,20 @@ export interface Snapshot {
   generatedAt: string;
 }
 
-export type HubToWorker =
+export type HubToControlAgent =
   | { type: "dispatch"; run: Run; agent: Agent }
   | { type: "cancel"; runId: string }
   | { type: "ping" };
 
-export type WorkerToHub =
-  | { type: "register"; node: ComputeNode }
+export type ControlAgentToHub =
+  | { type: "register"; protocolVersion?: "1"; node: ComputeNode }
   | { type: "heartbeat"; nodeId: string; activeRuns: number; at: string }
   | { type: "run.started"; runId: string; at: string }
   | { type: "run.output"; runId: string; chunk: string; at: string }
   | { type: "run.completed"; runId: string; output: string; at: string }
   | { type: "run.failed"; runId: string; error: string; at: string };
+
+/** @deprecated Use HubToControlAgent. */
+export type HubToWorker = HubToControlAgent;
+/** @deprecated Use ControlAgentToHub. */
+export type WorkerToHub = ControlAgentToHub;

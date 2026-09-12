@@ -5,23 +5,27 @@ import { fileURLToPath } from "node:url";
 import cors from "cors";
 import express from "express";
 import { WebSocket, WebSocketServer } from "ws";
-import { agentAvatarColors, agentAvatarShapes, type Agent, type ComputeNode, type HubToWorker, type Run, type WorkerToHub } from "@coffee-shop/protocol";
+import { agentAvatarColors, agentAvatarShapes, type Agent, type ComputeNode, type ControlAgentToHub, type HubToControlAgent, type Run } from "@coffee-shop/protocol";
 import { newEvent, newId, newMessage, Store } from "./store.js";
 
 const app = express();
 const server = createServer(app);
-const workers = new Map<string, WebSocket>();
+const controlAgents = new Map<string, WebSocket>();
 const clients = new Set<WebSocket>();
 const store = new Store();
-const token = process.env.COFFEE_SHOP_TOKEN ?? "dev-coffee";
+const token = process.env.COFFEE_SHOP_TOKEN;
 const port = Number(process.env.PORT ?? 8787);
+
+if (process.env.NODE_ENV === "production" && !token) {
+  throw new Error("COFFEE_SHOP_TOKEN is required in production");
+}
 
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
 app.use((req, res, next) => {
   if (!req.path.startsWith("/api/") || req.path === "/api/health" || process.env.NODE_ENV !== "production") return next();
   const supplied = req.header("authorization")?.replace(/^Bearer\s+/i, "") ?? req.query.token;
-  if (supplied !== token) return res.status(401).json({ error: "Unauthorized" });
+  if (!token || supplied !== token) return res.status(401).json({ error: "Unauthorized" });
   next();
 });
 
@@ -30,8 +34,8 @@ const broadcast = () => {
   for (const socket of clients) if (socket.readyState === WebSocket.OPEN) socket.send(payload);
 };
 
-const sendToWorker = (nodeId: string, message: HubToWorker) => {
-  const socket = workers.get(nodeId);
+const sendToControlAgent = (nodeId: string, message: HubToControlAgent) => {
+  const socket = controlAgents.get(nodeId);
   if (!socket || socket.readyState !== WebSocket.OPEN) return false;
   socket.send(JSON.stringify(message));
   return true;
@@ -43,8 +47,8 @@ async function queueRun(agent: Agent, prompt: string, options: { parentRunId?: s
     model: agent.model, workspace: agent.workspace, prompt, status: "queued", output: "",
     depth: options.depth ?? 0, parentRunId: options.parentRunId, createdAt: new Date().toISOString()
   };
-  const worker = workers.get(agent.computeNodeId);
-  const dispatched = Boolean(worker && worker.readyState === WebSocket.OPEN);
+  const controlAgent = controlAgents.get(agent.computeNodeId);
+  const dispatched = Boolean(controlAgent && controlAgent.readyState === WebSocket.OPEN);
   await store.transact((state) => {
     state.runs.unshift(run);
     agent = state.agents.find((item) => item.id === agent.id)!;
@@ -56,13 +60,13 @@ async function queueRun(agent: Agent, prompt: string, options: { parentRunId?: s
   if (dispatched) {
     const directory = store.snapshot().agents.filter((item) => item.id !== agent.id).map((item) => `${item.id} (${item.title})`).join(", ");
     const dispatchAgent = { ...agent, systemPrompt: `${agent.systemPrompt}\n\nAvailable teammates: ${directory || "none"}` };
-    sendToWorker(agent.computeNodeId, { type: "dispatch", run, agent: dispatchAgent });
+    sendToControlAgent(agent.computeNodeId, { type: "dispatch", run, agent: dispatchAgent });
   }
   broadcast();
   return run;
 }
 
-app.get("/api/health", (_req, res) => res.json({ ok: true, service: "coffee-shop-hub", workers: workers.size }));
+app.get("/api/health", (_req, res) => res.json({ ok: true, service: "coffee-shop-control-plane", controlAgents: controlAgents.size }));
 app.get("/api/snapshot", (_req, res) => res.json(store.snapshot()));
 
 app.post("/api/agents", async (req, res) => {
@@ -135,7 +139,7 @@ app.patch("/api/agents/:id", async (req, res) => {
 app.post("/api/runs/:id/cancel", async (req, res) => {
   const run = store.getRun(req.params.id);
   if (!run) return res.status(404).json({ error: "Run not found" });
-  sendToWorker(run.nodeId, { type: "cancel", runId: run.id });
+  sendToControlAgent(run.nodeId, { type: "cancel", runId: run.id });
   await store.transact((state) => { const target = state.runs.find((item) => item.id === run.id); if (target) target.status = "cancelled"; });
   broadcast();
   res.status(202).json({ ok: true });
@@ -150,8 +154,11 @@ if (existsSync(webDist)) {
 const wss = new WebSocketServer({ noServer: true });
 server.on("upgrade", (request, socket, head) => {
   const url = new URL(request.url ?? "/", `http://${request.headers.host}`);
-  if (url.pathname === "/worker" && url.searchParams.get("token") !== token) return socket.destroy();
+  const isControlAgent = url.pathname === "/control-agent" || url.pathname === "/worker";
+  const suppliedToken = request.headers.authorization?.replace(/^Bearer\s+/i, "") ?? url.searchParams.get("token");
+  if (isControlAgent && token && suppliedToken !== token) return socket.destroy();
   if (url.pathname === "/events" && process.env.NODE_ENV === "production" && url.searchParams.get("token") !== token) return socket.destroy();
+  if (!isControlAgent && url.pathname !== "/events") return socket.destroy();
   wss.handleUpgrade(request, socket, head, (ws) => wss.emit("connection", ws, request));
 });
 
@@ -166,10 +173,11 @@ wss.on("connection", (socket, request) => {
 
   let nodeId = "";
   socket.on("message", async (raw) => {
-    const message = JSON.parse(raw.toString()) as WorkerToHub;
+    const message = JSON.parse(raw.toString()) as ControlAgentToHub;
     if (message.type === "register") {
+      if (message.protocolVersion && message.protocolVersion !== "1") return socket.close(1002, "unsupported control protocol");
       nodeId = message.node.id;
-      workers.set(nodeId, socket);
+      controlAgents.set(nodeId, socket);
       await store.transact((state) => {
         const index = state.nodes.findIndex((node) => node.id === nodeId);
         const online: ComputeNode = { ...message.node, status: "online", lastSeen: new Date().toISOString() };
@@ -179,7 +187,7 @@ wss.on("connection", (socket, request) => {
       const queued = store.snapshot().runs.filter((run) => run.nodeId === nodeId && run.status === "queued");
       for (const run of queued) {
         const agent = store.getAgent(run.agentId);
-        if (agent) sendToWorker(nodeId, { type: "dispatch", run, agent });
+        if (agent) sendToControlAgent(nodeId, { type: "dispatch", run, agent });
       }
       broadcast();
     } else if (message.type === "heartbeat") {
@@ -223,7 +231,8 @@ wss.on("connection", (socket, request) => {
   });
   socket.on("close", async () => {
     if (!nodeId) return;
-    workers.delete(nodeId);
+    if (controlAgents.get(nodeId) !== socket) return;
+    controlAgents.delete(nodeId);
     await store.transact((state) => { const node = state.nodes.find((item) => item.id === nodeId); if (node) { node.status = "offline"; node.activeRuns = 0; } });
     broadcast();
   });
