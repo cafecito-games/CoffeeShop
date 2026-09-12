@@ -4,13 +4,15 @@ import {
   Coffee, Cpu, Gear, MagnifyingGlass, PaperPlaneTilt, Plus,
   Robot, SlidersHorizontal, TerminalWindow, UsersThree, WarningCircle, X, LockKey
 } from "@phosphor-icons/react";
-import { isActiveRunStatus, type Agent, type AgentState, type ChatMessage, type ComputeNode, type Run, type RunStatus, type TimelineEvent } from "@coffee-shop/protocol";
+import { isActiveRunStatus, type Agent, type AgentState, type ChatMessage, type ComputeNode, type Run, type RunStatus } from "@coffee-shop/protocol";
 import { AccessibleDialog } from "./AccessibleDialog.js";
+import { ActivityView } from "./ActivityView.js";
 import { AgentConfigurationForm, CreateAgentDialog, type AgentConfigurationPayload } from "./AgentConfiguration.js";
 import { CoffeeAvatar } from "./CoffeeAvatar.js";
 import { ComputeView } from "./compute/ComputeView.js";
 import { useHubConnection, type ConnectionStatus } from "./hubConnection.js";
 import { SettingsView } from "./settings/SettingsView.js";
+import { PwaInstallProvider } from "./settings/PwaInstall.js";
 
 type View = "agents" | "activity" | "compute" | "settings";
 
@@ -181,11 +183,6 @@ function Inspector({ agent, nodes, onClose, onSave, onReconcile, canMutate }: {
   );
 }
 
-function ActivityView({ events, agents, onInspectRun }: { events: TimelineEvent[]; agents: Agent[]; onInspectRun: (id: string) => void }) {
-  const name = (id?: string) => agents.find((agent) => agent.id === id)?.name;
-  return <main className="utility-view"><header className="utility-header"><div><small>Across every harness and machine</small><h1>Activity</h1></div><button className="filter-btn"><SlidersHorizontal size={16} /> Filter</button></header><div className="timeline">{events.map((event, index) => <article key={event.id} className={`timeline-event event-${event.type}`}><div className="timeline-rail"><span>{event.type === "handoff" ? <UsersThree size={15} /> : event.type === "node" ? <Cpu size={15} /> : <Activity size={15} />}</span>{index < events.length - 1 && <i />}</div><div><div className="event-heading"><strong>{event.title}</strong><time>{timeAgo(event.createdAt)}</time></div><p>{event.detail}</p>{event.fromAgentId && <small>{name(event.fromAgentId)} handed work to {name(event.toAgentId)}</small>}{event.runId && <button className="run-link" onClick={() => onInspectRun(event.runId!)}><TerminalWindow size={14} /> Inspect run</button>}</div></article>)}</div></main>;
-}
-
 const runStatusLabels: Record<RunStatus, string> = {
   queued: "Queued", running: "Running", completed: "Completed", failed: "Failed", cancelled: "Cancelled"
 };
@@ -278,7 +275,7 @@ function LockScreen() {
   return <main className="lock-screen"><div className="brand-mark"><span /><span /></div><LockKey size={20} /><h1>Connect to your control plane</h1><p>Enter the hub token configured on this deployment. It stays in this browser.</p><form onSubmit={(event) => { event.preventDefault(); if (!value.trim()) return; localStorage.setItem("coffee-shop-token", value.trim()); location.reload(); }}><input type="password" value={value} onChange={(event) => setValue(event.target.value)} placeholder="Hub access token" autoFocus /><button>Connect</button></form></main>;
 }
 
-export default function App() {
+function CoffeeShopApp() {
   const { snapshot, status: connection, canMutate, retry } = useHubConnection(accessToken);
   const [view, setView] = useState<View>("agents");
   const [selectedId, setSelectedId] = useState<string>();
@@ -347,4 +344,8 @@ export default function App() {
       {creating && <CreateAgentDialog nodes={snapshot.nodes} onClose={() => setCreating(false)} onSave={createAgent} onReconcile={retry} canMutate={canMutate} />}
     </div>
   );
+}
+
+export default function App() {
+  return <PwaInstallProvider><CoffeeShopApp /></PwaInstallProvider>;
 }

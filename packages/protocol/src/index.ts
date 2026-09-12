@@ -86,9 +86,12 @@ export interface Run {
   createdAt: string;
 }
 
+export const timelineEventTypes = ["run", "status", "handoff", "node", "message"] as const;
+export type TimelineEventType = typeof timelineEventTypes[number];
+
 export interface TimelineEvent {
   id: string;
-  type: "run" | "status" | "handoff" | "node" | "message";
+  type: TimelineEventType;
   title: string;
   detail: string;
   agentId?: string;
