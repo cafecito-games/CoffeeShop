@@ -1,0 +1,161 @@
+import { posix, win32 } from "node:path";
+import {
+  agentAvatarColors,
+  agentAvatarShapes,
+  type Agent,
+  type AgentAvatarColor,
+  type AgentAvatarShape,
+  type ComputeNode,
+  type HarnessId,
+  type Run
+} from "@coffee-shop/protocol";
+
+export interface AgentConfigurationState {
+  agents: Agent[];
+  nodes: ComputeNode[];
+  runs: Run[];
+}
+
+type EditableAgentConfiguration = Pick<Agent,
+  "name" | "title" | "summary" | "harnessId" | "model" | "computeNodeId" |
+  "workspace" | "systemPrompt" | "avatarShape" | "avatarColor" | "glyph">;
+
+type ConfigurationFailure = { ok: false; kind: "invalid" | "not-found"; error: string };
+type CreateResult = { ok: true; agent: Agent; node: ComputeNode } | ConfigurationFailure;
+type UpdateResult = { ok: true; agent: Agent; node: ComputeNode; changed: boolean } | ConfigurationFailure;
+
+const editableKeys = [
+  "name", "title", "summary", "harnessId", "model", "computeNodeId", "workspace",
+  "systemPrompt", "avatarShape", "avatarColor"
+] as const;
+const editableKeySet = new Set<string>(editableKeys);
+
+function invalid(error: string): ConfigurationFailure {
+  return { ok: false, kind: "invalid", error };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isWorkspaceWithinRoot(workspace: string, root: string) {
+  const paths = /^[A-Za-z]:[\\/]|^\\\\/.test(workspace) ? win32 : posix;
+  if (!paths.isAbsolute(workspace) || !paths.isAbsolute(root)) return false;
+  const relative = paths.relative(paths.normalize(root), paths.normalize(workspace));
+  return relative === "" || (relative !== ".." && !relative.startsWith(`..${paths.sep}`) && !paths.isAbsolute(relative));
+}
+
+function validateConfiguration(body: unknown, nodes: readonly ComputeNode[], existing?: Agent):
+  { ok: true; configuration: EditableAgentConfiguration; node: ComputeNode } | ConfigurationFailure {
+  if (!isRecord(body)) return invalid("Request body must be an object");
+  const unknown = Object.keys(body).find((key) => !editableKeySet.has(key));
+  if (unknown) return invalid(`Unknown agent field: ${unknown}`);
+  const nonString = Object.keys(body).find((key) => typeof body[key] !== "string");
+  if (nonString) return invalid(`${nonString} must be a string`);
+
+  const values: Record<string, string | undefined> = existing ? {
+    name: existing.name,
+    title: existing.title,
+    summary: existing.summary,
+    harnessId: existing.harnessId,
+    model: existing.model,
+    computeNodeId: existing.computeNodeId,
+    workspace: existing.workspace,
+    systemPrompt: existing.systemPrompt,
+    avatarShape: existing.avatarShape,
+    avatarColor: existing.avatarColor
+  } : {
+    summary: "",
+    avatarShape: "cup",
+    avatarColor: "amber"
+  };
+  for (const key of editableKeys) {
+    if (Object.hasOwn(body, key)) values[key] = body[key] as string;
+  }
+
+  const name = values.name?.trim() ?? "";
+  const title = values.title?.trim() ?? "";
+  const summary = values.summary?.trim() ?? "";
+  const systemPrompt = values.systemPrompt?.trim() ?? "";
+  const computeNodeId = values.computeNodeId?.trim() ?? "";
+  const harnessId = values.harnessId?.trim() ?? "";
+  const model = values.model?.trim() ?? "";
+  const workspace = values.workspace?.trim() ?? "";
+  if (!name) return invalid("Name is required");
+  if (!title) return invalid("Title is required");
+  if (!systemPrompt) return invalid("System prompt is required");
+
+  const node = nodes.find((item) => item.id === computeNodeId);
+  if (!node) return invalid("Select a compute node that is still available");
+  const harness = node.harnesses.find((item) => item.id === harnessId && item.available);
+  if (!harness) return invalid("Select a harness advertised as available by the compute node");
+  if (harness.models.length ? !harness.models.includes(model) : model !== "default") {
+    return invalid(harness.models.length
+      ? "Select a model advertised by the selected harness"
+      : "This harness only permits its provider default model");
+  }
+  if (!workspace || !node.workspaceRoots.some((root) => isWorkspaceWithinRoot(workspace, root))) {
+    return invalid("Workspace must be an absolute path within a root advertised by the compute node");
+  }
+  if (!agentAvatarShapes.includes(values.avatarShape as AgentAvatarShape)) return invalid("Select a valid avatar shape");
+  if (!agentAvatarColors.includes(values.avatarColor as AgentAvatarColor)) return invalid("Select a valid avatar color");
+
+  return {
+    ok: true,
+    node,
+    configuration: {
+      name,
+      title,
+      summary,
+      glyph: [...name][0].toUpperCase(),
+      harnessId: harness.id as HarnessId,
+      model,
+      computeNodeId: node.id,
+      workspace,
+      systemPrompt,
+      avatarShape: values.avatarShape as AgentAvatarShape,
+      avatarColor: values.avatarColor as AgentAvatarColor
+    }
+  };
+}
+
+function configurationChanged(agent: Agent, configuration: EditableAgentConfiguration) {
+  return Object.entries(configuration).some(([key, value]) => agent[key as keyof Agent] !== value);
+}
+
+export function createConfiguredAgent(
+  state: AgentConfigurationState,
+  body: unknown,
+  now: string,
+  createId: (name: string) => string
+): CreateResult {
+  const validated = validateConfiguration(body, state.nodes);
+  if (!validated.ok) return validated;
+  const agent: Agent = {
+    id: createId(validated.configuration.name),
+    ...validated.configuration,
+    state: "idle",
+    currentAction: "Available",
+    unread: 0,
+    updatedAt: now
+  };
+  state.agents.push(agent);
+  return { ok: true, agent, node: validated.node };
+}
+
+export function updateConfiguredAgent(
+  state: AgentConfigurationState,
+  id: string,
+  body: unknown,
+  now: string
+): UpdateResult {
+  const agent = state.agents.find((item) => item.id === id);
+  if (!agent) return { ok: false, kind: "not-found", error: "Agent not found" };
+  const validated = validateConfiguration(body, state.nodes, agent);
+  if (!validated.ok) return validated;
+  if (!configurationChanged(agent, validated.configuration)) {
+    return { ok: true, agent, node: validated.node, changed: false };
+  }
+  Object.assign(agent, validated.configuration, { updatedAt: now });
+  return { ok: true, agent, node: validated.node, changed: true };
+}

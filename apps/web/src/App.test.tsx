@@ -110,7 +110,7 @@ describe("connection freshness UI", () => {
     const composer = screen.getByPlaceholderText("Reconnect to message Milo");
     expect(composer).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: "Context" }));
-    expect(screen.getByRole("button", { name: /Codex/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Edit" })).toBeDisabled();
     expect(fetch).not.toHaveBeenCalled();
   });
 
@@ -128,15 +128,118 @@ describe("connection freshness UI", () => {
     const { default: App } = await import("./App.js");
     const rendered = render(<App />);
     fireEvent.click(screen.getAllByRole("button", { name: "Create agent" })[0]);
-    const dialog = screen.getByRole("heading", { name: "Create an agent" }).closest("form");
-    fireEvent.change(screen.getByPlaceholderText("Agent name"), { target: { value: "Scout" } });
-    fireEvent.change(screen.getByPlaceholderText("Agent role"), { target: { value: "Researcher" } });
-    expect(dialog?.querySelector(".create-button")).toBeEnabled();
+    const dialog = screen.getByRole("dialog");
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Scout" } });
+    fireEvent.change(screen.getByLabelText("Title"), { target: { value: "Researcher" } });
+    fireEvent.change(screen.getByLabelText("System prompt"), { target: { value: "Research carefully." } });
+    expect(dialog.querySelector(".save-configuration")).toBeEnabled();
 
     mocks.status = "reconnecting";
     rendered.rerender(<App />);
-    expect(dialog?.querySelector(".create-button")).toBeDisabled();
-    expect(dialog?.querySelector("input[placeholder='Agent name']")).toBeDisabled();
+    expect(dialog.querySelector(".save-configuration")).toBeDisabled();
+    expect(screen.getByLabelText("Name")).toBeDisabled();
+    expect(dialog).toHaveTextContent("Reconnect before saving");
+  });
+});
+
+describe("agent configuration experience", () => {
+  beforeEach(() => prepareBrowser());
+
+  it.each([
+    [1440, "close"],
+    [900, "escape"],
+    [390, "outside"]
+  ] as const)("opens and closes Context accessibly at %ipx", async (width, closeMethod) => {
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: width });
+    const { default: App } = await import("./App.js");
+    render(<App />);
+    fireEvent.click(screen.getAllByRole("button", { name: /Milo/ })[0]);
+    const trigger = screen.getByRole("button", { name: "Context" });
+    trigger.focus();
+    fireEvent.click(trigger);
+    const dialog = screen.getByRole("dialog", { name: "Agent context" });
+    const close = screen.getByRole("button", { name: "Close agent context" });
+    const edit = screen.getByRole("button", { name: "Edit" });
+    expect(trigger).toHaveAttribute("aria-expanded", "true");
+    expect(close).toHaveFocus();
+    edit.focus();
+    await userEvent.tab({ shift: true });
+    expect(close).toHaveFocus();
+
+    if (closeMethod === "close") fireEvent.click(close);
+    if (closeMethod === "escape") fireEvent.keyDown(document, { key: "Escape" });
+    if (closeMethod === "outside") fireEvent.mouseDown(dialog);
+    expect(screen.queryByRole("dialog", { name: "Agent context" })).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+  });
+
+  it("edits all configuration through PATCH, discards cancelled drafts, and accepts the confirmed glyph", async () => {
+    const fetchMock = vi.mocked(fetch);
+    const renamed = { ...agent, name: "Nova", title: "Operator", summary: "Coordinates", glyph: "N", systemPrompt: "Coordinate carefully.", updatedAt: "later" };
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify(renamed), { status: 200, headers: { "content-type": "application/json" } }));
+    const { default: App } = await import("./App.js");
+    const rendered = render(<App />);
+    fireEvent.click(screen.getAllByRole("button", { name: /Milo/ })[0]);
+    fireEvent.click(screen.getByRole("button", { name: "Context" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Discarded" } });
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.getAllByRole("heading", { name: "Milo" }).length).toBeGreaterThan(0);
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    expect(screen.getByLabelText("Name")).toHaveValue("Milo");
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Nova" } });
+    fireEvent.change(screen.getByLabelText("Title"), { target: { value: "Operator" } });
+    fireEvent.change(screen.getByLabelText("Summary (optional)"), { target: { value: "Coordinates" } });
+    fireEvent.change(screen.getByLabelText("System prompt"), { target: { value: "Coordinate carefully." } });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+    const request = fetchMock.mock.calls[0];
+    expect(request[0]).toBe("/api/agents/agent-one");
+    expect(JSON.parse(String((request[1] as RequestInit).body))).toMatchObject({ name: "Nova", title: "Operator", harnessId: "codex-cli", model: "gpt-5" });
+
+    currentSnapshot = { ...currentSnapshot, agents: [renamed] };
+    rendered.rerender(<App />);
+    expect(screen.getAllByText("Nova").length).toBeGreaterThan(0);
+    expect(currentSnapshot.agents[0].glyph).toBe("N");
+  });
+
+  it("shows failed saves, restores confirmed state, and requests a latest-snapshot reconciliation", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify({ error: "Selected node is stale" }), { status: 400, headers: { "content-type": "application/json" } }));
+    const { default: App } = await import("./App.js");
+    render(<App />);
+    fireEvent.click(screen.getAllByRole("button", { name: /Milo/ })[0]);
+    fireEvent.click(screen.getByRole("button", { name: "Context" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Optimistic name" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Selected node is stale");
+    expect(screen.getByLabelText("Name")).toHaveValue("Milo");
+    expect(mocks.retry).toHaveBeenCalledOnce();
+  });
+
+  it("creates with node-derived runtime fields and the complete required contract", async () => {
+    const created = { ...agent, id: "scout", name: "Scout", title: "Researcher", summary: "", glyph: "S", systemPrompt: "Research carefully." };
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify(created), { status: 201, headers: { "content-type": "application/json" } }));
+    const { default: App } = await import("./App.js");
+    render(<App />);
+    fireEvent.click(screen.getAllByRole("button", { name: "Create agent" })[0]);
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Scout" } });
+    fireEvent.change(screen.getByLabelText("Title"), { target: { value: "Researcher" } });
+    fireEvent.change(screen.getByLabelText("System prompt"), { target: { value: "Research carefully." } });
+    fireEvent.click(screen.getByRole("dialog").querySelector(".save-configuration")!);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+    expect(JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body))).toMatchObject({
+      name: "Scout",
+      title: "Researcher",
+      systemPrompt: "Research carefully.",
+      computeNodeId: "node-one",
+      harnessId: "codex-cli",
+      model: "gpt-5",
+      workspace: "/workspace"
+    });
+    await waitFor(() => expect(screen.queryByRole("heading", { name: "Create an agent" })).not.toBeInTheDocument());
   });
 });
 

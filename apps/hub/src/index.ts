@@ -5,7 +5,8 @@ import { fileURLToPath } from "node:url";
 import cors from "cors";
 import express from "express";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
-import { agentAvatarColors, agentAvatarShapes, type Agent, type ComputeNode, type ControlAgentToHub, type HubToControlAgent, type Run } from "@coffee-shop/protocol";
+import { type Agent, type ComputeNode, type ControlAgentToHub, type HubToControlAgent, type Run } from "@coffee-shop/protocol";
+import { createConfiguredAgent, updateConfiguredAgent } from "./agentConfiguration.js";
 import { applyRunLifecycle, cancelPersistedRun, queuedRunsForNode, retryAsync, serializeAsync } from "./lifecycle.js";
 import { newEvent, newId, newMessage, Store } from "./store.js";
 
@@ -76,28 +77,18 @@ app.get("/api/health", (_req, res) => res.json({ ok: true, service: "coffee-shop
 app.get("/api/snapshot", (_req, res) => res.json(store.snapshot()));
 
 app.post("/api/agents", async (req, res) => {
-  const name = typeof req.body?.name === "string" ? req.body.name.trim() : "";
-  const title = typeof req.body?.title === "string" ? req.body.title.trim() : "";
-  const node = store.snapshot().nodes.find((item) => item.id === req.body?.computeNodeId);
-  const harnessId = req.body?.harnessId === "codex-cli" ? "codex-cli" : "claude-cli";
-  const avatarShape = agentAvatarShapes.find((shape) => shape === req.body?.avatarShape) ?? "cup";
-  const avatarColor = agentAvatarColors.find((color) => color === req.body?.avatarColor) ?? "amber";
-  if (!name || !title || !node) return res.status(400).json({ error: "Name, title, and a valid compute node are required" });
-  const baseId = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "agent";
-  const id = store.getAgent(baseId) ? `${baseId}-${Math.random().toString(36).slice(2, 6)}` : baseId;
-  const agent: Agent = {
-    id, name, title, summary: req.body?.summary?.trim() || `Purpose-built for ${title.toLowerCase()}.`, glyph: name[0].toUpperCase(), avatarShape, avatarColor,
-    state: "idle", currentAction: "Available", harnessId, model: harnessId === "claude-cli" ? "sonnet" : "default",
-    computeNodeId: node.id, workspace: req.body?.workspace?.trim() || node.workspaceRoots[0] || "/workspace",
-    systemPrompt: req.body?.systemPrompt?.trim() || `You are ${name}, a ${title}. Work carefully, report evidence, and leave durable results.`,
-    unread: 0, updatedAt: new Date().toISOString()
-  };
+  let result: ReturnType<typeof createConfiguredAgent> | undefined;
   await store.transact((state) => {
-    state.agents.push(agent);
-    state.events.unshift(newEvent({ type: "status", title: `${agent.name} joined the roster`, detail: `${agent.title} · ${node.name}`, agentId: agent.id }));
+    result = createConfiguredAgent(state, req.body, new Date().toISOString(), (name) => {
+      const baseId = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "agent";
+      return state.agents.some((agent) => agent.id === baseId) ? `${baseId}-${Math.random().toString(36).slice(2, 6)}` : baseId;
+    });
+    if (!result.ok) return false;
+    state.events.unshift(newEvent({ type: "status", title: `${result.agent.name} joined the roster`, detail: `${result.agent.title} · ${result.node.name}`, agentId: result.agent.id }));
   });
+  if (!result?.ok) return res.status(400).json({ error: result?.error ?? "Invalid agent configuration" });
   broadcast();
-  res.status(201).json(agent);
+  res.status(201).json(result.agent);
 });
 
 app.post("/api/agents/:id/messages", async (req, res) => {
@@ -124,22 +115,14 @@ app.post("/api/handoffs", async (req, res) => {
 });
 
 app.patch("/api/agents/:id", async (req, res) => {
-  const allowed = ["name", "title", "summary", "harnessId", "model", "computeNodeId", "workspace", "systemPrompt", "avatarShape", "avatarColor"] as const;
-  let updated: Agent | undefined;
+  let result: ReturnType<typeof updateConfiguredAgent> | undefined;
   await store.transact((state) => {
-    updated = state.agents.find((agent) => agent.id === req.params.id);
-    if (!updated) return;
-    for (const key of allowed) {
-      if (typeof req.body?.[key] !== "string") continue;
-      if (key === "avatarShape" && !agentAvatarShapes.some((value) => value === req.body[key])) continue;
-      if (key === "avatarColor" && !agentAvatarColors.some((value) => value === req.body[key])) continue;
-      (updated as unknown as Record<string, string>)[key] = req.body[key];
-    }
-    updated.updatedAt = new Date().toISOString();
+    result = updateConfiguredAgent(state, req.params.id, req.body, new Date().toISOString());
+    if (!result.ok || !result.changed) return false;
   });
-  if (!updated) return res.status(404).json({ error: "Agent not found" });
-  broadcast();
-  res.json(updated);
+  if (!result?.ok) return res.status(result?.kind === "not-found" ? 404 : 400).json({ error: result?.error ?? "Invalid agent configuration" });
+  if (result.changed) broadcast();
+  res.json(result.agent);
 });
 
 app.post("/api/runs/:id/cancel", async (req, res) => {
