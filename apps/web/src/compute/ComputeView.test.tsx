@@ -69,8 +69,11 @@ describe("compute experience", () => {
 
   it("generates and copies a safe complete command without exposing browser secrets", async () => {
     render(<ComputeView nodes={[node]} />);
-    fireEvent.click(screen.getByRole("button", { name: "Add compute" }));
+    const trigger = screen.getByRole("button", { name: "Add compute" });
+    trigger.focus();
+    fireEvent.click(trigger);
     expect(screen.getByRole("dialog")).toHaveAccessibleName("Add a Barista");
+    expect(screen.getByRole("button", { name: "Close Barista setup" })).toHaveFocus();
     expect(screen.getByLabelText("Hub URL")).toHaveValue("http://localhost:8787");
     expect(screen.getByText("Local computer")).toBeInTheDocument();
     expect(screen.getByText("Home server")).toBeInTheDocument();
@@ -87,6 +90,9 @@ describe("compute experience", () => {
     expect(copied).toContain("BARISTA_NAME='Desk'\"'\"'; echo unsafe'");
     expect(copied).toContain("COFFEE_SHOP_TOKEN='replace-with-hub-token'");
     expect(copied).not.toContain("browser-secret-that-must-not-copy");
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
   });
 
   it("disables copy for invalid fields and keeps selectable text after clipboard failure", async () => {

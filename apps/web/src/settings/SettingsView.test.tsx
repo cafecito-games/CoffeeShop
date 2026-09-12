@@ -23,8 +23,11 @@ const node: ComputeNode = {
 describe("execution policy review", () => {
   it("separates provenance and renders current, offline, unsupported, and stale policy truthfully", () => {
     render(<SettingsView connection="reconnecting" nodes={[node]} generatedAt="2026-09-11T20:01:00Z" />);
-    fireEvent.click(screen.getByRole("button", { name: "Review" }));
+    const trigger = screen.getByRole("button", { name: "Review" });
+    trigger.focus();
+    fireEvent.click(trigger);
     expect(screen.getByRole("dialog")).toHaveAccessibleName("Execution policy");
+    expect(screen.getByRole("button", { name: "Close execution policy" })).toHaveFocus();
     expect(screen.getAllByText("Worker-reported").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Hub-observed").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Release documentation").length).toBeGreaterThan(0);
@@ -36,6 +39,9 @@ describe("execution policy review", () => {
     expect(screen.getByText("Unrecognized / not verified")).toBeInTheDocument();
     expect(screen.getByText("/srv/workspaces")).toBeInTheDocument();
     expect(screen.getByText(/neither provider token/)).toBeInTheDocument();
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
   });
 
   it("fails closed for structurally valid unknown runtime values and keeps the open review fresh", () => {

@@ -32,6 +32,7 @@ describe("Barista onboarding configuration", () => {
     expect(command).toContain("COFFEE_SHOP_TOKEN='replace-with-hub-token' \\");
     expect(command).toContain("WORKSPACE_ROOTS='/Users/me/Code,/Users/me/Notes' \\");
     expect(command.endsWith("./bin/barista")).toBe(true);
+    expect(buildBaristaCommand(valid)).toBe(buildBaristaCommand(valid));
   });
 
   it.each([
