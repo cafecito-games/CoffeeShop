@@ -29,7 +29,7 @@ describe("compute experience", () => {
   it("opens the exact node, renders all node and harness fields, and follows replacement snapshots", async () => {
     const other = { ...node, id: "node-two", name: "Cloud", kind: "cloud" as const, platform: "linux · amd64" };
     const rendered = render(<ComputeView nodes={[node, other]} />);
-    fireEvent.click(screen.getByRole("button", { name: "View Cloud compute details" }));
+    fireEvent.click(screen.getByRole("button", { name: "View Cloud (node-two) compute details" }));
 
     expect(screen.getByRole("dialog")).toHaveAccessibleName("Cloud");
     expect(screen.getByText("node-two")).toBeInTheDocument();
@@ -58,7 +58,7 @@ describe("compute experience", () => {
     const rendered = render(<ComputeView nodes={[]} />);
     expect(screen.getByText("No Baristas registered")).toBeInTheDocument();
     rendered.rerender(<ComputeView nodes={[{ ...node, status: "offline" }]} />);
-    const trigger = screen.getByRole("button", { name: "View Desk compute details" });
+    const trigger = screen.getByRole("button", { name: "View Desk (node-one) compute details" });
     trigger.focus();
     fireEvent.click(trigger);
     expect(screen.getByText(/inventory is the last report/)).toBeInTheDocument();
@@ -71,8 +71,18 @@ describe("compute experience", () => {
 
   it("keeps an accessible dialog name when a structurally valid node name is empty", () => {
     render(<ComputeView nodes={[{ ...node, name: "" }]} />);
-    fireEvent.click(screen.getByRole("button", { name: "View unnamed compute details" }));
+    fireEvent.click(screen.getByRole("button", { name: "View Unnamed compute (node-one) compute details" }));
     expect(screen.getByRole("dialog")).toHaveAccessibleName("Unnamed compute");
+  });
+
+  it("distinguishes duplicate node names in accessible row actions", () => {
+    const duplicate = { ...node, id: "node-two", platform: "linux · amd64" };
+    render(<ComputeView nodes={[node, duplicate]} />);
+    expect(screen.getByRole("button", { name: "View Desk (node-one) compute details" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "View Desk (node-two) compute details" }));
+    expect(screen.getByRole("dialog")).toHaveAccessibleName("Desk");
+    expect(screen.getByText("node-two")).toBeInTheDocument();
+    expect(screen.queryByText("node-one")).not.toBeInTheDocument();
   });
 
   it("generates and copies a safe complete command without exposing browser secrets", async () => {

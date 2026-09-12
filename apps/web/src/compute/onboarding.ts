@@ -32,7 +32,11 @@ export function workspaceRoots(value: string): string[] {
 export function validateOnboarding(values: OnboardingValues): string[] {
   const errors: string[] = [];
   try {
-    const endpoint = new URL(values.controlEndpoint);
+    const endpointValue = values.controlEndpoint.trim();
+    if (!/^https?:\/\//i.test(endpointValue) || /%(?![0-9a-f]{2})/i.test(endpointValue) || /[\u0000-\u001f\u007f]/.test(endpointValue)) {
+      throw new Error("unsupported URL");
+    }
+    const endpoint = new URL(endpointValue);
     if (!(["http:", "https:"] as string[]).includes(endpoint.protocol) || !endpoint.hostname) throw new Error("unsupported URL");
   } catch {
     errors.push("Use an HTTP or HTTPS hub URL.");

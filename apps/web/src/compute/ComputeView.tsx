@@ -36,7 +36,7 @@ export function ComputeView({ nodes }: { nodes: ComputeNode[] }) {
           const reportedName = typeof node.name === "string" && node.name.trim() ? node.name : undefined;
           const nodeName = reportedName ?? "Unnamed compute";
           return (
-            <button key={node.id} className="node-row" onClick={() => setSelectedNodeId(node.id)} aria-label={reportedName ? `View ${reportedName} compute details` : "View unnamed compute details"}>
+            <button key={node.id} className="node-row" onClick={() => setSelectedNodeId(node.id)} aria-label={`View ${nodeName} (${node.id}) compute details`}>
               <span className="node-icon"><KindIcon kind={node.kind} /></span>
               <span className="node-main"><span><strong>{nodeName}</strong><span className={`node-status ${node.status}`}><i />{node.status}</span></span><span className="node-summary">{node.platform} · {node.activeRuns} of {node.concurrency} slots active</span><span className="capacity"><i style={{ width: `${Math.max(3, (node.activeRuns / Math.max(node.concurrency, 1)) * 100)}%` }} /></span><span className="harness-tags">{node.harnesses.map((harness) => <span key={harness.id} className={harness.available ? "" : "unavailable"}><Command size={13} />{harness.label}<small>{harness.available ? "ready" : "missing"}</small></span>)}</span></span>
               <ArrowRight className="node-arrow" size={17} aria-hidden="true" />

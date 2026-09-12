@@ -38,6 +38,8 @@ describe("Barista onboarding configuration", () => {
   it.each([
     [{ ...valid, controlEndpoint: "ws://coffee.example" }, "Use an HTTP or HTTPS hub URL."],
     [{ ...valid, controlEndpoint: "not a url" }, "Use an HTTP or HTTPS hub URL."],
+    [{ ...valid, controlEndpoint: "https://coffee.example/%zz" }, "Use an HTTP or HTTPS hub URL."],
+    [{ ...valid, controlEndpoint: "https:coffee.example" }, "Use an HTTP or HTTPS hub URL."],
     [{ ...valid, name: "  " }, "Enter a Barista name."],
     [{ ...valid, nodeId: "Bad ID" }, "Use a lowercase ID containing only letters, numbers, and hyphens."],
     [{ ...valid, kind: "edge" as OnboardingValues["kind"] }, "Choose a supported compute kind."],
