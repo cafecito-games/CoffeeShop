@@ -34,9 +34,9 @@ describe("execution policy review", () => {
     expect(screen.getByText("Connection is stale")).toBeInTheDocument();
     expect(screen.getByText(/Offline node/)).toBeInTheDocument();
     expect(screen.getByText("Matches this documented Barista release")).toBeInTheDocument();
-    expect(screen.getByText(/--permission-mode auto/)).toBeInTheDocument();
+    expect(screen.queryByText(/--permission-mode auto/)).not.toBeInTheDocument();
     expect(screen.getByText(/protocol identity is not executable/)).toBeInTheDocument();
-    expect(screen.getByText("Unrecognized / not verified")).toBeInTheDocument();
+    expect(screen.getAllByText("Unrecognized / not verified")).toHaveLength(2);
     expect(screen.getByText("/srv/workspaces")).toBeInTheDocument();
     expect(screen.getByText(/neither provider token/)).toBeInTheDocument();
     fireEvent.keyDown(document, { key: "Escape" });
@@ -75,6 +75,24 @@ describe("execution policy review", () => {
     fireEvent.click(screen.getByRole("button", { name: "Review" }));
     expect(screen.getByText(/Current-release flags are withheld/)).toBeInTheDocument();
     expect(screen.queryByText(/--permission-mode auto/)).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ["stale connection", "reconnecting" as const, "online" as const],
+    ["offline node", "connected" as const, "offline" as const]
+  ])("withholds positive qualification for a %s", (_scenario, connection, status) => {
+    render(<SettingsView connection={connection} nodes={[{ ...node, status, harnesses: [node.harnesses[0]] }]} generatedAt="now" />);
+    fireEvent.click(screen.getByRole("button", { name: "Review" }));
+    expect(screen.getByText("Unrecognized / not verified")).toBeInTheDocument();
+    expect(screen.queryByText("Documented for matching release")).not.toBeInTheDocument();
+    expect(screen.queryByText(/--permission-mode auto/)).not.toBeInTheDocument();
+  });
+
+  it("shows documented flags only for a fresh available matching report", () => {
+    render(<SettingsView connection="connected" nodes={[{ ...node, status: "online", harnesses: [node.harnesses[0]] }]} generatedAt="now" />);
+    fireEvent.click(screen.getByRole("button", { name: "Review" }));
+    expect(screen.getByText("Documented for matching release")).toBeInTheDocument();
+    expect(screen.getByText(/--permission-mode auto/)).toBeInTheDocument();
   });
 
   it("fails closed for cross-paired Claude and Codex authentication reports", () => {

@@ -7,10 +7,11 @@ import { isDocumentedHarnessAuthPair, releaseMatch, runtimeAuthModePolicy, runti
 
 const documentedVersion = import.meta.env.VITE_BARISTA_VERSION?.trim() || "dev";
 
-function PolicyQualification({ harness, versionMatches }: { harness: HarnessProfile; versionMatches: boolean }) {
+function PolicyQualification({ harness, versionMatches, reportFresh }: { harness: HarnessProfile; versionMatches: boolean; reportFresh: boolean }) {
   const harnessCopy = runtimeHarnessPolicy(harness?.id);
   const authCopy = runtimeAuthModePolicy(harness?.authMode);
-  const verified = versionMatches
+  const verified = reportFresh
+    && versionMatches
     && harness?.available === true
     && harnessCopy.verified
     && authCopy.verified
@@ -21,7 +22,7 @@ function PolicyQualification({ harness, versionMatches }: { harness: HarnessProf
       <p>{harnessCopy.detail}</p>
       <p>{authCopy.detail}</p>
       {verified && harnessCopy.documentedFlags && <div><Provenance kind="documented" /><code>{harnessCopy.documentedFlags}</code></div>}
-      {!verified && harnessCopy.documentedFlags && <p>Current-release flags are withheld because this report is unavailable, mismatched, or unrecognized.</p>}
+      {!verified && harnessCopy.documentedFlags && <p>Current-release flags are withheld because this report is unavailable, stale, mismatched, or unrecognized.</p>}
     </div>
   );
 }
@@ -62,7 +63,7 @@ export function ExecutionPolicyDialog({ nodes, connection, generatedAt, onClose 
             <div className="experience-section-heading"><h4>Node configuration</h4><Provenance kind="reported" /></div>
             <NodeFacts node={node} statusProvenance="observed" />
             <div className="experience-section-heading"><h4>Harness configuration</h4><Provenance kind="reported" /></div>
-            <HarnessList harnesses={node.harnesses}>{(harness) => <PolicyQualification harness={harness} versionMatches={match.matches} />}</HarnessList>
+            <HarnessList harnesses={node.harnesses}>{(harness) => <PolicyQualification harness={harness} versionMatches={match.matches} reportFresh={!stale && node.status !== "offline"} />}</HarnessList>
           </section>
         );
       })}
