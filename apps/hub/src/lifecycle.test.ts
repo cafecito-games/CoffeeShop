@@ -104,6 +104,29 @@ test("persisted cancellation finishes before best-effort delivery and works disc
   assert.equal(store.snapshot().events.length, 1);
 });
 
+test("persistence failure rolls cancellation back and leaves delivery retryable", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "coffee-shop-cancel-"));
+  const store = new Store(join(directory, "state.json"));
+  await store.load();
+  await store.transact((current) => Object.assign(current, state("running")));
+  const before = store.snapshot();
+  const mutableStore = store as unknown as { save: () => Promise<void> };
+  const save = mutableStore.save.bind(store);
+  mutableStore.save = async () => { throw new Error("disk full"); };
+  let deliveries = 0;
+
+  await assert.rejects(cancelPersistedRun(store, "run-one", () => { deliveries += 1; return true; }, at), /disk full/);
+  assert.equal(deliveries, 0);
+  const { generatedAt: _beforeGeneratedAt, ...stateBefore } = before;
+  const { generatedAt: _afterGeneratedAt, ...stateAfter } = store.snapshot();
+  assert.deepEqual(stateAfter, stateBefore);
+
+  mutableStore.save = save;
+  const retried = await cancelPersistedRun(store, "run-one", () => { deliveries += 1; return true; }, at);
+  assert.equal(retried.kind, "cancelled");
+  assert.equal(deliveries, 1);
+});
+
 test("late lifecycle messages and duplicate acknowledgements cannot change a cancelled run", () => {
   for (const message of [
     { type: "run.started", runId: "run-one", at },

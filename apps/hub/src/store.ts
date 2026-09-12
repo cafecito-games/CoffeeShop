@@ -101,17 +101,19 @@ export class Store {
 
   async transact(change: (state: State) => unknown) {
     const transaction = this.transactionQueue.then(async () => {
-      if (change(this.state) === false) return;
-      await this.save();
+      const next = structuredClone(this.state);
+      if (change(next) === false) return;
+      await this.save(next);
+      this.state = next;
     });
     this.transactionQueue = transaction.catch(() => undefined);
     return transaction;
   }
 
-  private async save() {
+  private async save(state = this.state) {
     await mkdir(dirname(this.path), { recursive: true });
     const temporary = `${this.path}.${process.pid}.tmp`;
-    await writeFile(temporary, JSON.stringify(this.state, null, 2));
+    await writeFile(temporary, JSON.stringify(state, null, 2));
     await rename(temporary, this.path);
   }
 }
