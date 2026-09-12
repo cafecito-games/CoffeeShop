@@ -198,6 +198,7 @@ export class HubConnection {
 
   private readonly onOffline = () => {
     if (!this.started) return;
+    if (this.status === "authentication-required") return;
     this.generation += 1;
     this.clearResources();
     this.status = "disconnected";
@@ -206,6 +207,7 @@ export class HubConnection {
 
   private readonly onOnline = () => {
     if (!this.started) return;
+    if (this.status === "authentication-required") return;
     this.attempt();
   };
 

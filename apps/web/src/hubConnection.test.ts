@@ -129,13 +129,21 @@ describe("HubConnection", () => {
   });
 
   it("distinguishes a REST 401 from a transient fetch failure", async () => {
-    const unauthorized = harness(async () => response(401, {}));
+    const unauthorizedFetch = vi.fn(async () => response(401, {}));
+    const unauthorized = harness(unauthorizedFetch);
     const unauthorizedStates: ConnectionView[] = [];
     const unauthorizedConnection = new HubConnection("bad", unauthorized.environment, (state) => unauthorizedStates.push(state));
     unauthorizedConnection.start();
     await flush();
     expect(unauthorizedStates.at(-1)?.status).toBe("authentication-required");
     expect(unauthorized.timers.size).toBe(0);
+    unauthorized.setOnline(false);
+    unauthorized.dispatch("offline");
+    unauthorized.setOnline(true);
+    unauthorized.dispatch("online");
+    await flush();
+    expect(unauthorizedStates.at(-1)?.status).toBe("authentication-required");
+    expect(unauthorizedFetch).toHaveBeenCalledOnce();
 
     const unavailable = harness(async () => { throw new TypeError("network"); });
     const unavailableStates: ConnectionView[] = [];
