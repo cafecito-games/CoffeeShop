@@ -463,6 +463,9 @@ button:disabled, textarea:disabled, fieldset:disabled button { cursor: not-allow
   .node-row { grid-template-columns: 38px minmax(0,1fr); }
   .node-arrow { display: none; }
   .worker-callout code { display: block; width: max-content; margin: 7px 0 0; }
+  .setup-steps, .onboarding-fields { grid-template-columns: 1fr; }
+  .command-preview { grid-template-columns: 1fr; }
+  .command-preview button { justify-content: center; }
 }
 
 @media (max-width: 520px) {
@@ -473,12 +476,9 @@ button:disabled, textarea:disabled, fieldset:disabled button { cursor: not-allow
   .run-dialog { max-height: calc(100dvh - 24px); padding: 18px; padding-bottom: calc(18px + env(safe-area-inset-bottom)); }
   .experience-dialog { max-height: calc(100dvh - 24px); padding: 16px; padding-bottom: calc(16px + env(safe-area-inset-bottom)); }
   .policy-dialog { width: min(94vw,760px); height: calc(100dvh - 24px); }
-  .fact-grid, .onboarding-fields { grid-template-columns: 1fr; }
-  .setup-steps { grid-template-columns: 1fr; }
+  .fact-grid { grid-template-columns: 1fr; }
   .kind-picker > div { grid-template-columns: 1fr; }
   .harness-report > dl { grid-template-columns: 1fr; }
-  .command-preview { grid-template-columns: 1fr; }
-  .command-preview button { justify-content: center; }
   .run-details { grid-template-columns: 1fr; }
   .cancel-confirm { width: 100%; flex-wrap: wrap; justify-content: flex-end; }
   .cancel-confirm span { width: 100%; text-align: right; }
