@@ -6,7 +6,7 @@ import cors from "cors";
 import express from "express";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
 import { type Agent, type ComputeNode, type ControlAgentToHub, type HubToControlAgent, type Run } from "@coffee-shop/protocol";
-import { createConfiguredAgent, updateConfiguredAgent } from "./agentConfiguration.js";
+import { createConfiguredAgent, markDisconnectedNodesOffline, updateConfiguredAgent } from "./agentConfiguration.js";
 import { applyRunLifecycle, cancelPersistedRun, queuedRunsForNode, retryAsync, serializeAsync } from "./lifecycle.js";
 import { newEvent, newId, newMessage, Store } from "./store.js";
 
@@ -79,7 +79,7 @@ app.get("/api/snapshot", (_req, res) => res.json(store.snapshot()));
 app.post("/api/agents", async (req, res) => {
   let result: ReturnType<typeof createConfiguredAgent> | undefined;
   await store.transact((state) => {
-    result = createConfiguredAgent(state, req.body, new Date().toISOString(), (name) => {
+    result = createConfiguredAgent(state, req.body, new Date().toISOString(), controlAgents, (name) => {
       const baseId = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "agent";
       return state.agents.some((agent) => agent.id === baseId) ? `${baseId}-${Math.random().toString(36).slice(2, 6)}` : baseId;
     });
@@ -117,7 +117,7 @@ app.post("/api/handoffs", async (req, res) => {
 app.patch("/api/agents/:id", async (req, res) => {
   let result: ReturnType<typeof updateConfiguredAgent> | undefined;
   await store.transact((state) => {
-    result = updateConfiguredAgent(state, req.params.id, req.body, new Date().toISOString());
+    result = updateConfiguredAgent(state, req.params.id, req.body, new Date().toISOString(), controlAgents);
     if (!result.ok || !result.changed) return false;
   });
   if (!result?.ok) return res.status(result?.kind === "not-found" ? 404 : 400).json({ error: result?.error ?? "Invalid agent configuration" });
@@ -248,4 +248,5 @@ wss.on("connection", (socket, request) => {
 });
 
 await store.load();
+await store.transact((state) => markDisconnectedNodesOffline(state, controlAgents) || false);
 server.listen(port, "0.0.0.0", () => console.log(`Coffee Shop hub listening on http://localhost:${port}`));

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { Agent, ComputeNode, Run } from "@coffee-shop/protocol";
-import { createConfiguredAgent, updateConfiguredAgent, type AgentConfigurationState } from "./agentConfiguration.js";
+import { createConfiguredAgent, markDisconnectedNodesOffline, updateConfiguredAgent, type AgentConfigurationState } from "./agentConfiguration.js";
 
 const node = (overrides: Partial<ComputeNode> = {}): ComputeNode => ({
   id: "node-one",
@@ -63,6 +63,10 @@ function state(nodes = [node()]): AgentConfigurationState {
   };
 }
 
+function connected(current: AgentConfigurationState) {
+  return new Set(current.nodes.filter((item) => item.status !== "offline").map((item) => item.id));
+}
+
 const createInput = {
   name: " Scout ",
   title: " Researcher ",
@@ -78,7 +82,7 @@ const createInput = {
 
 test("creates a normalized agent from a node-advertised configuration", () => {
   const current = state();
-  const result = createConfiguredAgent(current, createInput, "2026-02-01T00:00:00Z", () => "scout");
+  const result = createConfiguredAgent(current, createInput, "2026-02-01T00:00:00Z", connected(current), () => "scout");
   assert.equal(result.ok, true);
   if (!result.ok) return;
   assert.deepEqual(result.agent, {
@@ -122,7 +126,7 @@ test("fails closed for malformed or unadvertised creation fields", () => {
 
   for (const [label, current, input] of cases) {
     const before = structuredClone(current);
-    const result = createConfiguredAgent(current, input, "2026-02-01T00:00:00Z", () => "scout");
+    const result = createConfiguredAgent(current, input, "2026-02-01T00:00:00Z", connected(current), () => "scout");
     assert.equal(result.ok, false, label);
     assert.deepEqual(current, before, label);
   }
@@ -130,7 +134,7 @@ test("fails closed for malformed or unadvertised creation fields", () => {
 
 test("allows only provider default when a profile advertises no models", () => {
   const current = state();
-  const result = createConfiguredAgent(current, { ...createInput, harnessId: "shell", model: "default" }, "2026-02-01T00:00:00Z", () => "scout");
+  const result = createConfiguredAgent(current, { ...createInput, harnessId: "shell", model: "default" }, "2026-02-01T00:00:00Z", connected(current), () => "scout");
   assert.equal(result.ok, true);
 });
 
@@ -140,7 +144,7 @@ test("validates the final combined PATCH atomically and preserves every run snap
     node({ id: "node-two", workspaceRoots: ["/other"], harnesses: [{ id: "shell", label: "Shell", description: "Shell", available: true, authMode: "none", models: [] }] })
   ]);
   const before = structuredClone(current);
-  const result = updateConfiguredAgent(current, "milo", { computeNodeId: "node-two" }, "2026-02-01T00:00:00Z");
+  const result = updateConfiguredAgent(current, "milo", { computeNodeId: "node-two" }, "2026-02-01T00:00:00Z", connected(current));
   assert.equal(result.ok, false);
   assert.deepEqual(current, before);
 
@@ -154,7 +158,7 @@ test("validates the final combined PATCH atomically and preserves every run snap
     model: "default",
     workspace: "/other/project",
     systemPrompt: "Coordinate carefully."
-  }, "2026-02-01T00:00:00Z");
+  }, "2026-02-01T00:00:00Z", connected(current));
   assert.equal(valid.ok, true);
   if (!valid.ok) return;
   assert.equal(valid.changed, true);
@@ -167,15 +171,15 @@ test("rejects unknown/non-string PATCH fields and treats a replay as a no-op", (
   for (const patch of [{ title: null }, { state: "working" }]) {
     const current = state();
     const before = structuredClone(current);
-    const result = updateConfiguredAgent(current, "milo", patch, "2026-02-01T00:00:00Z");
+    const result = updateConfiguredAgent(current, "milo", patch, "2026-02-01T00:00:00Z", connected(current));
     assert.equal(result.ok, false);
     assert.deepEqual(current, before);
   }
 
   const current = state();
-  const first = updateConfiguredAgent(current, "milo", { title: "Architect" }, "2026-02-01T00:00:00Z");
+  const first = updateConfiguredAgent(current, "milo", { title: "Architect" }, "2026-02-01T00:00:00Z", connected(current));
   const afterFirst = structuredClone(current);
-  const replay = updateConfiguredAgent(current, "milo", { title: "Architect" }, "2026-02-02T00:00:00Z");
+  const replay = updateConfiguredAgent(current, "milo", { title: "Architect" }, "2026-02-02T00:00:00Z", connected(current));
   assert.equal(first.ok && first.changed, true);
   assert.equal(replay.ok && replay.changed, false);
   assert.deepEqual(current, afterFirst);
@@ -184,6 +188,23 @@ test("rejects unknown/non-string PATCH fields and treats a replay as a no-op", (
 test("distinguishes a missing agent without mutating state", () => {
   const current = state();
   const before = structuredClone(current);
-  assert.deepEqual(updateConfiguredAgent(current, "gone", { title: "Nope" }, "now"), { ok: false, kind: "not-found", error: "Agent not found" });
+  assert.deepEqual(updateConfiguredAgent(current, "gone", { title: "Nope" }, "now", connected(current)), { ok: false, kind: "not-found", error: "Agent not found" });
   assert.deepEqual(current, before);
+});
+
+test("fails closed after restart when persisted online nodes have no live connection", () => {
+  const current = state([node({ status: "online", activeRuns: 2 })]);
+  const runs = structuredClone(current.runs);
+  assert.equal(markDisconnectedNodesOffline(current, new Set()), true);
+  assert.equal(current.nodes[0].status, "offline");
+  assert.equal(current.nodes[0].activeRuns, 0);
+
+  const beforeCreate = structuredClone(current);
+  const created = createConfiguredAgent(current, createInput, "later", new Set(), () => "scout");
+  assert.equal(created.ok, false);
+  assert.deepEqual(current, beforeCreate);
+  const updated = updateConfiguredAgent(current, "milo", { title: "Changed" }, "later", new Set());
+  assert.equal(updated.ok, false);
+  assert.deepEqual(current.runs, runs);
+  assert.equal(current.agents[0].title, "Builder");
 });

@@ -16,6 +16,10 @@ export interface AgentConfigurationState {
   runs: Run[];
 }
 
+interface ConnectedNodeLookup {
+  has(id: string): boolean;
+}
+
 type EditableAgentConfiguration = Pick<Agent,
   "name" | "title" | "summary" | "harnessId" | "model" | "computeNodeId" |
   "workspace" | "systemPrompt" | "avatarShape" | "avatarColor" | "glyph">;
@@ -45,7 +49,7 @@ function isWorkspaceWithinRoot(workspace: string, root: string) {
   return relative === "" || (relative !== ".." && !relative.startsWith(`..${paths.sep}`) && !paths.isAbsolute(relative));
 }
 
-function validateConfiguration(body: unknown, nodes: readonly ComputeNode[], existing?: Agent):
+function validateConfiguration(body: unknown, nodes: readonly ComputeNode[], connectedNodeIds: ConnectedNodeLookup, existing?: Agent):
   { ok: true; configuration: EditableAgentConfiguration; node: ComputeNode } | ConfigurationFailure {
   if (!isRecord(body)) return invalid("Request body must be an object");
   const unknown = Object.keys(body).find((key) => !editableKeySet.has(key));
@@ -87,7 +91,7 @@ function validateConfiguration(body: unknown, nodes: readonly ComputeNode[], exi
 
   const node = nodes.find((item) => item.id === computeNodeId);
   if (!node) return invalid("Select a compute node that is still available");
-  if (node.status === "offline") return invalid("Select a compute node that is online and not stale");
+  if (node.status === "offline" || !connectedNodeIds.has(node.id)) return invalid("Select a compute node that is online and not stale");
   const harness = node.harnesses.find((item) => item.id === harnessId && item.available);
   if (!harness) return invalid("Select a harness advertised as available by the compute node");
   if (harness.models.length ? !harness.models.includes(model) : model !== "default") {
@@ -128,9 +132,10 @@ export function createConfiguredAgent(
   state: AgentConfigurationState,
   body: unknown,
   now: string,
+  connectedNodeIds: ConnectedNodeLookup,
   createId: (name: string) => string
 ): CreateResult {
-  const validated = validateConfiguration(body, state.nodes);
+  const validated = validateConfiguration(body, state.nodes, connectedNodeIds);
   if (!validated.ok) return validated;
   const agent: Agent = {
     id: createId(validated.configuration.name),
@@ -148,15 +153,27 @@ export function updateConfiguredAgent(
   state: AgentConfigurationState,
   id: string,
   body: unknown,
-  now: string
+  now: string,
+  connectedNodeIds: ConnectedNodeLookup
 ): UpdateResult {
   const agent = state.agents.find((item) => item.id === id);
   if (!agent) return { ok: false, kind: "not-found", error: "Agent not found" };
-  const validated = validateConfiguration(body, state.nodes, agent);
+  const validated = validateConfiguration(body, state.nodes, connectedNodeIds, agent);
   if (!validated.ok) return validated;
   if (!configurationChanged(agent, validated.configuration)) {
     return { ok: true, agent, node: validated.node, changed: false };
   }
   Object.assign(agent, validated.configuration, { updatedAt: now });
   return { ok: true, agent, node: validated.node, changed: true };
+}
+
+export function markDisconnectedNodesOffline(state: Pick<AgentConfigurationState, "nodes">, connectedNodeIds: ConnectedNodeLookup) {
+  let changed = false;
+  for (const node of state.nodes) {
+    if (connectedNodeIds.has(node.id)) continue;
+    if (node.status !== "offline" || node.activeRuns !== 0) changed = true;
+    node.status = "offline";
+    node.activeRuns = 0;
+  }
+  return changed;
 }
