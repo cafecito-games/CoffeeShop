@@ -62,4 +62,18 @@ describe("execution policy review", () => {
     expect(screen.getByText("No Baristas registered")).toBeInTheDocument();
     expect(screen.getByText(/Snapshot generated second/)).toBeInTheDocument();
   });
+
+  it("withholds positive qualification and current flags for unavailable or mismatched harnesses", () => {
+    const unavailable = { ...node, status: "online" as const, harnesses: [{ ...node.harnesses[0], available: false }] };
+    const first = render(<SettingsView connection="connected" nodes={[unavailable]} generatedAt="now" />);
+    fireEvent.click(screen.getByRole("button", { name: "Review" }));
+    expect(screen.getByText("Unrecognized / not verified")).toBeInTheDocument();
+    expect(screen.queryByText("Documented for matching release")).not.toBeInTheDocument();
+    first.unmount();
+
+    render(<SettingsView connection="connected" nodes={[{ ...node, status: "online", version: "0.0.9" }]} generatedAt="now" />);
+    fireEvent.click(screen.getByRole("button", { name: "Review" }));
+    expect(screen.getByText(/Current-release flags are withheld/)).toBeInTheDocument();
+    expect(screen.queryByText(/--permission-mode auto/)).not.toBeInTheDocument();
+  });
 });

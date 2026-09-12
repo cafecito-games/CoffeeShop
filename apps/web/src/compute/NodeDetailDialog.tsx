@@ -4,10 +4,11 @@ import { AccessibleDialog } from "../AccessibleDialog.js";
 import { HarnessList, NodeFacts, Provenance } from "./ComputeFacts.js";
 
 export function NodeDetailDialog({ selectedNodeId, node, onClose }: { selectedNodeId: string; node?: ComputeNode; onClose: () => void }) {
+  const title = node && typeof node.name === "string" && node.name.trim() ? node.name : node ? "Unnamed compute" : "Compute unavailable";
   return (
     <AccessibleDialog labelledBy="node-detail-title" onClose={onClose} className="experience-dialog node-detail-dialog">
       <header className="experience-header">
-        <div><small>Compute inventory</small><h2 id="node-detail-title">{node?.name ?? "Compute unavailable"}</h2></div>
+        <div><small>Compute inventory</small><h2 id="node-detail-title">{title}</h2></div>
         <button className="icon-btn" onClick={onClose} aria-label="Close compute details" data-dialog-initial-focus><X size={17} /></button>
       </header>
       {!node ? (

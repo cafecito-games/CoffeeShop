@@ -67,6 +67,12 @@ describe("compute experience", () => {
     await userEvent.tab();
   });
 
+  it("keeps an accessible dialog name when a structurally valid node name is empty", () => {
+    render(<ComputeView nodes={[{ ...node, name: "" }]} />);
+    fireEvent.click(screen.getByRole("button", { name: "View unnamed compute details" }));
+    expect(screen.getByRole("dialog")).toHaveAccessibleName("Unnamed compute");
+  });
+
   it("generates and copies a safe complete command without exposing browser secrets", async () => {
     render(<ComputeView nodes={[node]} />);
     const trigger = screen.getByRole("button", { name: "Add compute" });

@@ -10,13 +10,14 @@ const documentedVersion = import.meta.env.VITE_BARISTA_VERSION?.trim() || "dev";
 function PolicyQualification({ harness, versionMatches }: { harness: HarnessProfile; versionMatches: boolean }) {
   const harnessCopy = runtimeHarnessPolicy(harness?.id);
   const authCopy = runtimeAuthModePolicy(harness?.authMode);
-  const verified = versionMatches && harnessCopy.verified && authCopy.verified;
+  const verified = versionMatches && harness?.available === true && harnessCopy.verified && authCopy.verified;
   return (
     <div className={`policy-qualification ${verified ? "verified" : "not-verified"}`}>
       <strong>{verified ? <ShieldCheck size={14} /> : <WarningCircle size={14} />}{verified ? "Documented for matching release" : "Unrecognized / not verified"}</strong>
       <p>{harnessCopy.detail}</p>
       <p>{authCopy.detail}</p>
-      {harnessCopy.documentedFlags && <div><Provenance kind="documented" /><code>{harnessCopy.documentedFlags}</code></div>}
+      {versionMatches && harnessCopy.documentedFlags && <div><Provenance kind="documented" /><code>{harnessCopy.documentedFlags}</code></div>}
+      {!versionMatches && harnessCopy.documentedFlags && <p>Current-release flags are withheld because this worker version does not match.</p>}
     </div>
   );
 }

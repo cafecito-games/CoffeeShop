@@ -61,7 +61,7 @@ export function releaseMatch(reportedVersion: unknown, documentedVersion: string
   if (typeof reportedVersion !== "string" || !reportedVersion.trim()) {
     return { matches: false, label: "Version unavailable; effective policy is not verified" };
   }
-  if (reportedVersion === documentedVersion) {
+  if (reportedVersion === documentedVersion || documentedVersion !== "dev" && reportedVersion.startsWith(`${documentedVersion}+`)) {
     return { matches: true, label: "Matches this documented Barista release" };
   }
   return { matches: false, label: "Version differs; effective policy is not verified" };

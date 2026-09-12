@@ -3,8 +3,9 @@ version: "3"
 dotenv: [".env"]
 
 vars:
+  COFFEE_SHOP_VERSION: 0.1.0
   BARISTA_VERSION:
-    sh: git describe --tags --always --dirty
+    sh: echo "{{.COFFEE_SHOP_VERSION}}+$(git describe --tags --always --dirty)"
 
 tasks:
   default:

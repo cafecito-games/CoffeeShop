@@ -6,7 +6,7 @@ COPY apps ./apps
 COPY packages ./packages
 RUN pnpm install --frozen-lockfile=false
 RUN pnpm --filter @coffee-shop/protocol build \
- && pnpm --filter @coffee-shop/web build \
+ && VITE_BARISTA_VERSION="$(node -p "require('./package.json').version")" pnpm --filter @coffee-shop/web build \
  && pnpm --filter @coffee-shop/hub build
 
 FROM node:24-slim
