@@ -4,16 +4,15 @@
   "private": true,
   "packageManager": "pnpm@10.16.1",
   "scripts": {
-    "build": "pnpm -r build",
-    "dev": "pnpm --filter @coffee-shop/protocol build && concurrently -n hub,web -c yellow,cyan \"pnpm --filter @coffee-shop/hub dev\" \"pnpm --filter @coffee-shop/web dev\"",
-    "dev:full": "pnpm --filter @coffee-shop/protocol build && concurrently -n hub,web,worker -c yellow,cyan,magenta \"pnpm --filter @coffee-shop/hub dev\" \"pnpm --filter @coffee-shop/web dev\" \"pnpm --filter @coffee-shop/worker dev\"",
+    "build": "task build",
+    "dev": "task dev",
+    "dev:full": "task dev:full",
     "start": "pnpm --filter @coffee-shop/hub start",
-    "worker": "pnpm --filter @coffee-shop/protocol build && pnpm --filter @coffee-shop/worker build && pnpm --filter @coffee-shop/worker start",
+    "control-agent": "task control-agent:run",
     "typecheck": "pnpm -r typecheck",
-    "test": "pnpm -r test"
+    "test": "task test"
   },
   "devDependencies": {
-    "concurrently": "^9.2.1",
     "typescript": "^5.9.2"
   }
 }

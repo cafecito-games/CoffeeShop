@@ -1,0 +1,188 @@
+version: "3"
+
+dotenv: [".env"]
+
+vars:
+  BARISTA_VERSION:
+    sh: git describe --tags --always --dirty
+
+tasks:
+  default:
+    desc: List available tasks
+    cmds:
+      - task --list
+
+  install:
+    desc: Install JavaScript workspace dependencies
+    cmds:
+      - pnpm install
+
+  dev:
+    desc: Run the Coffee Shop control plane and frontend
+    deps: [protocol:build]
+    cmds:
+      - task --parallel control-plane:dev frontend:dev
+
+  dev:full:
+    desc: Run the control plane, frontend, and a local Barista
+    deps: [protocol:build]
+    cmds:
+      - task --parallel control-plane:dev frontend:dev control-agent:run
+
+  build:
+    desc: Build every product in the repository
+    cmds:
+      - task: protocol:build
+      - task: control-plane:build
+      - task: frontend:build
+      - task: control-agent:build
+
+  test:
+    desc: Run every test suite
+    cmds:
+      - pnpm -r test
+      - task: control-agent:test
+
+  typecheck:
+    desc: Type-check every TypeScript workspace
+    cmds:
+      - pnpm -r typecheck
+
+  lint:
+    desc: Run static checks across languages
+    cmds:
+      - task: control-agent:lint
+      - git diff --check
+
+  fmt:
+    desc: Format Go source files
+    cmds:
+      - task: control-agent:fmt
+
+  fmt:check:
+    desc: Verify Go source formatting
+    cmds:
+      - task: control-agent:fmt:check
+
+  ci:
+    desc: Run the local CI pipeline
+    cmds:
+      - task: fmt:check
+      - task: test
+      - task: typecheck
+      - task: lint
+      - task: build
+
+  protocol:build:
+    desc: Build shared TypeScript contracts
+    sources:
+      - packages/protocol/src/**/*.ts
+      - packages/protocol/tsconfig.json
+    generates:
+      - packages/protocol/dist/**/*.js
+    cmds:
+      - pnpm --filter @coffee-shop/protocol build
+
+  frontend:dev:
+    desc: Run the Vite frontend with reload
+    deps: [protocol:build]
+    cmds:
+      - pnpm --filter @coffee-shop/web dev
+
+  frontend:build:
+    desc: Build the production frontend
+    deps: [protocol:build]
+    cmds:
+      - pnpm --filter @coffee-shop/web build
+
+  frontend:test:
+    desc: Run frontend tests
+    cmds:
+      - pnpm --filter @coffee-shop/web test
+
+  frontend:typecheck:
+    desc: Type-check the frontend
+    cmds:
+      - pnpm --filter @coffee-shop/web typecheck
+
+  control-plane:dev:
+    desc: Run the Coffee Shop hub with reload
+    deps: [protocol:build]
+    cmds:
+      - pnpm --filter @coffee-shop/hub dev
+
+  control-plane:build:
+    desc: Build the Coffee Shop hub
+    deps: [protocol:build]
+    cmds:
+      - pnpm --filter @coffee-shop/hub build
+
+  control-plane:run:
+    desc: Run the built Coffee Shop hub
+    cmds:
+      - pnpm --filter @coffee-shop/hub start
+
+  control-plane:test:
+    desc: Run control-plane tests
+    cmds:
+      - pnpm --filter @coffee-shop/hub test
+
+  control-plane:typecheck:
+    desc: Type-check the control plane
+    cmds:
+      - pnpm --filter @coffee-shop/hub typecheck
+
+  control-agent:run:
+    desc: Run Barista from source; append flags after --
+    dir: apps/control-agent
+    cmds:
+      - go run ./cmd/barista {{.CLI_ARGS}}
+
+  control-agent:build:
+    desc: Build the portable Barista binary for this platform
+    dir: apps/control-agent
+    cmds:
+      - mkdir -p ../../bin
+      - go build -trimpath -ldflags "-s -w -X main.version={{.BARISTA_VERSION}}" -o ../../bin/barista ./cmd/barista
+
+  control-agent:build:all:
+    desc: Cross-compile Barista release binaries
+    dir: apps/control-agent
+    cmds:
+      - mkdir -p ../../dist/barista
+      - GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w -X main.version={{.BARISTA_VERSION}}" -o ../../dist/barista/barista-linux-amd64 ./cmd/barista
+      - GOOS=linux GOARCH=arm64 go build -trimpath -ldflags "-s -w -X main.version={{.BARISTA_VERSION}}" -o ../../dist/barista/barista-linux-arm64 ./cmd/barista
+      - GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags "-s -w -X main.version={{.BARISTA_VERSION}}" -o ../../dist/barista/barista-darwin-amd64 ./cmd/barista
+      - GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags "-s -w -X main.version={{.BARISTA_VERSION}}" -o ../../dist/barista/barista-darwin-arm64 ./cmd/barista
+      - GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-s -w -X main.version={{.BARISTA_VERSION}}" -o ../../dist/barista/barista-windows-amd64.exe ./cmd/barista
+
+  control-agent:test:
+    desc: Run Barista tests
+    dir: apps/control-agent
+    cmds:
+      - go test ./...
+
+  control-agent:lint:
+    desc: Vet Barista packages
+    dir: apps/control-agent
+    cmds:
+      - go vet ./...
+
+  control-agent:fmt:
+    desc: Format Barista source files
+    dir: apps/control-agent
+    cmds:
+      - gofmt -w .
+
+  control-agent:fmt:check:
+    desc: Verify Barista source formatting
+    dir: apps/control-agent
+    cmds:
+      - |
+        unformatted="$(gofmt -l .)"
+        if [ -n "$unformatted" ]; then
+          echo "Unformatted files:"
+          echo "$unformatted"
+          exit 1
+        fi
+    silent: true
