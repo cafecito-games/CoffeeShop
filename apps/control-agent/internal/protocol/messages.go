@@ -2,7 +2,7 @@ package protocol
 
 import "encoding/json"
 
-const Version = "1"
+const Version = "2"
 
 type HarnessProfile struct {
 	ID          string   `json:"id"`
@@ -55,6 +55,7 @@ type Outbound struct {
 	Node            *ComputeNode `json:"node,omitempty"`
 	NodeID          string       `json:"nodeId,omitempty"`
 	ActiveRuns      int          `json:"activeRuns"`
+	ActiveRunIDs    []string     `json:"activeRunIds,omitempty"`
 	RunID           string       `json:"runId,omitempty"`
 	Chunk           string       `json:"chunk,omitempty"`
 	Output          string       `json:"output,omitempty"`

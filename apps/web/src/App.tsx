@@ -4,7 +4,8 @@ import {
   Coffee, Cpu, Desktop, Gear, HouseLine, Laptop, MagnifyingGlass, PaperPlaneTilt, Plus,
   Robot, SlidersHorizontal, TerminalWindow, UsersThree, WarningCircle, X, LockKey
 } from "@phosphor-icons/react";
-import type { Agent, AgentAvatarColor, AgentAvatarShape, AgentState, ChatMessage, ComputeNode, TimelineEvent } from "@coffee-shop/protocol";
+import { isActiveRunStatus, type Agent, type AgentAvatarColor, type AgentAvatarShape, type AgentState, type ChatMessage, type ComputeNode, type Run, type RunStatus, type TimelineEvent } from "@coffee-shop/protocol";
+import { AccessibleDialog } from "./AccessibleDialog.js";
 import { AvatarPicker, CoffeeAvatar } from "./CoffeeAvatar.js";
 import { useHubConnection, type ConnectionStatus } from "./hubConnection.js";
 
@@ -85,9 +86,9 @@ function EmptyAgents({ agents, onSelect, onCreate, canMutate }: { agents: Agent[
   );
 }
 
-function Chat({ agent, messages, nodes, sending, onBack, onSend, onInspector, canMutate }: {
+function Chat({ agent, messages, nodes, sending, onBack, onSend, onInspector, onInspectRun, canMutate }: {
   agent: Agent; messages: ChatMessage[]; nodes: ComputeNode[]; sending: boolean;
-  onBack: () => void; onSend: (body: string) => Promise<void>; onInspector: () => void; canMutate: boolean;
+  onBack: () => void; onSend: (body: string) => Promise<void>; onInspector: () => void; onInspectRun: (id: string) => void; canMutate: boolean;
 }) {
   const [body, setBody] = useState("");
   const endRef = useRef<HTMLDivElement>(null);
@@ -105,7 +106,7 @@ function Chat({ agent, messages, nodes, sending, onBack, onSend, onInspector, ca
       <div className="chat-scroll">
         <div className="agent-intro"><Avatar agent={agent} size="lg" /><h1>{agent.name}</h1><p>{agent.title}</p><small>{agent.summary}</small></div>
         <div className="messages">
-          {messages.map((message) => <Message key={message.id} message={message} agent={agent} />)}
+          {messages.map((message) => <Message key={message.id} message={message} agent={agent} onInspectRun={onInspectRun} />)}
           {sending && <div className="message agent-message pending"><div className="message-meta"><strong>{agent.name}</strong><span>now</span></div><p><CircleNotch className="spin" size={14} /> Dispatching to {node?.name ?? agent.computeNodeId}…</p></div>}
           <div ref={endRef} />
         </div>
@@ -118,14 +119,14 @@ function Chat({ agent, messages, nodes, sending, onBack, onSend, onInspector, ca
   );
 }
 
-function Message({ message, agent }: { message: ChatMessage; agent: Agent }) {
+function Message({ message, agent, onInspectRun }: { message: ChatMessage; agent: Agent; onInspectRun: (id: string) => void }) {
   if (message.kind === "handoff") return <div className="handoff-message"><UsersThree size={17} /><div><strong>Agent handoff</strong><p>{message.body}</p></div><time>{timeAgo(message.createdAt)}</time></div>;
   if (message.author === "system") return <div className="system-message"><WarningCircle size={15} />{message.body}</div>;
   return (
     <article className={`message ${message.author === "you" ? "user-message" : "agent-message"}`}>
       <div className="message-meta"><strong>{message.author === "you" ? "You" : agent.name}</strong><span>{timeAgo(message.createdAt)}</span></div>
       <p>{message.body}</p>
-      {message.runId && <button className="run-link"><TerminalWindow size={14} /> Inspect run</button>}
+      {message.runId && <button className="run-link" onClick={() => onInspectRun(message.runId!)}><TerminalWindow size={14} /> Inspect run</button>}
     </article>
   );
 }
@@ -162,9 +163,85 @@ function Inspector({ agent, nodes, open, onClose, onUpdate, canMutate }: { agent
   );
 }
 
-function ActivityView({ events, agents }: { events: TimelineEvent[]; agents: Agent[] }) {
+function ActivityView({ events, agents, onInspectRun }: { events: TimelineEvent[]; agents: Agent[]; onInspectRun: (id: string) => void }) {
   const name = (id?: string) => agents.find((agent) => agent.id === id)?.name;
-  return <main className="utility-view"><header className="utility-header"><div><small>Across every harness and machine</small><h1>Activity</h1></div><button className="filter-btn"><SlidersHorizontal size={16} /> Filter</button></header><div className="timeline">{events.map((event, index) => <article key={event.id} className={`timeline-event event-${event.type}`}><div className="timeline-rail"><span>{event.type === "handoff" ? <UsersThree size={15} /> : event.type === "node" ? <Cpu size={15} /> : <Activity size={15} />}</span>{index < events.length - 1 && <i />}</div><div><div className="event-heading"><strong>{event.title}</strong><time>{timeAgo(event.createdAt)}</time></div><p>{event.detail}</p>{event.fromAgentId && <small>{name(event.fromAgentId)} handed work to {name(event.toAgentId)}</small>}</div></article>)}</div></main>;
+  return <main className="utility-view"><header className="utility-header"><div><small>Across every harness and machine</small><h1>Activity</h1></div><button className="filter-btn"><SlidersHorizontal size={16} /> Filter</button></header><div className="timeline">{events.map((event, index) => <article key={event.id} className={`timeline-event event-${event.type}`}><div className="timeline-rail"><span>{event.type === "handoff" ? <UsersThree size={15} /> : event.type === "node" ? <Cpu size={15} /> : <Activity size={15} />}</span>{index < events.length - 1 && <i />}</div><div><div className="event-heading"><strong>{event.title}</strong><time>{timeAgo(event.createdAt)}</time></div><p>{event.detail}</p>{event.fromAgentId && <small>{name(event.fromAgentId)} handed work to {name(event.toAgentId)}</small>}{event.runId && <button className="run-link" onClick={() => onInspectRun(event.runId!)}><TerminalWindow size={14} /> Inspect run</button>}</div></article>)}</div></main>;
+}
+
+const runStatusLabels: Record<RunStatus, string> = {
+  queued: "Queued", running: "Running", completed: "Completed", failed: "Failed", cancelled: "Cancelled"
+};
+
+function RunInspector({ selectedRunId, run, agents, nodes, onClose, canMutate }: {
+  selectedRunId: string;
+  run?: Run;
+  agents: Agent[];
+  nodes: ComputeNode[];
+  onClose: () => void;
+  canMutate: boolean;
+}) {
+  const [confirming, setConfirming] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
+  const [notice, setNotice] = useState("");
+  const titleId = "run-inspector-title";
+  const agent = run ? agents.find((item) => item.id === run.agentId) : undefined;
+  const node = run ? nodes.find((item) => item.id === run.nodeId) : undefined;
+
+  async function cancelRun() {
+    if (!run || !canMutate) return;
+    setCancelling(true);
+    setNotice("");
+    try {
+      const response = await apiFetch(`/api/runs/${encodeURIComponent(run.id)}/cancel`, { method: "POST" });
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({})) as { error?: string };
+        throw new Error(body.error ?? `Cancellation failed (${response.status})`);
+      }
+      setConfirming(false);
+      setNotice("Cancellation accepted. Waiting for the live run update.");
+    } catch (cause) {
+      setNotice(cause instanceof Error ? cause.message : "Could not cancel this run");
+    } finally {
+      setCancelling(false);
+    }
+  }
+
+  return (
+    <AccessibleDialog labelledBy={titleId} onClose={onClose} className="run-dialog">
+      <header>
+        <div><small>Execution record</small><h2 id={titleId}>Run {selectedRunId}</h2></div>
+        <button className="icon-btn" onClick={onClose} aria-label="Close run inspector" data-dialog-initial-focus><X size={17} /></button>
+      </header>
+      {!run ? (
+        <div className="run-unavailable" role="status"><WarningCircle size={20} /><strong>Run unavailable</strong><p>No run named <code>{selectedRunId}</code> exists in the latest snapshot.</p></div>
+      ) : (
+        <>
+          <div className="run-summary"><span className={`run-status run-status-${run.status}`}>{runStatusLabels[run.status]}</span><code>{run.id}</code></div>
+          <dl className="run-details">
+            <div><dt>Agent</dt><dd>{agent ? `${agent.name} · ${agent.id}` : `${run.agentId} · unavailable`}</dd></div>
+            <div><dt>Compute</dt><dd>{node ? `${node.name} · ${node.id}` : `${run.nodeId} · unavailable`}</dd></div>
+            <div><dt>Harness / model</dt><dd>{run.harnessId} · {run.model || "Model unavailable"}</dd></div>
+            <div><dt>Workspace</dt><dd><code>{run.workspace || "Workspace unavailable"}</code></dd></div>
+            <div><dt>Parent run</dt><dd>{run.parentRunId ?? "No parent run"}</dd></div>
+            <div><dt>Handoff depth</dt><dd>{run.depth}</dd></div>
+            <div><dt>Created</dt><dd><time>{run.createdAt || "Timestamp unavailable"}</time></dd></div>
+            <div><dt>Dispatched</dt><dd><time>{run.dispatchedAt ?? "Not dispatched yet"}</time></dd></div>
+            <div><dt>Started</dt><dd><time>{run.startedAt ?? "Not started yet"}</time></dd></div>
+            <div><dt>Finished</dt><dd><time>{run.finishedAt ?? "Not finished yet"}</time></dd></div>
+          </dl>
+          <section className="run-text"><h3>Prompt</h3><pre>{run.prompt || "Prompt unavailable"}</pre></section>
+          <section className="run-text" aria-live="polite"><h3>Output</h3><pre>{run.output || (isActiveRunStatus(run.status) ? "Output is not available yet." : "No output was produced.")}</pre></section>
+          <section className="run-text"><h3>Error</h3><pre>{run.error ?? "No error reported."}</pre></section>
+          {notice && <p className="run-notice" role="alert">{notice}</p>}
+          {isActiveRunStatus(run.status) && (
+            <footer className="run-actions">
+              {!confirming ? <button className="danger-button" disabled={!canMutate} onClick={() => setConfirming(true)}>Cancel run</button> : <div className="cancel-confirm"><span>Cancel this run?</span><button onClick={() => setConfirming(false)} disabled={cancelling}>Keep run</button><button className="danger-button" onClick={cancelRun} disabled={cancelling || !canMutate}>{cancelling ? "Cancelling…" : "Confirm cancellation"}</button></div>}
+            </footer>
+          )}
+        </>
+      )}
+    </AccessibleDialog>
+  );
 }
 
 function ComputeView({ nodes }: { nodes: ComputeNode[] }) {
@@ -210,9 +287,9 @@ function CreateAgentDialog({ nodes, onClose, onCreate, canMutate }: { nodes: Com
     catch (cause) { setError(cause instanceof Error ? cause.message : "Could not create agent"); }
     finally { setBusy(false); }
   }
-  return <div className="dialog-scrim" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+  return <AccessibleDialog labelledBy="create-agent-title" onClose={onClose} className="dialog-content-reset">
     <form className="create-dialog" onSubmit={submit}>
-      <header><div><small>New teammate</small><h2>Create an agent</h2></div><button type="button" className="icon-btn" onClick={onClose}><X size={17} /></button></header>
+      <header><div><small>New teammate</small><h2 id="create-agent-title">Create an agent</h2></div><button type="button" className="icon-btn" onClick={onClose} aria-label="Close create agent dialog"><X size={17} /></button></header>
       <p>Give the agent a stable purpose. You can move it between harnesses and machines later without changing who it is.</p>
       <fieldset className="create-fields" disabled={!canMutate}>
       <AvatarPicker shape={avatarShape} color={avatarColor} onShape={setAvatarShape} onColor={setAvatarColor} />
@@ -226,7 +303,7 @@ function CreateAgentDialog({ nodes, onClose, onCreate, canMutate }: { nodes: Com
       {error && <div className="dialog-error">{error}</div>}
       <footer><button type="button" onClick={onClose}>Cancel</button><button className="create-button" disabled={!canMutate || busy || !name || !title || !computeNodeId}>{busy ? "Creating…" : "Create agent"}</button></footer>
     </form>
-  </div>;
+  </AccessibleDialog>;
 }
 
 export default function App() {
@@ -234,6 +311,7 @@ export default function App() {
   const [view, setView] = useState<View>("agents");
   const [selectedId, setSelectedId] = useState<string>();
   const [inspectorOpen, setInspectorOpen] = useState(false);
+  const [selectedRunId, setSelectedRunId] = useState<string>();
   const [sending, setSending] = useState(false);
   const [creating, setCreating] = useState(false);
   const selected = snapshot.agents.find((agent) => agent.id === selectedId);
@@ -251,7 +329,7 @@ export default function App() {
     await apiFetch(`/api/agents/${selected.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(patch) });
   }
 
-  function selectAgent(id: string) { setSelectedId(id); setView("agents"); setInspectorOpen(false); }
+  function selectAgent(id: string) { setSelectedId(id); setView("agents"); setInspectorOpen(false); setSelectedRunId(undefined); }
   function switchView(next: View) { setView(next); if (next !== "agents") setSelectedId(undefined); }
   async function createAgent(fields: Record<string, string>) {
     if (!canMutate) throw new Error("Reconnect before creating an agent");
@@ -269,12 +347,13 @@ export default function App() {
       <div className="workspace">
         <FreshnessNotice connection={connection} onRetry={retry} />
         {view === "agents" && !selected && <EmptyAgents agents={snapshot.agents} onSelect={selectAgent} onCreate={() => { if (canMutate) setCreating(true); }} canMutate={canMutate} />}
-        {view === "agents" && selected && <Chat agent={selected} nodes={snapshot.nodes} messages={selectedMessages} sending={sending} onBack={() => setSelectedId(undefined)} onSend={send} onInspector={() => setInspectorOpen(true)} canMutate={canMutate} />}
-        {view === "activity" && <ActivityView events={snapshot.events} agents={snapshot.agents} />}
+        {view === "agents" && selected && <Chat agent={selected} nodes={snapshot.nodes} messages={selectedMessages} sending={sending} onBack={() => setSelectedId(undefined)} onSend={send} onInspector={() => setInspectorOpen(true)} onInspectRun={setSelectedRunId} canMutate={canMutate} />}
+        {view === "activity" && <ActivityView events={snapshot.events} agents={snapshot.agents} onInspectRun={setSelectedRunId} />}
         {view === "compute" && <ComputeView nodes={snapshot.nodes} />}
         {view === "settings" && <SettingsView connection={connection} />}
       </div>
       {selected && <Inspector agent={selected} nodes={snapshot.nodes} open={inspectorOpen} onClose={() => setInspectorOpen(false)} onUpdate={updateAgent} canMutate={canMutate} />}
+      {selectedRunId && <RunInspector selectedRunId={selectedRunId} run={snapshot.runs.find((run) => run.id === selectedRunId)} agents={snapshot.agents} nodes={snapshot.nodes} onClose={() => setSelectedRunId(undefined)} canMutate={canMutate} />}
       <nav className="desktop-nav" aria-label="Primary">
         <div className="rail-brand" aria-label="Coffee Shop"><Coffee size={21} /></div>
         <button aria-label="Agents" className={view === "agents" ? "active" : ""} onClick={() => switchView("agents")}><Robot size={18} /><span>Agents</span></button>

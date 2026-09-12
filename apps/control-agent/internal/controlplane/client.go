@@ -8,6 +8,7 @@ import (
 	"log"
 	"math/rand/v2"
 	"net/http"
+	"sort"
 	"sync"
 	"time"
 
@@ -27,10 +28,14 @@ type Client struct {
 	outbox       [][]byte
 	runsMu       sync.Mutex
 	runs         map[string]context.CancelFunc
+	cancelled    map[string]struct{}
 }
 
 func NewClient(cfg config.Config, node protocol.ComputeNode, runner *harness.Runner) *Client {
-	return &Client{config: cfg, node: node, runner: runner, runs: map[string]context.CancelFunc{}}
+	return &Client{
+		config: cfg, node: node, runner: runner,
+		runs: map[string]context.CancelFunc{}, cancelled: map[string]struct{}{},
+	}
 }
 
 func (client *Client) Run(ctx context.Context) error {
@@ -122,7 +127,7 @@ func (client *Client) attach(ctx context.Context, connection *websocket.Conn) er
 		}
 		client.outbox = client.outbox[1:]
 	}
-	return nil
+	return write(ctx, connection, protocol.Outbound{Type: "sync.complete", NodeID: client.node.ID, ActiveRunIDs: client.activeRunIDs(), At: now()})
 }
 
 func (client *Client) detach(connection *websocket.Conn) {
@@ -172,10 +177,13 @@ func (client *Client) handle(ctx context.Context, message protocol.Inbound) {
 		client.send(protocol.Outbound{Type: "heartbeat", NodeID: client.node.ID, ActiveRuns: client.activeRuns(), At: now()})
 	case "cancel":
 		client.runsMu.Lock()
+		client.cancelled[message.RunID] = struct{}{}
 		cancel := client.runs[message.RunID]
 		client.runsMu.Unlock()
 		if cancel != nil {
 			cancel()
+		} else {
+			client.send(protocol.Outbound{Type: "run.cancelled", RunID: message.RunID, At: now()})
 		}
 	case "dispatch":
 		client.dispatch(ctx, message.Run, message.Agent)
@@ -186,6 +194,10 @@ func (client *Client) handle(ctx context.Context, message protocol.Inbound) {
 
 func (client *Client) dispatch(ctx context.Context, run protocol.Run, agent protocol.Agent) {
 	client.runsMu.Lock()
+	if _, cancelled := client.cancelled[run.ID]; cancelled {
+		client.runsMu.Unlock()
+		return
+	}
 	if _, exists := client.runs[run.ID]; exists {
 		client.runsMu.Unlock()
 		return
@@ -203,16 +215,26 @@ func (client *Client) dispatch(ctx context.Context, run protocol.Run, agent prot
 		defer func() {
 			client.runsMu.Lock()
 			delete(client.runs, run.ID)
+			_, cancelled := client.cancelled[run.ID]
 			client.runsMu.Unlock()
 			cancel()
+			if cancelled {
+				client.send(protocol.Outbound{Type: "run.cancelled", RunID: run.ID, At: now()})
+			}
 		}()
 		workspace, err := harness.AuthorizeWorkspace(run.Workspace, client.config.WorkspaceRoots)
 		if err != nil {
 			client.send(protocol.Outbound{Type: "run.failed", RunID: run.ID, Error: err.Error(), At: now()})
 			return
 		}
+		if runContext.Err() != nil {
+			return
+		}
 		client.send(protocol.Outbound{Type: "run.started", RunID: run.ID, At: now()})
 		result, err := client.runner.Run(runContext, run, agent, workspace, func(chunk string) {
+			if runContext.Err() != nil {
+				return
+			}
 			client.send(protocol.Outbound{Type: "run.output", RunID: run.ID, Chunk: chunk, At: now()})
 		})
 		if err != nil {
@@ -222,7 +244,9 @@ func (client *Client) dispatch(ctx context.Context, run protocol.Run, agent prot
 			client.send(protocol.Outbound{Type: "run.failed", RunID: run.ID, Error: err.Error(), At: now()})
 			return
 		}
-		client.send(protocol.Outbound{Type: "run.completed", RunID: run.ID, Output: result, At: now()})
+		if runContext.Err() == nil {
+			client.send(protocol.Outbound{Type: "run.completed", RunID: run.ID, Output: result, At: now()})
+		}
 	}()
 }
 
@@ -230,6 +254,17 @@ func (client *Client) activeRuns() int {
 	client.runsMu.Lock()
 	defer client.runsMu.Unlock()
 	return len(client.runs)
+}
+
+func (client *Client) activeRunIDs() []string {
+	client.runsMu.Lock()
+	defer client.runsMu.Unlock()
+	ids := make([]string, 0, len(client.runs))
+	for id := range client.runs {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
 }
 
 func (client *Client) cancelRuns() {

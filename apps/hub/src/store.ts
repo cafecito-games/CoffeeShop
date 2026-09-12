@@ -3,7 +3,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { agentAvatarColors, agentAvatarShapes, type ChatMessage, type Snapshot, type TimelineEvent } from "@coffee-shop/protocol";
 
-type State = Omit<Snapshot, "generatedAt">;
+export type State = Omit<Snapshot, "generatedAt">;
 
 const emptyState = (): State => ({
   agents: [],
@@ -74,6 +74,7 @@ function addMissingAgentAvatars(state: State) {
 export class Store {
   private state: State = emptyState();
   private readonly path: string;
+  private transactionQueue: Promise<void> = Promise.resolve();
 
   constructor(path = process.env.COFFEE_SHOP_DATA ?? fileURLToPath(new URL("../../../data/state.json", import.meta.url))) {
     this.path = resolve(path);
@@ -98,15 +99,21 @@ export class Store {
   getAgent(id: string) { return this.state.agents.find((agent) => agent.id === id); }
   getRun(id: string) { return this.state.runs.find((run) => run.id === id); }
 
-  async transact(change: (state: State) => void) {
-    change(this.state);
-    await this.save();
+  async transact(change: (state: State) => unknown) {
+    const transaction = this.transactionQueue.then(async () => {
+      const next = structuredClone(this.state);
+      if (change(next) === false) return;
+      await this.save(next);
+      this.state = next;
+    });
+    this.transactionQueue = transaction.catch(() => undefined);
+    return transaction;
   }
 
-  private async save() {
+  private async save(state = this.state) {
     await mkdir(dirname(this.path), { recursive: true });
     const temporary = `${this.path}.${process.pid}.tmp`;
-    await writeFile(temporary, JSON.stringify(this.state, null, 2));
+    await writeFile(temporary, JSON.stringify(state, null, 2));
     await rename(temporary, this.path);
   }
 }

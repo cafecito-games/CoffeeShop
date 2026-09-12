@@ -5,14 +5,47 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/config"
+	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/harness"
 	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/protocol"
 	"github.com/stretchr/testify/require"
 	"nhooyr.io/websocket"
 )
+
+func outboundMessages(t *testing.T, client *Client) []protocol.Outbound {
+	t.Helper()
+	client.connectionMu.Lock()
+	defer client.connectionMu.Unlock()
+	messages := make([]protocol.Outbound, 0, len(client.outbox))
+	for _, data := range client.outbox {
+		var message protocol.Outbound
+		require.NoError(t, json.Unmarshal(data, &message))
+		messages = append(messages, message)
+	}
+	return messages
+}
+
+func waitForMessage(t *testing.T, client *Client, messageType string) protocol.Outbound {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, message := range outboundMessages(t, client) {
+			if message.Type == messageType {
+				return message
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", messageType)
+	return protocol.Outbound{}
+}
 
 func TestRunOnceAuthenticatesAndRegisters(t *testing.T) {
 	type receivedMessage struct {
@@ -59,4 +92,76 @@ func TestRunOnceAuthenticatesAndRegisters(t *testing.T) {
 	require.Equal(t, protocol.Version, got.message.ProtocolVersion)
 	require.NotNil(t, got.message.Node)
 	require.Equal(t, "worker-1", got.message.Node.ID)
+}
+
+func TestReconnectFlushesLifecycleBeforeCompletingSync(t *testing.T) {
+	messages := make(chan []protocol.Outbound, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		connection, err := websocket.Accept(writer, request, nil)
+		require.NoError(t, err)
+		defer connection.Close(websocket.StatusNormalClosure, "test complete")
+		got := make([]protocol.Outbound, 0, 3)
+		for len(got) < 3 {
+			_, data, readErr := connection.Read(request.Context())
+			require.NoError(t, readErr)
+			var message protocol.Outbound
+			require.NoError(t, json.Unmarshal(data, &message))
+			got = append(got, message)
+		}
+		messages <- got
+	}))
+	defer server.Close()
+
+	client := NewClient(config.Config{
+		ControlEndpoint: strings.Replace(server.URL, "http://", "ws://", 1), Concurrency: 1,
+	}, protocol.ComputeNode{ID: "node-one"}, nil)
+	client.send(protocol.Outbound{Type: "run.completed", RunID: "run-one", Output: "done", At: now()})
+	connected, err := client.runOnce(context.Background())
+	require.Error(t, err)
+	require.True(t, connected)
+
+	got := <-messages
+	require.Equal(t, []string{"register", "run.completed", "sync.complete"}, []string{got[0].Type, got[1].Type, got[2].Type})
+	require.Equal(t, protocol.Version, got[0].ProtocolVersion)
+	require.Equal(t, "node-one", got[2].NodeID)
+}
+
+func TestCancelBeforeDispatchCreatesTombstoneAndAcknowledgesDuplicates(t *testing.T) {
+	client := NewClient(config.Config{Concurrency: 1}, protocol.ComputeNode{ID: "node-one"}, nil)
+	client.handle(context.Background(), protocol.Inbound{Type: "cancel", RunID: "run-one"})
+	client.handle(context.Background(), protocol.Inbound{Type: "cancel", RunID: "run-one"})
+	client.handle(context.Background(), protocol.Inbound{Type: "dispatch", Run: protocol.Run{ID: "run-one"}})
+
+	require.Zero(t, client.activeRuns())
+	messages := outboundMessages(t, client)
+	require.Len(t, messages, 2)
+	for _, message := range messages {
+		require.Equal(t, "run.cancelled", message.Type)
+		require.Equal(t, "run-one", message.RunID)
+	}
+}
+
+func TestActiveCancellationAcknowledgesWithoutFailureOrCompletion(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test fixture is a shell script")
+	}
+	directory := t.TempDir()
+	binary := filepath.Join(directory, "fake-codex")
+	require.NoError(t, os.WriteFile(binary, []byte("#!/bin/sh\nprintf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"started\"}}'\nsleep 30\n"), 0o755))
+	runner := harness.NewRunner([]protocol.HarnessProfile{{ID: "codex-cli", Binary: binary, Available: true}})
+	client := NewClient(config.Config{Concurrency: 1, WorkspaceRoots: []string{directory}}, protocol.ComputeNode{ID: "node-one"}, runner)
+	run := protocol.Run{ID: "run-one", HarnessID: "codex-cli", Model: "default", Workspace: directory, Prompt: "test"}
+	client.handle(context.Background(), protocol.Inbound{Type: "dispatch", Run: run, Agent: protocol.Agent{ID: "agent-one"}})
+	waitForMessage(t, client, "run.started")
+
+	client.handle(context.Background(), protocol.Inbound{Type: "cancel", RunID: "run-one"})
+	waitForMessage(t, client, "run.cancelled")
+	require.Zero(t, client.activeRuns(), "active cancellation is acknowledged after process-tree cleanup")
+	for _, message := range outboundMessages(t, client) {
+		require.NotEqual(t, "run.failed", message.Type)
+		require.NotEqual(t, "run.completed", message.Type)
+	}
+
+	client.handle(context.Background(), protocol.Inbound{Type: "dispatch", Run: run, Agent: protocol.Agent{ID: "agent-one"}})
+	require.Zero(t, client.activeRuns(), "a reconnect replay must remain tombstoned")
 }

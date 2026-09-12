@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { Snapshot } from "@coffee-shop/protocol";
+import { runStatuses, type Snapshot } from "@coffee-shop/protocol";
 
 export type ConnectionStatus = "connecting" | "connected" | "reconnecting" | "disconnected" | "authentication-required";
 
@@ -49,7 +49,6 @@ const harnessIds = ["claude-cli", "codex-cli", "shell", "ag-ui"] as const;
 const agentStates = ["idle", "thinking", "working", "waiting", "blocked", "done"] as const;
 const avatarShapes = ["cup", "bean", "moka", "kettle", "grinder", "pour-over"] as const;
 const avatarColors = ["amber", "sage", "clay", "sky", "plum", "rose"] as const;
-const runStatuses = ["queued", "running", "completed", "failed", "cancelled"] as const;
 
 function isHarness(value: unknown): boolean {
   return isObject(value)
@@ -111,6 +110,7 @@ function isRun(value: unknown): boolean {
     && isOptionalString(value.error)
     && isNumber(value.depth)
     && isOptionalString(value.parentRunId)
+    && isOptionalString(value.dispatchedAt)
     && isOptionalString(value.startedAt)
     && isOptionalString(value.finishedAt)
     && isString(value.createdAt);
