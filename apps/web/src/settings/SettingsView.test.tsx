@@ -71,12 +71,18 @@ describe("execution policy review", () => {
     fireEvent.click(screen.getByRole("button", { name: "Review" }));
     expect(screen.getByText("Unrecognized / not verified")).toBeInTheDocument();
     expect(screen.queryByText("Documented for matching release")).not.toBeInTheDocument();
+    expect(screen.getByText(/Release-specific execution behavior is not established/)).toBeInTheDocument();
+    expect(screen.getByText(/Credential handling is not established/)).toBeInTheDocument();
+    expect(screen.queryByText(/starts the official Claude CLI directly/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Authentication is held by the vendor CLI/)).not.toBeInTheDocument();
     first.unmount();
 
     render(<SettingsView connection="connected" nodes={[{ ...node, status: "online", version: "0.0.9" }]} generatedAt="now" documentedVersion={documentedVersion} />);
     fireEvent.click(screen.getByRole("button", { name: "Review" }));
     expect(screen.getByText(/Current-release flags are withheld/)).toBeInTheDocument();
     expect(screen.queryByText(/--permission-mode auto/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/starts the official Claude CLI directly/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Authentication is held by the vendor CLI/)).not.toBeInTheDocument();
   });
 
   it.each([
@@ -88,6 +94,10 @@ describe("execution policy review", () => {
     expect(screen.getByText("Unrecognized / not verified")).toBeInTheDocument();
     expect(screen.queryByText("Documented for matching release")).not.toBeInTheDocument();
     expect(screen.queryByText(/--permission-mode auto/)).not.toBeInTheDocument();
+    expect(screen.getByText(/Release-specific execution behavior is not established/)).toBeInTheDocument();
+    expect(screen.getByText(/Credential handling is not established/)).toBeInTheDocument();
+    expect(screen.queryByText(/starts the official Claude CLI directly/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Authentication is held by the vendor CLI/)).not.toBeInTheDocument();
   });
 
   it("shows documented flags only for a fresh available matching report", () => {
@@ -95,6 +105,8 @@ describe("execution policy review", () => {
     fireEvent.click(screen.getByRole("button", { name: "Review" }));
     expect(screen.getByText("Documented for matching release")).toBeInTheDocument();
     expect(screen.getByText(/--permission-mode auto/)).toBeInTheDocument();
+    expect(screen.getByText(/starts the official Claude CLI directly/)).toBeInTheDocument();
+    expect(screen.getByText(/Authentication is held by the vendor CLI/)).toBeInTheDocument();
   });
 
   it("fails closed for cross-paired Claude and Codex authentication reports", () => {
@@ -112,5 +124,9 @@ describe("execution policy review", () => {
     expect(screen.queryByText("Documented for matching release")).not.toBeInTheDocument();
     expect(screen.queryByText(/--permission-mode auto/)).not.toBeInTheDocument();
     expect(screen.queryByText(/--sandbox workspace-write/)).not.toBeInTheDocument();
+    expect(screen.getAllByText(/Release-specific execution behavior is not established/)).toHaveLength(2);
+    expect(screen.getAllByText(/Credential handling is not established/)).toHaveLength(2);
+    expect(screen.queryByText(/starts the official Claude CLI directly/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Authentication is held by the vendor CLI/)).not.toBeInTheDocument();
   });
 });

@@ -16,11 +16,17 @@ function PolicyQualification({ harness, versionMatches, reportFresh }: { harness
     && harnessCopy.verified
     && authCopy.verified
     && isDocumentedHarnessAuthPair(harness?.id, harness?.authMode);
+  const harnessDetail = verified || !harnessCopy.verified
+    ? harnessCopy.detail
+    : `Reported harness identity: ${harnessCopy.label}. Release-specific execution behavior is not established for this report.`;
+  const authDetail = verified || !authCopy.verified
+    ? authCopy.detail
+    : `Reported authentication mode: ${authCopy.label}. Credential handling is not established for this report.`;
   return (
     <div className={`policy-qualification ${verified ? "verified" : "not-verified"}`}>
       <strong>{verified ? <ShieldCheck size={14} /> : <WarningCircle size={14} />}{verified ? "Documented for matching release" : "Unrecognized / not verified"}</strong>
-      <p>{harnessCopy.detail}</p>
-      <p>{authCopy.detail}</p>
+      <p>{harnessDetail}</p>
+      <p>{authDetail}</p>
       {verified && harnessCopy.documentedFlags && <div><Provenance kind="documented" /><code>{harnessCopy.documentedFlags}</code></div>}
       {!verified && harnessCopy.documentedFlags && <p>Current-release flags are withheld because this report is unavailable, stale, mismatched, or unrecognized.</p>}
     </div>
