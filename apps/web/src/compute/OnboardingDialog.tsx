@@ -2,7 +2,7 @@ import { nodeKinds, type NodeKind } from "@coffee-shop/protocol";
 import { Check, Copy, WarningCircle, X } from "@phosphor-icons/react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AccessibleDialog } from "../AccessibleDialog.js";
-import { buildBaristaCommand, defaultControlEndpoint, validateOnboarding, type OnboardingValues } from "./onboarding.js";
+import { buildBaristaCommand, defaultControlEndpoint, MAX_BARISTA_CONCURRENCY, validateOnboarding, type OnboardingValues } from "./onboarding.js";
 
 const kindLabels: Record<NodeKind, string> = { local: "Local computer", "home-server": "Home server", cloud: "Cloud machine" };
 
@@ -57,7 +57,7 @@ export function OnboardingDialog({ onClose }: { onClose: () => void }) {
         <label>Hub URL<input value={values.controlEndpoint} onChange={(event) => update("controlEndpoint", event.target.value)} inputMode="url" /></label>
         <label>Barista name<input value={values.name} onChange={(event) => update("name", event.target.value)} /></label>
         <label>Barista ID<input value={values.nodeId} onChange={(event) => update("nodeId", event.target.value)} /></label>
-        <label>Concurrency<input value={values.concurrency} onChange={(event) => update("concurrency", event.target.value)} inputMode="numeric" /></label>
+        <label>Concurrency<input type="number" min={1} max={MAX_BARISTA_CONCURRENCY} value={values.concurrency} onChange={(event) => update("concurrency", event.target.value)} inputMode="numeric" /></label>
         <fieldset className="kind-picker"><legend>Machine kind</legend><div>{nodeKinds.map((kind) => <button type="button" key={kind} aria-pressed={values.kind === kind} onClick={() => update("kind", kind)}>{kindLabels[kind]}</button>)}</div></fieldset>
         <label className="field-wide">Workspace roots <small>One absolute path per line</small><textarea rows={3} value={values.workspaceRoots} onChange={(event) => update("workspaceRoots", event.target.value)} placeholder="/absolute/path/to/workspace" /></label>
       </div>

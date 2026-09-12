@@ -43,8 +43,9 @@ describe("Barista onboarding configuration", () => {
     [{ ...valid, name: "  " }, "Enter a Barista name."],
     [{ ...valid, nodeId: "Bad ID" }, "Use a lowercase ID containing only letters, numbers, and hyphens."],
     [{ ...valid, kind: "edge" as OnboardingValues["kind"] }, "Choose a supported compute kind."],
-    [{ ...valid, concurrency: "0" }, "Concurrency must be a positive integer."],
-    [{ ...valid, concurrency: "1.5" }, "Concurrency must be a positive integer."],
+    [{ ...valid, concurrency: "0" }, "Concurrency must be an integer from 1 to 2147483647."],
+    [{ ...valid, concurrency: "1.5" }, "Concurrency must be an integer from 1 to 2147483647."],
+    [{ ...valid, concurrency: "999999999999999999999999999999" }, "Concurrency must be an integer from 1 to 2147483647."],
     [{ ...valid, workspaceRoots: "relative/path" }, "Every workspace root must be absolute."],
     [{ ...valid, workspaceRoots: "/srv/intended,/" }, "Workspace roots cannot contain commas."],
     [{ ...valid, workspaceRoots: "" }, "Enter at least one absolute workspace root."]

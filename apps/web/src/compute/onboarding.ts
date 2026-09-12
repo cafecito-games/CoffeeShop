@@ -10,6 +10,8 @@ export const BARISTA_ENVIRONMENT_FIELDS = [
   "COFFEE_SHOP_TOKEN"
 ] as const;
 
+export const MAX_BARISTA_CONCURRENCY = 2_147_483_647;
+
 export interface OnboardingValues {
   controlEndpoint: string;
   name: string;
@@ -44,7 +46,10 @@ export function validateOnboarding(values: OnboardingValues): string[] {
   if (!values.name.trim()) errors.push("Enter a Barista name.");
   if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(values.nodeId)) errors.push("Use a lowercase ID containing only letters, numbers, and hyphens.");
   if (!(nodeKinds as readonly string[]).includes(values.kind)) errors.push("Choose a supported compute kind.");
-  if (!/^[1-9]\d*$/.test(values.concurrency)) errors.push("Concurrency must be a positive integer.");
+  const concurrency = Number(values.concurrency);
+  if (!/^[1-9]\d*$/.test(values.concurrency) || !Number.isSafeInteger(concurrency) || concurrency > MAX_BARISTA_CONCURRENCY) {
+    errors.push(`Concurrency must be an integer from 1 to ${MAX_BARISTA_CONCURRENCY}.`);
+  }
   const roots = workspaceRoots(values.workspaceRoots);
   if (!roots.length) errors.push("Enter at least one absolute workspace root.");
   else if (roots.some((root) => !isAbsolutePath(root))) errors.push("Every workspace root must be absolute.");

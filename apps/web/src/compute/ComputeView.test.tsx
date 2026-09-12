@@ -93,6 +93,7 @@ describe("compute experience", () => {
     expect(screen.getByRole("dialog")).toHaveAccessibleName("Add a Barista");
     expect(screen.getByRole("button", { name: "Close Barista setup" })).toHaveFocus();
     expect(screen.getByLabelText("Hub URL")).toHaveValue("http://localhost:8787");
+    expect(screen.getByLabelText("Concurrency")).toHaveAttribute("max", "2147483647");
     expect(screen.getByText("Local computer")).toBeInTheDocument();
     expect(screen.getByText("Home server")).toBeInTheDocument();
     expect(screen.getByText("Cloud machine")).toBeInTheDocument();
