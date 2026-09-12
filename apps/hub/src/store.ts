@@ -74,6 +74,7 @@ function addMissingAgentAvatars(state: State) {
 export class Store {
   private state: State = emptyState();
   private readonly path: string;
+  private transactionQueue: Promise<void> = Promise.resolve();
 
   constructor(path = process.env.COFFEE_SHOP_DATA ?? fileURLToPath(new URL("../../../data/state.json", import.meta.url))) {
     this.path = resolve(path);
@@ -99,8 +100,12 @@ export class Store {
   getRun(id: string) { return this.state.runs.find((run) => run.id === id); }
 
   async transact(change: (state: State) => unknown) {
-    if (change(this.state) === false) return;
-    await this.save();
+    const transaction = this.transactionQueue.then(async () => {
+      if (change(this.state) === false) return;
+      await this.save();
+    });
+    this.transactionQueue = transaction.catch(() => undefined);
+    return transaction;
   }
 
   private async save() {

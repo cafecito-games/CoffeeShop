@@ -67,3 +67,18 @@ test("removes legacy demo records without removing user-created data", async () 
   assert.equal(persisted.agents[0].avatarShape, "cup");
   assert.equal(persisted.agents[0].avatarColor, "amber");
 });
+
+test("serializes concurrent transactions without losing persistence", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "coffee-shop-store-"));
+  const path = join(directory, "state.json");
+  const store = new Store(path);
+  await store.load();
+
+  await Promise.all(Array.from({ length: 24 }, (_, index) => store.transact((state) => {
+    state.events.push(newEvent({ type: "status", title: `Event ${index}`, detail: "Concurrent persistence check" }));
+  })));
+
+  const reloaded = new Store(path);
+  await reloaded.load();
+  assert.equal(reloaded.snapshot().events.length, 24);
+});

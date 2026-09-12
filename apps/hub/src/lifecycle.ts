@@ -8,6 +8,9 @@ import {
 import { newEvent, newMessage, type State, type Store } from "./store.js";
 
 type RunLifecycleMessage = Extract<ControlAgentToHub, { type: `run.${string}` }>;
+const runLifecycleMessageTypes = new Set<string>([
+  "run.started", "run.output", "run.completed", "run.failed", "run.cancelled"
+]);
 
 export interface CancellationResult {
   kind: "cancelled" | "already-cancelled" | "not-found" | "conflict";
@@ -72,7 +75,10 @@ export async function cancelPersistedRun(
   if (existing.status === "cancelled") return { kind: "already-cancelled", run: existing } satisfies CancellationResult;
   if (!canTransitionRun(existing.status, "cancelled")) return { kind: "conflict", run: existing } satisfies CancellationResult;
   let result: CancellationResult = { kind: "not-found" };
-  await store.transact((state) => { result = cancelRunInState(state, runId, at); });
+  await store.transact((state) => {
+    result = cancelRunInState(state, runId, at);
+    return result.kind === "cancelled";
+  });
   if (result.kind === "cancelled" && result.run) {
     send(result.run.nodeId, { type: "cancel", runId: result.run.id });
   }
@@ -80,6 +86,7 @@ export async function cancelPersistedRun(
 }
 
 export function applyRunLifecycle(state: State, message: RunLifecycleMessage) {
+  if (!runLifecycleMessageTypes.has(message.type)) return false;
   const run = state.runs.find((item) => item.id === message.runId);
   if (!run) return false;
   if (typeof message.at !== "string") return false;

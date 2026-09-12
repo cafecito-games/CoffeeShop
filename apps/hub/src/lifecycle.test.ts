@@ -127,7 +127,9 @@ test("malformed lifecycle payloads are ignored without mutation", () => {
     { type: "run.started", runId: "run-one" },
     { type: "run.output", runId: "run-one", chunk: 3, at },
     { type: "run.completed", runId: "run-one", output: null, at },
-    { type: "run.failed", runId: "run-one", error: {}, at }
+    { type: "run.failed", runId: "run-one", error: {}, at },
+    { type: "run.future", runId: "run-one", error: "unsupported", at },
+    { type: "run.future", runId: "run-one", at }
   ]) {
     const current = state("running");
     const before = structuredClone(current);
