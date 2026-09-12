@@ -192,7 +192,7 @@ function LockScreen() {
   return <main className="lock-screen"><div className="brand-mark"><span /><span /></div><LockKey size={20} /><h1>Connect to your control plane</h1><p>Enter the hub token configured on this deployment. It stays in this browser.</p><form onSubmit={(event) => { event.preventDefault(); if (!value.trim()) return; localStorage.setItem("coffee-shop-token", value.trim()); location.reload(); }}><input type="password" value={value} onChange={(event) => setValue(event.target.value)} placeholder="Hub access token" autoFocus /><button>Connect</button></form></main>;
 }
 
-function CreateAgentDialog({ nodes, onClose, onCreate }: { nodes: ComputeNode[]; onClose: () => void; onCreate: (fields: Record<string, string>) => Promise<void> }) {
+function CreateAgentDialog({ nodes, onClose, onCreate, canMutate }: { nodes: ComputeNode[]; onClose: () => void; onCreate: (fields: Record<string, string>) => Promise<void>; canMutate: boolean }) {
   const [name, setName] = useState("");
   const [title, setTitle] = useState("");
   const [harnessId, setHarnessId] = useState("claude-cli");
@@ -203,7 +203,9 @@ function CreateAgentDialog({ nodes, onClose, onCreate }: { nodes: ComputeNode[];
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   async function submit(event: FormEvent) {
-    event.preventDefault(); setBusy(true); setError("");
+    event.preventDefault();
+    if (!canMutate) return;
+    setBusy(true); setError("");
     try { await onCreate({ name, title, harnessId, computeNodeId, workspace, avatarShape, avatarColor }); onClose(); }
     catch (cause) { setError(cause instanceof Error ? cause.message : "Could not create agent"); }
     finally { setBusy(false); }
@@ -212,14 +214,17 @@ function CreateAgentDialog({ nodes, onClose, onCreate }: { nodes: ComputeNode[];
     <form className="create-dialog" onSubmit={submit}>
       <header><div><small>New teammate</small><h2>Create an agent</h2></div><button type="button" className="icon-btn" onClick={onClose}><X size={17} /></button></header>
       <p>Give the agent a stable purpose. You can move it between harnesses and machines later without changing who it is.</p>
+      <fieldset className="create-fields" disabled={!canMutate}>
       <AvatarPicker shape={avatarShape} color={avatarColor} onShape={setAvatarShape} onColor={setAvatarColor} />
       <label>Name<input value={name} onChange={(event) => setName(event.target.value)} placeholder="Agent name" autoFocus required /></label>
       <label>Role<input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Agent role" required /></label>
       <fieldset><legend>Harness</legend><div className="choice-row"><button type="button" className={harnessId === "claude-cli" ? "selected" : ""} onClick={() => setHarnessId("claude-cli")}><Command size={15} />Claude Code</button><button type="button" className={harnessId === "codex-cli" ? "selected" : ""} onClick={() => setHarnessId("codex-cli")}><Command size={15} />Codex</button></div></fieldset>
       <fieldset><legend>Compute</legend><div className="node-choices">{nodes.map((node) => <button type="button" key={node.id} className={computeNodeId === node.id ? "selected" : ""} onClick={() => { setComputeNodeId(node.id); setWorkspace(node.workspaceRoots[0] ?? ""); }}><span><strong>{node.name}</strong><small>{node.status} · {node.platform}</small></span>{computeNodeId === node.id && <Check size={14} />}</button>)}</div></fieldset>
       <label>Workspace<input value={workspace} onChange={(event) => setWorkspace(event.target.value)} placeholder="/absolute/project/path" required /></label>
+      </fieldset>
+      {!canMutate && <div className="dialog-error">Reconnect before creating an agent.</div>}
       {error && <div className="dialog-error">{error}</div>}
-      <footer><button type="button" onClick={onClose}>Cancel</button><button className="create-button" disabled={busy || !name || !title || !computeNodeId}>{busy ? "Creating…" : "Create agent"}</button></footer>
+      <footer><button type="button" onClick={onClose}>Cancel</button><button className="create-button" disabled={!canMutate || busy || !name || !title || !computeNodeId}>{busy ? "Creating…" : "Create agent"}</button></footer>
     </form>
   </div>;
 }
@@ -279,7 +284,7 @@ export default function App() {
         <div className="rail-user">CS</div>
       </nav>
       <BottomNav view={view} onView={switchView} />
-      {creating && <CreateAgentDialog nodes={snapshot.nodes} onClose={() => setCreating(false)} onCreate={createAgent} />}
+      {creating && <CreateAgentDialog nodes={snapshot.nodes} onClose={() => setCreating(false)} onCreate={createAgent} canMutate={canMutate} />}
     </div>
   );
 }

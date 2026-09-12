@@ -104,4 +104,20 @@ describe("connection freshness UI", () => {
     expect(document.querySelector(".stale-label")).toHaveTextContent("reconnecting · stale");
     expect(document.querySelector(".ok-label")).toBeNull();
   });
+
+  it("disables an open creation dialog when the connection becomes stale", async () => {
+    mocks.status = "connected";
+    const { default: App } = await import("./App.js");
+    const rendered = render(<App />);
+    fireEvent.click(screen.getAllByRole("button", { name: "Create agent" })[0]);
+    const dialog = screen.getByRole("heading", { name: "Create an agent" }).closest("form");
+    fireEvent.change(screen.getByPlaceholderText("Agent name"), { target: { value: "Scout" } });
+    fireEvent.change(screen.getByPlaceholderText("Agent role"), { target: { value: "Researcher" } });
+    expect(dialog?.querySelector(".create-button")).toBeEnabled();
+
+    mocks.status = "reconnecting";
+    rendered.rerender(<App />);
+    expect(dialog?.querySelector(".create-button")).toBeDisabled();
+    expect(dialog?.querySelector("input[placeholder='Agent name']")).toBeDisabled();
+  });
 });
