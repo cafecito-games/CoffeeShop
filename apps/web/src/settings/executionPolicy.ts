@@ -64,7 +64,8 @@ export function releaseMatch(reportedVersion: unknown, documentedVersion: string
   if (typeof reportedVersion !== "string" || !reportedVersion.trim()) {
     return { matches: false, label: "Version unavailable; effective policy is not verified" };
   }
-  if (reportedVersion === "dev" || documentedVersion === "dev" || reportedVersion.includes("dirty") || documentedVersion.includes("dirty")) {
+  const developmentMarker = /(^|[+.-])(dev(?:elopment)?|dirty)(?=$|[+.-])/i;
+  if (developmentMarker.test(reportedVersion) || developmentMarker.test(documentedVersion)) {
     return { matches: false, label: "Development version; effective policy is not verified" };
   }
   if (reportedVersion === documentedVersion) {

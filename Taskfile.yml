@@ -38,6 +38,11 @@ tasks:
       - task: frontend:build
       - task: control-agent:build
 
+  container:build:
+    desc: Build the hub image with exact Barista release provenance
+    cmds:
+      - docker build --build-arg BARISTA_VERSION="{{.BARISTA_VERSION}}" -t coffee-shop:local .
+
   test:
     desc: Run every test suite
     cmds:

@@ -1,4 +1,5 @@
 FROM node:24-slim AS build
+ARG BARISTA_VERSION=dev
 RUN corepack enable
 WORKDIR /app
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml* tsconfig.base.json ./
@@ -6,7 +7,7 @@ COPY apps ./apps
 COPY packages ./packages
 RUN pnpm install --frozen-lockfile=false
 RUN pnpm --filter @coffee-shop/protocol build \
- && VITE_BARISTA_VERSION="$(node -p "require('./package.json').version")" pnpm --filter @coffee-shop/web build \
+ && VITE_BARISTA_VERSION="${BARISTA_VERSION}" pnpm --filter @coffee-shop/web build \
  && pnpm --filter @coffee-shop/hub build
 
 FROM node:24-slim

@@ -74,6 +74,7 @@ task dev                    control plane + frontend with reload
 task dev:full               control plane + frontend + local Barista
 task frontend:dev           frontend only
 task frontend:build         production frontend bundle
+task container:build        hub image with exact Barista version provenance
 task control-plane:dev      hub only
 task control-plane:build    production hub bundle
 task control-agent:run -- … run Barista from source
@@ -110,4 +111,4 @@ go.work                Go workspace for Go applications in the monorepo
 
 ## Production control plane
 
-Build the web/hub container with `docker compose build`, set a strong `COFFEE_SHOP_TOKEN`, and terminate TLS in front of the hub. The shared token remains appropriate only for a private, single-user deployment. Per-node enrollment grants, rotation, and revocation are the next security boundary before a public or multi-user rollout.
+Build the web/hub container with `task container:build`, set a strong `COFFEE_SHOP_TOKEN`, and terminate TLS in front of the hub. This injects the same clean source-derived version used by `task control-agent:build`, allowing exact release-policy comparison. Direct `docker compose build` defaults the UI provenance to `dev` and therefore fails closed unless `BARISTA_VERSION` is supplied explicitly. The shared token remains appropriate only for a private, single-user deployment. Per-node enrollment grants, rotation, and revocation are the next security boundary before a public or multi-user rollout.
