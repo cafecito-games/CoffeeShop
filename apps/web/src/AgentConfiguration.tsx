@@ -71,8 +71,7 @@ function sourceSignature(nodes: readonly ComputeNode[], agent?: Agent) {
       workspace: agent.workspace,
       systemPrompt: agent.systemPrompt,
       avatarShape: agent.avatarShape,
-      avatarColor: agent.avatarColor,
-      updatedAt: agent.updatedAt
+      avatarColor: agent.avatarColor
     },
     nodes: nodes.map((node) => ({
       id: node.id,
