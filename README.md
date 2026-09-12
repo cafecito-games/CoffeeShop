@@ -34,6 +34,7 @@ task control-agent:run -- \
 ```
 
 `task dev:full` starts all three applications. By default, Barista allows only the directory it was started from; pass one or more `--workspace-root` flags for other locations.
+The PWA’s **Compute → Add compute** dialog also walks through build/authentication prerequisites and creates a validated, shell-quoted environment command. In development it correctly targets the hub on port 8787 rather than the Vite origin on port 5173.
 
 ## Install Barista on a compute machine
 
@@ -90,6 +91,8 @@ The pnpm workspace contains only JavaScript/TypeScript packages. Barista owns it
 Control agents initiate the connection, so compute hosts do not need a public inbound port. The hub sends typed dispatch/cancel messages over the authenticated WebSocket; Barista returns lifecycle and normalized output messages.
 
 Before starting a harness, Barista canonicalizes the requested absolute workspace and confirms it remains within an enrolled root, including through symlinks. Claude Code runs in auto permission mode with unanswered prompts denied. Codex runs with `workspace-write` sandboxing. Vendor credentials remain in vendor-owned CLI storage and are never sent to the hub.
+
+Compute rows expose the latest reported node and harness inventory. The Settings policy review distinguishes that self-report from hub-observed freshness and release documentation; it does not claim that a worker’s runtime or flags have been attested.
 
 Keep a subscription-backed compute node private to the account owner. Do not expose it as a resale or credential-sharing service. See [the provider note](docs/anthropic-usage.md), [the Barista operational guide](docs/control-agent.md), and [the architecture](docs/architecture.md).
 

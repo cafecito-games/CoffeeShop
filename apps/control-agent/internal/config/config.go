@@ -48,7 +48,10 @@ func Parse(args []string) (Config, error) {
 		return Config{}, fmt.Errorf("read working directory: %w", err)
 	}
 
-	concurrency := envInt("BARISTA_CONCURRENCY", 2)
+	concurrency, err := envPositiveInt("BARISTA_CONCURRENCY", 2)
+	if err != nil {
+		return Config{}, err
+	}
 	roots := stringList(splitEnv("WORKSPACE_ROOTS"))
 	set := flag.NewFlagSet("barista", flag.ContinueOnError)
 	set.SetOutput(os.Stderr)
@@ -133,6 +136,9 @@ func canonicalizeRoots(roots []string) ([]string, error) {
 	result := make([]string, 0, len(roots))
 	seen := map[string]bool{}
 	for _, root := range roots {
+		if !filepath.IsAbs(root) {
+			return nil, fmt.Errorf("workspace root %q must be an absolute path", root)
+		}
 		absolute, err := filepath.Abs(root)
 		if err != nil {
 			return nil, fmt.Errorf("resolve workspace root %q: %w", root, err)
@@ -172,12 +178,16 @@ func env(key, fallback string) string {
 	return fallback
 }
 
-func envInt(key string, fallback int) int {
-	value, err := strconv.Atoi(os.Getenv(key))
-	if err != nil {
-		return fallback
+func envPositiveInt(key string, fallback int) (int, error) {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback, nil
 	}
-	return value
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed < 1 {
+		return 0, fmt.Errorf("%s must be a positive integer", key)
+	}
+	return parsed, nil
 }
 
 func splitEnv(key string) []string {

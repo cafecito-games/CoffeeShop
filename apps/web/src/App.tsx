@@ -1,14 +1,16 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import {
-  Pulse as Activity, ArrowLeft, ArrowRight, Broadcast, Check, CircleNotch, Cloud, Command,
-  Coffee, Cpu, Desktop, Gear, HouseLine, Laptop, MagnifyingGlass, PaperPlaneTilt, Plus,
+  Pulse as Activity, ArrowLeft, ArrowRight, Broadcast, Check, CircleNotch, Command,
+  Coffee, Cpu, Gear, MagnifyingGlass, PaperPlaneTilt, Plus,
   Robot, SlidersHorizontal, TerminalWindow, UsersThree, WarningCircle, X, LockKey
 } from "@phosphor-icons/react";
 import { isActiveRunStatus, type Agent, type AgentState, type ChatMessage, type ComputeNode, type Run, type RunStatus, type TimelineEvent } from "@coffee-shop/protocol";
 import { AccessibleDialog } from "./AccessibleDialog.js";
 import { AgentConfigurationForm, CreateAgentDialog, type AgentConfigurationPayload } from "./AgentConfiguration.js";
 import { CoffeeAvatar } from "./CoffeeAvatar.js";
+import { ComputeView } from "./compute/ComputeView.js";
 import { useHubConnection, type ConnectionStatus } from "./hubConnection.js";
+import { SettingsView } from "./settings/SettingsView.js";
 
 type View = "agents" | "activity" | "compute" | "settings";
 
@@ -260,15 +262,6 @@ function RunInspector({ selectedRunId, run, agents, nodes, onClose, canMutate }:
   );
 }
 
-function ComputeView({ nodes }: { nodes: ComputeNode[] }) {
-  const kindIcon = (kind: ComputeNode["kind"]) => kind === "local" ? <Laptop size={20} /> : kind === "home-server" ? <HouseLine size={20} /> : <Cloud size={20} />;
-  return <main className="utility-view"><header className="utility-header"><div><small>Execution fabric</small><h1>Compute</h1></div><button className="primary-btn"><Plus size={16} /> Add compute</button></header><div className="node-list">{nodes.map((node) => <article key={node.id} className="node-row"><div className="node-icon">{kindIcon(node.kind)}</div><div className="node-main"><div><strong>{node.name}</strong><span className={`node-status ${node.status}`}><i />{node.status}</span></div><p>{node.platform} · {node.activeRuns} of {node.concurrency} slots active</p><div className="capacity"><i style={{ width: `${Math.max(3, (node.activeRuns / node.concurrency) * 100)}%` }} /></div><div className="harness-tags">{node.harnesses.map((h) => <span key={h.id} className={h.available ? "" : "unavailable"}><Command size={13} />{h.label}<small>{h.available ? "ready" : "missing"}</small></span>)}</div></div><button className="icon-btn"><ArrowRight size={17} /></button></article>)}</div><section className="worker-callout"><TerminalWindow size={19} /><div><strong>Bring another machine online</strong><code>barista --control-endpoint {window.location.host}</code><p>Barista connects outbound; model credentials never leave the compute machine.</p></div></section></main>;
-}
-
-function SettingsView({ connection }: { connection: ConnectionStatus }) {
-  return <main className="utility-view"><header className="utility-header"><div><small>Control plane</small><h1>Settings</h1></div></header><div className="settings-list"><section><div><Broadcast size={18} /><span><strong>Hub connection</strong><small>WebSocket events and Barista dispatch</small></span></div><em className={connection === "connected" ? "ok-label" : "stale-label"}>{connection === "connected" ? <Check size={13} /> : <WarningCircle size={13} />} {connectionLabels[connection].toLowerCase()}</em></section><section><div><Desktop size={18} /><span><strong>Installable app</strong><small>Add Coffee Shop to your home screen</small></span></div><button>Install PWA</button></section><section><div><WarningCircle size={18} /><span><strong>Execution policy</strong><small>Barista enforces workspace allowlists and safe harness modes</small></span></div><button>Review</button></section></div><div className="terms-note"><strong>Claude subscription boundary</strong><p>Coffee Shop invokes Anthropic’s official Claude Code CLI through Barista. It never reads, copies, or proxies Claude credentials. Keep a subscription-backed compute node private to its account owner.</p></div></main>;
-}
-
 function FreshnessNotice({ connection, onRetry }: { connection: ConnectionStatus; onRetry: () => void }) {
   if (connection === "connected") return null;
   const waiting = connection === "connecting";
@@ -338,7 +331,7 @@ export default function App() {
         {view === "agents" && selected && <Chat agent={selected} nodes={snapshot.nodes} messages={selectedMessages} sending={sending} inspectorOpen={inspectorOpen} onBack={() => setSelectedId(undefined)} onSend={send} onInspector={() => setInspectorOpen((open) => !open)} onInspectRun={setSelectedRunId} canMutate={canMutate} />}
         {view === "activity" && <ActivityView events={snapshot.events} agents={snapshot.agents} onInspectRun={setSelectedRunId} />}
         {view === "compute" && <ComputeView nodes={snapshot.nodes} />}
-        {view === "settings" && <SettingsView connection={connection} />}
+        {view === "settings" && <SettingsView connection={connection} nodes={snapshot.nodes} generatedAt={snapshot.generatedAt} />}
       </div>
       {selected && inspectorOpen && <Inspector agent={selected} nodes={snapshot.nodes} onClose={() => setInspectorOpen(false)} onSave={updateAgent} onReconcile={retry} canMutate={canMutate} />}
       {selectedRunId && <RunInspector selectedRunId={selectedRunId} run={snapshot.runs.find((run) => run.id === selectedRunId)} agents={snapshot.agents} nodes={snapshot.nodes} onClose={() => setSelectedRunId(undefined)} canMutate={canMutate} />}

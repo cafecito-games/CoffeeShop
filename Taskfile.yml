@@ -93,7 +93,7 @@ tasks:
     desc: Build the production frontend
     deps: [protocol:build]
     cmds:
-      - pnpm --filter @coffee-shop/web build
+      - VITE_BARISTA_VERSION={{.BARISTA_VERSION}} pnpm --filter @coffee-shop/web build
 
   frontend:test:
     desc: Run frontend tests

@@ -16,7 +16,8 @@ const runTransitions: Readonly<Record<RunStatus, readonly RunStatus[]>> = {
 export const isActiveRunStatus = (status: RunStatus) => activeRunStatuses.includes(status);
 export const isTerminalRunStatus = (status: RunStatus) => terminalRunStatuses.includes(status);
 export const canTransitionRun = (from: RunStatus, to: RunStatus) => runTransitions[from].includes(to);
-export type NodeKind = "local" | "home-server" | "cloud";
+export const nodeKinds = ["local", "home-server", "cloud"] as const;
+export type NodeKind = typeof nodeKinds[number];
 export const agentAvatarShapes = ["cup", "bean", "moka", "kettle", "grinder", "pour-over"] as const;
 export const agentAvatarColors = ["amber", "sage", "clay", "sky", "plum", "rose"] as const;
 export type AgentAvatarShape = typeof agentAvatarShapes[number];
