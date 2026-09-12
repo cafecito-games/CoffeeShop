@@ -35,10 +35,17 @@ describe("Barista onboarding configuration", () => {
     expect(buildBaristaCommand(valid)).toBe(buildBaristaCommand(valid));
   });
 
+  it("accepts valid URL escapes outside the authority", () => {
+    const escapedPath = { ...valid, controlEndpoint: "https://coffee.example/%63ontrol" };
+    expect(validateOnboarding(escapedPath)).toEqual([]);
+    expect(buildBaristaCommand(escapedPath)).toContain("CONTROL_ENDPOINT='https://coffee.example/%63ontrol'");
+  });
+
   it.each([
     [{ ...valid, controlEndpoint: "ws://coffee.example" }, "Use an HTTP or HTTPS hub URL."],
     [{ ...valid, controlEndpoint: "not a url" }, "Use an HTTP or HTTPS hub URL."],
     [{ ...valid, controlEndpoint: "https://coffee.example/%zz" }, "Use an HTTP or HTTPS hub URL."],
+    [{ ...valid, controlEndpoint: "https://%63offee.example" }, "Use an HTTP or HTTPS hub URL."],
     [{ ...valid, controlEndpoint: "https:coffee.example" }, "Use an HTTP or HTTPS hub URL."],
     [{ ...valid, name: "  " }, "Enter a Barista name."],
     [{ ...valid, nodeId: "Bad ID" }, "Use a lowercase ID containing only letters, numbers, and hyphens."],

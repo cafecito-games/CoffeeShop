@@ -35,9 +35,11 @@ export function validateOnboarding(values: OnboardingValues): string[] {
   const errors: string[] = [];
   try {
     const endpointValue = values.controlEndpoint.trim();
+    const authority = /^https?:\/\/([^/?#]+)/i.exec(endpointValue)?.[1];
     if (!/^https?:\/\//i.test(endpointValue) || /%(?![0-9a-f]{2})/i.test(endpointValue) || /[\u0000-\u001f\u007f]/.test(endpointValue)) {
       throw new Error("unsupported URL");
     }
+    if (!authority || authority.includes("%") || authority.includes("\\")) throw new Error("unsupported URL authority");
     const endpoint = new URL(endpointValue);
     if (!(["http:", "https:"] as string[]).includes(endpoint.protocol) || !endpoint.hostname) throw new Error("unsupported URL");
   } catch {
