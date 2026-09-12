@@ -36,6 +36,8 @@ The UI presents agents first, matching Grok Bot's useful primitive: you return t
 6. The hub persists output and state, then pushes a fresh snapshot to every UI.
 7. A typed handoff directive becomes a new event and child run, capped at three levels.
 
+Queued and running runs may also transition to `cancelled`. The hub persists that terminal state and its timestamp before attempting best-effort delivery to Barista. Late lifecycle messages cannot move a terminal run or produce output, messages, events, or handoffs. Barista keeps an in-memory cancellation tombstone for each received cancel, acknowledges it with `run.cancelled`, and suppresses both a not-yet-started dispatch and terminal output from an actively cancelled process. The persisted hub run remains the authority across a Barista disconnect.
+
 ## Security boundaries in the MVP
 
 - Baristas connect outbound and authenticate with the hub secret.

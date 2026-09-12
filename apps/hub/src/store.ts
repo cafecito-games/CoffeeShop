@@ -3,7 +3,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { agentAvatarColors, agentAvatarShapes, type ChatMessage, type Snapshot, type TimelineEvent } from "@coffee-shop/protocol";
 
-type State = Omit<Snapshot, "generatedAt">;
+export type State = Omit<Snapshot, "generatedAt">;
 
 const emptyState = (): State => ({
   agents: [],
@@ -98,8 +98,8 @@ export class Store {
   getAgent(id: string) { return this.state.agents.find((agent) => agent.id === id); }
   getRun(id: string) { return this.state.runs.find((run) => run.id === id); }
 
-  async transact(change: (state: State) => void) {
-    change(this.state);
+  async transact(change: (state: State) => unknown) {
+    if (change(this.state) === false) return;
     await this.save();
   }
 

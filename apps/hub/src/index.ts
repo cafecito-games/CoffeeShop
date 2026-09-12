@@ -6,6 +6,7 @@ import cors from "cors";
 import express from "express";
 import { WebSocket, WebSocketServer } from "ws";
 import { agentAvatarColors, agentAvatarShapes, type Agent, type ComputeNode, type ControlAgentToHub, type HubToControlAgent, type Run } from "@coffee-shop/protocol";
+import { applyRunLifecycle, cancelPersistedRun } from "./lifecycle.js";
 import { newEvent, newId, newMessage, Store } from "./store.js";
 
 const app = express();
@@ -37,8 +38,12 @@ const broadcast = () => {
 const sendToControlAgent = (nodeId: string, message: HubToControlAgent) => {
   const socket = controlAgents.get(nodeId);
   if (!socket || socket.readyState !== WebSocket.OPEN) return false;
-  socket.send(JSON.stringify(message));
-  return true;
+  try {
+    socket.send(JSON.stringify(message));
+    return true;
+  } catch {
+    return false;
+  }
 };
 
 async function queueRun(agent: Agent, prompt: string, options: { parentRunId?: string; depth?: number } = {}) {
@@ -137,12 +142,11 @@ app.patch("/api/agents/:id", async (req, res) => {
 });
 
 app.post("/api/runs/:id/cancel", async (req, res) => {
-  const run = store.getRun(req.params.id);
-  if (!run) return res.status(404).json({ error: "Run not found" });
-  sendToControlAgent(run.nodeId, { type: "cancel", runId: run.id });
-  await store.transact((state) => { const target = state.runs.find((item) => item.id === run.id); if (target) target.status = "cancelled"; });
-  broadcast();
-  res.status(202).json({ ok: true });
+  const result = await cancelPersistedRun(store, req.params.id, sendToControlAgent);
+  if (result.kind === "not-found") return res.status(404).json({ error: "Run not found" });
+  if (result.kind === "conflict") return res.status(409).json({ error: `A ${result.run?.status} run cannot be cancelled` });
+  if (result.kind === "cancelled") broadcast();
+  res.json(result.run);
 });
 
 const webDist = resolve(fileURLToPath(new URL("../../web/dist", import.meta.url)));
@@ -173,7 +177,14 @@ wss.on("connection", (socket, request) => {
 
   let nodeId = "";
   socket.on("message", async (raw) => {
-    const message = JSON.parse(raw.toString()) as ControlAgentToHub;
+    let decoded: unknown;
+    try {
+      decoded = JSON.parse(raw.toString());
+    } catch {
+      return;
+    }
+    if (typeof decoded !== "object" || decoded === null || !("type" in decoded) || typeof decoded.type !== "string") return;
+    const message = decoded as ControlAgentToHub;
     if (message.type === "register") {
       if (message.protocolVersion && message.protocolVersion !== "1") return socket.close(1002, "unsupported control protocol");
       nodeId = message.node.id;
@@ -197,22 +208,12 @@ wss.on("connection", (socket, request) => {
       const runId = message.runId;
       const current = store.getRun(runId);
       if (!current) return;
+      let accepted = false;
       await store.transact((state) => {
-        const run = state.runs.find((item) => item.id === runId)!;
-        const agent = state.agents.find((item) => item.id === run.agentId)!;
-        if (message.type === "run.started") { run.status = "running"; run.startedAt = message.at; agent.state = "working"; agent.currentAction = "Working"; }
-        if (message.type === "run.output") { run.output += message.chunk; agent.currentAction = message.chunk.trim().slice(-90) || "Working"; }
-        if (message.type === "run.completed") {
-          run.status = "completed"; run.output = message.output; run.finishedAt = message.at; agent.state = "done"; agent.currentAction = "Completed just now";
-          state.messages.push(newMessage({ agentId: agent.id, author: "agent", body: message.output || "Completed.", kind: "message", runId }));
-          state.events.unshift(newEvent({ type: "status", title: `${agent.name} finished`, detail: run.prompt.slice(0, 120), agentId: agent.id, runId }));
-        }
-        if (message.type === "run.failed") {
-          run.status = "failed"; run.error = message.error; run.finishedAt = message.at; agent.state = "blocked"; agent.currentAction = message.error.slice(0, 90);
-          state.messages.push(newMessage({ agentId: agent.id, author: "system", body: `Run failed: ${message.error}`, kind: "status", runId }));
-        }
-        agent.updatedAt = message.at;
+        accepted = applyRunLifecycle(state, message);
+        return accepted;
       });
+      if (!accepted) return;
       if (message.type === "run.completed" && current.depth < 3) {
         const directive = message.output.match(/<handoff\s+to=["']([^"']+)["']>([\s\S]*?)<\/handoff>/i);
         const recipient = directive && store.getAgent(directive[1]);

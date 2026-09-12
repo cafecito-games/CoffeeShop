@@ -1,6 +1,21 @@
 export type HarnessId = "claude-cli" | "codex-cli" | "shell" | "ag-ui";
 export type AgentState = "idle" | "thinking" | "working" | "waiting" | "blocked" | "done";
-export type RunStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
+export const runStatuses = ["queued", "running", "completed", "failed", "cancelled"] as const;
+export type RunStatus = typeof runStatuses[number];
+export const activeRunStatuses: readonly RunStatus[] = ["queued", "running"];
+export const terminalRunStatuses: readonly RunStatus[] = ["completed", "failed", "cancelled"];
+
+const runTransitions: Readonly<Record<RunStatus, readonly RunStatus[]>> = {
+  queued: ["running", "failed", "cancelled"],
+  running: ["completed", "failed", "cancelled"],
+  completed: [],
+  failed: [],
+  cancelled: []
+};
+
+export const isActiveRunStatus = (status: RunStatus) => activeRunStatuses.includes(status);
+export const isTerminalRunStatus = (status: RunStatus) => terminalRunStatuses.includes(status);
+export const canTransitionRun = (from: RunStatus, to: RunStatus) => runTransitions[from].includes(to);
 export type NodeKind = "local" | "home-server" | "cloud";
 export const agentAvatarShapes = ["cup", "bean", "moka", "kettle", "grinder", "pour-over"] as const;
 export const agentAvatarColors = ["amber", "sage", "clay", "sky", "plum", "rose"] as const;
@@ -110,7 +125,8 @@ export type ControlAgentToHub =
   | { type: "run.started"; runId: string; at: string }
   | { type: "run.output"; runId: string; chunk: string; at: string }
   | { type: "run.completed"; runId: string; output: string; at: string }
-  | { type: "run.failed"; runId: string; error: string; at: string };
+  | { type: "run.failed"; runId: string; error: string; at: string }
+  | { type: "run.cancelled"; runId: string; at: string };
 
 /** @deprecated Use HubToControlAgent. */
 export type HubToWorker = HubToControlAgent;

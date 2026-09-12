@@ -27,10 +27,14 @@ type Client struct {
 	outbox       [][]byte
 	runsMu       sync.Mutex
 	runs         map[string]context.CancelFunc
+	cancelled    map[string]struct{}
 }
 
 func NewClient(cfg config.Config, node protocol.ComputeNode, runner *harness.Runner) *Client {
-	return &Client{config: cfg, node: node, runner: runner, runs: map[string]context.CancelFunc{}}
+	return &Client{
+		config: cfg, node: node, runner: runner,
+		runs: map[string]context.CancelFunc{}, cancelled: map[string]struct{}{},
+	}
 }
 
 func (client *Client) Run(ctx context.Context) error {
@@ -172,11 +176,13 @@ func (client *Client) handle(ctx context.Context, message protocol.Inbound) {
 		client.send(protocol.Outbound{Type: "heartbeat", NodeID: client.node.ID, ActiveRuns: client.activeRuns(), At: now()})
 	case "cancel":
 		client.runsMu.Lock()
+		client.cancelled[message.RunID] = struct{}{}
 		cancel := client.runs[message.RunID]
 		client.runsMu.Unlock()
 		if cancel != nil {
 			cancel()
 		}
+		client.send(protocol.Outbound{Type: "run.cancelled", RunID: message.RunID, At: now()})
 	case "dispatch":
 		client.dispatch(ctx, message.Run, message.Agent)
 	default:
@@ -186,6 +192,10 @@ func (client *Client) handle(ctx context.Context, message protocol.Inbound) {
 
 func (client *Client) dispatch(ctx context.Context, run protocol.Run, agent protocol.Agent) {
 	client.runsMu.Lock()
+	if _, cancelled := client.cancelled[run.ID]; cancelled {
+		client.runsMu.Unlock()
+		return
+	}
 	if _, exists := client.runs[run.ID]; exists {
 		client.runsMu.Unlock()
 		return
@@ -211,8 +221,14 @@ func (client *Client) dispatch(ctx context.Context, run protocol.Run, agent prot
 			client.send(protocol.Outbound{Type: "run.failed", RunID: run.ID, Error: err.Error(), At: now()})
 			return
 		}
+		if runContext.Err() != nil {
+			return
+		}
 		client.send(protocol.Outbound{Type: "run.started", RunID: run.ID, At: now()})
 		result, err := client.runner.Run(runContext, run, agent, workspace, func(chunk string) {
+			if runContext.Err() != nil {
+				return
+			}
 			client.send(protocol.Outbound{Type: "run.output", RunID: run.ID, Chunk: chunk, At: now()})
 		})
 		if err != nil {
@@ -222,7 +238,9 @@ func (client *Client) dispatch(ctx context.Context, run protocol.Run, agent prot
 			client.send(protocol.Outbound{Type: "run.failed", RunID: run.ID, Error: err.Error(), At: now()})
 			return
 		}
-		client.send(protocol.Outbound{Type: "run.completed", RunID: run.ID, Output: result, At: now()})
+		if runContext.Err() == nil {
+			client.send(protocol.Outbound{Type: "run.completed", RunID: run.ID, Output: result, At: now()})
+		}
 	}()
 }
 

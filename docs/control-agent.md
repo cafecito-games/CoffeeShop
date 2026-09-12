@@ -46,7 +46,10 @@ Barista sends:
 
 - `register`: protocol version and compute-node inventory;
 - `heartbeat`: node ID, active run count, and timestamp;
-- `run.started`, `run.output`, `run.completed`, and `run.failed`: run lifecycle.
+- `run.started`, `run.output`, `run.completed`, and `run.failed`: run lifecycle;
+- `run.cancelled`: acknowledgement that Barista recorded a cancellation tombstone and cancelled any active process.
+
+Cancellation commands are idempotent from Barista's perspective. A cancel received before its matching dispatch prevents the process from starting; a cancel received during execution terminates the process without translating that intentional termination into `run.failed`. Tombstones survive control-plane reconnects for the lifetime of the Barista process, so a replayed dispatch cannot resurrect cancelled work. The hub persists cancellation before sending the command and remains authoritative if Barista is offline.
 
 The TypeScript source of truth is `packages/protocol/src/index.ts`; Go wire structs are deliberately isolated in `apps/control-agent/internal/protocol`. Changes to the wire contract must update both and should retain compatibility across rolling deployments.
 
