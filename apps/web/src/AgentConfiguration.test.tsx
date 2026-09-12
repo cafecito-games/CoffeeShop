@@ -90,6 +90,16 @@ describe("AgentConfigurationForm", () => {
     expect(screen.getByLabelText("Name")).toHaveValue("Milo");
   });
 
+  it("retains an actionable save error after rolling back a changed compute selection", async () => {
+    const onSave = vi.fn(async () => { throw new Error("Node disappeared; choose another compute node"); });
+    render(<AgentConfigurationForm mode="edit" agent={agent} nodes={nodes} canMutate onSave={onSave} onCancel={vi.fn()} onReconcile={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText("Compute node"), { target: { value: "node-two" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Node disappeared; choose another compute node");
+    await waitFor(() => expect(screen.getByLabelText("Compute node")).toHaveValue("node-one"));
+    expect(screen.getByRole("alert")).toHaveTextContent("Node disappeared; choose another compute node");
+  });
+
   it("discards edits on cancel and reconciles when a confirmed snapshot replaces the agent", () => {
     const onCancel = vi.fn();
     const rendered = render(<AgentConfigurationForm mode="edit" agent={agent} nodes={nodes} canMutate onSave={vi.fn()} onCancel={onCancel} onReconcile={vi.fn()} />);

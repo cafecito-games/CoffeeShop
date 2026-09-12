@@ -196,8 +196,15 @@ export function AgentConfigurationForm({
       const saved = await onSave(draft);
       onSuccess?.(saved);
     } catch (cause) {
+      const confirmedDraft = initialDraft(nodes, agent);
+      previousRuntimeSignature.current = runtimeSignature(
+        nodes.find((node) => node.id === confirmedDraft.computeNodeId),
+        confirmedDraft.computeNodeId,
+        nodes
+      );
+      setDraft(confirmedDraft);
+      setNotice("");
       setError(cause instanceof Error ? cause.message : "Could not save agent configuration");
-      setDraft(initialDraft(nodes, agent));
       onReconcile();
     } finally {
       setBusy(false);
