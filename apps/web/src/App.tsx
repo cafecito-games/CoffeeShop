@@ -4,13 +4,20 @@ import {
   Coffee, Cpu, Desktop, Gear, HouseLine, Laptop, MagnifyingGlass, PaperPlaneTilt, Plus,
   Robot, SlidersHorizontal, TerminalWindow, UsersThree, WarningCircle, X, LockKey
 } from "@phosphor-icons/react";
-import type { Agent, AgentAvatarColor, AgentAvatarShape, AgentState, ChatMessage, ComputeNode, Snapshot, TimelineEvent } from "@coffee-shop/protocol";
+import type { Agent, AgentAvatarColor, AgentAvatarShape, AgentState, ChatMessage, ComputeNode, TimelineEvent } from "@coffee-shop/protocol";
 import { AvatarPicker, CoffeeAvatar } from "./CoffeeAvatar.js";
+import { useHubConnection, type ConnectionStatus } from "./hubConnection.js";
 
 type View = "agents" | "activity" | "compute" | "settings";
 
-const emptySnapshot: Snapshot = { agents: [], nodes: [], runs: [], events: [], messages: [], generatedAt: new Date().toISOString() };
 const statusLabels: Record<AgentState, string> = { idle: "Idle", thinking: "Thinking", working: "Working", waiting: "Waiting", blocked: "Blocked", done: "Done" };
+const connectionLabels: Record<ConnectionStatus, string> = {
+  connecting: "Connecting",
+  connected: "Connected",
+  reconnecting: "Reconnecting · stale",
+  disconnected: "Disconnected · stale",
+  "authentication-required": "Authentication required"
+};
 const queryToken = new URLSearchParams(location.search).get("token");
 if (queryToken) { localStorage.setItem("coffee-shop-token", queryToken); history.replaceState({}, "", location.pathname); }
 const accessToken = localStorage.getItem("coffee-shop-token") ?? "";
@@ -34,12 +41,12 @@ function StateMark({ state }: { state: AgentState }) {
   return <span className={`state-mark state-${state}`}><i />{statusLabels[state]}</span>;
 }
 
-function Roster({ agents, selectedId, onSelect, onCreate }: { agents: Agent[]; selectedId?: string; onSelect: (id: string) => void; onCreate: () => void }) {
+function Roster({ agents, selectedId, onSelect, onCreate, connection, canMutate }: { agents: Agent[]; selectedId?: string; onSelect: (id: string) => void; onCreate: () => void; connection: ConnectionStatus; canMutate: boolean }) {
   const [query, setQuery] = useState("");
   const filtered = agents.filter((agent) => `${agent.name} ${agent.title}`.toLowerCase().includes(query.toLowerCase()));
   return (
     <aside className="roster">
-      <div className="brand-row"><strong>Agent roster</strong><button className="icon-btn" onClick={onCreate} aria-label="Create agent"><Plus size={17} /></button></div>
+      <div className="brand-row"><strong>Agent roster</strong><button className="icon-btn" onClick={onCreate} aria-label="Create agent" disabled={!canMutate}><Plus size={17} /></button></div>
       <label className="search"><MagnifyingGlass size={15} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Find an agent" /></label>
       <div className="section-label"><span>Agents</span><small>{agents.filter((a) => ["working", "thinking"].includes(a.state)).length} active</small></div>
       <div className="agent-list">
@@ -51,16 +58,16 @@ function Roster({ agents, selectedId, onSelect, onCreate }: { agents: Agent[]; s
           </button>
         ))}
       </div>
-      <div className="roster-foot"><span><i className="online-dot" /> Control plane</span><small>Local-first</small></div>
+      <div className="roster-foot"><span><i className={connection === "connected" ? "online-dot" : "offline-dot"} /> {connectionLabels[connection]}</span><small>Local-first</small></div>
     </aside>
   );
 }
 
-function EmptyAgents({ agents, onSelect, onCreate }: { agents: Agent[]; onSelect: (id: string) => void; onCreate: () => void }) {
+function EmptyAgents({ agents, onSelect, onCreate, canMutate }: { agents: Agent[]; onSelect: (id: string) => void; onCreate: () => void; canMutate: boolean }) {
   const active = agents.filter((agent) => ["working", "thinking", "waiting"].includes(agent.state));
   return (
     <main className="mobile-list-view">
-      <header className="mobile-header"><div className="brand-mark"><span /><span /></div><strong>Coffee Shop</strong><button className="icon-btn" onClick={onCreate} aria-label="Create agent"><Plus size={18} /></button></header>
+      <header className="mobile-header"><div className="brand-mark"><span /><span /></div><strong>Coffee Shop</strong><button className="icon-btn" onClick={onCreate} aria-label="Create agent" disabled={!canMutate}><Plus size={18} /></button></header>
       <section className="mobile-overview">
         <div><small>Today</small><h1>Your agents</h1></div>
         <div className="signal"><Broadcast size={16} weight="fill" />{active.length} in motion</div>
@@ -78,15 +85,15 @@ function EmptyAgents({ agents, onSelect, onCreate }: { agents: Agent[]; onSelect
   );
 }
 
-function Chat({ agent, messages, nodes, sending, onBack, onSend, onInspector }: {
+function Chat({ agent, messages, nodes, sending, onBack, onSend, onInspector, canMutate }: {
   agent: Agent; messages: ChatMessage[]; nodes: ComputeNode[]; sending: boolean;
-  onBack: () => void; onSend: (body: string) => Promise<void>; onInspector: () => void;
+  onBack: () => void; onSend: (body: string) => Promise<void>; onInspector: () => void; canMutate: boolean;
 }) {
   const [body, setBody] = useState("");
   const endRef = useRef<HTMLDivElement>(null);
   const node = nodes.find((item) => item.id === agent.computeNodeId);
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages.length]);
-  async function submit(event: FormEvent) { event.preventDefault(); const value = body.trim(); if (!value || sending) return; setBody(""); await onSend(value); }
+  async function submit(event: FormEvent) { event.preventDefault(); const value = body.trim(); if (!value || sending || !canMutate) return; setBody(""); await onSend(value); }
   return (
     <main className="chat">
       <header className="chat-header">
@@ -104,7 +111,7 @@ function Chat({ agent, messages, nodes, sending, onBack, onSend, onInspector }: 
         </div>
       </div>
       <form className="composer" onSubmit={submit}>
-        <div className="composer-box"><textarea value={body} onChange={(event) => setBody(event.target.value)} placeholder={`Message ${agent.name}`} rows={1} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} /><button disabled={!body.trim() || sending}><PaperPlaneTilt size={17} weight="fill" /></button></div>
+        <div className="composer-box"><textarea value={body} onChange={(event) => setBody(event.target.value)} placeholder={canMutate ? `Message ${agent.name}` : `Reconnect to message ${agent.name}`} rows={1} disabled={!canMutate} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} /><button disabled={!canMutate || !body.trim() || sending}><PaperPlaneTilt size={17} weight="fill" /></button></div>
         <small>{agent.harnessId === "claude-cli" ? "Claude Code" : "Codex"} · {agent.model} · runs on {node?.name ?? "unassigned compute"}</small>
       </form>
     </main>
@@ -123,13 +130,14 @@ function Message({ message, agent }: { message: ChatMessage; agent: Agent }) {
   );
 }
 
-function Inspector({ agent, nodes, open, onClose, onUpdate }: { agent: Agent; nodes: ComputeNode[]; open: boolean; onClose: () => void; onUpdate: (patch: Partial<Agent>) => void }) {
+function Inspector({ agent, nodes, open, onClose, onUpdate, canMutate }: { agent: Agent; nodes: ComputeNode[]; open: boolean; onClose: () => void; onUpdate: (patch: Partial<Agent>) => void; canMutate: boolean }) {
   const [menu, setMenu] = useState<"harness" | "node" | null>(null);
   const node = nodes.find((item) => item.id === agent.computeNodeId);
   const harnesses = Array.from(new Map(nodes.flatMap((item) => item.harnesses).map((h) => [h.id, h])).values());
   return (
     <aside className={`inspector ${open ? "open" : ""}`}>
       <header><span>Agent context</span><button className="icon-btn" onClick={onClose}><X size={17} /></button></header>
+      <fieldset className="inspector-fields" disabled={!canMutate}>
       <section className="avatar-editor">
         <div className="section-label"><span>Identity mark</span><small>editable</small></div>
         <CoffeeAvatar shape={agent.avatarShape} color={agent.avatarColor} size="xl" />
@@ -148,6 +156,7 @@ function Inspector({ agent, nodes, open, onClose, onUpdate }: { agent: Agent; no
         <div className="config-line"><label>Workspace</label><code>{agent.workspace}</code></div>
       </section>
       <section className="prompt-section"><div className="section-label"><span>Purpose</span><small>system prompt</small></div><p>{agent.systemPrompt}</p></section>
+      </fieldset>
       <footer><div><i className={node?.status === "online" || node?.status === "busy" ? "online-dot" : "offline-dot"} /><span>{node?.status ?? "offline"}</span></div><small>Credentials stay on {node?.name ?? "the compute node"}</small></footer>
     </aside>
   );
@@ -163,8 +172,14 @@ function ComputeView({ nodes }: { nodes: ComputeNode[] }) {
   return <main className="utility-view"><header className="utility-header"><div><small>Execution fabric</small><h1>Compute</h1></div><button className="primary-btn"><Plus size={16} /> Add compute</button></header><div className="node-list">{nodes.map((node) => <article key={node.id} className="node-row"><div className="node-icon">{kindIcon(node.kind)}</div><div className="node-main"><div><strong>{node.name}</strong><span className={`node-status ${node.status}`}><i />{node.status}</span></div><p>{node.platform} · {node.activeRuns} of {node.concurrency} slots active</p><div className="capacity"><i style={{ width: `${Math.max(3, (node.activeRuns / node.concurrency) * 100)}%` }} /></div><div className="harness-tags">{node.harnesses.map((h) => <span key={h.id} className={h.available ? "" : "unavailable"}><Command size={13} />{h.label}<small>{h.available ? "ready" : "missing"}</small></span>)}</div></div><button className="icon-btn"><ArrowRight size={17} /></button></article>)}</div><section className="worker-callout"><TerminalWindow size={19} /><div><strong>Bring another machine online</strong><code>barista --control-endpoint {window.location.host}</code><p>Barista connects outbound; model credentials never leave the compute machine.</p></div></section></main>;
 }
 
-function SettingsView() {
-  return <main className="utility-view"><header className="utility-header"><div><small>Control plane</small><h1>Settings</h1></div></header><div className="settings-list"><section><div><Broadcast size={18} /><span><strong>Hub connection</strong><small>WebSocket events and Barista dispatch</small></span></div><em className="ok-label"><Check size={13} /> connected</em></section><section><div><Desktop size={18} /><span><strong>Installable app</strong><small>Add Coffee Shop to your home screen</small></span></div><button>Install PWA</button></section><section><div><WarningCircle size={18} /><span><strong>Execution policy</strong><small>Barista enforces workspace allowlists and safe harness modes</small></span></div><button>Review</button></section></div><div className="terms-note"><strong>Claude subscription boundary</strong><p>Coffee Shop invokes Anthropic’s official Claude Code CLI through Barista. It never reads, copies, or proxies Claude credentials. Keep a subscription-backed compute node private to its account owner.</p></div></main>;
+function SettingsView({ connection }: { connection: ConnectionStatus }) {
+  return <main className="utility-view"><header className="utility-header"><div><small>Control plane</small><h1>Settings</h1></div></header><div className="settings-list"><section><div><Broadcast size={18} /><span><strong>Hub connection</strong><small>WebSocket events and Barista dispatch</small></span></div><em className={connection === "connected" ? "ok-label" : "stale-label"}>{connection === "connected" ? <Check size={13} /> : <WarningCircle size={13} />} {connectionLabels[connection].toLowerCase()}</em></section><section><div><Desktop size={18} /><span><strong>Installable app</strong><small>Add Coffee Shop to your home screen</small></span></div><button>Install PWA</button></section><section><div><WarningCircle size={18} /><span><strong>Execution policy</strong><small>Barista enforces workspace allowlists and safe harness modes</small></span></div><button>Review</button></section></div><div className="terms-note"><strong>Claude subscription boundary</strong><p>Coffee Shop invokes Anthropic’s official Claude Code CLI through Barista. It never reads, copies, or proxies Claude credentials. Keep a subscription-backed compute node private to its account owner.</p></div></main>;
+}
+
+function FreshnessNotice({ connection, onRetry }: { connection: ConnectionStatus; onRetry: () => void }) {
+  if (connection === "connected") return null;
+  const waiting = connection === "connecting";
+  return <div className="freshness-notice" role="status"><WarningCircle size={15} /><span><strong>{connectionLabels[connection]}</strong>{waiting ? "Waiting for a validated live snapshot." : "Showing last known data. Changes are disabled until the live snapshot is restored."}</span>{!waiting && <button onClick={onRetry} aria-label="Retry connection">Retry</button>}</div>;
 }
 
 function BottomNav({ view, onView }: { view: View; onView: (view: View) => void }) {
@@ -210,58 +225,51 @@ function CreateAgentDialog({ nodes, onClose, onCreate }: { nodes: ComputeNode[];
 }
 
 export default function App() {
-  const [snapshot, setSnapshot] = useState<Snapshot>(emptySnapshot);
+  const { snapshot, status: connection, canMutate, retry } = useHubConnection(accessToken);
   const [view, setView] = useState<View>("agents");
   const [selectedId, setSelectedId] = useState<string>();
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [sending, setSending] = useState(false);
-  const [locked, setLocked] = useState(false);
   const [creating, setCreating] = useState(false);
   const selected = snapshot.agents.find((agent) => agent.id === selectedId);
   const selectedMessages = useMemo(() => snapshot.messages.filter((message) => message.agentId === selectedId).sort((a, b) => a.createdAt.localeCompare(b.createdAt)), [snapshot.messages, selectedId]);
 
-  useEffect(() => {
-    apiFetch("/api/snapshot").then(async (response) => { if (!response.ok) { setLocked(true); return; } setSnapshot(await response.json()); }).catch(() => setLocked(true));
-    const socket = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/events${accessToken ? `?token=${encodeURIComponent(accessToken)}` : ""}`);
-    socket.onmessage = (event) => { const message = JSON.parse(event.data); if (message.type === "snapshot") setSnapshot(message.data); };
-    return () => socket.close();
-  }, []);
-
   async function send(body: string) {
-    if (!selected) return;
+    if (!selected || !canMutate) return;
     setSending(true);
     try { await apiFetch(`/api/agents/${selected.id}/messages`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ body }) }); }
     finally { setSending(false); }
   }
 
   async function updateAgent(patch: Partial<Agent>) {
-    if (!selected) return;
-    setSnapshot((current) => ({ ...current, agents: current.agents.map((agent) => agent.id === selected.id ? { ...agent, ...patch } : agent) }));
+    if (!selected || !canMutate) return;
     await apiFetch(`/api/agents/${selected.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(patch) });
   }
 
   function selectAgent(id: string) { setSelectedId(id); setView("agents"); setInspectorOpen(false); }
   function switchView(next: View) { setView(next); if (next !== "agents") setSelectedId(undefined); }
   async function createAgent(fields: Record<string, string>) {
+    if (!canMutate) throw new Error("Reconnect before creating an agent");
     const response = await apiFetch("/api/agents", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(fields) });
     if (!response.ok) throw new Error((await response.json()).error ?? "Could not create agent");
     const agent = await response.json() as Agent;
     setSelectedId(agent.id); setView("agents");
   }
 
-  if (locked) return <LockScreen />;
+  if (connection === "authentication-required") return <LockScreen />;
 
   return (
     <div className="app-shell">
-      <Roster agents={snapshot.agents} selectedId={selectedId} onSelect={selectAgent} onCreate={() => setCreating(true)} />
+      <Roster agents={snapshot.agents} selectedId={selectedId} onSelect={selectAgent} onCreate={() => { if (canMutate) setCreating(true); }} connection={connection} canMutate={canMutate} />
       <div className="workspace">
-        {view === "agents" && !selected && <EmptyAgents agents={snapshot.agents} onSelect={selectAgent} onCreate={() => setCreating(true)} />}
-        {view === "agents" && selected && <Chat agent={selected} nodes={snapshot.nodes} messages={selectedMessages} sending={sending} onBack={() => setSelectedId(undefined)} onSend={send} onInspector={() => setInspectorOpen(true)} />}
+        <FreshnessNotice connection={connection} onRetry={retry} />
+        {view === "agents" && !selected && <EmptyAgents agents={snapshot.agents} onSelect={selectAgent} onCreate={() => { if (canMutate) setCreating(true); }} canMutate={canMutate} />}
+        {view === "agents" && selected && <Chat agent={selected} nodes={snapshot.nodes} messages={selectedMessages} sending={sending} onBack={() => setSelectedId(undefined)} onSend={send} onInspector={() => setInspectorOpen(true)} canMutate={canMutate} />}
         {view === "activity" && <ActivityView events={snapshot.events} agents={snapshot.agents} />}
         {view === "compute" && <ComputeView nodes={snapshot.nodes} />}
-        {view === "settings" && <SettingsView />}
+        {view === "settings" && <SettingsView connection={connection} />}
       </div>
-      {selected && <Inspector agent={selected} nodes={snapshot.nodes} open={inspectorOpen} onClose={() => setInspectorOpen(false)} onUpdate={updateAgent} />}
+      {selected && <Inspector agent={selected} nodes={snapshot.nodes} open={inspectorOpen} onClose={() => setInspectorOpen(false)} onUpdate={updateAgent} canMutate={canMutate} />}
       <nav className="desktop-nav" aria-label="Primary">
         <div className="rail-brand" aria-label="Coffee Shop"><Coffee size={21} /></div>
         <button aria-label="Agents" className={view === "agents" ? "active" : ""} onClick={() => switchView("agents")}><Robot size={18} /><span>Agents</span></button>

@@ -28,7 +28,12 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
 code, time { font-family: "DM Mono", monospace; font-variant-numeric: tabular-nums; }
 
 .app-shell { position: relative; display: grid; grid-template-columns: 72px 272px minmax(0, 1fr) 304px; height: 100dvh; background: var(--surface); }
-.workspace { grid-column: 3; min-width: 0; height: 100%; overflow: hidden; }
+.workspace { position: relative; grid-column: 3; min-width: 0; height: 100%; overflow: hidden; }
+button:disabled, textarea:disabled, fieldset:disabled button { cursor: not-allowed; opacity: .52; }
+.freshness-notice { position: absolute; z-index: 12; top: 10px; left: 50%; width: min(560px, calc(100% - 24px)); min-height: 38px; padding: 8px 9px 8px 11px; border: 1px solid rgba(200,121,110,.32); border-radius: 8px; display: grid; grid-template-columns: auto minmax(0,1fr) auto; align-items: center; gap: 9px; color: var(--danger); background: rgba(29,20,19,.94); box-shadow: 0 8px 28px rgba(0,0,0,.28); transform: translateX(-50%); backdrop-filter: blur(14px); }
+.freshness-notice span { display: flex; flex-wrap: wrap; gap: 4px 8px; color: var(--secondary); font-size: 8px; }
+.freshness-notice strong { color: var(--danger); font-size: 8px; }
+.freshness-notice button { padding: 5px 8px; border: 1px solid rgba(200,121,110,.36); border-radius: 5px; color: var(--text); background: transparent; font-size: 8px; cursor: pointer; }
 
 .desktop-nav { grid-column: 1; grid-row: 1; z-index: 10; padding: 14px 12px; border-right: 1px solid var(--line); display: flex; flex-direction: column; align-items: center; gap: 8px; background: var(--bg); }
 .desktop-nav .rail-brand { width: 42px; height: 42px; margin-bottom: 18px; border: 1px solid rgba(223, 163, 76, .34); border-radius: 10px; display: grid; place-items: center; color: var(--accent); background: var(--accent-soft); }
@@ -160,6 +165,7 @@ code, time { font-family: "DM Mono", monospace; font-variant-numeric: tabular-nu
 @keyframes spin { to { transform: rotate(360deg); } }
 
 .inspector { grid-column: 4; grid-row: 1; min-width: 0; border-left: 1px solid var(--line); display: flex; flex-direction: column; overflow-y: auto; background: var(--bg); }
+.inspector-fields { min-width: 0; margin: 0; padding: 0; border: 0; }
 .inspector > header { flex: 0 0 58px; padding: 0 16px; border-bottom: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; color: var(--muted); font: 500 8px "DM Mono", monospace; letter-spacing: .08em; text-transform: uppercase; }
 .inspector > header .icon-btn { display: none; }
 .avatar-editor { padding: 20px 16px; border-bottom: 1px solid var(--line); }
@@ -247,7 +253,8 @@ code, time { font-family: "DM Mono", monospace; font-variant-numeric: tabular-nu
 .settings-list strong { font-size: 10px; }
 .settings-list small { color: var(--muted); font-size: 8px; }
 .settings-list button { padding: 6px 9px; border: 1px solid var(--line); border-radius: 5px; color: var(--secondary); background: var(--surface-2); font-size: 8px; }
-.ok-label { display: flex; align-items: center; gap: 4px; color: var(--success); font-size: 8px; font-style: normal; }
+.ok-label, .stale-label { display: flex; align-items: center; gap: 4px; color: var(--success); font-size: 8px; font-style: normal; }
+.stale-label { color: var(--danger); }
 .terms-note { max-width: 720px; margin-top: 28px; padding: 16px; border-left: 2px solid var(--accent); color: var(--secondary); background: var(--accent-soft); }
 .terms-note strong { color: var(--text); font-size: 9px; }
 .terms-note p { margin: 6px 0 0; font-size: 8px; line-height: 1.6; }
