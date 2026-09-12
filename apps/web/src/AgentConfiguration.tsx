@@ -25,7 +25,7 @@ interface Draft extends AgentConfigurationPayload {
 }
 
 function availableHarnesses(node?: ComputeNode) {
-  return node?.harnesses.filter((harness) => harness.available) ?? [];
+  return node && node.status !== "offline" ? node.harnesses.filter((harness) => harness.available) : [];
 }
 
 function initialDraft(nodes: readonly ComputeNode[], agent?: Agent): Draft {
@@ -43,7 +43,7 @@ function initialDraft(nodes: readonly ComputeNode[], agent?: Agent): Draft {
       avatarColor: agent.avatarColor
     };
   }
-  const node = nodes.find((item) => availableHarnesses(item).length > 0) ?? nodes[0];
+  const node = nodes.find((item) => availableHarnesses(item).length > 0);
   const harness = availableHarnesses(node)[0];
   return {
     name: "",
@@ -59,25 +59,30 @@ function initialDraft(nodes: readonly ComputeNode[], agent?: Agent): Draft {
   };
 }
 
-function sourceSignature(nodes: readonly ComputeNode[], agent?: Agent) {
+function confirmedAgentSignature(agent?: Agent) {
+  return JSON.stringify(agent && {
+    name: agent.name,
+    title: agent.title,
+    summary: agent.summary,
+    harnessId: agent.harnessId,
+    model: agent.model,
+    computeNodeId: agent.computeNodeId,
+    workspace: agent.workspace,
+    systemPrompt: agent.systemPrompt,
+    avatarShape: agent.avatarShape,
+    avatarColor: agent.avatarColor
+  });
+}
+
+function runtimeSignature(node: ComputeNode | undefined, selectedId: string, nodes: readonly ComputeNode[]) {
+  if (!node) {
+    return JSON.stringify({ selectedId, eligibleNodes: selectedId ? [] : nodes.filter((item) => item.status !== "offline").map((item) => item.id) });
+  }
   return JSON.stringify({
-    agent: agent && {
-      name: agent.name,
-      title: agent.title,
-      summary: agent.summary,
-      harnessId: agent.harnessId,
-      model: agent.model,
-      computeNodeId: agent.computeNodeId,
-      workspace: agent.workspace,
-      systemPrompt: agent.systemPrompt,
-      avatarShape: agent.avatarShape,
-      avatarColor: agent.avatarColor
-    },
-    nodes: nodes.map((node) => ({
-      id: node.id,
-      roots: node.workspaceRoots,
-      harnesses: node.harnesses.map((harness) => ({ id: harness.id, available: harness.available, models: harness.models }))
-    }))
+    id: node.id,
+    eligible: node.status !== "offline",
+    roots: node.workspaceRoots,
+    harnesses: node.harnesses.map((harness) => ({ id: harness.id, available: harness.available, models: harness.models }))
   });
 }
 
@@ -100,8 +105,8 @@ export function AgentConfigurationForm({
   onReconcile: () => void;
   onSuccess?: (agent: Agent) => void;
 }) {
-  const signature = sourceSignature(nodes, agent);
-  const previousSignature = useRef(signature);
+  const agentSignature = confirmedAgentSignature(agent);
+  const previousAgentSignature = useRef(agentSignature);
   const formRef = useRef<HTMLFormElement>(null);
   const [draft, setDraft] = useState(() => initialDraft(nodes, agent));
   const [busy, setBusy] = useState(false);
@@ -109,8 +114,10 @@ export function AgentConfigurationForm({
   const [notice, setNotice] = useState("");
   const selectedNode = nodes.find((node) => node.id === draft.computeNodeId);
   const harnesses = selectedNode?.harnesses ?? [];
-  const selectedHarness = harnesses.find((harness) => harness.id === draft.harnessId && harness.available);
+  const selectedHarness = availableHarnesses(selectedNode).find((harness) => harness.id === draft.harnessId);
   const models = selectedHarness ? selectedHarness.models.length ? selectedHarness.models : ["default"] : [];
+  const selectedRuntimeSignature = runtimeSignature(selectedNode, draft.computeNodeId, nodes);
+  const previousRuntimeSignature = useRef(selectedRuntimeSignature);
   const valid = Boolean(
     draft.name.trim()
     && draft.title.trim()
@@ -122,12 +129,24 @@ export function AgentConfigurationForm({
   );
 
   useEffect(() => {
-    if (signature === previousSignature.current) return;
-    previousSignature.current = signature;
-    setDraft(initialDraft(nodes, agent));
+    if (agentSignature === previousAgentSignature.current) return;
+    previousAgentSignature.current = agentSignature;
+    const confirmed = initialDraft(nodes, agent);
+    previousRuntimeSignature.current = runtimeSignature(nodes.find((node) => node.id === confirmed.computeNodeId), confirmed.computeNodeId, nodes);
+    setDraft(confirmed);
     setError("");
     setNotice("Draft reconciled to the latest hub snapshot. Review the available configuration before saving.");
-  }, [agent, nodes, signature]);
+  }, [agent, agentSignature, nodes]);
+
+  useEffect(() => {
+    if (selectedRuntimeSignature === previousRuntimeSignature.current) return;
+    previousRuntimeSignature.current = selectedRuntimeSignature;
+    const confirmed = initialDraft(nodes, agent);
+    previousRuntimeSignature.current = runtimeSignature(nodes.find((node) => node.id === confirmed.computeNodeId), confirmed.computeNodeId, nodes);
+    setDraft(confirmed);
+    setError("");
+    setNotice("Draft reconciled to the latest hub snapshot. Review the available configuration before saving.");
+  }, [agent, nodes, selectedRuntimeSignature]);
 
   useEffect(() => {
     formRef.current?.querySelector<HTMLElement>("[data-dialog-initial-focus]")?.focus();
@@ -144,6 +163,7 @@ export function AgentConfigurationForm({
   function selectNode(computeNodeId: string) {
     const node = nodes.find((item) => item.id === computeNodeId);
     const harness = availableHarnesses(node)[0];
+    previousRuntimeSignature.current = runtimeSignature(node, computeNodeId, nodes);
     setDraft((current) => ({
       ...current,
       computeNodeId,
@@ -156,7 +176,7 @@ export function AgentConfigurationForm({
   }
 
   function selectHarness(harnessId: string) {
-    const harness = harnesses.find((item) => item.id === harnessId && item.available);
+    const harness = availableHarnesses(selectedNode).find((item) => item.id === harnessId);
     setDraft((current) => ({
       ...current,
       harnessId: harness?.id ?? "",
@@ -197,7 +217,7 @@ export function AgentConfigurationForm({
         <div className="configuration-grid">
           <label>Compute node<select value={draft.computeNodeId} onChange={(event) => selectNode(event.target.value)}>
             {!selectedNode && draft.computeNodeId && <option value={draft.computeNodeId}>Unavailable node</option>}
-            {nodes.map((node) => <option key={node.id} value={node.id}>{node.name}</option>)}
+            {nodes.map((node) => <option key={node.id} value={node.id} disabled={node.status === "offline"}>{node.name}{node.status === "offline" ? " (offline)" : ""}</option>)}
           </select></label>
           <label>Harness<select value={draft.harnessId} onChange={(event) => selectHarness(event.target.value)}>
             {!draft.harnessId && <option value="">No available harness</option>}
@@ -212,6 +232,7 @@ export function AgentConfigurationForm({
         <small id="workspace-roots" className="workspace-hint">Advertised roots: {rootHint}</small>
       </fieldset>
       {!canMutate && <p className="configuration-error" role="alert">Reconnect before saving agent configuration.</p>}
+      {selectedNode?.status === "offline" && <p className="configuration-error" role="alert">The selected compute node is offline. Choose an online node before saving.</p>}
       {error && <p className="configuration-error" role="alert">{error}</p>}
       {notice && <p className="configuration-notice" role="status">{notice}</p>}
       <footer>

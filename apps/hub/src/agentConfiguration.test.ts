@@ -110,6 +110,7 @@ test("fails closed for malformed or unadvertised creation fields", () => {
     ["empty title", state(), { ...createInput, title: "" }],
     ["empty system prompt", state(), { ...createInput, systemPrompt: "\n" }],
     ["unknown node", state(), { ...createInput, computeNodeId: "gone" }],
+    ["offline stale node", state([node({ status: "offline" })]), createInput],
     ["unavailable harness", state(), { ...createInput, harnessId: "claude-cli", model: "sonnet" }],
     ["unadvertised harness", state(), { ...createInput, harnessId: "ag-ui" }],
     ["unadvertised model", state(), { ...createInput, model: "gpt-4" }],

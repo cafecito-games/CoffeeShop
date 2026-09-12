@@ -87,6 +87,7 @@ function validateConfiguration(body: unknown, nodes: readonly ComputeNode[], exi
 
   const node = nodes.find((item) => item.id === computeNodeId);
   if (!node) return invalid("Select a compute node that is still available");
+  if (node.status === "offline") return invalid("Select a compute node that is online and not stale");
   const harness = node.harnesses.find((item) => item.id === harnessId && item.available);
   if (!harness) return invalid("Select a harness advertised as available by the compute node");
   if (harness.models.length ? !harness.models.includes(model) : model !== "default") {

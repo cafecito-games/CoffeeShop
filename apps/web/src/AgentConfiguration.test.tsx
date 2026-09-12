@@ -111,6 +111,19 @@ describe("AgentConfigurationForm", () => {
     expect(screen.queryByText(/latest hub snapshot/)).not.toBeInTheDocument();
   });
 
+  it("does not discard a draft when an unrelated node profile changes", () => {
+    const rendered = render(<AgentConfigurationForm mode="edit" agent={agent} nodes={nodes} canMutate onSave={vi.fn()} onCancel={vi.fn()} onReconcile={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Unsaved name" } });
+    rendered.rerender(<AgentConfigurationForm mode="edit" agent={agent} nodes={[nodes[0], { ...nodes[1], workspaceRoots: ["/srv/new-root"] }]} canMutate onSave={vi.fn()} onCancel={vi.fn()} onReconcile={vi.fn()} />);
+    expect(screen.getByLabelText("Name")).toHaveValue("Unsaved name");
+    expect(screen.queryByText(/latest hub snapshot/)).not.toBeInTheDocument();
+  });
+
+  it("fails closed when the selected node goes offline", () => {
+    render(<AgentConfigurationForm mode="edit" agent={agent} nodes={[{ ...nodes[0], status: "offline" }, nodes[1]]} canMutate onSave={vi.fn()} onCancel={vi.fn()} onReconcile={vi.fn()} />);
+    expect(screen.getByRole("button", { name: "Save changes" })).toBeDisabled();
+  });
+
   it("requires all required draft fields and disables the entire form while stale", async () => {
     const rendered = render(<AgentConfigurationForm mode="create" nodes={nodes} canMutate onSave={vi.fn()} onCancel={vi.fn()} onReconcile={vi.fn()} />);
     expect(screen.getByRole("button", { name: "Create agent" })).toBeDisabled();
