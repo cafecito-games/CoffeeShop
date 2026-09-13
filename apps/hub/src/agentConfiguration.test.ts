@@ -77,7 +77,8 @@ const createInput = {
   workspace: "/workspace/scout",
   systemPrompt: " Verify every claim. ",
   avatarShape: "bean",
-  avatarColor: "sage"
+  avatarColor: "sage",
+  canDelegate: false
 };
 
 test("creates a normalized agent from a node-advertised configuration", () => {
@@ -93,6 +94,7 @@ test("creates a normalized agent from a node-advertised configuration", () => {
     glyph: "S",
     avatarShape: "bean",
     avatarColor: "sage",
+    canDelegate: false,
     state: "idle",
     currentAction: "Available",
     harnessId: "codex-cli",

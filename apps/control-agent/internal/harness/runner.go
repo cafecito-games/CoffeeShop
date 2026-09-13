@@ -10,14 +10,16 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 
+	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/mcpserver"
 	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/protocol"
 )
 
-const handoffContract = `
+const coordinationContract = `
 
-You are running inside Coffee Shop. If another specialist should continue a bounded task, end your response with exactly <handoff to="agent-id">task and context</handoff>. Use only an agent id you were given. Handoffs are visible and capped; do not delegate reflexively.`
+You are running inside Coffee Shop. Use the Coffee Shop hub tools for durable thread context, artifacts, and bounded delegation when they are available. Refine the thread title, objective, and summary when that improves the shared record, and mark it completed only when the overall objective is satisfied. Keep returned task and artifact ids. If hub delegation is unavailable and another specialist must continue, end your response with exactly <handoff to="agent-id">task and context</handoff>. Use only an agent id you were given.`
 
 type Runner struct {
 	profiles []protocol.HarnessProfile
@@ -27,12 +29,12 @@ func NewRunner(profiles []protocol.HarnessProfile) *Runner {
 	return &Runner{profiles: profiles}
 }
 
-func (r *Runner) Run(ctx context.Context, run protocol.Run, agent protocol.Agent, cwd string, output func(string)) (string, error) {
+func (r *Runner) Run(ctx context.Context, run protocol.Run, agent protocol.Agent, cwd string, mcpConfig mcpserver.Config, output func(string)) (string, error) {
 	profile, available := r.profile(run.HarnessID)
 	if !available {
 		return "", fmt.Errorf("harness %s is not installed or did not pass its version check", run.HarnessID)
 	}
-	binary, args, err := commandFor(run, agent)
+	binary, args, err := commandFor(run, agent, mcpConfig)
 	if err != nil {
 		return "", err
 	}
@@ -43,6 +45,9 @@ func (r *Runner) Run(ctx context.Context, run protocol.Run, agent protocol.Agent
 	configureProcessCancellation(command)
 	command.Dir = cwd
 	command.Env = os.Environ()
+	if mcpConfig.URL != "" {
+		command.Env = append(command.Env, "COFFEE_SHOP_MCP_TOKEN="+mcpConfig.Token)
+	}
 	stdout, err := command.StdoutPipe()
 	if err != nil {
 		return "", err
@@ -79,15 +84,37 @@ func (r *Runner) profile(id string) (protocol.HarnessProfile, bool) {
 	return protocol.HarnessProfile{}, false
 }
 
-func commandFor(run protocol.Run, agent protocol.Agent) (string, []string, error) {
-	prompt := agent.SystemPrompt + handoffContract + "\n\nAvailable teammate ids may be listed by the control plane.\n\nUser task:\n" + run.Prompt
+func commandFor(run protocol.Run, agent protocol.Agent, mcpConfig mcpserver.Config) (string, []string, error) {
+	prompt := agent.SystemPrompt + coordinationContract + "\n\nAvailable teammate ids may be listed by the control plane.\n\nUser task:\n" + run.Prompt
 	switch run.HarnessID {
 	case "claude-cli":
-		return "claude", []string{"-p", prompt, "--output-format", "stream-json", "--verbose", "--permission-mode", "auto", "--permission-prompts", "none", "--model", run.Model}, nil
+		args := []string{"-p", prompt, "--output-format", "stream-json", "--verbose", "--permission-mode", "auto", "--permission-prompts", "none", "--model", run.Model}
+		if mcpConfig.URL != "" {
+			configuration, err := json.Marshal(map[string]any{"mcpServers": map[string]any{"coffee_shop_hub": map[string]any{
+				"type": "http", "url": mcpConfig.URL, "headers": map[string]string{"Authorization": "Bearer ${COFFEE_SHOP_MCP_TOKEN}"},
+			}}})
+			if err != nil {
+				return "", nil, err
+			}
+			allowed := "mcp__coffee_shop_hub__get_task_context,mcp__coffee_shop_hub__post_artifact,mcp__coffee_shop_hub__update_thread"
+			if mcpConfig.CanDelegate {
+				allowed += ",mcp__coffee_shop_hub__delegate_task"
+			}
+			args = append(args, "--mcp-config", string(configuration), "--allowedTools", allowed)
+		}
+		return "claude", args, nil
 	case "codex-cli":
 		args := []string{"exec", "--json", "--sandbox", "workspace-write"}
 		if run.Model != "" && run.Model != "default" {
 			args = append(args, "--model", run.Model)
+		}
+		if mcpConfig.URL != "" {
+			args = append(args,
+				"-c", "mcp_servers.coffee_shop_hub.url="+strconv.Quote(mcpConfig.URL),
+				"-c", `mcp_servers.coffee_shop_hub.bearer_token_env_var="COFFEE_SHOP_MCP_TOKEN"`,
+				"-c", "mcp_servers.coffee_shop_hub.required=true",
+				"-c", `mcp_servers.coffee_shop_hub.default_tools_approval_mode="approve"`,
+			)
 		}
 		return "codex", append(args, prompt), nil
 	default:

@@ -5,15 +5,20 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"math/rand/v2"
 	"net/http"
+	"net/url"
 	"sort"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/config"
 	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/harness"
+	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/mcpserver"
 	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/protocol"
 	"nhooyr.io/websocket"
 )
@@ -22,6 +27,7 @@ type Client struct {
 	config config.Config
 	node   protocol.ComputeNode
 	runner *harness.Runner
+	bridge *mcpserver.Server
 
 	connectionMu sync.Mutex
 	connection   *websocket.Conn
@@ -29,16 +35,29 @@ type Client struct {
 	runsMu       sync.Mutex
 	runs         map[string]context.CancelFunc
 	cancelled    map[string]struct{}
+	pendingMu    sync.Mutex
+	pending      map[string]chan rpcResult
+	requestID    atomic.Uint64
+}
+
+type rpcResult struct {
+	result json.RawMessage
+	err    error
 }
 
 func NewClient(cfg config.Config, node protocol.ComputeNode, runner *harness.Runner) *Client {
-	return &Client{
+	client := &Client{
 		config: cfg, node: node, runner: runner,
-		runs: map[string]context.CancelFunc{}, cancelled: map[string]struct{}{},
+		runs: map[string]context.CancelFunc{}, cancelled: map[string]struct{}{}, pending: map[string]chan rpcResult{},
 	}
+	client.bridge = mcpserver.New(client.callHub, client.uploadArtifact)
+	return client
 }
 
 func (client *Client) Run(ctx context.Context) error {
+	if err := client.bridge.Start(ctx); err != nil {
+		return err
+	}
 	backoff := time.Second
 	for {
 		connected, err := client.runOnce(ctx)
@@ -104,6 +123,10 @@ func (client *Client) runOnce(ctx context.Context) (bool, error) {
 			log.Printf("ignore invalid control-plane message: %v", err)
 			continue
 		}
+		if message.Type == "hub.rpc.response" {
+			client.resolveRPC(message)
+			continue
+		}
 		client.handle(ctx, message)
 	}
 }
@@ -135,6 +158,7 @@ func (client *Client) detach(connection *websocket.Conn) {
 	defer client.connectionMu.Unlock()
 	if client.connection == connection {
 		client.connection = nil
+		client.failPending(errors.New("control plane disconnected"))
 	}
 }
 
@@ -230,8 +254,14 @@ func (client *Client) dispatch(ctx context.Context, run protocol.Run, agent prot
 		if runContext.Err() != nil {
 			return
 		}
+		capability, err := client.bridge.Grant(run.ID, workspace, agent.CanDelegate)
+		if err != nil {
+			client.send(protocol.Outbound{Type: "run.failed", RunID: run.ID, Error: err.Error(), At: now()})
+			return
+		}
+		defer client.bridge.Revoke(capability.Token)
 		client.send(protocol.Outbound{Type: "run.started", RunID: run.ID, At: now()})
-		result, err := client.runner.Run(runContext, run, agent, workspace, func(chunk string) {
+		result, err := client.runner.Run(runContext, run, agent, workspace, capability, func(chunk string) {
 			if runContext.Err() != nil {
 				return
 			}
@@ -248,6 +278,116 @@ func (client *Client) dispatch(ctx context.Context, run protocol.Run, agent prot
 			client.send(protocol.Outbound{Type: "run.completed", RunID: run.ID, Output: result, At: now()})
 		}
 	}()
+}
+
+func (client *Client) callHub(ctx context.Context, runID, operation string, arguments json.RawMessage) (json.RawMessage, error) {
+	requestID := fmt.Sprintf("rpc-%d", client.requestID.Add(1))
+	response := make(chan rpcResult, 1)
+	client.pendingMu.Lock()
+	client.pending[requestID] = response
+	client.pendingMu.Unlock()
+	defer func() {
+		client.pendingMu.Lock()
+		delete(client.pending, requestID)
+		client.pendingMu.Unlock()
+	}()
+
+	message := protocol.Outbound{Type: "hub.rpc.request", RequestID: requestID, RunID: runID, Operation: operation, Arguments: arguments, At: now()}
+	data, err := json.Marshal(message)
+	if err != nil {
+		return nil, err
+	}
+	client.connectionMu.Lock()
+	connection := client.connection
+	if connection == nil {
+		client.connectionMu.Unlock()
+		return nil, errors.New("control plane is unavailable")
+	}
+	writeContext, cancel := context.WithTimeout(ctx, 10*time.Second)
+	err = writeBytes(writeContext, connection, data)
+	cancel()
+	client.connectionMu.Unlock()
+	if err != nil {
+		return nil, fmt.Errorf("send hub tool request: %w", err)
+	}
+	select {
+	case received := <-response:
+		return received.result, received.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-time.After(30 * time.Second):
+		return nil, errors.New("hub tool request timed out")
+	}
+}
+
+func (client *Client) resolveRPC(message protocol.Inbound) {
+	client.pendingMu.Lock()
+	response := client.pending[message.RequestID]
+	delete(client.pending, message.RequestID)
+	client.pendingMu.Unlock()
+	if response == nil {
+		return
+	}
+	if message.RPCError != nil {
+		response <- rpcResult{err: fmt.Errorf("%s: %s", message.RPCError.Code, message.RPCError.Message)}
+		return
+	}
+	response <- rpcResult{result: message.Result}
+}
+
+func (client *Client) failPending(err error) {
+	client.pendingMu.Lock()
+	pending := client.pending
+	client.pending = map[string]chan rpcResult{}
+	client.pendingMu.Unlock()
+	for _, response := range pending {
+		response <- rpcResult{err: err}
+	}
+}
+
+func (client *Client) uploadArtifact(ctx context.Context, uploadPath string, content io.Reader, size int64) error {
+	endpoint, err := httpEndpoint(client.config.ControlEndpoint, uploadPath)
+	if err != nil {
+		return err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPut, endpoint, content)
+	if err != nil {
+		return err
+	}
+	request.ContentLength = size
+	request.Header.Set("Content-Type", "application/octet-stream")
+	if client.config.Token != "" {
+		request.Header.Set("Authorization", "Bearer "+client.config.Token)
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(response.Body, 4*1024))
+		return fmt.Errorf("hub returned %s: %s", response.Status, strings.TrimSpace(string(body)))
+	}
+	return nil
+}
+
+func httpEndpoint(controlEndpoint, path string) (string, error) {
+	parsed, err := url.Parse(controlEndpoint)
+	if err != nil {
+		return "", err
+	}
+	switch parsed.Scheme {
+	case "ws":
+		parsed.Scheme = "http"
+	case "wss":
+		parsed.Scheme = "https"
+	default:
+		return "", errors.New("control endpoint must use ws or wss")
+	}
+	parsed.Path = path
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return parsed.String(), nil
 }
 
 func (client *Client) activeRuns() int {

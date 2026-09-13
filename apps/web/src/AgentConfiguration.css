@@ -8,6 +8,8 @@
 .agent-configuration-form input, .agent-configuration-form select, .agent-configuration-form textarea { width: 100%; min-height: 40px; padding: 9px 10px; border: 1px solid var(--line); border-radius: 7px; outline: 0; resize: vertical; color: var(--text); background: var(--surface); font-size: 10px; }
 .agent-configuration-form select { appearance: auto; }
 .agent-configuration-form input:focus, .agent-configuration-form select:focus, .agent-configuration-form textarea:focus { border-color: rgba(223,163,76,.50); }
+.agent-configuration-form .coordination-toggle { display: flex; align-items: center; gap: 9px; color: var(--secondary); }
+.agent-configuration-form .coordination-toggle input { width: 15px; min-height: 15px; margin: 0; accent-color: var(--accent); }
 .configuration-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 10px; }
 .workspace-hint { display: block; margin: -4px 0 12px; overflow-wrap: anywhere; color: var(--faint); font-size: 8px; }
 .configuration-error, .configuration-notice { margin: 10px 0 0; color: var(--danger); font-size: 8px; line-height: 1.5; }

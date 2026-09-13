@@ -86,6 +86,7 @@ describe("AgentConfigurationForm", () => {
     render(<AgentConfigurationForm mode="edit" agent={agent} nodes={nodes} canMutate onSave={onSave} onCancel={vi.fn()} onReconcile={onReconcile} />);
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Nova" } });
     fireEvent.change(screen.getByLabelText("Summary (optional)"), { target: { value: "Coordinates work" } });
+    fireEvent.click(screen.getByLabelText("Allow this agent to delegate bounded tasks to other agents"));
     fireEvent.submit(screen.getByRole("button", { name: "Save changes" }).closest("form")!);
     expect(screen.getByRole("button", { name: "Saving…" })).toBeDisabled();
     expect(onSave).toHaveBeenCalledWith(expect.objectContaining({
@@ -95,7 +96,8 @@ describe("AgentConfigurationForm", () => {
       model: "gpt-5",
       computeNodeId: "node-one",
       workspace: "/workspace/project",
-      systemPrompt: "Build carefully."
+      systemPrompt: "Build carefully.",
+      canDelegate: true
     }));
     reject(new Error("Node disappeared; choose another compute node"));
     expect(await screen.findByRole("alert")).toHaveTextContent("Node disappeared");

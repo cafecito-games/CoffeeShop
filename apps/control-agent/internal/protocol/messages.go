@@ -2,7 +2,7 @@ package protocol
 
 import "encoding/json"
 
-const Version = "2"
+const Version = "3"
 
 type HarnessProfile struct {
 	ID          string   `json:"id"`
@@ -32,10 +32,12 @@ type Agent struct {
 	ID           string `json:"id"`
 	Name         string `json:"name"`
 	SystemPrompt string `json:"systemPrompt"`
+	CanDelegate  bool   `json:"canDelegate,omitempty"`
 }
 
 type Run struct {
 	ID        string `json:"id"`
+	ThreadID  string `json:"threadId,omitempty"`
 	HarnessID string `json:"harnessId"`
 	Model     string `json:"model"`
 	Workspace string `json:"workspace"`
@@ -43,24 +45,36 @@ type Run struct {
 }
 
 type Inbound struct {
-	Type  string `json:"type"`
-	RunID string `json:"runId,omitempty"`
-	Run   Run    `json:"run,omitempty"`
-	Agent Agent  `json:"agent,omitempty"`
+	Type      string          `json:"type"`
+	RunID     string          `json:"runId,omitempty"`
+	Run       Run             `json:"run,omitempty"`
+	Agent     Agent           `json:"agent,omitempty"`
+	RequestID string          `json:"requestId,omitempty"`
+	Result    json.RawMessage `json:"result,omitempty"`
+	RPCError  *HubRPCError    `json:"error,omitempty"`
+}
+
+type HubRPCError struct {
+	Code      string `json:"code"`
+	Message   string `json:"message"`
+	Retryable bool   `json:"retryable"`
 }
 
 type Outbound struct {
-	Type            string       `json:"type"`
-	ProtocolVersion string       `json:"protocolVersion,omitempty"`
-	Node            *ComputeNode `json:"node,omitempty"`
-	NodeID          string       `json:"nodeId,omitempty"`
-	ActiveRuns      int          `json:"activeRuns"`
-	ActiveRunIDs    []string     `json:"activeRunIds,omitempty"`
-	RunID           string       `json:"runId,omitempty"`
-	Chunk           string       `json:"chunk,omitempty"`
-	Output          string       `json:"output,omitempty"`
-	Error           string       `json:"error,omitempty"`
-	At              string       `json:"at,omitempty"`
+	Type            string          `json:"type"`
+	ProtocolVersion string          `json:"protocolVersion,omitempty"`
+	Node            *ComputeNode    `json:"node,omitempty"`
+	NodeID          string          `json:"nodeId,omitempty"`
+	ActiveRuns      int             `json:"activeRuns"`
+	ActiveRunIDs    []string        `json:"activeRunIds,omitempty"`
+	RunID           string          `json:"runId,omitempty"`
+	Chunk           string          `json:"chunk,omitempty"`
+	Output          string          `json:"output,omitempty"`
+	Error           string          `json:"error,omitempty"`
+	At              string          `json:"at,omitempty"`
+	RequestID       string          `json:"requestId,omitempty"`
+	Operation       string          `json:"operation,omitempty"`
+	Arguments       json.RawMessage `json:"arguments,omitempty"`
 }
 
 func DecodeInbound(data []byte) (Inbound, error) {

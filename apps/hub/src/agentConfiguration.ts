@@ -30,16 +30,17 @@ export function openConnectionLookup<T extends { readyState: number }>(
 
 type EditableAgentConfiguration = Pick<Agent,
   "name" | "title" | "summary" | "harnessId" | "model" | "computeNodeId" |
-  "workspace" | "systemPrompt" | "avatarShape" | "avatarColor" | "glyph">;
+  "workspace" | "systemPrompt" | "avatarShape" | "avatarColor" | "glyph" | "canDelegate">;
 
 type ConfigurationFailure = { ok: false; kind: "invalid" | "not-found"; error: string };
 type CreateResult = { ok: true; agent: Agent; node: ComputeNode } | ConfigurationFailure;
 type UpdateResult = { ok: true; agent: Agent; node: ComputeNode; changed: boolean } | ConfigurationFailure;
 
-const editableKeys = [
+const stringEditableKeys = [
   "name", "title", "summary", "harnessId", "model", "computeNodeId", "workspace",
   "systemPrompt", "avatarShape", "avatarColor"
 ] as const;
+const editableKeys = [...stringEditableKeys, "canDelegate"] as const;
 const editableKeySet = new Set<string>(editableKeys);
 
 function invalid(error: string): ConfigurationFailure {
@@ -62,8 +63,9 @@ function validateConfiguration(body: unknown, nodes: readonly ComputeNode[], con
   if (!isRecord(body)) return invalid("Request body must be an object");
   const unknown = Object.keys(body).find((key) => !editableKeySet.has(key));
   if (unknown) return invalid(`Unknown agent field: ${unknown}`);
-  const nonString = Object.keys(body).find((key) => typeof body[key] !== "string");
+  const nonString = Object.keys(body).find((key) => key !== "canDelegate" && typeof body[key] !== "string");
   if (nonString) return invalid(`${nonString} must be a string`);
+  if (Object.hasOwn(body, "canDelegate") && typeof body.canDelegate !== "boolean") return invalid("canDelegate must be a boolean");
 
   const values: Record<string, string | undefined> = existing ? {
     name: existing.name,
@@ -81,7 +83,7 @@ function validateConfiguration(body: unknown, nodes: readonly ComputeNode[], con
     avatarShape: "cup",
     avatarColor: "amber"
   };
-  for (const key of editableKeys) {
+  for (const key of stringEditableKeys) {
     if (Object.hasOwn(body, key)) values[key] = body[key] as string;
   }
 
@@ -128,7 +130,8 @@ function validateConfiguration(body: unknown, nodes: readonly ComputeNode[], con
       workspace,
       systemPrompt,
       avatarShape: values.avatarShape as AgentAvatarShape,
-      avatarColor: values.avatarColor as AgentAvatarColor
+      avatarColor: values.avatarColor as AgentAvatarColor,
+      canDelegate: Object.hasOwn(body, "canDelegate") ? body.canDelegate as boolean : existing?.canDelegate ?? false
     }
   };
 }

@@ -110,6 +110,21 @@ test("persisted cancellation finishes before best-effort delivery and works disc
   assert.equal(store.snapshot().events.length, 1);
 });
 
+test("cancelling an orchestrator cascades to active descendants", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "coffee-shop-cancel-"));
+  const store = new Store(join(directory, "state.json"));
+  await store.load();
+  const current = state("running");
+  current.runs.push({ ...run("queued", "run-child"), parentRunId: "run-one", agentId: "agent-one" });
+  current.runs.push({ ...run("completed", "run-finished"), parentRunId: "run-child", agentId: "agent-one" });
+  await store.transact((value) => Object.assign(value, current));
+  const delivered: string[] = [];
+  await cancelPersistedRun(store, "run-one", (_nodeId, message) => { if (message.type === "cancel") delivered.push(message.runId); return true; }, at);
+  assert.deepEqual(delivered.sort(), ["run-child", "run-one"]);
+  assert.equal(store.getRun("run-child")?.status, "cancelled");
+  assert.equal(store.getRun("run-finished")?.status, "completed");
+});
+
 test("persistence failure rolls cancellation back and leaves delivery retryable", async () => {
   const directory = await mkdtemp(join(tmpdir(), "coffee-shop-cancel-"));
   const store = new Store(join(directory, "state.json"));

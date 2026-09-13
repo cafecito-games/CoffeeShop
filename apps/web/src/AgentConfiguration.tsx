@@ -16,6 +16,7 @@ export interface AgentConfigurationPayload {
   systemPrompt: string;
   avatarShape: string;
   avatarColor: string;
+  canDelegate: boolean;
 }
 
 interface Draft extends AgentConfigurationPayload {
@@ -44,7 +45,8 @@ function initialDraft(nodes: readonly ComputeNode[], agent?: Agent): Draft {
       workspace: agent.workspace,
       systemPrompt: agent.systemPrompt,
       avatarShape: agent.avatarShape,
-      avatarColor: agent.avatarColor
+      avatarColor: agent.avatarColor,
+      canDelegate: agent.canDelegate ?? false
     };
   }
   const node = nodes.find((item) => availableHarnesses(item).length > 0);
@@ -59,7 +61,8 @@ function initialDraft(nodes: readonly ComputeNode[], agent?: Agent): Draft {
     workspace: node?.workspaceRoots[0] ?? "",
     systemPrompt: "",
     avatarShape: "cup",
-    avatarColor: "amber"
+    avatarColor: "amber",
+    canDelegate: false
   };
 }
 
@@ -74,7 +77,8 @@ function confirmedAgentSignature(agent?: Agent) {
     workspace: agent.workspace,
     systemPrompt: agent.systemPrompt,
     avatarShape: agent.avatarShape,
-    avatarColor: agent.avatarColor
+    avatarColor: agent.avatarColor,
+    canDelegate: agent.canDelegate ?? false
   });
 }
 
@@ -225,6 +229,7 @@ export function AgentConfigurationForm({
         </div>
         <label>Summary (optional)<textarea value={draft.summary} onChange={(event) => update("summary", event.target.value)} rows={2} /></label>
         <label>System prompt<textarea value={draft.systemPrompt} onChange={(event) => update("systemPrompt", event.target.value)} rows={5} required /></label>
+        <label className="coordination-toggle"><input type="checkbox" checked={draft.canDelegate} onChange={(event) => update("canDelegate", event.target.checked)} /> Allow this agent to delegate bounded tasks to other agents</label>
         <div className="configuration-grid">
           <label>Compute node<select value={draft.computeNodeId} onChange={(event) => selectNode(event.target.value)}>
             {!selectedNode && draft.computeNodeId && <option value={draft.computeNodeId}>Unavailable node</option>}

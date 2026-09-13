@@ -4,10 +4,12 @@ import {
   activeRunStatuses,
   canTransitionRun,
   harnessIds,
+  hubToolNames,
   isActiveRunStatus,
   isTerminalRunStatus,
   runStatuses,
-  terminalRunStatuses
+  terminalRunStatuses,
+  threadStatuses
 } from "../dist/index.js";
 
 test("run status vocabulary and canonical transitions stay aligned", () => {
@@ -27,4 +29,9 @@ test("run status vocabulary and canonical transitions stay aligned", () => {
 
 test("agent harness identities remain a closed mutation vocabulary", () => {
   assert.deepEqual(harnessIds, ["claude-cli", "codex-cli", "shell", "ag-ui"]);
+});
+
+test("hub MCP tools remain a small stable vocabulary", () => {
+  assert.deepEqual(hubToolNames, ["get_task_context", "delegate_task", "post_artifact", "update_thread"]);
+  assert.deepEqual(threadStatuses, ["active", "completed", "archived"]);
 });
