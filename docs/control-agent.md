@@ -1,6 +1,6 @@
 # Barista control agent
 
-Barista is the machine-local half of Coffee Shop. It is installed once on every computer that contributes compute and connects outbound to the control plane. It does not expose an inbound listener.
+Barista is the machine-local half of Coffee Shop. It is installed once on every computer that contributes compute and connects outbound to the control plane. It has no network-reachable listener; its MCP bridge binds only to loopback.
 
 ## Startup
 
@@ -10,9 +10,10 @@ At startup Barista:
 2. canonicalizes every workspace root and refuses missing roots;
 3. locates `claude` and `codex` on `PATH` and runs each binary's `--version` check;
 4. exits if no supported harness passes discovery;
-5. opens an authenticated WebSocket to `/control-agent`;
-6. registers the node, its platform, capacity, workspace roots, Barista version, and discovered harnesses;
-7. maintains heartbeats and reconnects with bounded exponential backoff.
+5. starts an authenticated MCP endpoint on an ephemeral loopback-only port;
+6. opens an authenticated WebSocket to `/control-agent`;
+7. registers the node, its platform, capacity, workspace roots, Barista version, and discovered harnesses;
+8. maintains heartbeats and reconnects with bounded exponential backoff.
 
 The minimal invocation is:
 
@@ -64,10 +65,28 @@ Barista sends:
 - `heartbeat`: node ID, active run count, and timestamp;
 - `run.started`, `run.output`, `run.completed`, and `run.failed`: run lifecycle;
 - `run.cancelled`: acknowledgement that Barista recorded a cancellation tombstone and, for active work, terminated the harness process tree.
+- `hub.rpc.request`: a correlated, active-run-bound request made through Barista's MCP bridge.
+
+The hub sends `hub.rpc.response` with either a structured result or a typed error. Protocol version 3 adds these RPC messages. They are not placed in the reconnect lifecycle outbox: a disconnected call fails promptly, while mutation idempotency makes an explicit retry safe.
+
+## Harness MCP bridge
+
+Barista exposes a Streamable HTTP MCP server on `127.0.0.1` only. Each run receives an opaque bearer capability in its generated harness configuration. The capability is mapped in memory to the active run and authorized workspace, and is revoked during completion, failure, or cancellation. The long-lived `COFFEE_SHOP_TOKEN` is never passed to the harness.
+
+The MCP server is named `coffee_shop_hub` and provides:
+
+- `get_task_context`: read the durable thread plus the current run or a visible ancestor/descendant, its child statuses, thread artifacts, limits, and available teammates;
+- `post_artifact`: validate and publish a regular file beneath the active workspace, capped at 10 MiB;
+- `delegate_task`: create an idempotent child run in the current thread, exposed only when the agent's **Allow delegation** setting is enabled;
+- `update_thread`: let the owner agent refine the current thread's title, objective, or summary, or mark it active/completed. Archival remains an operator action.
+
+The capability determines `threadId`; the harness never supplies it to delegation or artifact calls. This prevents accidental or adversarial cross-thread attachment.
+
+Claude Code receives the server through `--mcp-config`; Codex receives run-local `mcp_servers` configuration overrides. Both use an environment reference for the ephemeral bearer token, so its value is not placed in process arguments. The older final-response handoff directive remains available when MCP cannot be loaded by an older harness.
 
 Cancellation commands are idempotent from Barista's perspective. A cancel received before its matching dispatch prevents the process from starting and is acknowledged immediately; a cancel received during execution terminates the process tree and is acknowledged after cleanup without translating that intentional termination into `run.failed`. Tombstones survive control-plane reconnects for the lifetime of the Barista process, so a replayed dispatch cannot resurrect cancelled work. The hub persists cancellation before sending the command and remains authoritative if Barista is offline.
 
-On reconnect, protocol version 2 sends `register`, flushes its lifecycle outbox, and then sends `sync.complete` with any run IDs still active on Barista. The hub processes those messages in socket order and waits for the barrier before redispatching queued runs, excluding work Barista reports as active. Version 1 remains accepted during rolling upgrades so existing lifecycle events can settle, but queued-run redispatch is disabled for v1; upgrade that Barista to resume queued work safely.
+On reconnect, protocol versions 2 and 3 send `register`, flush the lifecycle outbox, and then send `sync.complete` with any run IDs still active on Barista. The hub processes those messages in socket order and waits for the barrier before redispatching queued runs, excluding work Barista reports as active. Version 1 remains accepted during rolling upgrades so existing lifecycle events can settle, but queued-run redispatch is disabled for v1; upgrade that Barista to resume queued work safely.
 
 The TypeScript source of truth is `packages/protocol/src/index.ts`; Go wire structs are deliberately isolated in `apps/control-agent/internal/protocol`. Changes to the wire contract must update both and should retain compatibility across rolling deployments.
 

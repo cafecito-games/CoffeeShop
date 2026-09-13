@@ -89,7 +89,7 @@ The pnpm workspace contains only JavaScript/TypeScript packages. Barista owns it
 
 ## Runtime and security model
 
-Control agents initiate the connection, so compute hosts do not need a public inbound port. The hub sends typed dispatch/cancel messages over the authenticated WebSocket; Barista returns lifecycle and normalized output messages.
+Control agents initiate the connection, so compute hosts do not need a public inbound port. The hub sends typed dispatch/cancel messages over the authenticated WebSocket; Barista returns lifecycle and normalized output messages. Every top-level request starts a durable thread that links its messages, execution trees, artifacts, and follow-ups. Barista gives each harness an authenticated, run-scoped MCP endpoint on loopback for typed thread/task context, thread refinement, artifact publication, and authorized delegation; those calls are relayed over the same outbound control connection.
 
 Before starting a harness, Barista canonicalizes the requested absolute workspace and confirms it remains within an enrolled root, including through symlinks. Claude Code runs in auto permission mode with unanswered prompts denied. Codex runs with `workspace-write` sandboxing. Vendor credentials remain in vendor-owned CLI storage and are never sent to the hub.
 

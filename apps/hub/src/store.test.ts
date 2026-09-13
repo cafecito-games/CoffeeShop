@@ -15,6 +15,7 @@ test("starts empty, persists state atomically, and loads it again", async () => 
   assert.deepEqual(first.snapshot().runs, []);
   assert.deepEqual(first.snapshot().events, []);
   assert.deepEqual(first.snapshot().messages, []);
+  assert.deepEqual(first.snapshot().threads, []);
 
   await first.transact((state) => {
     state.events.push(newEvent({ type: "status", title: "Saved event", detail: "Persistence check" }));
@@ -62,6 +63,9 @@ test("removes legacy demo records without removing user-created data", async () 
   assert.deepEqual(snapshot.runs.map((run) => run.id), ["real-run"]);
   assert.deepEqual(snapshot.events.map((event) => event.id), ["real-event"]);
   assert.deepEqual(snapshot.messages.map((message) => message.id), ["real-message"]);
+  assert.equal(snapshot.threads?.length, 1);
+  assert.equal(snapshot.runs[0].threadId, snapshot.threads?.[0].id);
+  assert.equal(snapshot.messages[0].threadId, snapshot.threads?.[0].id);
   const persisted = JSON.parse(await readFile(path, "utf8"));
   assert.equal(persisted.agents[0].id, "claude-scout");
   assert.equal(persisted.agents[0].avatarShape, "cup");
@@ -81,4 +85,27 @@ test("serializes concurrent transactions without losing persistence", async () =
   const reloaded = new Store(path);
   await reloaded.load();
   assert.equal(reloaded.snapshot().events.length, 24);
+});
+
+test("stores artifact bytes outside the JSON snapshot", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "coffee-shop-store-"));
+  const path = join(directory, "state.json");
+  const store = new Store(path);
+  await store.load();
+  await store.writeArtifactContent("artifact-safe-id", Buffer.from("artifact body"));
+  assert.equal((await store.readArtifactContent("artifact-safe-id")).toString(), "artifact body");
+  assert.doesNotMatch(await readFile(path, "utf8"), /artifact body/);
+});
+
+test("migrates an active legacy run into an active durable thread", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "coffee-shop-store-"));
+  const path = join(directory, "state.json");
+  await writeFile(path, JSON.stringify({
+    agents: [], nodes: [], events: [], messages: [],
+    runs: [{ id: "run-active", agentId: "agent-one", prompt: "Continue active work", status: "queued", createdAt: "2026-01-01T00:00:00Z" }]
+  }));
+  const store = new Store(path);
+  await store.load();
+  assert.equal(store.snapshot().threads?.[0].status, "active");
+  assert.equal(store.snapshot().runs[0].threadId, store.snapshot().threads?.[0].id);
 });

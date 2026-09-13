@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import {
   Pulse as Activity, ArrowLeft, ArrowRight, Broadcast, Check, CircleNotch, Command,
-  Coffee, Cpu, Gear, MagnifyingGlass, PaperPlaneTilt, Plus,
+  Coffee, Cpu, FolderOpen, Gear, MagnifyingGlass, PaperPlaneTilt, Plus,
   Robot, SlidersHorizontal, TerminalWindow, UsersThree, WarningCircle, X, LockKey
 } from "@phosphor-icons/react";
-import { isActiveRunStatus, type Agent, type AgentState, type ChatMessage, type ComputeNode, type Run, type RunStatus } from "@coffee-shop/protocol";
+import { isActiveRunStatus, type Agent, type AgentState, type Artifact, type ChatMessage, type ComputeNode, type Run, type RunStatus, type Thread, type ThreadStatus } from "@coffee-shop/protocol";
 import { AccessibleDialog } from "./AccessibleDialog.js";
 import { ActivityView } from "./ActivityView.js";
 import { AgentConfigurationForm, CreateAgentDialog, type AgentConfigurationPayload } from "./AgentConfiguration.js";
@@ -12,9 +12,10 @@ import { CoffeeAvatar } from "./CoffeeAvatar.js";
 import { ComputeView } from "./compute/ComputeView.js";
 import { useHubConnection, type ConnectionStatus } from "./hubConnection.js";
 import { SettingsView } from "./settings/SettingsView.js";
+import { ThreadsView } from "./ThreadsView.js";
 import { PwaInstallProvider } from "./settings/PwaInstall.js";
 
-type View = "agents" | "activity" | "compute" | "settings";
+type View = "agents" | "threads" | "activity" | "compute" | "settings";
 
 const statusLabels: Record<AgentState, string> = { idle: "Idle", thinking: "Thinking", working: "Working", waiting: "Waiting", blocked: "Blocked", done: "Done" };
 const connectionLabels: Record<ConnectionStatus, string> = {
@@ -91,10 +92,10 @@ function EmptyAgents({ agents, onSelect, onCreate, canMutate }: { agents: Agent[
   );
 }
 
-function Chat({ agent, messages, nodes, sending, inspectorOpen, onBack, onSend, onInspector, onInspectRun, canMutate }: {
-  agent: Agent; messages: ChatMessage[]; nodes: ComputeNode[]; sending: boolean;
+function Chat({ agent, messages, nodes, threads, selectedThreadId, sending, inspectorOpen, onBack, onSend, onThreadChange, onInspector, onInspectRun, canMutate }: {
+  agent: Agent; messages: ChatMessage[]; nodes: ComputeNode[]; threads: Thread[]; selectedThreadId: string; sending: boolean;
   inspectorOpen: boolean;
-  onBack: () => void; onSend: (body: string) => Promise<void>; onInspector: () => void; onInspectRun: (id: string) => void; canMutate: boolean;
+  onBack: () => void; onSend: (body: string) => Promise<void>; onThreadChange: (id: string) => void; onInspector: () => void; onInspectRun: (id: string) => void; canMutate: boolean;
 }) {
   const [body, setBody] = useState("");
   const endRef = useRef<HTMLDivElement>(null);
@@ -118,7 +119,8 @@ function Chat({ agent, messages, nodes, sending, inspectorOpen, onBack, onSend, 
         </div>
       </div>
       <form className="composer" onSubmit={submit}>
-        <div className="composer-box"><textarea value={body} onChange={(event) => setBody(event.target.value)} placeholder={canMutate ? `Message ${agent.name}` : `Reconnect to message ${agent.name}`} rows={1} disabled={!canMutate} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} /><button disabled={!canMutate || !body.trim() || sending}><PaperPlaneTilt size={17} weight="fill" /></button></div>
+        <label className="thread-picker">Thread<select aria-label="Thread" value={selectedThreadId} onChange={(event) => onThreadChange(event.target.value)} disabled={!canMutate || sending}><option value="">New thread</option>{threads.filter((thread) => thread.status !== "archived").map((thread) => <option key={thread.id} value={thread.id}>{thread.title}{thread.status === "completed" ? " · completed" : ""}</option>)}</select></label>
+        <div className="composer-box"><textarea value={body} onChange={(event) => setBody(event.target.value)} placeholder={canMutate ? `Message ${agent.name}` : `Reconnect to message ${agent.name}`} rows={1} disabled={!canMutate} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} /><button aria-label="Send" disabled={!canMutate || !body.trim() || sending}><PaperPlaneTilt size={17} weight="fill" /></button></div>
         <small>{agent.harnessId === "claude-cli" ? "Claude Code" : "Codex"} · {agent.model} · runs on {node?.name ?? "unassigned compute"}</small>
       </form>
     </main>
@@ -172,6 +174,7 @@ function Inspector({ agent, nodes, onClose, onSave, onReconcile, canMutate }: {
                 <div><dt>Harness</dt><dd>{harness?.label ?? agent.harnessId}</dd></div>
                 <div><dt>Model</dt><dd>{agent.model}</dd></div>
                 <div><dt>Workspace</dt><dd><code>{agent.workspace}</code></dd></div>
+                <div><dt>Coordination</dt><dd>{agent.canDelegate ? "May delegate bounded tasks" : "Worker only"}</dd></div>
               </dl>
             </section>
             <section className="prompt-section"><div className="section-label"><span>Purpose</span><small>system prompt</small></div><p>{agent.systemPrompt}</p></section>
@@ -187,12 +190,16 @@ const runStatusLabels: Record<RunStatus, string> = {
   queued: "Queued", running: "Running", completed: "Completed", failed: "Failed", cancelled: "Cancelled"
 };
 
-function RunInspector({ selectedRunId, run, agents, nodes, onClose, canMutate }: {
+function RunInspector({ selectedRunId, run, runs, threads, artifacts, agents, nodes, onClose, onInspectRun, canMutate }: {
   selectedRunId: string;
   run?: Run;
+  runs: Run[];
+  threads: Thread[];
+  artifacts: Artifact[];
   agents: Agent[];
   nodes: ComputeNode[];
   onClose: () => void;
+  onInspectRun: (id: string) => void;
   canMutate: boolean;
 }) {
   const [confirming, setConfirming] = useState(false);
@@ -201,6 +208,9 @@ function RunInspector({ selectedRunId, run, agents, nodes, onClose, canMutate }:
   const titleId = "run-inspector-title";
   const agent = run ? agents.find((item) => item.id === run.agentId) : undefined;
   const node = run ? nodes.find((item) => item.id === run.nodeId) : undefined;
+  const thread = run?.threadId ? threads.find((item) => item.id === run.threadId) : undefined;
+  const children = run ? runs.filter((item) => item.parentRunId === run.id) : [];
+  const runArtifacts = run ? artifacts.filter((item) => item.runId === run.id && item.uploaded) : [];
 
   async function cancelRun() {
     if (!run || !canMutate) return;
@@ -221,6 +231,22 @@ function RunInspector({ selectedRunId, run, agents, nodes, onClose, canMutate }:
     }
   }
 
+  async function downloadArtifact(artifact: Artifact) {
+    setNotice("");
+    try {
+      const response = await apiFetch(artifact.downloadPath);
+      if (!response.ok) throw new Error(`Artifact download failed (${response.status})`);
+      const objectUrl = URL.createObjectURL(await response.blob());
+      const link = document.createElement("a");
+      link.href = objectUrl;
+      link.download = artifact.relativePath.split("/").at(-1) || artifact.title;
+      link.click();
+      URL.revokeObjectURL(objectUrl);
+    } catch (cause) {
+      setNotice(cause instanceof Error ? cause.message : "Could not download the artifact");
+    }
+  }
+
   return (
     <AccessibleDialog labelledBy={titleId} onClose={onClose} className="run-dialog">
       <header>
@@ -237,6 +263,7 @@ function RunInspector({ selectedRunId, run, agents, nodes, onClose, canMutate }:
             <div><dt>Compute</dt><dd>{node ? `${node.name} · ${node.id}` : `${run.nodeId} · unavailable`}</dd></div>
             <div><dt>Harness / model</dt><dd>{run.harnessId} · {run.model || "Model unavailable"}</dd></div>
             <div><dt>Workspace</dt><dd><code>{run.workspace || "Workspace unavailable"}</code></dd></div>
+            <div><dt>Thread</dt><dd>{thread ? `${thread.title} · ${thread.id}` : run.threadId ?? "Legacy run"}</dd></div>
             <div><dt>Parent run</dt><dd>{run.parentRunId ?? "No parent run"}</dd></div>
             <div><dt>Handoff depth</dt><dd>{run.depth}</dd></div>
             <div><dt>Created</dt><dd><time>{run.createdAt || "Timestamp unavailable"}</time></dd></div>
@@ -247,6 +274,8 @@ function RunInspector({ selectedRunId, run, agents, nodes, onClose, canMutate }:
           <section className="run-text"><h3>Prompt</h3><pre>{run.prompt || "Prompt unavailable"}</pre></section>
           <section className="run-text" aria-live="polite"><h3>Output</h3><pre>{run.output || (isActiveRunStatus(run.status) ? "Output is not available yet." : "No output was produced.")}</pre></section>
           <section className="run-text"><h3>Error</h3><pre>{run.error ?? "No error reported."}</pre></section>
+          {children.length > 0 && <section className="run-related"><h3>Delegated tasks</h3>{children.map((child) => <button key={child.id} onClick={() => onInspectRun(child.id)}><span>{agents.find((item) => item.id === child.agentId)?.name ?? child.agentId}</span><small>{runStatusLabels[child.status]}</small></button>)}</section>}
+          {runArtifacts.length > 0 && <section className="run-related"><h3>Artifacts</h3>{runArtifacts.map((artifact) => <button key={artifact.id} onClick={() => void downloadArtifact(artifact)}><span>{artifact.title}</span><small>{artifact.kind} · {artifact.size} bytes</small></button>)}</section>}
           {notice && <p className="run-notice" role="alert">{notice}</p>}
           {isActiveRunStatus(run.status) && (
             <footer className="run-actions">
@@ -266,7 +295,7 @@ function FreshnessNotice({ connection, onRetry }: { connection: ConnectionStatus
 }
 
 function BottomNav({ view, onView }: { view: View; onView: (view: View) => void }) {
-  const items: [View, typeof Robot, string][] = [["agents", Robot, "Agents"], ["activity", Activity, "Activity"], ["compute", Cpu, "Compute"], ["settings", Gear, "Settings"]];
+  const items: [View, typeof Robot, string][] = [["agents", Robot, "Agents"], ["threads", FolderOpen, "Threads"], ["activity", Activity, "Activity"], ["compute", Cpu, "Compute"], ["settings", Gear, "Settings"]];
   return <nav className="bottom-nav">{items.map(([key, Icon, label]) => <button key={key} className={view === key ? "active" : ""} onClick={() => onView(key)}><Icon size={21} weight={view === key ? "fill" : "regular"} /><span>{label}</span></button>)}</nav>;
 }
 
@@ -281,16 +310,35 @@ function CoffeeShopApp() {
   const [selectedId, setSelectedId] = useState<string>();
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [selectedRunId, setSelectedRunId] = useState<string>();
+  const [selectedThreadId, setSelectedThreadId] = useState("");
   const [sending, setSending] = useState(false);
   const [creating, setCreating] = useState(false);
   const selected = snapshot.agents.find((agent) => agent.id === selectedId);
-  const selectedMessages = useMemo(() => snapshot.messages.filter((message) => message.agentId === selectedId).sort((a, b) => a.createdAt.localeCompare(b.createdAt)), [snapshot.messages, selectedId]);
+  const selectedMessages = useMemo(() => snapshot.messages.filter((message) => message.agentId === selectedId && (!selectedThreadId || message.threadId === selectedThreadId)).sort((a, b) => a.createdAt.localeCompare(b.createdAt)), [snapshot.messages, selectedId, selectedThreadId]);
+  const selectedThreads = useMemo(() => (snapshot.threads ?? []).filter((thread) => thread.ownerAgentId === selectedId), [snapshot.threads, selectedId]);
 
   async function send(body: string) {
     if (!selected || !canMutate) return;
     setSending(true);
-    try { await apiFetch(`/api/agents/${selected.id}/messages`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ body }) }); }
+    try {
+      const response = await apiFetch(`/api/agents/${selected.id}/messages`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ body, threadId: selectedThreadId || undefined }) });
+      if (!response.ok) {
+        const failure = await response.json().catch(() => ({})) as { error?: string };
+        throw new Error(failure.error ?? `Could not send message (${response.status})`);
+      }
+      const run = await response.json() as Run;
+      if (run.threadId) setSelectedThreadId(run.threadId);
+    }
     finally { setSending(false); }
+  }
+
+  async function setThreadStatus(thread: Thread, status: ThreadStatus) {
+    if (!canMutate) throw new Error("Reconnect before updating a thread");
+    const response = await apiFetch(`/api/threads/${encodeURIComponent(thread.id)}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ status }) });
+    if (!response.ok) {
+      const failure = await response.json().catch(() => ({})) as { error?: string };
+      throw new Error(failure.error ?? `Could not update thread (${response.status})`);
+    }
   }
 
   async function updateAgent(payload: AgentConfigurationPayload) {
@@ -303,7 +351,8 @@ function CoffeeShopApp() {
     return response.json() as Promise<Agent>;
   }
 
-  function selectAgent(id: string) { setSelectedId(id); setView("agents"); setInspectorOpen(false); setSelectedRunId(undefined); }
+  function selectAgent(id: string) { setSelectedId(id); setSelectedThreadId(""); setView("agents"); setInspectorOpen(false); setSelectedRunId(undefined); }
+  function continueThread(thread: Thread) { setSelectedId(thread.ownerAgentId); setSelectedThreadId(thread.id); setView("agents"); setInspectorOpen(false); }
   function switchView(next: View) { setView(next); if (next !== "agents") setSelectedId(undefined); }
   async function createAgent(fields: AgentConfigurationPayload) {
     if (!canMutate) throw new Error("Reconnect before creating an agent");
@@ -325,16 +374,18 @@ function CoffeeShopApp() {
       <div className="workspace">
         <FreshnessNotice connection={connection} onRetry={retry} />
         {view === "agents" && !selected && <EmptyAgents agents={snapshot.agents} onSelect={selectAgent} onCreate={() => { if (canMutate) setCreating(true); }} canMutate={canMutate} />}
-        {view === "agents" && selected && <Chat agent={selected} nodes={snapshot.nodes} messages={selectedMessages} sending={sending} inspectorOpen={inspectorOpen} onBack={() => setSelectedId(undefined)} onSend={send} onInspector={() => setInspectorOpen((open) => !open)} onInspectRun={setSelectedRunId} canMutate={canMutate} />}
+        {view === "agents" && selected && <Chat agent={selected} nodes={snapshot.nodes} threads={selectedThreads} selectedThreadId={selectedThreadId} messages={selectedMessages} sending={sending} inspectorOpen={inspectorOpen} onBack={() => setSelectedId(undefined)} onSend={send} onThreadChange={setSelectedThreadId} onInspector={() => setInspectorOpen((open) => !open)} onInspectRun={setSelectedRunId} canMutate={canMutate} />}
+        {view === "threads" && <ThreadsView threads={snapshot.threads ?? []} runs={snapshot.runs} artifacts={snapshot.artifacts ?? []} agents={snapshot.agents} canMutate={canMutate} onContinue={continueThread} onInspectRun={setSelectedRunId} onSetStatus={setThreadStatus} />}
         {view === "activity" && <ActivityView events={snapshot.events} agents={snapshot.agents} onInspectRun={setSelectedRunId} />}
         {view === "compute" && <ComputeView nodes={snapshot.nodes} />}
         {view === "settings" && <SettingsView connection={connection} nodes={snapshot.nodes} generatedAt={snapshot.generatedAt} />}
       </div>
       {selected && inspectorOpen && <Inspector agent={selected} nodes={snapshot.nodes} onClose={() => setInspectorOpen(false)} onSave={updateAgent} onReconcile={retry} canMutate={canMutate} />}
-      {selectedRunId && <RunInspector selectedRunId={selectedRunId} run={snapshot.runs.find((run) => run.id === selectedRunId)} agents={snapshot.agents} nodes={snapshot.nodes} onClose={() => setSelectedRunId(undefined)} canMutate={canMutate} />}
+      {selectedRunId && <RunInspector selectedRunId={selectedRunId} run={snapshot.runs.find((run) => run.id === selectedRunId)} runs={snapshot.runs} threads={snapshot.threads ?? []} artifacts={snapshot.artifacts ?? []} agents={snapshot.agents} nodes={snapshot.nodes} onClose={() => setSelectedRunId(undefined)} onInspectRun={setSelectedRunId} canMutate={canMutate} />}
       <nav className="desktop-nav" aria-label="Primary">
         <div className="rail-brand" aria-label="Coffee Shop"><Coffee size={21} /></div>
         <button aria-label="Agents" className={view === "agents" ? "active" : ""} onClick={() => switchView("agents")}><Robot size={18} /><span>Agents</span></button>
+        <button aria-label="Threads" className={view === "threads" ? "active" : ""} onClick={() => switchView("threads")}><FolderOpen size={18} /><span>Threads</span></button>
         <button aria-label="Activity" className={view === "activity" ? "active" : ""} onClick={() => switchView("activity")}><Activity size={18} /><span>Activity</span></button>
         <button aria-label="Compute" className={view === "compute" ? "active" : ""} onClick={() => switchView("compute")}><Cpu size={18} /><span>Compute</span></button>
         <button aria-label="Settings" className={view === "settings" ? "active" : ""} onClick={() => switchView("settings")}><Gear size={18} /><span>Settings</span></button>

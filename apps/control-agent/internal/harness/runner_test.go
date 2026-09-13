@@ -5,9 +5,11 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/mcpserver"
 	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/protocol"
 	"github.com/stretchr/testify/require"
 )
@@ -30,7 +32,7 @@ func TestRunnerCancellationTerminatesDescendantProcessTree(t *testing.T) {
 	started := make(chan struct{}, 1)
 	finished := make(chan error, 1)
 	go func() {
-		_, err := runner.Run(ctx, protocol.Run{ID: "run-tree", HarnessID: "codex-cli", Workspace: directory}, protocol.Agent{}, directory, func(string) {
+		_, err := runner.Run(ctx, protocol.Run{ID: "run-tree", HarnessID: "codex-cli", Workspace: directory}, protocol.Agent{}, directory, mcpserver.Config{}, func(string) {
 			started <- struct{}{}
 		})
 		finished <- err
@@ -71,10 +73,26 @@ func TestRunnerExecutesDiscoveredBinaryAndNormalizesOutput(t *testing.T) {
 		protocol.Run{ID: "run-1", HarnessID: "codex-cli", Model: "default", Prompt: "test"},
 		protocol.Agent{ID: "agent-1", SystemPrompt: "Test agent"},
 		directory,
+		mcpserver.Config{},
 		func(chunk string) { chunks = append(chunks, chunk) },
 	)
 
 	require.NoError(t, err)
 	require.Equal(t, "fake result", result)
 	require.Equal(t, []string{"fake result"}, chunks)
+}
+
+func TestHarnessCommandsInjectRunScopedMCPWithoutPuttingTokenInArguments(t *testing.T) {
+	configuration := mcpserver.Config{URL: "http://127.0.0.1:1234/mcp", Token: "do-not-leak", CanDelegate: true}
+	for _, harnessID := range []string{"claude-cli", "codex-cli"} {
+		_, args, err := commandFor(protocol.Run{HarnessID: harnessID, Model: "default", Prompt: "test"}, protocol.Agent{}, configuration)
+		require.NoError(t, err)
+		joined := strings.Join(args, " ")
+		require.Contains(t, joined, "coffee_shop_hub")
+		if harnessID == "claude-cli" {
+			require.Contains(t, joined, "update_thread")
+		}
+		require.Contains(t, joined, "COFFEE_SHOP_MCP_TOKEN")
+		require.NotContains(t, joined, configuration.Token)
+	}
 }

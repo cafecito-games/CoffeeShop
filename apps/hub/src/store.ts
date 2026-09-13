@@ -1,7 +1,7 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { agentAvatarColors, agentAvatarShapes, type ChatMessage, type Snapshot, type TimelineEvent } from "@coffee-shop/protocol";
+import { agentAvatarColors, agentAvatarShapes, type ChatMessage, type Snapshot, type Thread, type TimelineEvent } from "@coffee-shop/protocol";
 
 export type State = Omit<Snapshot, "generatedAt">;
 
@@ -10,7 +10,10 @@ const emptyState = (): State => ({
   nodes: [],
   runs: [],
   events: [],
-  messages: []
+  messages: [],
+  threads: [],
+  delegations: [],
+  artifacts: []
 });
 
 const legacyDemoAgents = new Map([
@@ -71,6 +74,85 @@ function addMissingAgentAvatars(state: State) {
   return changed;
 }
 
+function addCoordinationDefaults(state: State) {
+  let changed = false;
+  if (!state.delegations) { state.delegations = []; changed = true; }
+  if (!state.artifacts) { state.artifacts = []; changed = true; }
+  if (!state.threads) { state.threads = []; changed = true; }
+  for (const agent of state.agents) {
+    if (agent.canDelegate === undefined) { agent.canDelegate = false; changed = true; }
+  }
+  return changed;
+}
+
+function addThreadDefaults(state: State) {
+  let changed = false;
+  state.threads ??= [];
+  const runs = new Map(state.runs.map((run) => [run.id, run]));
+  const threadIdsByRootRun = new Map<string, string>();
+  const generatedThreadIds = new Set<string>();
+  for (const run of state.runs) {
+    if (run.threadId) {
+      let cursor = run;
+      const seen = new Set<string>();
+      while (cursor.parentRunId && runs.has(cursor.parentRunId) && !seen.has(cursor.id)) {
+        seen.add(cursor.id);
+        cursor = runs.get(cursor.parentRunId)!;
+      }
+      threadIdsByRootRun.set(cursor.id, run.threadId);
+    }
+  }
+  for (const run of state.runs) {
+    let root = run;
+    const seen = new Set<string>();
+    while (root.parentRunId && runs.has(root.parentRunId) && !seen.has(root.id)) {
+      seen.add(root.id);
+      root = runs.get(root.parentRunId)!;
+    }
+    let threadId = root.threadId ?? threadIdsByRootRun.get(root.id);
+    if (!threadId) {
+      const objective = typeof root.prompt === "string" && root.prompt.trim() ? root.prompt.trim() : `Recovered run ${root.id}`;
+      const firstLine = objective.split(/\r?\n/, 1)[0].replace(/\s+/g, " ");
+      const createdAt = typeof root.createdAt === "string" ? root.createdAt : new Date().toISOString();
+      const thread: Thread = {
+        id: newId("thread"), title: firstLine.length <= 120 ? firstLine : `${firstLine.slice(0, 119).trimEnd()}…`,
+        objective, summary: "", status: "completed", ownerAgentId: root.agentId, createdBy: "user",
+        createdAt, updatedAt: root.finishedAt ?? createdAt, completedAt: root.finishedAt ?? createdAt
+      };
+      state.threads.push(thread);
+      generatedThreadIds.add(thread.id);
+      threadId = thread.id;
+      threadIdsByRootRun.set(root.id, threadId);
+      changed = true;
+    }
+    if (!run.threadId) { run.threadId = threadId; changed = true; }
+  }
+  for (const thread of state.threads.filter((item) => generatedThreadIds.has(item.id))) {
+    if (state.runs.some((run) => run.threadId === thread.id && (run.status === "queued" || run.status === "running"))) {
+      thread.status = "active";
+      thread.completedAt = undefined;
+    }
+  }
+  const threadIdForRun = new Map(state.runs.map((run) => [run.id, run.threadId]));
+  for (const delegation of state.delegations ?? []) {
+    const threadId = threadIdForRun.get(delegation.parentRunId);
+    if (!delegation.threadId && threadId) { delegation.threadId = threadId; changed = true; }
+  }
+  for (const artifact of state.artifacts ?? []) {
+    const threadId = threadIdForRun.get(artifact.runId);
+    if (!artifact.threadId && threadId) { artifact.threadId = threadId; changed = true; }
+  }
+  for (const event of state.events) {
+    const threadId = event.runId && threadIdForRun.get(event.runId);
+    if (!event.threadId && threadId) { event.threadId = threadId; changed = true; }
+  }
+  for (const message of state.messages) {
+    const threadId = message.runId && threadIdForRun.get(message.runId);
+    if (!message.threadId && threadId) { message.threadId = threadId; changed = true; }
+  }
+  return changed;
+}
+
 export class Store {
   private state: State = emptyState();
   private readonly path: string;
@@ -85,7 +167,9 @@ export class Store {
       this.state = JSON.parse(await readFile(this.path, "utf8")) as State;
       const removedDemoRecords = removeLegacyDemoRecords(this.state);
       const addedAgentAvatars = addMissingAgentAvatars(this.state);
-      if (removedDemoRecords || addedAgentAvatars) await this.save();
+      const addedCoordination = addCoordinationDefaults(this.state);
+      const addedThreads = addThreadDefaults(this.state);
+      if (removedDemoRecords || addedAgentAvatars || addedCoordination || addedThreads) await this.save();
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       await this.save();
@@ -98,6 +182,20 @@ export class Store {
 
   getAgent(id: string) { return this.state.agents.find((agent) => agent.id === id); }
   getRun(id: string) { return this.state.runs.find((run) => run.id === id); }
+  getThread(id: string) { return this.state.threads?.find((thread) => thread.id === id); }
+
+  async writeArtifactContent(id: string, content: Buffer) {
+    const directory = resolve(dirname(this.path), "artifacts");
+    await mkdir(directory, { recursive: true });
+    const destination = resolve(directory, id);
+    const temporary = `${destination}.${process.pid}.tmp`;
+    await writeFile(temporary, content);
+    await rename(temporary, destination);
+  }
+
+  async readArtifactContent(id: string) {
+    return readFile(resolve(dirname(this.path), "artifacts", id));
+  }
 
   async transact(change: (state: State) => unknown) {
     const transaction = this.transactionQueue.then(async () => {

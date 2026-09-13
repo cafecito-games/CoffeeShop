@@ -45,8 +45,8 @@ export async function retryAsync<T>(operation: () => Promise<T>, attempts = 3): 
   throw failure;
 }
 
-export function queuedRunsForNode(snapshot: Snapshot, nodeId: string, activeRunIds: readonly string[], protocolVersion: "1" | "2") {
-  if (protocolVersion !== "2") return [];
+export function queuedRunsForNode(snapshot: Snapshot, nodeId: string, activeRunIds: readonly string[], protocolVersion: "1" | "2" | "3") {
+  if (protocolVersion === "1") return [];
   const active = new Set(activeRunIds);
   return snapshot.runs.filter((run) => run.nodeId === nodeId && run.status === "queued" && !active.has(run.id));
 }
@@ -90,9 +90,12 @@ export function cancelRunInState(state: State, runId: string, at: string): Cance
     type: "status",
     title: "Run cancelled",
     detail: `Run ${run.id} was cancelled`,
+    threadId: run.threadId,
     agentId: run.agentId,
     runId: run.id
   }));
+  const thread = run.threadId ? state.threads?.find((item) => item.id === run.threadId) : undefined;
+  if (thread) thread.updatedAt = at;
   updateAgentAfterCancellation(state, run, at);
   return { kind: "cancelled", run };
 }
@@ -108,12 +111,25 @@ export async function cancelPersistedRun(
   if (existing.status === "cancelled") return { kind: "already-cancelled", run: existing } satisfies CancellationResult;
   if (!canTransitionRun(existing.status, "cancelled")) return { kind: "conflict", run: existing } satisfies CancellationResult;
   let result: CancellationResult = { kind: "not-found" };
+  const cancelledRuns: Run[] = [];
   await store.transact((state) => {
     result = cancelRunInState(state, runId, at);
-    return result.kind === "cancelled";
+    if (result.kind !== "cancelled" || !result.run) return false;
+    cancelledRuns.push(result.run);
+    const pendingParents = [result.run.id];
+    while (pendingParents.length) {
+      const parentRunId = pendingParents.shift()!;
+      for (const child of state.runs.filter((run) => run.parentRunId === parentRunId)) {
+        pendingParents.push(child.id);
+        if (!isActiveRunStatus(child.status)) continue;
+        const childResult = cancelRunInState(state, child.id, at);
+        if (childResult.kind === "cancelled" && childResult.run) cancelledRuns.push(childResult.run);
+      }
+    }
+    return true;
   });
-  if (result.kind === "cancelled" && result.run) {
-    send(result.run.nodeId, { type: "cancel", runId: result.run.id });
+  for (const cancelled of cancelledRuns) {
+    send(cancelled.nodeId, { type: "cancel", runId: cancelled.id });
   }
   return result;
 }
@@ -130,6 +146,7 @@ export function applyRunLifecycle(state: State, message: RunLifecycleMessage) {
   if (run.status === "cancelled") return false;
   const agent = state.agents.find((item) => item.id === run.agentId);
   if (!agent) return false;
+  const thread = run.threadId ? state.threads?.find((item) => item.id === run.threadId) : undefined;
 
   if (message.type === "run.started") {
     if (!canTransitionRun(run.status, "running")) return false;
@@ -148,8 +165,8 @@ export function applyRunLifecycle(state: State, message: RunLifecycleMessage) {
     run.finishedAt = message.at;
     agent.state = "done";
     agent.currentAction = "Completed just now";
-    state.messages.push(newMessage({ agentId: agent.id, author: "agent", body: message.output || "Completed.", kind: "message", runId: run.id }));
-    state.events.unshift(newEvent({ type: "status", title: `${agent.name} finished`, detail: run.prompt.slice(0, 120), agentId: agent.id, runId: run.id }));
+    state.messages.push(newMessage({ agentId: agent.id, author: "agent", body: message.output || "Completed.", kind: "message", threadId: run.threadId, runId: run.id }));
+    state.events.unshift(newEvent({ type: "status", title: `${agent.name} finished`, detail: run.prompt.slice(0, 120), threadId: run.threadId, agentId: agent.id, runId: run.id }));
   } else {
     if (!canTransitionRun(run.status, "failed")) return false;
     run.status = "failed";
@@ -157,8 +174,9 @@ export function applyRunLifecycle(state: State, message: RunLifecycleMessage) {
     run.finishedAt = message.at;
     agent.state = "blocked";
     agent.currentAction = message.error.slice(0, 90);
-    state.messages.push(newMessage({ agentId: agent.id, author: "system", body: `Run failed: ${message.error}`, kind: "status", runId: run.id }));
+    state.messages.push(newMessage({ agentId: agent.id, author: "system", body: `Run failed: ${message.error}`, kind: "status", threadId: run.threadId, runId: run.id }));
   }
   agent.updatedAt = message.at;
+  if (thread) thread.updatedAt = message.at;
   return true;
 }

@@ -1,4 +1,4 @@
-import type { Agent, ComputeNode, Run, RunStatus, Snapshot } from "@coffee-shop/protocol";
+import type { Agent, ComputeNode, Run, RunStatus, Snapshot, Thread } from "@coffee-shop/protocol";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -91,6 +91,56 @@ function prepareBrowser(status: ConnectionStatus = "connected") {
     get length() { return storage.size; }
   });
 }
+
+const thread: Thread = {
+  id: "thread-one", title: "User contact information form", objective: "Create a contact form", summary: "Ready for follow-up",
+  status: "completed", ownerAgentId: agent.id, createdBy: "user", createdAt: "2026-01-01T00:00:00Z",
+  updatedAt: "2026-01-01T00:02:00Z", completedAt: "2026-01-01T00:02:00Z"
+};
+
+describe("durable threads", () => {
+  beforeEach(() => prepareBrowser());
+
+  it("shows linked runs and artifacts and continues with the inherited thread id", async () => {
+    currentSnapshot.threads = [thread];
+    currentSnapshot.runs = [{ ...testRun("completed"), threadId: thread.id, parentRunId: undefined }];
+    currentSnapshot.artifacts = [{
+      id: "artifact-one", threadId: thread.id, runId: "run-one", agentId: agent.id, relativePath: "report.md",
+      title: "Form report", kind: "report", mediaType: "text/markdown", summary: "Ready", size: 12,
+      sha256: "a".repeat(64), downloadPath: "/api/artifacts/artifact-one/content", uploaded: true,
+      idempotencyKey: "report", createdAt: "2026-01-01T00:01:00Z"
+    }];
+    currentSnapshot.messages = [{
+      id: "message-one", threadId: thread.id, agentId: agent.id, author: "agent", body: "Initial work complete",
+      kind: "message", runId: "run-one", createdAt: "2026-01-01T00:02:00Z"
+    }];
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ ...testRun("queued", "run-follow-up"), threadId: thread.id }), { status: 202, headers: { "content-type": "application/json" } }));
+    const { default: App } = await import("./App.js");
+    render(<App />);
+    fireEvent.click(screen.getAllByRole("button", { name: "Threads" })[0]);
+    expect(screen.getByRole("heading", { name: thread.title })).toBeInTheDocument();
+    expect(screen.getAllByText("1", { selector: ".thread-card dd" })).toHaveLength(2);
+    fireEvent.click(screen.getByRole("button", { name: "Continue thread" }));
+    expect(screen.getByLabelText("Thread")).toHaveValue(thread.id);
+    expect(screen.getByText("Initial work complete")).toBeInTheDocument();
+    fireEvent.change(screen.getByPlaceholderText("Message Milo"), { target: { value: "Add consent text" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+    expect(JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body))).toEqual({ body: "Add consent text", threadId: thread.id });
+  });
+
+  it("archives through the operator endpoint", async () => {
+    currentSnapshot.threads = [thread];
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ ...thread, status: "archived" }), { status: 200, headers: { "content-type": "application/json" } }));
+    const { default: App } = await import("./App.js");
+    render(<App />);
+    fireEvent.click(screen.getAllByRole("button", { name: "Threads" })[0]);
+    fireEvent.click(screen.getByRole("button", { name: "Archive" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/threads/thread-one", expect.objectContaining({ method: "PATCH" })));
+  });
+});
 
 describe("connection freshness UI", () => {
   beforeEach(() => {
@@ -314,6 +364,26 @@ describe("run inspector", () => {
       expect(screen.getByText(status[0].toUpperCase() + status.slice(1))).toBeInTheDocument();
     }
     expect(screen.queryByRole("button", { name: "Cancel run" })).not.toBeInTheDocument();
+  });
+
+  it("shows delegated children and uploaded artifacts", async () => {
+    const parent = testRun("running");
+    const child = { ...testRun("completed", "run-child"), parentRunId: parent.id };
+    currentSnapshot.runs = [parent, child];
+    currentSnapshot.events = [{ id: "event-one", type: "run", title: "Running", detail: "Working", runId: parent.id, createdAt: "2026-01-01T00:00:00Z" }];
+    currentSnapshot.artifacts = [{
+      id: "artifact-one", runId: parent.id, agentId: agent.id, relativePath: "reports/result.json",
+      title: "Test results", kind: "test-results", mediaType: "application/json", summary: "Passed",
+      size: 42, sha256: "a".repeat(64), downloadPath: "/api/artifacts/artifact-one/content",
+      uploaded: true, idempotencyKey: "results", createdAt: "2026-01-01T00:01:00Z"
+    }];
+    const { default: App } = await import("./App.js");
+    render(<App />);
+    fireEvent.click(screen.getAllByRole("button", { name: "Activity" })[0]);
+    fireEvent.click(screen.getByRole("button", { name: "Inspect run" }));
+    expect(screen.getByRole("button", { name: /Test results/ })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Milo.*Completed/ }));
+    expect(screen.getByRole("dialog")).toHaveAccessibleName("Run run-child");
   });
 
   it("traps focus, closes with Escape, and restores the triggering control", async () => {

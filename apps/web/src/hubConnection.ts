@@ -35,6 +35,7 @@ export const emptySnapshot: Snapshot = {
   runs: [],
   events: [],
   messages: [],
+  threads: [],
   generatedAt: ""
 };
 
@@ -76,8 +77,42 @@ function isAgent(value: unknown): boolean {
     && isString(value.computeNodeId)
     && isString(value.workspace)
     && isString(value.systemPrompt)
+    && (value.canDelegate === undefined || typeof value.canDelegate === "boolean")
     && isNumber(value.unread)
     && isString(value.updatedAt);
+}
+
+function isDelegation(value: unknown): boolean {
+  return isObject(value)
+    && isString(value.id)
+    && isOptionalString(value.threadId)
+    && isString(value.parentRunId)
+    && isString(value.childRunId)
+    && isString(value.fromAgentId)
+    && isString(value.toAgentId)
+    && isString(value.task)
+    && isString(value.idempotencyKey)
+    && (value.artifactIds === undefined || isArrayOf(value.artifactIds, isString))
+    && isString(value.createdAt);
+}
+
+function isArtifact(value: unknown): boolean {
+  return isObject(value)
+    && isString(value.id)
+    && isOptionalString(value.threadId)
+    && isString(value.runId)
+    && isString(value.agentId)
+    && isString(value.relativePath)
+    && isString(value.title)
+    && isOneOf(value.kind, ["patch", "report", "test-results", "log", "image", "other"])
+    && isString(value.mediaType)
+    && isString(value.summary)
+    && isNumber(value.size)
+    && isString(value.sha256)
+    && isString(value.downloadPath)
+    && typeof value.uploaded === "boolean"
+    && isString(value.idempotencyKey)
+    && isString(value.createdAt);
 }
 
 function isNode(value: unknown): boolean {
@@ -98,6 +133,7 @@ function isNode(value: unknown): boolean {
 function isRun(value: unknown): boolean {
   return isObject(value)
     && isString(value.id)
+    && isOptionalString(value.threadId)
     && isString(value.agentId)
     && isString(value.nodeId)
     && isOneOf(value.harnessId, harnessIds)
@@ -118,6 +154,7 @@ function isRun(value: unknown): boolean {
 function isEvent(value: unknown): boolean {
   return isObject(value)
     && isString(value.id)
+    && isOptionalString(value.threadId)
     && isOneOf(value.type, ["run", "status", "handoff", "node", "message"])
     && isString(value.title)
     && isString(value.detail)
@@ -131,12 +168,28 @@ function isEvent(value: unknown): boolean {
 function isMessage(value: unknown): boolean {
   return isObject(value)
     && isString(value.id)
+    && isOptionalString(value.threadId)
     && isString(value.agentId)
     && isOneOf(value.author, ["you", "agent", "system"])
     && isString(value.body)
     && isOneOf(value.kind, ["message", "handoff", "status"])
     && isOptionalString(value.runId)
     && isString(value.createdAt);
+}
+
+function isThread(value: unknown): boolean {
+  return isObject(value)
+    && isString(value.id)
+    && isString(value.title)
+    && isString(value.objective)
+    && isString(value.summary)
+    && isOneOf(value.status, ["active", "completed", "archived"])
+    && isString(value.ownerAgentId)
+    && isOneOf(value.createdBy, ["user", "agent"])
+    && isString(value.createdAt)
+    && isString(value.updatedAt)
+    && isOptionalString(value.completedAt)
+    && isOptionalString(value.archivedAt);
 }
 
 export function isSnapshot(value: unknown): value is Snapshot {
@@ -146,6 +199,9 @@ export function isSnapshot(value: unknown): value is Snapshot {
     && isArrayOf(value.runs, isRun)
     && isArrayOf(value.events, isEvent)
     && isArrayOf(value.messages, isMessage)
+    && (value.threads === undefined || isArrayOf(value.threads, isThread))
+    && (value.delegations === undefined || isArrayOf(value.delegations, isDelegation))
+    && (value.artifacts === undefined || isArrayOf(value.artifacts, isArtifact))
     && isString(value.generatedAt);
 }
 
