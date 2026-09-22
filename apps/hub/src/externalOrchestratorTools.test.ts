@@ -446,14 +446,17 @@ test("every tool the hub serves is reachable with a well-formed call", async () 
     ["update_thread", { threadId, title: "Renamed" }],
     ["detach_thread", { threadId }]
   ];
-  assert.deepEqual([...calls.map(([tool]) => tool)].sort(), [...servedExternalOrchestratorTools].sort(), "every served tool is exercised");
+  // This credential holds only `orchestrate`, so the approval tools are exercised by their scope
+  // refusal; `apps/hub/src/orchestratorApprovals.test.ts` drives them with the scope they need.
+  const approvalTools: ExternalOrchestratorToolName[] = ["list_approvals", "resolve_approval"];
+  assert.deepEqual([...calls.map(([tool]) => tool), ...approvalTools].sort(), [...servedExternalOrchestratorTools].sort(), "every served tool is exercised");
 
   for (const [tool, argumentsValue] of calls) {
     const response = await call(peer, tool, argumentsValue);
     if (!("error" in response)) continue;
     assert.equal(response.error.code, tool === "update_task" ? "forbidden" : "", `${tool}: ${response.error.message}`);
   }
-  for (const tool of ["list_approvals", "resolve_approval"] as ExternalOrchestratorToolName[]) {
+  for (const tool of approvalTools) {
     assert.equal(errorOf(await call(peer, tool, { threadId })).code, "forbidden", `${tool} needs another scope`);
   }
 });

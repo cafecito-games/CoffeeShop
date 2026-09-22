@@ -14,8 +14,18 @@ import {
   type OrchestratorHubToClient,
   type Validation
 } from "@coffee-shop/protocol";
+import {
+  orchestratorApprovalAuthority,
+  orchestratorApprovalView,
+  orchestratorApprovalViews,
+  parseOrchestratorApprovalResolution,
+  resolveApprovalForOrchestrator,
+  type OrchestratorApprovalAuthority,
+  type OrchestratorApprovalResolutionResult
+} from "./approvals.js";
 import { CoordinationError } from "./coordinationError.js";
 import { submitTasksForSource, updateTaskForSource } from "./coordination.js";
+import { deliverApprovalResolution, type ControlAgentSender } from "./harnessGateway.js";
 import { executionInventoryForSource, type InventoryEnvironment } from "./executionInventory.js";
 import {
   externalSource,
@@ -101,6 +111,11 @@ export interface OrchestratorClientGatewayDependencies {
   inventory?: () => Omit<InventoryEnvironment, "now">;
   /** Runs a scheduling pass after a submission commits; it never rejects. */
   schedule?: () => Promise<void>;
+  /**
+   * Writes an approval decision to the run's Barista. When unwired, a resolution still commits and
+   * its decision stays pending for the reconnect barrier to deliver.
+   */
+  sendToControlAgent?: ControlAgentSender;
 }
 
 export interface OrchestratorClientGateway {
@@ -227,7 +242,8 @@ export function createOrchestratorClientGateway({
   timers = defaultTimers,
   waiters = new TaskEventWaiters(store),
   inventory = () => unwiredInventory,
-  schedule
+  schedule,
+  sendToControlAgent = () => false
 }: OrchestratorClientGatewayDependencies): OrchestratorClientGateway {
   const connections = new Map<string, LiveConnection>();
   /*
@@ -526,9 +542,53 @@ export function createOrchestratorClientGateway({
       };
 
       /*
+       * Approval tools.
+       *
+       * The dispatcher already refused a credential whose committed scopes lack `resolve-approvals`,
+       * but that read happened before the handler ran. Both handlers decide the authority again from
+       * committed state, and `resolve_approval` does so inside the transaction that commits the
+       * resolution, so a scope removed or a credential revoked while the call was in flight can
+       * never resolve a worker's approval.
+       */
+      const refuseApprovalAuthority = (authority: Exclude<OrchestratorApprovalAuthority, { kind: "authorized" }>): ToolOutcome =>
+        authority.kind === "not-attached"
+          ? failure("not_attached", "This connection holds no attachment on that thread")
+          : failure("forbidden", "This credential may not resolve approvals");
+
+      const listApprovals = threadScoped((threadId, rest) => {
+        if (Object.keys(rest).length) return failure("invalid_arguments", "list_approvals accepts only threadId");
+        return store.read((state) => {
+          const authority = orchestratorApprovalAuthority(state, connectionId!, threadId);
+          if (authority.kind !== "authorized") return refuseApprovalAuthority(authority);
+          return { result: { threadId, approvals: structuredClone(orchestratorApprovalViews(state, threadId)) } };
+        });
+      });
+
+      const resolveApproval = async (_client: OrchestratorClient, argumentsValue: unknown): Promise<ToolOutcome> => {
+        const request = parseOrchestratorApprovalResolution(argumentsValue);
+        if (!request.ok) return failure("invalid_arguments", request.reason);
+        const at = now();
+        let outcome: OrchestratorApprovalResolutionResult = { kind: "not-attached" };
+        await store.transact((state) => {
+          outcome = resolveApprovalForOrchestrator(state, connectionId!, request.value, at);
+          return outcome.kind === "resolved" || (outcome.kind === "conflict" && outcome.changed);
+        });
+        const resolution = outcome as OrchestratorApprovalResolutionResult;
+        if (resolution.kind === "not-attached" || resolution.kind === "forbidden") return refuseApprovalAuthority(resolution);
+        // An approval on another thread and an approval that never existed answer identically.
+        if (resolution.kind === "not-found") return failure("not_found", "No such approval is open on a thread this connection holds");
+        if (resolution.kind === "option-not-offered") return failure("invalid_arguments", "The selected option was not offered by this approval");
+        if (resolution.kind === "resolved" || (resolution.kind === "conflict" && resolution.changed)) broadcast();
+        if (await deliverApprovalResolution(store, request.value.approvalId, resolution, sendToControlAgent, at)) broadcast();
+        if (resolution.kind === "conflict") return failure("conflict", resolution.reason);
+        const approval = store.read((state) => (state.approvals ?? []).find((item) => item.id === request.value.approvalId));
+        if (approval === undefined) return failure("not_found", "No such approval is open on a thread this connection holds");
+        return { result: { approval: orchestratorApprovalView(approval, approval.taskId!) } };
+      };
+
+      /*
        * Every tool name the protocol declares is named here, so adding one to `packages/protocol`
        * without serving it answers `invalid_arguments` instead of reaching an undefined handler.
-       * The tools left unserved belong to the doorbell and approval work.
        */
       const handlers: Readonly<Record<ExternalOrchestratorToolName, ((client: OrchestratorClient, argumentsValue: unknown) => ToolOutcome | Promise<ToolOutcome>) | undefined>> = {
         create_thread: createThread,
@@ -542,8 +602,8 @@ export function createOrchestratorClientGateway({
         send_task_message: sendTaskMessage,
         update_thread: updateThread,
         get_execution_inventory: getExecutionInventory,
-        list_approvals: undefined,
-        resolve_approval: undefined
+        list_approvals: listApprovals,
+        resolve_approval: resolveApproval
       };
 
       const dispatch = async (requestId: string, tool: ExternalOrchestratorToolName, argumentsValue: Record<string, unknown>) => {
@@ -698,5 +758,7 @@ export const servedExternalOrchestratorTools: readonly ExternalOrchestratorToolN
   "update_task",
   "send_task_message",
   "update_thread",
-  "get_execution_inventory"
+  "get_execution_inventory",
+  "list_approvals",
+  "resolve_approval"
 ];
