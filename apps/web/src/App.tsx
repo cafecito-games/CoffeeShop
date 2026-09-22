@@ -5,7 +5,7 @@ import {
   Robot, SlidersHorizontal, TerminalWindow, UsersThree, WarningCircle, X, LockKey
 } from "@phosphor-icons/react";
 import {
-  isActiveRunStatus, type Agent, type AgentState, type ApprovalRequest, type Artifact, type ChatMessage,
+  isActiveRunStatus, threadOwnerAgentId, type Agent, type AgentState, type ApprovalRequest, type Artifact, type ChatMessage,
   type ComputeNode, type HarnessSessionBinding, type Run, type RunActivity, type RunStatus, type Thread, type ThreadStatus
 } from "@coffee-shop/protocol";
 import { AccessibleDialog } from "./AccessibleDialog.js";
@@ -13,6 +13,8 @@ import { ActivityView } from "./ActivityView.js";
 import { AgentConfigurationForm, CreateAgentDialog, type AgentConfigurationPayload } from "./AgentConfiguration.js";
 import { CoffeeAvatar } from "./CoffeeAvatar.js";
 import { ComputeView } from "./compute/ComputeView.js";
+import { ExternalThreadDialog } from "./ExternalThreadDialog.js";
+import { describeThreadOrchestrator } from "./orchestratorPresentation.js";
 import { useHubConnection, type ConnectionStatus } from "./hubConnection.js";
 import { AgentTimelineItem, buildAgentTimeline, type AgentTimelineEntry } from "./orchestration/AgentWorkTimeline.js";
 import { ApprovalDialog } from "./orchestration/ApprovalsView.js";
@@ -367,11 +369,14 @@ function CoffeeShopApp() {
   const [creating, setCreating] = useState(false);
   const selected = snapshot.agents.find((agent) => agent.id === selectedId);
   const [reviewingApprovalId, setReviewingApprovalId] = useState<string>();
-  const selectedThreads = useMemo(() => (snapshot.threads ?? []).filter((thread) => thread.ownerAgentId === selectedId), [snapshot.threads, selectedId]);
+  const [externalThreadId, setExternalThreadId] = useState<string>();
+  const orchestratorClients = useMemo(() => snapshot.orchestratorClients ?? [], [snapshot.orchestratorClients]);
+  const orchestratorAttachments = useMemo(() => snapshot.orchestratorAttachments ?? [], [snapshot.orchestratorAttachments]);
+  const selectedThreads = useMemo(() => (snapshot.threads ?? []).filter((thread) => threadOwnerAgentId(thread) === selectedId), [snapshot.threads, selectedId]);
   const viewableThreads = useMemo(() => {
     const workedIn = new Set(snapshot.runs.filter((run) => run.agentId === selectedId && run.threadId).map((run) => run.threadId!));
     return (snapshot.threads ?? [])
-      .filter((thread) => thread.status !== "archived" && (thread.ownerAgentId === selectedId || workedIn.has(thread.id)))
+      .filter((thread) => thread.status !== "archived" && (threadOwnerAgentId(thread) === selectedId || workedIn.has(thread.id)))
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   }, [snapshot.threads, snapshot.runs, selectedId]);
   // A filtered thread that was archived or otherwise left the list falls back to showing everything.
@@ -390,8 +395,9 @@ function CoffeeShopApp() {
     approvals: approvals ?? []
   }) : [], [selectedId, effectiveThreadFilter, agents, messages, runs, tasks, threads, taskMessages, runActivity, approvals]);
   const reviewingApproval = (snapshot.approvals ?? []).find((approval) => approval.id === reviewingApprovalId);
+  const externalThread = (snapshot.threads ?? []).find((thread) => thread.id === externalThreadId);
   const orchestratorName = useMemo(() => {
-    const ownerId = viewableThreads.find((thread) => thread.ownerAgentId !== selectedId)?.ownerAgentId;
+    const ownerId = viewableThreads.map(threadOwnerAgentId).find((owner) => owner !== undefined && owner !== selectedId);
     return ownerId ? snapshot.agents.find((agent) => agent.id === ownerId)?.name ?? ownerId : undefined;
   }, [viewableThreads, selectedId, snapshot.agents]);
   function chooseSendTarget(threadId: string) {
@@ -439,7 +445,18 @@ function CoffeeShopApp() {
   }
 
   function selectAgent(id: string) { setSelectedId(id); setSelectedThreadId(""); setThreadFilter(""); setView("agents"); setInspectorOpen(false); setSelectedRunId(undefined); }
-  function continueThread(thread: Thread) { setSelectedId(thread.ownerAgentId); setSelectedThreadId(thread.id); setThreadFilter(thread.id); setView("agents"); setInspectorOpen(false); }
+  /** An externally orchestrated thread has no agent chat: it is messaged through its orchestrator. */
+  function continueThread(thread: Thread) {
+    if (describeThreadOrchestrator(thread, { agents: snapshot.agents, clients: orchestratorClients, attachments: orchestratorAttachments }).kind === "external") {
+      setExternalThreadId(thread.id);
+      return;
+    }
+    setSelectedId(threadOwnerAgentId(thread));
+    setSelectedThreadId(thread.id);
+    setThreadFilter(thread.id);
+    setView("agents");
+    setInspectorOpen(false);
+  }
   function switchView(next: View) { setView(next); if (next !== "agents") setSelectedId(undefined); }
   async function createAgent(fields: AgentConfigurationPayload) {
     if (!canMutate) throw new Error("Reconnect before creating an agent");
@@ -462,7 +479,7 @@ function CoffeeShopApp() {
         <FreshnessNotice connection={connection} onRetry={retry} />
         {view === "agents" && !selected && <EmptyAgents agents={snapshot.agents} onSelect={selectAgent} onCreate={() => { if (canMutate) setCreating(true); }} canMutate={canMutate} />}
         {view === "agents" && selected && <Chat agent={selected} nodes={snapshot.nodes} threads={selectedThreads} viewableThreads={viewableThreads} threadFilter={effectiveThreadFilter} orchestratorName={orchestratorName} selectedThreadId={selectedThreadId} timeline={selectedTimeline} sending={sending} inspectorOpen={inspectorOpen} onBack={() => setSelectedId(undefined)} onSend={send} onThreadChange={chooseSendTarget} onThreadFilterChange={chooseThreadFilter} onInspector={() => setInspectorOpen((open) => !open)} onInspectRun={setSelectedRunId} onReviewApproval={setReviewingApprovalId} canMutate={canMutate} />}
-        {view === "threads" && <ThreadsView threads={snapshot.threads ?? []} runs={snapshot.runs} artifacts={snapshot.artifacts ?? []} agents={snapshot.agents} canMutate={canMutate} onContinue={continueThread} onInspectRun={setSelectedRunId} onSetStatus={setThreadStatus} />}
+        {view === "threads" && <ThreadsView threads={snapshot.threads ?? []} runs={snapshot.runs} artifacts={snapshot.artifacts ?? []} agents={snapshot.agents} orchestratorClients={orchestratorClients} orchestratorAttachments={orchestratorAttachments} canMutate={canMutate} onContinue={continueThread} onInspectRun={setSelectedRunId} onSetStatus={setThreadStatus} />}
         {view === "activity" && <ActivityView events={snapshot.events} agents={snapshot.agents} onInspectRun={setSelectedRunId} />}
         {view === "orchestration" && (
           <OrchestrationView
@@ -475,16 +492,18 @@ function CoffeeShopApp() {
             agents={snapshot.agents}
             nodes={snapshot.nodes}
             runs={snapshot.runs}
+            orchestratorClients={orchestratorClients}
             canMutate={canMutate}
             apiFetch={apiFetch}
             onInspectRun={setSelectedRunId}
           />
         )}
         {view === "compute" && <ComputeView nodes={snapshot.nodes} />}
-        {view === "settings" && <SettingsView connection={connection} nodes={snapshot.nodes} generatedAt={snapshot.generatedAt} />}
+        {view === "settings" && <SettingsView connection={connection} nodes={snapshot.nodes} generatedAt={snapshot.generatedAt} orchestratorClients={orchestratorClients} canMutate={canMutate} apiFetch={apiFetch} />}
       </div>
       {selected && inspectorOpen && <Inspector agent={selected} nodes={snapshot.nodes} sessions={providerSessionsForAgent(selected.id, snapshot.runs, snapshot.sessionBindings ?? [])} onClose={() => setInspectorOpen(false)} onSave={updateAgent} onReconcile={retry} canMutate={canMutate} />}
-      {reviewingApproval && <ApprovalDialog approval={reviewingApproval} agents={snapshot.agents} nodes={snapshot.nodes} runs={snapshot.runs} tasks={snapshot.tasks ?? []} canMutate={canMutate} onClose={() => setReviewingApprovalId(undefined)} apiFetch={apiFetch} />}
+      {externalThread && <ExternalThreadDialog thread={externalThread} description={describeThreadOrchestrator(externalThread, { agents: snapshot.agents, clients: orchestratorClients, attachments: orchestratorAttachments })} taskMessages={snapshot.taskMessages ?? []} canMutate={canMutate} apiFetch={apiFetch} onClose={() => setExternalThreadId(undefined)} />}
+      {reviewingApproval && <ApprovalDialog approval={reviewingApproval} agents={snapshot.agents} nodes={snapshot.nodes} runs={snapshot.runs} tasks={snapshot.tasks ?? []} orchestratorClients={orchestratorClients} canMutate={canMutate} onClose={() => setReviewingApprovalId(undefined)} apiFetch={apiFetch} />}
       {selectedRunId && <RunInspector selectedRunId={selectedRunId} run={snapshot.runs.find((run) => run.id === selectedRunId)} runs={snapshot.runs} threads={snapshot.threads ?? []} artifacts={snapshot.artifacts ?? []} agents={snapshot.agents} nodes={snapshot.nodes} runActivity={snapshot.runActivity ?? []} approvals={snapshot.approvals ?? []} sessionBindings={snapshot.sessionBindings ?? []} onClose={() => setSelectedRunId(undefined)} onInspectRun={setSelectedRunId} canMutate={canMutate} />}
       <nav className="desktop-nav" aria-label="Primary">
         <div className="rail-brand" aria-label="Coffee Shop"><Coffee size={21} /></div>

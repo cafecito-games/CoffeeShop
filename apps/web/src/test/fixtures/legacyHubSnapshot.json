@@ -1,0 +1,177 @@
+{
+  "agents": [
+    {
+      "id": "milo",
+      "name": "Milo",
+      "title": "Builder",
+      "summary": "Builds things",
+      "glyph": "M",
+      "avatarShape": "cup",
+      "avatarColor": "amber",
+      "state": "working",
+      "currentAction": "Editing the login path",
+      "harnessId": "claude-cli",
+      "model": "sonnet",
+      "computeNodeId": "node-workshop",
+      "workspace": "/srv/workspaces/login",
+      "systemPrompt": "Build",
+      "unread": 0,
+      "updatedAt": "2026-09-22T12:00:00.000Z"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "node-workshop",
+      "name": "Workshop",
+      "kind": "home-server",
+      "platform": "darwin · arm64",
+      "status": "online",
+      "lastSeen": "2026-09-22T12:00:00.000Z",
+      "activeRuns": 1,
+      "concurrency": 2,
+      "workspaceRoots": [
+        "/srv/workspaces"
+      ],
+      "harnesses": [
+        {
+          "id": "claude-cli",
+          "label": "Claude",
+          "description": "Claude Code",
+          "available": true,
+          "authMode": "local-subscription",
+          "models": [
+            "sonnet"
+          ]
+        }
+      ],
+      "version": "0.1.0+fixture"
+    }
+  ],
+  "runs": [
+    {
+      "id": "run-login",
+      "agentId": "milo",
+      "nodeId": "node-workshop",
+      "harnessId": "claude-cli",
+      "model": "sonnet",
+      "workspace": "/srv/workspaces/login",
+      "prompt": "Ship the login path",
+      "status": "running",
+      "output": "",
+      "depth": 0,
+      "threadId": "thread_mud4zi3v_v96kiv",
+      "createdAt": "2026-09-22T12:00:00.000Z"
+    }
+  ],
+  "events": [
+    {
+      "type": "status",
+      "title": "Approval approved",
+      "detail": "Write to config.json",
+      "threadId": "thread_mud4zi3v_v96kiv",
+      "agentId": "milo",
+      "runId": "run-login",
+      "id": "evt_mud4zi3x_o5zjpm",
+      "createdAt": "2026-09-22T20:38:35.373Z"
+    },
+    {
+      "type": "status",
+      "title": "Approval requested",
+      "detail": "Write to config.json",
+      "threadId": "thread_mud4zi3v_v96kiv",
+      "agentId": "milo",
+      "runId": "run-login",
+      "id": "evt_mud4zi3x_zf2tmg",
+      "createdAt": "2026-09-22T20:38:35.373Z"
+    },
+    {
+      "type": "status",
+      "title": "Thread created",
+      "detail": "Checkout funnel",
+      "threadId": "thread_mud4zi3w_tudoki",
+      "id": "evt_mud4zi3w_qiucv4",
+      "createdAt": "2026-09-22T20:38:35.372Z"
+    }
+  ],
+  "messages": [],
+  "threads": [
+    {
+      "id": "thread_mud4zi3v_v96kiv",
+      "title": "Ship the login path",
+      "objective": "Ship the login path",
+      "summary": "",
+      "status": "active",
+      "ownerAgentId": "milo",
+      "createdBy": "user",
+      "createdAt": "2026-09-22T12:00:00.000Z",
+      "updatedAt": "2026-09-22T12:00:00.000Z"
+    }
+  ],
+  "delegations": [],
+  "artifacts": [],
+  "runActivity": [],
+  "orchestratorInboxes": [],
+  "tasks": [],
+  "taskMessages": [
+    {
+      "id": "taskmsg_mud4zi3x_jy1h4z",
+      "threadId": "thread_mud4zi3w_tudoki",
+      "sender": {
+        "type": "operator"
+      },
+      "recipient": {
+        "type": "orchestrator"
+      },
+      "sequence": 1,
+      "kind": "instruction",
+      "body": "Please prioritize the login path",
+      "artifactIds": [],
+      "sourceKey": "operator",
+      "idempotencyKey": "opmsg_mud4zi3x_iw1lme",
+      "createdAt": "2026-09-22T12:04:00.000Z"
+    }
+  ],
+  "taskMessageAcknowledgements": [],
+  "sessionBindings": [],
+  "approvals": [
+    {
+      "id": "approval_mud4zi3x_fyn8o5",
+      "harnessApprovalId": "acp-permission-1",
+      "threadId": "thread_mud4zi3v_v96kiv",
+      "runId": "run-login",
+      "nodeId": "node-workshop",
+      "title": "Write to config.json",
+      "options": [
+        {
+          "id": "opt-once",
+          "label": "Allow once",
+          "kind": "allow-once"
+        },
+        {
+          "id": "opt-reject",
+          "label": "Reject",
+          "kind": "reject-once"
+        }
+      ],
+      "status": "approved",
+      "requestedAt": "2026-09-22T12:05:00.000Z",
+      "expiresAt": "2026-09-22T12:14:00.000Z",
+      "detail": "The harness wants to edit config.json",
+      "resolvedAt": "2026-09-22T12:06:00.000Z",
+      "resolvedBy": {
+        "kind": "orchestrator",
+        "clientId": "orchestrator-client-a17822b2f216a5c9",
+        "attachmentId": "attachment_mud4zi3w_opbgp4"
+      },
+      "delivery": {
+        "status": "pending",
+        "attempts": 0,
+        "updatedAt": "2026-09-22T12:06:00.000Z"
+      },
+      "selectedOptionId": "opt-once",
+      "resolutionIdempotencyKey": "fixture-resolution"
+    }
+  ],
+  "workspaceLeases": [],
+  "generatedAt": "2026-09-22T20:38:35.373Z"
+}

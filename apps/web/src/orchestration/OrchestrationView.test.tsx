@@ -21,7 +21,7 @@ describe("OrchestrationView", () => {
     render(
       <OrchestrationView
         threads={threads} tasks={tasks} taskMessages={[]} taskMessageAcknowledgements={[]}
-        approvals={approvals} workspaceLeases={[]} agents={agents} nodes={nodes} runs={[]}
+        approvals={approvals} workspaceLeases={[]} agents={agents} nodes={nodes} runs={[]} orchestratorClients={[]}
         canMutate apiFetch={vi.fn(async () => new Response(JSON.stringify({ profile: { id: "p", name: "p" }, readiness: [] }), { status: 200 }))}
         onInspectRun={vi.fn()}
       />
@@ -40,7 +40,7 @@ describe("OrchestrationView", () => {
     render(
       <OrchestrationView
         threads={threads} tasks={[]} taskMessages={[]} taskMessageAcknowledgements={[]}
-        approvals={[]} workspaceLeases={[]} agents={agents} nodes={nodes} runs={[]}
+        approvals={[]} workspaceLeases={[]} agents={agents} nodes={nodes} runs={[]} orchestratorClients={[]}
         canMutate apiFetch={vi.fn()} onInspectRun={vi.fn()}
       />
     );
@@ -51,7 +51,7 @@ describe("OrchestrationView", () => {
     render(
       <OrchestrationView
         threads={threads} tasks={tasks} taskMessages={[]} taskMessageAcknowledgements={[]}
-        approvals={approvals} workspaceLeases={[]} agents={agents} nodes={nodes} runs={[]}
+        approvals={approvals} workspaceLeases={[]} agents={agents} nodes={nodes} runs={[]} orchestratorClients={[]}
         canMutate apiFetch={vi.fn(async () => new Response(JSON.stringify({ profile: { id: "p", name: "p" }, readiness: [] }), { status: 200 }))}
         onInspectRun={vi.fn()}
       />
@@ -73,7 +73,7 @@ describe("OrchestrationView", () => {
     render(
       <OrchestrationView
         threads={threads} tasks={tasks} taskMessages={[]} taskMessageAcknowledgements={[]}
-        approvals={approvals} workspaceLeases={[]} agents={agents} nodes={nodes} runs={[]}
+        approvals={approvals} workspaceLeases={[]} agents={agents} nodes={nodes} runs={[]} orchestratorClients={[]}
         canMutate apiFetch={vi.fn(async () => new Response(JSON.stringify({ profile: { id: "p", name: "p" }, readiness: [] }), { status: 200 }))}
         onInspectRun={vi.fn()}
       />

@@ -1,6 +1,11 @@
 import { Archive, ArrowCounterClockwise, ChatCircle, FolderOpen, TerminalWindow } from "@phosphor-icons/react";
 import { useMemo, useState } from "react";
-import { isActiveRunStatus, type Agent, type Artifact, type Run, type Thread, type ThreadStatus } from "@coffee-shop/protocol";
+import {
+  isActiveRunStatus, type Agent, type Artifact, type OrchestratorAttachment, type OrchestratorClient,
+  type Run, type Thread, type ThreadStatus
+} from "@coffee-shop/protocol";
+import { OrchestratorBadge } from "./OrchestratorBadge.js";
+import { describeThreadOrchestrator } from "./orchestratorPresentation.js";
 
 const statusLabels: Record<ThreadStatus, string> = { active: "Active", completed: "Completed", archived: "Archived" };
 
@@ -14,11 +19,13 @@ function timeAgo(date: string) {
   return `${Math.floor(hours / 24)}d`;
 }
 
-export function ThreadsView({ threads, runs, artifacts, agents, canMutate, onContinue, onInspectRun, onSetStatus }: {
+export function ThreadsView({ threads, runs, artifacts, agents, orchestratorClients, orchestratorAttachments, canMutate, onContinue, onInspectRun, onSetStatus }: {
   threads: Thread[];
   runs: Run[];
   artifacts: Artifact[];
   agents: Agent[];
+  orchestratorClients: OrchestratorClient[];
+  orchestratorAttachments: OrchestratorAttachment[];
   canMutate: boolean;
   onContinue: (thread: Thread) => void;
   onInspectRun: (runId: string) => void;
@@ -57,22 +64,23 @@ export function ThreadsView({ threads, runs, artifacts, agents, canMutate, onCon
         const participantIds = new Set(threadRuns.map((run) => run.agentId));
         const participants = agents.filter((agent) => participantIds.has(agent.id));
         const activeRuns = threadRuns.filter((run) => isActiveRunStatus(run.status));
-        const owner = agents.find((agent) => agent.id === thread.ownerAgentId);
+        const orchestrator = describeThreadOrchestrator(thread, { agents, clients: orchestratorClients, attachments: orchestratorAttachments });
         return <article key={thread.id} className="thread-card">
           <header>
             <div><span className={`thread-status thread-status-${thread.status}`}>{statusLabels[thread.status]}</span><h2>{thread.title}</h2></div>
             <time>{timeAgo(thread.updatedAt)}</time>
           </header>
+          <OrchestratorBadge description={orchestrator} />
           <p>{thread.summary || thread.objective}</p>
           <dl>
-            <div><dt>Owner</dt><dd>{owner?.name ?? thread.ownerAgentId}</dd></div>
+            <div><dt>Orchestrator</dt><dd>{orchestrator.name}</dd></div>
             <div><dt>Agents</dt><dd>{participants.map((agent) => agent.name).join(", ") || "None yet"}</dd></div>
             <div><dt>Runs</dt><dd>{threadRuns.length}{activeRuns.length ? ` · ${activeRuns.length} active` : ""}</dd></div>
             <div><dt>Artifacts</dt><dd>{threadArtifacts.length}</dd></div>
           </dl>
           {threadRuns.length > 0 && <div className="thread-runs">{threadRuns.slice(0, 5).map((run) => <button key={run.id} onClick={() => onInspectRun(run.id)}><TerminalWindow size={14} /><span>{agents.find((agent) => agent.id === run.agentId)?.name ?? run.agentId}</span><small>{run.status}</small></button>)}</div>}
           <footer>
-            {thread.status !== "archived" && <button onClick={() => onContinue(thread)}><ChatCircle size={15} /> Continue thread</button>}
+            {thread.status !== "archived" && <button onClick={() => onContinue(thread)}><ChatCircle size={15} /> {orchestrator.kind === "external" ? "Message orchestrator" : "Continue thread"}</button>}
             {thread.status !== "archived"
               ? <button disabled={!canMutate || updatingId === thread.id || activeRuns.length > 0} onClick={() => void setStatus(thread, "archived")} title={activeRuns.length ? "Finish or cancel active runs before archiving" : undefined}><Archive size={15} /> Archive</button>
               : <button disabled={!canMutate || updatingId === thread.id} onClick={() => void setStatus(thread, "active")}><ArrowCounterClockwise size={15} /> Reopen</button>}
