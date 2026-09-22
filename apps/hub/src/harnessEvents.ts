@@ -339,7 +339,8 @@ function pruneHistory(state: State) {
  */
 export function acceptHarnessEvent(state: State, source: HarnessEventSource, event: HarnessEvent): HarnessEventOutcome {
   const run = state.runs.find((item) => item.id === event.runId);
-  if (!run) return { kind: "rejected", reason: `harness event names unknown run ${event.runId}` };
+  // The run identity is untrusted until it matches a hub run, so it never appears in a diagnostic.
+  if (!run) return { kind: "rejected", reason: "harness event names an unknown run" };
   if (run.nodeId !== source.nodeId) return { kind: "rejected", reason: `run ${run.id} is not assigned to node ${source.nodeId}` };
   if (run.status !== "running") return { kind: "rejected", reason: `run ${run.id} is ${run.status}; its events are no longer accepted` };
 

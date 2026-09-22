@@ -219,9 +219,14 @@ app.get("/api/approvals/:id", (req, res) => {
 });
 
 app.post("/api/approvals/:id/resolution", async (req, res) => {
-  const response = await resolveApproval(store, req.params.id, req.body, sendToControlAgent);
-  if (response.changed) broadcast();
-  res.status(response.status).json(response.body);
+  try {
+    const response = await resolveApproval(store, req.params.id, req.body, sendToControlAgent);
+    if (response.changed) broadcast();
+    res.status(response.status).json(response.body);
+  } catch (error) {
+    console.error("approval resolution failed", error);
+    if (!res.headersSent) res.status(500).json({ error: "The approval resolution failed" });
+  }
 });
 
 app.get("/api/runs/:id/events", (req, res) => {
@@ -383,14 +388,14 @@ wss.on("connection", (socket, request) => {
     } else if (message.type === "harness.event" || message.type === "session.binding" || message.type === "workspace.lease" || message.type === "approval.undeliverable") {
       const validated = validateOrchestrationControlAgentMessage(decoded, protocolVersion);
       if (!validated.ok) {
-        console.warn(`rejected ${message.type} from ${nodeId || "an unregistered Barista"}: ${validated.reason}`);
+        console.warn(redactor.redact(`rejected ${message.type} from ${nodeId || "an unregistered Barista"}: ${validated.reason}`));
         return;
       }
       if (!nodeId || controlAgents.get(nodeId) !== socket) return;
       const orchestration = validated.value;
       if (orchestration.type === "harness.event") {
         const outcome = await receiveHarnessEvent(store, nodeId, orchestration.event, redactor, sendToControlAgent);
-        if (outcome.kind === "rejected") console.warn(`rejected harness.event from ${nodeId}: ${outcome.reason}`);
+        if (outcome.kind === "rejected") console.warn(redactor.redact(`rejected harness.event from ${nodeId}: ${outcome.reason}`));
         if (outcome.kind === "accepted" || outcome.kind === "stream-failed") broadcast();
       } else if (orchestration.type === "approval.undeliverable") {
         if (await receiveApprovalUndeliverable(store, nodeId, orchestration.runId, orchestration.approvalId, orchestration.reason, redactor, orchestration.at)) broadcast();

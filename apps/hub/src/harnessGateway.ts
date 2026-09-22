@@ -27,7 +27,15 @@ export async function deliverApprovalDecisions(store: Store, approvals: readonly
   const sent = approvals
     .filter((approval) => send(approval.nodeId, { type: "approval.decision", decision: approvalDecision(approval) }))
     .map((approval) => approval.id);
-  if (sent.length) await store.transact((state) => recordDeliveryAttempts(state, sent, at));
+  if (sent.length) {
+    try {
+      await store.transact((state) => recordDeliveryAttempts(state, sent, at));
+    } catch (error) {
+      // The decisions were written; an unrecorded attempt only leaves them eligible for a
+      // redelivery that Barista treats as an exact duplicate.
+      console.error("recording approval delivery failed", error);
+    }
+  }
   return sent;
 }
 
@@ -93,7 +101,9 @@ const latestApproval = (store: Store, approvalId: string) =>
 
 /**
  * Operator resolution of an approval. The resolution is committed first; a failed write returns
- * 500 and sends nothing. Delivery happens afterwards and never changes the committed resolution.
+ * 500 and sends nothing. Delivery happens afterwards and never changes the committed resolution:
+ * if delivery bookkeeping fails, the response still reports the committed approval, whose
+ * `delivery` shows it has not been confirmed as sent.
  */
 export async function resolveApproval(store: Store, approvalId: string, body: unknown, send: ControlAgentSender, at = new Date().toISOString()): Promise<ApprovalResolutionResponse> {
   const input = parseApprovalResolution(body);
@@ -117,14 +127,22 @@ export async function resolveApproval(store: Store, approvalId: string, body: un
   let deliveryChanged = false;
   if (pendingDelivery) {
     let deliverable: ApprovalRequest[] = [];
-    await store.transact((state) => {
-      const approval = (state.approvals ?? []).find((item) => item.id === approvalId);
-      if (!approval) return false;
-      const before = JSON.stringify(approval.delivery);
-      deliverable = structuredClone(approvalsAwaitingDelivery(state, [approval], at));
-      deliveryChanged = before !== JSON.stringify(approval.delivery);
-      return deliveryChanged;
-    });
+    try {
+      await store.transact((state) => {
+        const approval = (state.approvals ?? []).find((item) => item.id === approvalId);
+        if (!approval) return false;
+        const before = JSON.stringify(approval.delivery);
+        deliverable = structuredClone(approvalsAwaitingDelivery(state, [approval], at));
+        deliveryChanged = before !== JSON.stringify(approval.delivery);
+        return deliveryChanged;
+      });
+    } catch (error) {
+      // The resolution is committed and its delivery stays pending, so reconciliation or an exact
+      // replay can still deliver it; the response reports that committed state.
+      console.error("approval delivery could not be prepared", error);
+      deliverable = [];
+      deliveryChanged = false;
+    }
     deliveryChanged = (await deliverApprovalDecisions(store, deliverable, send, at)).length > 0 || deliveryChanged;
   }
   const approval = latestApproval(store, approvalId)!;

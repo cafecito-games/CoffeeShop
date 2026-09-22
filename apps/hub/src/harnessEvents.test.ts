@@ -602,3 +602,12 @@ test("permission events that contradict approval state fail the stream", () => {
   if (missingOutcome.kind !== "stream-failed") assert.fail(missingOutcome.kind);
   assert.match(missingOutcome.reason, /unknown approval/);
 });
+
+test("rejections never echo an unknown, token-shaped run identity", () => {
+  const current = state();
+  const secretRunId = `sk-proj-${"a".repeat(32)}`;
+  const outcome = accept(current, messageDelta(1, "hello", secretRunId));
+  assert.equal(outcome.kind, "rejected");
+  assert.ok(outcome.kind === "rejected" && !outcome.reason.includes(secretRunId));
+  assert.ok(!JSON.stringify(current).includes(secretRunId));
+});

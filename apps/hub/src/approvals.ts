@@ -20,6 +20,9 @@ import { newEvent, newId, type State } from "./store.js";
  * delivery is tracked separately so an offline Barista never makes a decision look applied.
  */
 
+/** Settled approvals kept per run and in total; pending or still-undelivered approvals are never pruned. */
+export const approvalRetentionLimits = { settledPerRun: 50, settled: 500 } as const;
+
 /** Shorter than Barista's ten-minute permission timeout, so the hub never approves after Barista gave up. */
 export const approvalLifetimeMilliseconds = 9 * 60 * 1000;
 export const approvalIdempotencyKeyBytes = 256;
@@ -66,6 +69,27 @@ function markNotApplied(approval: ApprovalRequest, reason: string, at: string) {
   return true;
 }
 
+const isSettled = (approval: ApprovalRequest) => isTerminalApprovalStatus(approval.status)
+  && (!approval.delivery || approval.delivery.status === "applied" || approval.delivery.status === "not-applied");
+
+/**
+ * Drops the oldest settled approvals beyond the per-run and total caps. Approvals are stored newest
+ * first, so the most recent settled approvals are the ones kept.
+ */
+export function pruneSettledApprovals(state: State) {
+  const perRun = new Map<string, number>();
+  let total = 0;
+  const before = (state.approvals ?? []).length;
+  state.approvals = (state.approvals ?? []).filter((approval) => {
+    if (!isSettled(approval)) return true;
+    const runCount = (perRun.get(approval.runId) ?? 0) + 1;
+    perRun.set(approval.runId, runCount);
+    total += 1;
+    return runCount <= approvalRetentionLimits.settledPerRun && total <= approvalRetentionLimits.settled;
+  });
+  return state.approvals.length !== before;
+}
+
 /** Opens a pending approval; returns a conflict reason when the request repeats a known approval. */
 export function openApproval(state: State, run: Run, event: PermissionRequestedEvent, receivedAt: string): string | undefined {
   if (findHarnessApproval(state, run.id, event.approvalId)) return `permission request ${event.approvalId} was already raised for this run`;
@@ -87,6 +111,7 @@ export function openApproval(state: State, run: Run, event: PermissionRequestedE
   if (event.detail) approval.detail = event.detail;
   state.approvals ??= [];
   state.approvals.unshift(approval);
+  pruneSettledApprovals(state);
   recordApprovalEvent(state, approval, "Approval requested");
   return undefined;
 }

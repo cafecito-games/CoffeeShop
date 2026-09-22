@@ -288,3 +288,33 @@ test("a harness-side timeout resolves a pending approval without any operator de
   assert.equal(late.status, 409);
   assert.equal(sender.sent.length, 0);
 });
+
+test("delivery bookkeeping failures after a committed resolution still produce a defined response", async () => {
+  const store = await storeWithRunningRun();
+  const sender = recordingSender();
+  const approval = await pendingApproval(store, sender);
+  const flaky = Object.create(store) as Store;
+  let transactions = 0;
+  flaky.transact = async (change) => {
+    transactions += 1;
+    if (transactions > 1) throw new Error("disk full");
+    return store.transact(change);
+  };
+  const response = await resolveApproval(flaky, approval.id, { idempotencyKey: "operator-1", expectedStatus: "pending", optionId: "allow" }, sender.send, later(1));
+  assert.equal(response.status, 200);
+  assert.equal(approvalOf(store).status, "approved");
+  assert.equal(approvalOf(store).delivery?.status, "pending");
+  assert.equal(sender.sent.length, 0);
+});
+
+test("recording a delivery attempt that fails does not reject", async () => {
+  const store = await storeWithRunningRun();
+  const sender = recordingSender();
+  const approval = await pendingApproval(store, sender);
+  await resolveApproval(store, approval.id, { idempotencyKey: "operator-1", expectedStatus: "pending", cancel: true }, recordingSender(false).send, later(1));
+  const failing = Object.create(store) as Store;
+  failing.transact = async () => { throw new Error("disk full"); };
+  const sent = await deliverApprovalDecisions(failing, [approvalOf(store)], sender.send, later(2));
+  assert.deepEqual(sent, [approval.id]);
+  assert.equal(approvalOf(store).delivery?.status, "pending");
+});

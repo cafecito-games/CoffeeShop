@@ -4,11 +4,13 @@ import type { ApprovalDelivery, ApprovalRequest, HarnessEvent, Run } from "@coff
 import {
   approvalDecision,
   approvalLifetimeMilliseconds,
+  approvalRetentionLimits,
   approvalsAwaitingDelivery,
   applyHarnessResolution,
   cancelPendingApprovals,
   expireApprovals,
   parseApprovalResolution,
+  pruneSettledApprovals,
   reconcileApprovalsForNode,
   recordDeliveryAttempts,
   recordUndeliverable,
@@ -381,4 +383,26 @@ test("terminal runs settle every approval and stream failures cancel pending one
   assert.equal(stream.approvals![0].delivery?.status, "pending");
   assert.equal(stream.approvals![1].status, "rejected");
   assert.equal(stream.approvals![2].status, "pending");
+});
+
+test("settled approvals are pruned beyond the per-run and total caps while pending and undelivered ones are kept", () => {
+  const current: State = { agents: [], nodes: [], runs: [], events: [], messages: [] };
+  const settled = (index: number, runId: string): ApprovalRequest => ({
+    id: `approval-${runId}-${index}`, harnessApprovalId: `acp-permission-${index}`, threadId: "thread-one", runId, nodeId: "node-one",
+    title: "Run tests", options: [{ id: "allow", label: "Allow", kind: "allow-once" }], status: "cancelled", requestedAt: "2026-09-21T12:00:00.000Z"
+  });
+  const perRun = approvalRetentionLimits.settledPerRun;
+  current.approvals = Array.from({ length: perRun + 5 }, (_, index) => settled(index, "run-one"));
+  current.approvals.push({ ...settled(999, "run-one"), status: "pending" });
+  current.approvals.push({ ...settled(998, "run-one"), status: "approved", selectedOptionId: "allow", delivery: { status: "sent", attempts: 1, updatedAt: "2026-09-21T12:00:00.000Z" } });
+  assert.equal(pruneSettledApprovals(current), true);
+  assert.equal(current.approvals.filter((approval) => approval.status === "cancelled").length, perRun);
+  assert.equal(current.approvals[0].id, "approval-run-one-0", "the newest settled approvals are kept");
+  assert.ok(current.approvals.some((approval) => approval.status === "pending"));
+  assert.ok(current.approvals.some((approval) => approval.delivery?.status === "sent"));
+
+  current.approvals = Array.from({ length: approvalRetentionLimits.settled + 10 }, (_, index) => settled(index, `run-${index % 40}`));
+  pruneSettledApprovals(current);
+  assert.equal(current.approvals.length, approvalRetentionLimits.settled);
+  assert.equal(pruneSettledApprovals(current), false);
 });
