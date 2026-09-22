@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { useRef, useState, type FormEvent } from "react";
 import { PaperPlaneTilt, X } from "@phosphor-icons/react";
 import type { TaskMessage, TaskMessageParticipant, Thread } from "@coffee-shop/protocol";
 import { AccessibleDialog } from "./AccessibleDialog.js";
@@ -35,6 +35,10 @@ export function ExternalThreadDialog({ thread, description, taskMessages, canMut
 }) {
   const [body, setBody] = useState("");
   const [sending, setSending] = useState(false);
+  // A send whose response is lost leaves the draft in place. Retrying it reuses the key the hub
+  // already saw, so its replay answers instead of appending the message a second time; only a
+  // different message, or one the hub accepted, earns a new key.
+  const attempt = useRef<{ body: string; idempotencyKey: string } | undefined>(undefined);
   const [notice, setNotice] = useState<{ tone: "info" | "error"; text: string } | undefined>(undefined);
   const titleId = "external-thread-title";
   const conversation = taskMessages
@@ -48,14 +52,16 @@ export function ExternalThreadDialog({ thread, description, taskMessages, canMut
     if (!value || sending || !canMutate || !active) return;
     setSending(true);
     setNotice(undefined);
+    if (attempt.current?.body !== value) attempt.current = { body: value, idempotencyKey: newIdempotencyKey() };
     try {
       const response = await apiFetch(`/api/threads/${encodeURIComponent(thread.id)}/messages`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ body: value, idempotencyKey: newIdempotencyKey() })
+        body: JSON.stringify({ body: value, idempotencyKey: attempt.current.idempotencyKey })
       });
       const payload = await response.json().catch(() => ({})) as { error?: string };
       if (response.status === 202) {
+        attempt.current = undefined;
         setBody("");
         setNotice({ tone: "info", text: `Delivered to ${description.name}'s inbox.` });
         return;

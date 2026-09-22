@@ -18,5 +18,14 @@ export default defineConfig({
       }
     })
   ],
-  server: { proxy: { "/api": "http://localhost:8787", "/events": { target: "ws://localhost:8787", ws: true } } }
+  server: {
+    proxy: {
+      "/api": "http://localhost:8787",
+      "/events": { target: "ws://localhost:8787", ws: true },
+      // The connect dialog builds a bridge hub URL from this app's origin, which is the dev server
+      // in development and the hub itself in production. Proxying the endpoint keeps the generated
+      // `.mcp.json` correct in both.
+      "/orchestrator-client": { target: "ws://localhost:8787", ws: true }
+    }
+  }
 });

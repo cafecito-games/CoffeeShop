@@ -83,6 +83,43 @@ describe("external thread messaging", () => {
     expect(screen.getByRole("textbox")).toHaveValue("One more");
   });
 
+  it("retries a lost send with the key the hub already saw, and earns a new key once it lands", async () => {
+    const responses = [
+      () => { throw new Error("network lost"); },
+      () => new Response(JSON.stringify({ created: false, threadId: "thread-1" }), { status: 202 }),
+      () => new Response(JSON.stringify({ created: true, threadId: "thread-1" }), { status: 202 })
+    ];
+    const apiFetch = vi.fn(async (_path: string, _init?: RequestInit) => responses.shift()!());
+    renderDialog({ apiFetch });
+
+    await userEvent.type(screen.getByRole("textbox"), "Check the redirect");
+    await userEvent.click(screen.getByRole("button", { name: "Send" }));
+    expect(await screen.findByRole("alert")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Send" }));
+    await screen.findByText(/Delivered to/);
+
+    const keys = apiFetch.mock.calls.map((call) => JSON.parse((call[1] as RequestInit).body as string).idempotencyKey);
+    expect(keys[1]).toBe(keys[0]);
+
+    await userEvent.type(screen.getByRole("textbox"), "Another message");
+    await userEvent.click(screen.getByRole("button", { name: "Send" }));
+    const third = JSON.parse((apiFetch.mock.calls[2][1] as RequestInit).body as string);
+    expect(third.body).toBe("Another message");
+    expect(third.idempotencyKey).not.toBe(keys[0]);
+  });
+
+  it("gives an edited draft its own idempotency key", async () => {
+    const apiFetch = vi.fn(async (_path: string, _init?: RequestInit) => new Response(JSON.stringify({ error: "The thread's message limit has been reached" }), { status: 409 }));
+    renderDialog({ apiFetch });
+    await userEvent.type(screen.getByRole("textbox"), "First wording");
+    await userEvent.click(screen.getByRole("button", { name: "Send" }));
+    await screen.findByRole("alert");
+    await userEvent.type(screen.getByRole("textbox"), " revised");
+    await userEvent.click(screen.getByRole("button", { name: "Send" }));
+    const keys = apiFetch.mock.calls.map((call) => JSON.parse((call[1] as RequestInit).body as string).idempotencyKey);
+    expect(keys[1]).not.toBe(keys[0]);
+  });
+
   it("refuses to message a thread that is not active", () => {
     renderDialog({ thread: { ...thread, status: "completed" } });
     expect(screen.getByRole("textbox")).toBeDisabled();
