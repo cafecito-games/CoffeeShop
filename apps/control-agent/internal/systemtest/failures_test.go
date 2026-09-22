@@ -126,6 +126,26 @@ func TestMalformedACPFrameFailsRun(t *testing.T) {
 			fmt.Sprintf("the attempt is %s with error %q", attempt.Status, attempt.Error)
 	})
 	malformedRun, _ := current.latestAttempt(current.threadTasks(threadID)["malformed"])
+	// The adapter that ran the prompt is the only codex-acp process that recorded one; startup
+	// probes never prompt and the orchestrator runs the native CLI.
+	adapterPIDs := []int{}
+	for _, records := range cluster.harnessRecords() {
+		if len(records) == 0 || records[0].Event != "start" || records[0].Role != "codex-acp" {
+			continue
+		}
+		for _, record := range records {
+			if record.Event == "prompt" {
+				adapterPIDs = append(adapterPIDs, records[0].PID)
+				break
+			}
+		}
+	}
+	if len(adapterPIDs) != 1 {
+		t.Fatalf("expected exactly one prompted codex adapter process, found %v", adapterPIDs)
+	}
+	waitFor(t, "the malformed run's adapter process to exit", func() bool {
+		return !processAlive(t, adapterPIDs[0])
+	})
 	cluster.eventually("the failed run's activity stream to stop being open", func(current snapshot) (bool, string) {
 		activity := current.activity(malformedRun.ID)
 		if activity == nil {

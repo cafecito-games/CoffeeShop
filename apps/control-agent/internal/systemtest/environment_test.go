@@ -69,6 +69,9 @@ func prepare(m *testing.M) (int, error) {
 			return 0, fmt.Errorf("%s is missing; run `task install` and `task protocol:build` first", required)
 		}
 	}
+	if err := verifyProcessInspection(); err != nil {
+		return 0, err
+	}
 	for _, tool := range []string{"node", "git", "go"} {
 		if _, err := exec.LookPath(tool); err != nil {
 			return 0, fmt.Errorf("%s is not on PATH", tool)
@@ -245,7 +248,7 @@ func (environment *environment) liveHarnessProcesses(deadline time.Duration) []i
 		alive := []int{}
 		for _, records := range environment.harnessRecords() {
 			for _, record := range records {
-				if record.Event == "start" && processAlive(record.PID) {
+				if record.Event == "start" && processAlive(environment.t, record.PID) {
 					alive = append(alive, record.PID)
 				}
 			}
@@ -259,8 +262,10 @@ func (environment *environment) liveHarnessProcesses(deadline time.Duration) []i
 }
 
 // processAlive reports whether pid is still one of this test binary's fake harness executables,
-// so a recycled process ID never counts as a leak and is never signalled.
-func processAlive(pid int) bool {
+// so a recycled process ID never counts as a leak and is never signalled. It fails the test when
+// the process cannot be inspected, so leak detection can never be silently disabled.
+func processAlive(t *testing.T, pid int) bool {
+	t.Helper()
 	if pid <= 0 {
 		return false
 	}
@@ -268,7 +273,27 @@ func processAlive(pid int) bool {
 		return false
 	}
 	command, err := exec.Command("ps", "-o", "command=", "-p", strconv.Itoa(pid)).Output()
-	return err == nil && strings.Contains(string(command), buildDirectoryPrefix)
+	if err != nil {
+		// ps exits nonzero for a process that ended between the two checks; anything else means
+		// the process cannot be inspected.
+		if exitError := (*exec.ExitError)(nil); errors.As(err, &exitError) {
+			if killErr := syscall.Kill(pid, 0); killErr != nil && !errors.Is(killErr, syscall.EPERM) {
+				return false
+			}
+		}
+		t.Fatalf("cannot inspect process %d with ps: %v", pid, err)
+	}
+	return strings.Contains(string(command), buildDirectoryPrefix)
+}
+
+// verifyProcessInspection proves ps can report a live process's command before any scenario
+// relies on it for leak detection.
+func verifyProcessInspection() error {
+	command, err := exec.Command("ps", "-o", "command=", "-p", strconv.Itoa(os.Getpid())).Output()
+	if err != nil || strings.TrimSpace(string(command)) == "" {
+		return fmt.Errorf("process inspection with `ps -o command= -p <pid>` is unavailable: %v", err)
+	}
+	return nil
 }
 
 func (environment *environment) dumpDiagnostics() {
