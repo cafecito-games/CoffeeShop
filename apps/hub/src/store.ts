@@ -119,10 +119,14 @@ export function addOrchestrationDefaults(state: State) {
  * Derives `Thread.orchestrator` for threads persisted before external orchestrators existed. A
  * thread with neither an orchestrator nor an owner agent is left unchanged and is simply not
  * agent-orchestrated; inventing an owner would hand the thread to an arbitrary agent.
+ *
+ * `Store.load` runs this before the thread migrations that dereference each entry, so a persisted
+ * thread that is not an object fails the load with a diagnosable reason rather than a TypeError.
  */
 export function addThreadOrchestratorDefaults(state: State) {
   let changed = false;
-  for (const thread of state.threads ?? []) {
+  for (const [index, thread] of (state.threads ?? []).entries()) {
+    if (!isRecord(thread)) throw new Error(`Persisted thread ${index} is not an object`);
     if (thread.orchestrator !== undefined || thread.ownerAgentId === undefined) continue;
     thread.orchestrator = { kind: "agent", agentId: thread.ownerAgentId };
     changed = true;
@@ -176,9 +180,10 @@ export function assertPersistedOrchestratorClientState(state: State) {
     if (!isOrchestratorAttachmentStatus(attachment.status)) throw new Error(`${context} has an unknown status`);
   }
   for (const [index, thread] of (state.threads ?? []).entries()) {
+    const context = `Persisted thread ${index}`;
+    if (!isRecord(thread)) throw new Error(`${context} is not an object`);
     const orchestrator: unknown = thread.orchestrator;
     if (orchestrator === undefined) continue;
-    const context = `Persisted thread ${index}`;
     if (!isRecord(orchestrator)) throw new Error(`${context} has a malformed orchestrator`);
     if (orchestrator.kind === "agent" ? !isNonEmptyString(orchestrator.agentId) : orchestrator.kind === "external" ? !isNonEmptyString(orchestrator.clientId) : true) {
       throw new Error(`${context} has an unknown orchestrator`);
@@ -461,9 +466,9 @@ export class Store {
     const removedDemoRecords = removeLegacyDemoRecords(loaded);
     const addedAgentAvatars = addMissingAgentAvatars(loaded);
     const addedCoordination = addCoordinationDefaults(loaded);
+    const addedThreadOrchestrators = addThreadOrchestratorDefaults(loaded);
     const addedThreads = addThreadDefaults(loaded);
     const addedOrchestration = addOrchestrationDefaults(loaded);
-    const addedThreadOrchestrators = addThreadOrchestratorDefaults(loaded);
     const addedApprovalResolvers = addApprovalResolverDefaults(loaded);
     assertPersistedTaskState(loaded);
     assertPersistedHarnessState(loaded);

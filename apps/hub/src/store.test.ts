@@ -364,6 +364,16 @@ test("rejects a persisted approval that is not an object, with a diagnosable rea
   }
 });
 
+// The producer that writes every entry of this array is `apps/hub/src/threads.ts:29` (`newThread`).
+test("rejects a persisted thread that is not an object, with a diagnosable reason", async () => {
+  for (const thread of [null, "thread-one", 7, ["thread-one"]]) {
+    const { store } = await loadFixture((state) => {
+      state.threads = [thread];
+    });
+    await assert.rejects(() => store.load(), /Persisted thread 0 is not an object/, JSON.stringify(thread ?? null));
+  }
+});
+
 test("keeps an already-migrated orchestrator resolution unchanged", async () => {
   const resolvedBy = { kind: "orchestrator", clientId: "client-one", attachmentId: "attachment-one" };
   const { store } = await loadFixture((state) => {
