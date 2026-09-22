@@ -21,7 +21,7 @@ const emptyResponse = "Run completed without a text response."
 
 const coordinationContract = `
 
-You are running inside Coffee Shop. Use the Coffee Shop hub tools for durable thread context, artifacts, and bounded delegation when they are available. Refine the thread title, objective, and summary when that improves the shared record, and mark it completed only when the overall objective is satisfied. Keep returned task and artifact ids. If hub delegation is unavailable and another specialist must continue, end your response with exactly <handoff to="agent-id">task and context</handoff>. Use only an agent id you were given.`
+You are running inside Coffee Shop. Use the Coffee Shop hub tools for durable thread and task context, task messages, artifacts, and bounded delegation when they are available. Refine the thread title, objective, and summary when that improves the shared record, and mark it completed only when the overall objective is satisfied. Keep returned task and artifact ids. If hub delegation is unavailable and another specialist must continue, end your response with exactly <handoff to="agent-id">task and context</handoff>. Use only an agent id you were given.`
 
 // nativeDriver runs a vendor CLI directly and parses its vendor-specific JSON stream.
 type nativeDriver struct {
@@ -100,11 +100,11 @@ func commandFor(run protocol.Run, agent protocol.Agent, mcpConfig mcpserver.Conf
 			if err != nil {
 				return "", nil, err
 			}
-			allowed := "mcp__coffee_shop_hub__get_task_context,mcp__coffee_shop_hub__post_artifact,mcp__coffee_shop_hub__update_thread"
-			if mcpConfig.CanDelegate {
-				allowed += ",mcp__coffee_shop_hub__delegate_task"
+			allowed := make([]string, 0, len(protocol.HubToolNames))
+			for _, name := range mcpserver.ToolNames(mcpConfig.CanDelegate) {
+				allowed = append(allowed, "mcp__coffee_shop_hub__"+name)
 			}
-			args = append(args, "--mcp-config", string(configuration), "--allowedTools", allowed)
+			args = append(args, "--mcp-config", string(configuration), "--allowedTools", strings.Join(allowed, ","))
 		}
 		return "claude", args, nil
 	case "codex-cli":

@@ -6,6 +6,7 @@ import test from "node:test";
 import type { Agent, ComputeNode, Run } from "@coffee-shop/protocol";
 import { CoordinationError, createArtifact, delegateTask, taskContext } from "./coordination.js";
 import { Store } from "./store.js";
+import { applyAttemptOutcome, assignTaskAttempt } from "./tasks.js";
 import { updateThreadByOperator, updateThreadForRun } from "./threads.js";
 
 const at = "2026-09-13T12:00:00.000Z";
@@ -22,7 +23,8 @@ function agent(id: string, canDelegate = false): Agent {
 function node(id: string): ComputeNode {
   return {
     id, name: id, kind: "local", platform: "test", status: "online", lastSeen: at, activeRuns: 0,
-    concurrency: 2, workspaceRoots: ["/workspace"], harnesses: [], version: "test"
+    concurrency: 2, workspaceRoots: ["/workspace"], version: "test",
+    harnesses: [{ id: "codex-cli", label: "Codex", description: "", available: true, authMode: "local-account", models: ["default"] }]
   };
 }
 
@@ -50,40 +52,96 @@ async function coordinationStore() {
   return store;
 }
 
-test("delegation is persisted, bounded, and idempotent", async () => {
+/** Starts a task's first attempt as a running run of `agentId`, as the scheduler and lifecycle would. */
+async function startAttempt(store: Store, taskId: string, agentId: string, runId = `run-${taskId}`) {
+  await store.transact((state) => {
+    const task = state.tasks!.find((item) => item.id === taskId)!;
+    const source = state.runs.find((run) => run.id === task.sourceRunId);
+    const run: Run = {
+      id: runId, threadId: task.threadId, agentId, nodeId: `node-${agentId}`, harnessId: "codex-cli", model: "default",
+      workspace: `/workspace/${agentId}`, prompt: task.instructions, status: "queued", output: "",
+      depth: (source?.depth ?? 0) + 1, parentRunId: source?.id, createdAt: at
+    };
+    assignTaskAttempt(state, taskId, run, at);
+    run.status = "running";
+    run.startedAt = at;
+    applyAttemptOutcome(state, run.id, at);
+  });
+  return runId;
+}
+
+test("legacy delegation submits one pinned task through the task graph and is idempotent", async () => {
   const store = await coordinationStore();
   const argumentsValue = { agentId: "reviewer", task: "Review the change", idempotencyKey: "review-1" };
-  const first = await delegateTask(store, "run-source", argumentsValue, () => true, at);
+  const first = await delegateTask(store, "run-source", argumentsValue, at);
   assert.equal(first.created, true);
-  assert.equal(first.dispatched, true);
-  assert.equal(first.run.parentRunId, "run-source");
-  assert.equal(first.run.threadId, "thread-one");
-  assert.equal(first.run.depth, 1);
-  assert.equal(store.snapshot().delegations?.length, 1);
+  assert.equal(first.agentId, "reviewer");
+  const task = store.snapshot().tasks?.find((item) => item.id === first.taskId);
+  assert.equal(task?.status, "ready");
+  assert.equal(task?.threadId, "thread-one");
+  assert.equal(task?.sourceRunId, "run-source");
+  assert.deepEqual(task?.placementOverride, { agentId: "reviewer", authorizedBy: "policy" });
+  assert.equal(store.snapshot().runs.length, 1, "delegation never creates a run directly");
 
-  const replay = await delegateTask(store, "run-source", argumentsValue, () => true, "later");
+  const replay = await delegateTask(store, "run-source", argumentsValue, "later");
   assert.equal(replay.created, false);
-  assert.equal(replay.run.id, first.run.id);
-  assert.equal(store.snapshot().runs.length, 2);
+  assert.equal(replay.taskId, first.taskId);
+  assert.equal(store.snapshot().tasks?.length, 1);
 
   await assert.rejects(
-    delegateTask(store, "run-source", { ...argumentsValue, task: "Different work" }, () => true),
+    delegateTask(store, "run-source", { ...argumentsValue, task: "Different work" }, at),
     (error: unknown) => error instanceof CoordinationError && error.code === "idempotency_conflict"
   );
+  await assert.rejects(
+    delegateTask(store, "run-source", { ...argumentsValue, agentId: "orchestrator", idempotencyKey: "self" }, at),
+    (error: unknown) => error instanceof CoordinationError && error.code === "target_ineligible" && !error.retryable
+  );
+  await assert.rejects(
+    delegateTask(store, "run-source", { ...argumentsValue, agentId: "missing", idempotencyKey: "missing" }, at),
+    (error: unknown) => error instanceof CoordinationError && error.code === "target_ineligible" && !error.retryable
+  );
+  assert.equal(store.snapshot().tasks?.length, 1);
+});
+
+test("legacy delegation keeps its depth and fan-out limits", async () => {
+  const store = await coordinationStore();
+  for (let index = 0; index < 4; index += 1) {
+    await delegateTask(store, "run-source", { agentId: "reviewer", task: `Review ${index}`, idempotencyKey: `review-${index}` }, at);
+  }
+  await assert.rejects(
+    delegateTask(store, "run-source", { agentId: "reviewer", task: "One too many", idempotencyKey: "review-4" }, at),
+    (error: unknown) => error instanceof CoordinationError && error.code === "fanout_limit"
+  );
+  await store.transact((state) => { state.runs[0].depth = 3; });
+  await assert.rejects(
+    delegateTask(store, "run-source", { agentId: "reviewer", task: "Too deep", idempotencyKey: "deep" }, at),
+    (error: unknown) => error instanceof CoordinationError && error.code === "depth_limit"
+  );
+  assert.equal(store.snapshot().tasks?.length, 4);
 });
 
 test("task context exposes only lineage and gives delegation capability to orchestrators", async () => {
   const store = await coordinationStore();
-  const child = await delegateTask(store, "run-source", { agentId: "reviewer", task: "Review", idempotencyKey: "review" }, () => false, at);
-  const sourceContext = taskContext(store.snapshot(), "run-source", {});
-  assert.equal(sourceContext.thread?.id, "thread-one");
+  const child = await delegateTask(store, "run-source", { agentId: "reviewer", task: "Review", idempotencyKey: "review" }, at);
+  const sourceContext = store.read((state) => taskContext(state, "run-source", {}));
+  assert.equal(sourceContext.thread.id, "thread-one");
+  assert.equal(sourceContext.caller.role, "orchestrator");
   assert.deepEqual(sourceContext.availableAgents.map((item) => item.id), ["reviewer"]);
-  assert.deepEqual(sourceContext.delegations.map((item) => item.taskId), [child.run.id]);
-  assert.equal(taskContext(store.snapshot(), child.run.id, { taskId: "run-source" }).task.id, "run-source");
+  assert.deepEqual(sourceContext.childTasks.map((item) => item.id), [child.taskId]);
+  assert.equal(sourceContext.mailbox.messageCount, 0);
+  assert.match(sourceContext.mailbox.cursor, /^tev1\./);
+
+  const childRunId = await startAttempt(store, child.taskId, "reviewer");
+  const childContext = store.read((state) => taskContext(state, childRunId, {}));
+  assert.equal(childContext.caller.taskId, child.taskId);
+  assert.equal(childContext.durableTask?.id, child.taskId);
+  assert.equal(store.read((state) => taskContext(state, childRunId, { taskId: "run-source" })).task.id, "run-source");
 
   const unrelated = { ...sourceRun(), id: "unrelated", agentId: "reviewer", parentRunId: undefined };
   await store.transact((state) => { state.runs.push(unrelated); });
-  assert.throws(() => taskContext(store.snapshot(), "run-source", { taskId: "unrelated" }), /lineage/);
+  assert.throws(() => store.read((state) => taskContext(state, "run-source", { taskId: "unrelated" })), /lineage/);
+  assert.throws(() => store.read((state) => taskContext(state, "run-source", { taskId: "does-not-exist" })), /lineage/);
+  assert.throws(() => store.read((state) => taskContext(state, "run-source", { taskId: "run-source", extra: true })), /unknown field/);
 });
 
 test("artifact registration validates metadata and rejects idempotency conflicts", async () => {
@@ -111,13 +169,13 @@ test("artifact registration validates metadata and rejects idempotency conflicts
 
 test("agents can refine and complete their thread but cannot archive it", async () => {
   const store = await coordinationStore();
-  const child = await delegateTask(store, "run-source", { agentId: "reviewer", task: "Review", idempotencyKey: "thread-review" }, () => false, at);
-  await store.transact((state) => { state.runs.find((run) => run.id === child.run.id)!.status = "running"; });
+  const child = await delegateTask(store, "run-source", { agentId: "reviewer", task: "Review", idempotencyKey: "thread-review" }, at);
+  const childRunId = await startAttempt(store, child.taskId, "reviewer");
   await assert.rejects(
-    updateThreadForRun(store, child.run.id, { summary: "Worker summary" }),
+    updateThreadForRun(store, childRunId, { summary: "Worker summary" }),
     (error: unknown) => error instanceof CoordinationError && error.code === "forbidden"
   );
-  await store.transact((state) => { state.runs.find((run) => run.id === child.run.id)!.status = "completed"; });
+  await store.transact((state) => { state.runs.find((run) => run.id === childRunId)!.status = "completed"; });
   const updated = await updateThreadForRun(store, "run-source", {
     title: "Reviewed change", summary: "The review is ready", status: "completed"
   }, at);
@@ -150,7 +208,7 @@ test("workers cannot delegate", async () => {
   const store = await coordinationStore();
   await store.transact((state) => { state.agents[0].canDelegate = false; });
   await assert.rejects(
-    delegateTask(store, "run-source", { agentId: "reviewer", task: "Review", idempotencyKey: "review" }, () => true),
+    delegateTask(store, "run-source", { agentId: "reviewer", task: "Review", idempotencyKey: "review" }, at),
     (error: unknown) => error instanceof CoordinationError && error.code === "forbidden"
   );
 });

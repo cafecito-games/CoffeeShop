@@ -23,7 +23,9 @@ import {
 import { createConfiguredAgent, markDisconnectedNodesOffline, updateConfiguredAgent } from "./agentConfiguration.js";
 import { ControlConnectionRegistry, type ControlConnection } from "./controlConnections.js";
 import { applyRunLifecycle, cancelPersistedRun, coalesceAsync, failLostTaskAttempts, queuedRunsForNode, retryAsync, serializeAsync } from "./lifecycle.js";
-import { CoordinationError, createArtifact, delegateTask, taskContext } from "./coordination.js";
+import { CoordinationError } from "./coordination.js";
+import { createHubToolHandler, hubToolError } from "./hubTools.js";
+import { TaskEventWaiters } from "./mailbox.js";
 import { forgetNodeCapabilityReport, getNodeCapabilityReport, recordNodeCapabilityReport } from "./nodeCapabilities.js";
 import { loadProjectProfilesFromFile, ProjectProfileRegistry } from "./projectProfiles.js";
 import { retainedHarnessEvents } from "./harnessEvents.js";
@@ -128,6 +130,15 @@ const scheduleReadyTasks = coalesceAsync(async () => {
   if (result.changed) broadcast();
 }, (error) => console.error("task scheduling failed", error));
 const requestScheduling = () => { void scheduleReadyTasks(); };
+
+const taskEventWaiters = new TaskEventWaiters(store);
+const handleHubTool = createHubToolHandler({
+  store,
+  waiters: taskEventWaiters,
+  inventory: () => ({ connection: schedulingConnection, capabilityReport: getNodeCapabilityReport }),
+  schedule: () => scheduleReadyTasks(),
+  broadcast
+});
 
 async function queueRun(agent: Agent, prompt: string, options: { threadId: string; parentRunId?: string; depth?: number }) {
   const run: Run = {
@@ -351,6 +362,7 @@ wss.on("connection", (socket, request) => {
 
   let nodeId = "";
   let protocolVersion: ControlProtocolVersion = "1";
+  const socketClosed = new AbortController();
   const isCurrentSocket = () => {
     const connection = controlAgents.connectionFor(socket);
     return connection !== undefined && controlAgents.isCurrent(connection);
@@ -439,39 +451,15 @@ wss.on("connection", (socket, request) => {
         respondToRpc(message.requestId, message.runId, undefined, { code: "run_not_active", message: "The calling run is not active on this node", retryable: false });
         return;
       }
-      try {
-        if (message.operation === "get_task_context") {
-          respondToRpc(message.requestId, message.runId, taskContext(store.snapshot(), message.runId, message.arguments));
-        } else if (message.operation === "delegate_task") {
-          let delegationConnection: ControlConnection<WebSocket> | undefined;
-          const delegated = await delegateTask(store, message.runId, message.arguments, (id) => {
-            const current = controlAgents.current(id);
-            delegationConnection = current && controlAgents.barrierPassed(current) ? current : undefined;
-            return delegationConnection !== undefined;
-          });
-          if (delegated.created && delegated.dispatched && delegationConnection) await deliverRun(delegated.run.id, delegationConnection);
-          respondToRpc(message.requestId, message.runId, {
-            taskId: delegated.run.id,
-            status: delegated.run.status,
-            agentId: delegated.run.agentId,
-            created: delegated.created
-          });
-          if (delegated.created) broadcast();
-        } else if (message.operation === "post_artifact") {
-          const result = await createArtifact(store, message.runId, message.arguments);
-          respondToRpc(message.requestId, message.runId, result);
-          broadcast();
-        } else if (message.operation === "update_thread") {
-          const thread = await updateThreadForRun(store, message.runId, message.arguments);
-          respondToRpc(message.requestId, message.runId, { thread });
-          broadcast();
-        } else {
-          throw new CoordinationError("unknown_tool", "The requested hub tool is not supported");
+      const call = handleHubTool(message.operation, message.runId, message.arguments, socketClosed.signal).then(
+        (result) => respondToRpc(message.requestId, message.runId, result),
+        (error: unknown) => {
+          if (!(error instanceof CoordinationError)) console.error("hub tool failed", error);
+          respondToRpc(message.requestId, message.runId, undefined, hubToolError(error));
         }
-      } catch (error) {
-        const failure = error instanceof CoordinationError ? error : new CoordinationError("internal_error", "The hub could not complete the tool call", true);
-        respondToRpc(message.requestId, message.runId, undefined, { code: failure.code, message: failure.message, retryable: failure.retryable });
-      }
+      );
+      // A long-poll wait must not hold this socket's serialized message handling.
+      if (message.operation !== "wait_for_task_events") await call;
     } else if (message.type === "harness.event" || message.type === "session.binding" || message.type === "workspace.lease" || message.type === "approval.undeliverable") {
       const validated = validateOrchestrationControlAgentMessage(decoded, protocolVersion);
       if (!validated.ok) {
@@ -527,6 +515,7 @@ wss.on("connection", (socket, request) => {
   }, (error) => console.error("control-agent message failed", error));
   socket.on("message", (raw) => { void handleMessage(raw); });
   socket.on("close", async () => {
+    socketClosed.abort();
     if (!nodeId) return;
     if (!controlAgents.release(socket)) return;
     await store.transact((state) => { const node = state.nodes.find((item) => item.id === nodeId); if (node) { node.status = "offline"; node.activeRuns = 0; } });

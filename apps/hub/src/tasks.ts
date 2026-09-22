@@ -11,12 +11,13 @@ import {
   type ExecutionRequirements,
   type HarnessId,
   type HarnessTransport,
+  type PlacementOverride,
   type Run,
   type Task,
   type TaskDependencyPolicy,
   type TaskStatus
 } from "@coffee-shop/protocol";
-import { CoordinationError } from "./coordination.js";
+import { CoordinationError } from "./coordinationError.js";
 import { newEvent, newId, type State, type Store, type TaskSubmission } from "./store.js";
 
 export const taskBatchLimits = {
@@ -74,7 +75,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function onlyKeys(value: Record<string, unknown>, keys: readonly string[], context: string) {
   const unknown = Object.keys(value).find((key) => !keys.includes(key));
-  if (unknown !== undefined) throw invalid(`${context} contains an unknown field: ${unknown}`);
+  if (unknown !== undefined) throw invalid(`${context} contains an unknown field`);
 }
 
 function boundedString(value: unknown, context: string, maximum: number) {
@@ -98,7 +99,7 @@ function stringList(value: unknown, context: string, allowed?: readonly string[]
   const entries = value.map((item, index) => boundedString(item, `${context}[${index}]`, taskBatchLimits.requirementValueLength));
   if (allowed) {
     const unknown = entries.find((entry) => !allowed.includes(entry));
-    if (unknown !== undefined) throw invalid(`${context} contains an unknown value: ${unknown}`);
+    if (unknown !== undefined) throw invalid(`${context} contains an unknown value`);
   }
   return entries;
 }
@@ -244,9 +245,22 @@ function canonicalJson(value: unknown): string {
  * local key, dependency edge, and policy; it deliberately excludes timestamps. Task order does not
  * change identity because local keys, not positions, name tasks.
  */
-export function taskBatchDigest(batch: NormalizedTaskBatch, threadId: string, sourceRunId: string) {
+export function taskBatchDigest(batch: NormalizedTaskBatch, threadId: string, sourceRunId: string, placementOverrides?: Readonly<Record<string, PlacementOverride>>) {
   const tasks = [...batch.tasks].sort((left, right) => (left.key < right.key ? -1 : left.key > right.key ? 1 : 0));
-  return createHash("sha256").update(canonicalJson({ version: 1, threadId, sourceRunId, idempotencyKey: batch.idempotencyKey, tasks })).digest("hex");
+  const overrides = placementOverrides && Object.keys(placementOverrides).length ? placementOverrides : undefined;
+  return createHash("sha256").update(canonicalJson({ version: 1, threadId, sourceRunId, idempotencyKey: batch.idempotencyKey, tasks, placementOverrides: overrides })).digest("hex");
+}
+
+/** Hub-side policy applied to one submission; none of it can be supplied by tool arguments. */
+export interface TaskBatchOptions {
+  /** Separately authorized placement narrowing by task key. It is part of the batch identity. */
+  placementOverrides?: Readonly<Record<string, PlacementOverride>>;
+  /** Tasks and legacy delegations the source run may have created in total, including this batch. */
+  maximumSourceTasks?: number;
+  /** Source runs at or beyond this depth cannot submit. */
+  maximumSourceDepth?: number;
+  /** Extra policy checked against the authoritative state before a new batch is created; never for a replay. */
+  assertAcceptable?: (state: Readonly<State>, sourceRunId: string) => void;
 }
 
 function findLocalCycle(batch: NormalizedTaskBatch) {
@@ -304,9 +318,9 @@ type BatchPlan =
  * Decides a submission against one consistent view of state. Called once as a fast preflight and
  * again inside the transaction, where its answer is authoritative.
  */
-function planTaskBatch(state: Readonly<State>, sourceRunId: string, batch: NormalizedTaskBatch): BatchPlan {
+function planTaskBatch(state: Readonly<State>, sourceRunId: string, batch: NormalizedTaskBatch, options: TaskBatchOptions): BatchPlan {
   const source = authorizeSource(state, sourceRunId);
-  const digest = taskBatchDigest(batch, source.threadId, source.run.id);
+  const digest = taskBatchDigest(batch, source.threadId, source.run.id, options.placementOverrides);
   const prior = state.taskSubmissions?.find((item) => item.threadId === source.threadId && item.idempotencyKey === batch.idempotencyKey);
   if (prior) {
     if (prior.digest !== digest) throw new CoordinationError("idempotency_conflict", "The idempotency key was already used with a different task batch");
@@ -316,6 +330,25 @@ function planTaskBatch(state: Readonly<State>, sourceRunId: string, batch: Norma
   if (thread?.status !== "active") throw new CoordinationError("thread_inactive", "Task submission requires an active thread");
   validateTaskBatchGraph(batch);
   const tasks = state.tasks ?? [];
+  if (options.maximumSourceDepth !== undefined && source.run.depth >= options.maximumSourceDepth) {
+    throw new CoordinationError("depth_limit", "The delegation depth limit has been reached");
+  }
+  if (options.maximumSourceTasks !== undefined) {
+    const prior = tasks.filter((task) => task.sourceRunId === source.run.id).length
+      + (state.delegations ?? []).filter((delegation) => delegation.parentRunId === source.run.id).length;
+    if (prior + batch.tasks.length > options.maximumSourceTasks) throw new CoordinationError("fanout_limit", "The task delegation limit has been reached");
+  }
+  options.assertAcceptable?.(state, source.run.id);
+  const keys = new Set(batch.tasks.map((task) => task.key));
+  for (const [key, override] of Object.entries(options.placementOverrides ?? {})) {
+    if (!keys.has(key)) throw invalid("A placement override names a task key outside the batch");
+    if (override.agentId !== undefined && !state.agents.some((agent) => agent.id === override.agentId)) {
+      throw new CoordinationError("invalid_target", "The pinned agent does not exist");
+    }
+    if (override.nodeId !== undefined && !state.nodes.some((node) => node.id === override.nodeId)) {
+      throw new CoordinationError("invalid_target", "The pinned compute node does not exist");
+    }
+  }
   for (const task of batch.tasks) {
     for (const dependency of task.dependencies) {
       if (dependency.reference.kind !== "existing") continue;
@@ -358,13 +391,19 @@ function statusFromDependencies(state: Readonly<State>, task: Task): { status: T
  * return the original tasks and write nothing; conflicting replays and every invalid batch reject
  * without mutation. If persistence fails the in-memory state is unchanged.
  */
-export async function submitTaskBatch(store: Store, sourceRunId: string, argumentsValue: unknown, at = new Date().toISOString()): Promise<TaskBatchResult> {
+export async function submitTaskBatch(
+  store: Store,
+  sourceRunId: string,
+  argumentsValue: unknown,
+  at = new Date().toISOString(),
+  options: TaskBatchOptions = {}
+): Promise<TaskBatchResult> {
   const batch = normalizeTaskBatch(argumentsValue);
   const order = batch.tasks.map((task) => task.key);
-  store.read((state) => planTaskBatch(state, sourceRunId, batch));
+  store.read((state) => planTaskBatch(state, sourceRunId, batch, options));
   let result: TaskBatchResult | undefined;
   await store.transact((state) => {
-    const plan = planTaskBatch(state, sourceRunId, batch);
+    const plan = planTaskBatch(state, sourceRunId, batch, options);
     if (plan.kind === "replay") {
       result = replayResult(state, plan.submission, order);
       return false;
@@ -383,6 +422,7 @@ export async function submitTaskBatch(store: Store, sourceRunId: string, argumen
         taskId: dependency.reference.kind === "local" ? idsByKey.get(dependency.reference.key)! : dependency.reference.taskId,
         policy: dependency.policy
       })),
+      ...(options.placementOverrides?.[input.key] ? { placementOverride: { ...options.placementOverrides[input.key] } } : {}),
       sourceRunId: plan.source.run.id,
       idempotencyKey: batch.idempotencyKey,
       attemptRunIds: [],
@@ -599,10 +639,13 @@ export interface TaskProjection {
   readiness: TaskReadiness;
   sourceRunId?: string;
   creatorAgentId?: string;
+  placementOverride?: Task["placementOverride"];
   assignment?: Task["assignment"];
+  placement?: Task["placement"];
   attempts: TaskAttemptProjection[];
   result?: string;
   error?: string;
+  progress?: Task["progress"];
   createdAt: string;
   updatedAt: string;
   finishedAt?: string;
@@ -629,7 +672,9 @@ function projectTask(state: Readonly<State>, task: Task): TaskProjection {
     readiness: taskReadiness(state, task),
     sourceRunId: task.sourceRunId,
     creatorAgentId: creator?.creatorAgentId,
+    placementOverride: task.placementOverride && { ...task.placementOverride },
     assignment: task.assignment && { ...task.assignment },
+    placement: task.placement && structuredClone(task.placement),
     attempts: task.attemptRunIds.flatMap((runId) => {
       const run = runs.get(runId);
       return run ? [{
@@ -639,6 +684,7 @@ function projectTask(state: Readonly<State>, task: Task): TaskProjection {
     }),
     result: task.result,
     error: task.error,
+    progress: task.progress && structuredClone(task.progress),
     createdAt: task.createdAt,
     updatedAt: task.updatedAt,
     finishedAt: task.finishedAt

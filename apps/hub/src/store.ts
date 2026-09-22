@@ -17,6 +17,7 @@ import {
   type TimelineEvent
 } from "@coffee-shop/protocol";
 import type { HarnessEventStream, StoredHarnessEvent } from "./harnessEvents.js";
+import { recordTaskEvents, type TaskEventEntry, type TaskEventStream } from "./taskEvents.js";
 
 /** The hub's durable record of one accepted task batch, used to answer idempotent replays. */
 export interface TaskSubmission {
@@ -31,9 +32,25 @@ export interface TaskSubmission {
   createdAt: string;
 }
 
+/** The hub's durable record of one accepted `update_task` call, used to answer idempotent replays. */
+export interface TaskUpdateRecord {
+  id: string;
+  threadId: string;
+  taskId: string;
+  sourceRunId: string;
+  agentId: string;
+  idempotencyKey: string;
+  /** SHA-256 of the normalized update and its source run. */
+  digest: string;
+  createdAt: string;
+}
+
 /** Hub-internal collections that are persisted but never published in snapshots. */
 interface HubOnlyState {
   taskSubmissions?: TaskSubmission[];
+  taskUpdates?: TaskUpdateRecord[];
+  taskEventJournal?: TaskEventEntry[];
+  taskEventStreams?: TaskEventStream[];
   harnessEventStreams?: HarnessEventStream[];
   harnessEvents?: StoredHarnessEvent[];
 }
@@ -50,6 +67,9 @@ const emptyState = (): State => withOrchestrationDefaults({
   delegations: [],
   artifacts: [],
   taskSubmissions: [],
+  taskUpdates: [],
+  taskEventJournal: [],
+  taskEventStreams: [],
   runActivity: [],
   harnessEventStreams: [],
   harnessEvents: []
@@ -57,9 +77,13 @@ const emptyState = (): State => withOrchestrationDefaults({
 
 export function addOrchestrationDefaults(state: State) {
   const changed = orchestrationCollections.some((collection) => state[collection] == null) || state.taskSubmissions == null
+    || state.taskUpdates == null || state.taskEventJournal == null || state.taskEventStreams == null
     || state.runActivity == null || state.harnessEventStreams == null || state.harnessEvents == null;
   withOrchestrationDefaults(state);
   state.taskSubmissions ??= [];
+  state.taskUpdates ??= [];
+  state.taskEventJournal ??= [];
+  state.taskEventStreams ??= [];
   state.runActivity ??= [];
   state.harnessEventStreams ??= [];
   state.harnessEvents ??= [];
@@ -112,7 +136,30 @@ export function assertPersistedTaskState(state: State) {
       throw new Error(`Persisted task submission ${index} is malformed`);
     }
   }
+  const streams = new Map<string, { head: number; floor: number }>();
+  for (const [index, stream] of (state.taskEventStreams ?? []).entries()) {
+    if (!isRecord(stream) || !isNonEmptyString(stream.threadId) || !isSequence(stream.head) || !isSequence(stream.floor)
+      || stream.floor > stream.head || streams.has(stream.threadId)) {
+      throw new Error(`Persisted task event stream ${index} is malformed`);
+    }
+    streams.set(stream.threadId, { head: stream.head, floor: stream.floor });
+  }
+  for (const [index, entry] of (state.taskEventJournal ?? []).entries()) {
+    const bounds = isRecord(entry) && isNonEmptyString(entry.threadId) ? streams.get(entry.threadId) : undefined;
+    if (!bounds || !isSequence(entry.sequence) || entry.sequence <= bounds.floor || entry.sequence > bounds.head
+      || (entry.kind !== "message" && entry.kind !== "task")) {
+      throw new Error(`Persisted task event ${index} is malformed`);
+    }
+  }
+  for (const [index, message] of (state.taskMessages ?? []).entries()) {
+    if (!isRecord(message) || !isNonEmptyString(message.id) || !isNonEmptyString(message.threadId) || !isSequence(message.sequence)
+      || !isRecord(message.sender) || !isRecord(message.recipient) || typeof message.idempotencyKey !== "string") {
+      throw new Error(`Persisted task message ${index} is malformed`);
+    }
+  }
 }
+
+const isSequence = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 
 const legacyDemoAgents = new Map([
   ["cpp-steward", "Ada"],
@@ -255,6 +302,7 @@ export class Store {
   private state: State = emptyState();
   private readonly path: string;
   private transactionQueue: Promise<void> = Promise.resolve();
+  private readonly commitListeners = new Set<(state: Readonly<State>) => void>();
 
   constructor(path = process.env.COFFEE_SHOP_DATA ?? fileURLToPath(new URL("../../../data/state.json", import.meta.url))) {
     this.path = resolve(path);
@@ -281,7 +329,10 @@ export class Store {
   }
 
   snapshot(): Snapshot {
-    const { taskSubmissions: _taskSubmissions, harnessEventStreams: _harnessEventStreams, harnessEvents: _harnessEvents, ...published } = this.state;
+    const {
+      taskSubmissions: _taskSubmissions, taskUpdates: _taskUpdates, taskEventJournal: _taskEventJournal, taskEventStreams: _taskEventStreams,
+      harnessEventStreams: _harnessEventStreams, harnessEvents: _harnessEvents, ...published
+    } = this.state;
     return structuredClone({ ...published, generatedAt: new Date().toISOString() });
   }
 
@@ -307,12 +358,29 @@ export class Store {
     return readFile(resolve(dirname(this.path), "artifacts", id));
   }
 
+  /**
+   * Registers a listener called synchronously after each committed transaction, with the new
+   * state. Listeners must not mutate or retain it; returns the unsubscribe function.
+   */
+  onCommit(listener: (state: Readonly<State>) => void) {
+    this.commitListeners.add(listener);
+    return () => { this.commitListeners.delete(listener); };
+  }
+
   async transact(change: (state: State) => unknown) {
     const transaction = this.transactionQueue.then(async () => {
       const next = structuredClone(this.state);
       if (change(next) === false) return;
+      recordTaskEvents(this.state, next, new Date().toISOString());
       await this.save(next);
       this.state = next;
+      for (const listener of [...this.commitListeners]) {
+        try {
+          listener(next);
+        } catch (error) {
+          console.error("commit listener failed", error);
+        }
+      }
     });
     this.transactionQueue = transaction.catch(() => undefined);
     return transaction;

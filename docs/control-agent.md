@@ -86,14 +86,21 @@ The hub sends `hub.rpc.response` with either a structured result or a typed erro
 
 Barista exposes a Streamable HTTP MCP server on `127.0.0.1` only. Each run receives an opaque bearer capability in its generated harness configuration. The capability is mapped in memory to the active run and authorized workspace, and is revoked during completion, failure, or cancellation. The long-lived `COFFEE_SHOP_TOKEN` is never passed to the harness.
 
-The MCP server is named `coffee_shop_hub` and provides:
+The MCP server is named `coffee_shop_hub`. Its tools are the shared `hubToolNames` vocabulary; delegation tools are listed and served only when the agent's **Allow delegation** setting is enabled, and the hub re-checks that permission:
 
-- `get_task_context`: read the durable thread plus the current run or a visible ancestor/descendant, its child statuses, thread artifacts, limits, and available teammates;
+- `get_task_context`: read the durable thread, the caller's task or a visible related task, dependencies, attempts, child tasks, thread artifacts, the mailbox summary and cursor, limits, and available teammates;
+- `send_task_message`: send an immutable, idempotent message to the thread orchestrator or a task in the caller's lineage;
+- `wait_for_task_events`: long-poll, for at most 20 seconds, for messages to the caller and changes to visible tasks after an opaque cursor, optionally acknowledging handled messages;
+- `update_task`: report progress, an advisory blocked reason, or completion fields as the task's current assignee;
 - `post_artifact`: validate and publish a regular file beneath the active workspace, capped at 10 MiB;
-- `delegate_task`: create an idempotent child run in the current thread, exposed only when the agent's **Allow delegation** setting is enabled;
-- `update_thread`: let the owner agent refine the current thread's title, objective, or summary, or mark it active/completed. Archival remains an operator action.
+- `update_thread`: let the owner agent refine the current thread's title, objective, or summary, or mark it active/completed. Archival remains an operator action;
+- `get_execution_inventory` (delegation): list agents, skills, nodes, harnesses, capacity, and worker-reported capability freshness;
+- `submit_tasks` (delegation): submit an atomic, idempotent task batch with capability requirements, preferences, dependencies, and optional pins;
+- `delegate_task` (delegation): submit one task pinned to a named agent through the same task and scheduler path.
 
-The capability determines `threadId`; the harness never supplies it to delegation or artifact calls. This prevents accidental or adversarial cross-thread attachment.
+Barista rejects unknown tools and non-object arguments before calling the hub. Tool failures are returned as `{"error":{"code","message","retryable"}}`; a lost control connection or an RPC timeout is `retryable`, and repeating the call with the same idempotency key is safe. Claude Code's allowed-tool list is generated from the same tool list.
+
+The capability determines `threadId`, the sender, and the lineage; the harness never supplies them to any tool. This prevents accidental or adversarial cross-thread attachment.
 
 Claude Code receives the server through `--mcp-config`; Codex receives run-local `mcp_servers` configuration overrides. Both use an environment reference for the ephemeral bearer token, so its value is not placed in process arguments. The older final-response handoff directive remains available when MCP cannot be loaded by an older harness.
 

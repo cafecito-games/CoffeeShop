@@ -1,0 +1,775 @@
+[
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "readOnlyHint": true
+    },
+    "description": "Get the durable thread, your task or a visible related task, its dependencies, attempts, child tasks, artifacts, your mailbox summary and cursor, and limits.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "taskId": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "name": "get_task_context",
+    "outputSchema": {
+      "properties": {
+        "artifacts": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "availableAgents": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "caller": {
+          "type": "object"
+        },
+        "childTasks": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "delegations": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "durableTask": {
+          "type": "object"
+        },
+        "limits": {
+          "type": "object"
+        },
+        "mailbox": {
+          "type": "object"
+        },
+        "task": {
+          "type": "object"
+        },
+        "taskGraph": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "taskGraphTruncated": {
+          "type": "boolean"
+        },
+        "thread": {
+          "type": "object"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "thread",
+        "task",
+        "delegations",
+        "artifacts",
+        "availableAgents",
+        "limits",
+        "version"
+      ],
+      "type": "object"
+    },
+    "title": "Get task context"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "readOnlyHint": false
+    },
+    "description": "Create a bounded task pinned to another available agent. It is scheduled like any other task; retain the returned task id and inspect it with get_task_context.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "agentId": {
+          "type": "string"
+        },
+        "artifactIds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "idempotencyKey": {
+          "type": "string"
+        },
+        "task": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "agentId",
+        "task",
+        "idempotencyKey"
+      ],
+      "type": "object"
+    },
+    "name": "delegate_task",
+    "outputSchema": {
+      "properties": {
+        "agentId": {
+          "type": "string"
+        },
+        "assignment": {
+          "type": "object"
+        },
+        "created": {
+          "type": "boolean"
+        },
+        "placement": {
+          "type": "object"
+        },
+        "status": {
+          "type": "string"
+        },
+        "taskId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "taskId",
+        "status",
+        "agentId",
+        "created"
+      ],
+      "type": "object"
+    },
+    "title": "Delegate task"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "readOnlyHint": false
+    },
+    "description": "Publish a regular file from the current run workspace. Use a relative path and a stable idempotency key.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "idempotencyKey": {
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "patch",
+            "report",
+            "test-results",
+            "log",
+            "image",
+            "other"
+          ],
+          "type": "string"
+        },
+        "mediaType": {
+          "type": "string"
+        },
+        "relativePath": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "relativePath",
+        "title",
+        "kind",
+        "mediaType",
+        "idempotencyKey"
+      ],
+      "type": "object"
+    },
+    "name": "post_artifact",
+    "outputSchema": {
+      "properties": {
+        "downloadPath": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "runId": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "uploaded": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "runId",
+        "title",
+        "kind",
+        "downloadPath",
+        "uploaded"
+      ],
+      "type": "object"
+    },
+    "title": "Post artifact"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "readOnlyHint": false
+    },
+    "description": "Refine the current thread title, objective, or summary, or mark it active or completed. Archival is reserved for the operator.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "objective": {
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "active",
+            "completed"
+          ],
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "name": "update_thread",
+    "outputSchema": {
+      "properties": {
+        "thread": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "thread"
+      ],
+      "type": "object"
+    },
+    "title": "Update thread"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "readOnlyHint": true
+    },
+    "description": "List configured agents with their skills and compute nodes with harnesses, capacity, and worker-reported capabilities and their freshness, to write task requirements.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {},
+      "type": "object"
+    },
+    "name": "get_execution_inventory",
+    "outputSchema": {
+      "properties": {
+        "agents": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "generatedAt": {
+          "type": "string"
+        },
+        "nodes": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "truncated": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "generatedAt",
+        "agents",
+        "nodes",
+        "truncated"
+      ],
+      "type": "object"
+    },
+    "title": "Get execution inventory"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "readOnlyHint": false
+    },
+    "description": "Atomically submit a batch of tasks. Name tasks with local keys, depend on sibling keys or existing task ids, and state hard requirements and preferences as capabilities. An optional pin narrows placement to an agent or node and never bypasses requirements. Submission succeeds even when no node can run a task yet.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "idempotencyKey": {
+          "type": "string"
+        },
+        "tasks": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "dependencies": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "key": {
+                      "type": "string"
+                    },
+                    "policy": {
+                      "enum": [
+                        "require-success",
+                        "allow-failure"
+                      ],
+                      "type": "string"
+                    },
+                    "taskId": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "instructions": {
+                "type": "string"
+              },
+              "key": {
+                "type": "string"
+              },
+              "pin": {
+                "additionalProperties": false,
+                "properties": {
+                  "agentId": {
+                    "type": "string"
+                  },
+                  "nodeId": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              },
+              "requirements": {
+                "additionalProperties": false,
+                "properties": {
+                  "architectures": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "harnessIds": {
+                    "items": {
+                      "enum": [
+                        "claude-cli",
+                        "codex-cli",
+                        "shell",
+                        "ag-ui"
+                      ],
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "labels": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "minimumConcurrency": {
+                    "type": "integer"
+                  },
+                  "minimumMemoryMegabytes": {
+                    "type": "integer"
+                  },
+                  "models": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "operatingSystems": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "preferences": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "harnessIds": {
+                        "items": {
+                          "enum": [
+                            "claude-cli",
+                            "codex-cli",
+                            "shell",
+                            "ag-ui"
+                          ],
+                          "type": "string"
+                        },
+                        "type": "array"
+                      },
+                      "labels": {
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      },
+                      "models": {
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      },
+                      "nodeIds": {
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "projectProfileId": {
+                    "type": "string"
+                  },
+                  "skills": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "transports": {
+                    "items": {
+                      "enum": [
+                        "native-cli",
+                        "acp-v1"
+                      ],
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "workspace": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "path": {
+                        "type": "string"
+                      },
+                      "repository": {
+                        "type": "string"
+                      },
+                      "writable": {
+                        "type": "boolean"
+                      }
+                    },
+                    "required": [
+                      "writable"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "type": "object"
+              },
+              "title": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "key",
+              "title",
+              "instructions"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "idempotencyKey",
+        "tasks"
+      ],
+      "type": "object"
+    },
+    "name": "submit_tasks",
+    "outputSchema": {
+      "properties": {
+        "created": {
+          "type": "boolean"
+        },
+        "submissionId": {
+          "type": "string"
+        },
+        "taskIdsByKey": {
+          "type": "object"
+        },
+        "tasks": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "created",
+        "submissionId",
+        "taskIdsByKey",
+        "tasks"
+      ],
+      "type": "object"
+    },
+    "title": "Submit tasks"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "readOnlyHint": false
+    },
+    "description": "Send an immutable message to the thread orchestrator or to a task in your lineage, optionally correlated with or replying to an earlier message and referencing uploaded artifacts.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "artifactIds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "body": {
+          "type": "string"
+        },
+        "correlationId": {
+          "type": "string"
+        },
+        "idempotencyKey": {
+          "type": "string"
+        },
+        "inReplyToMessageId": {
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "question",
+            "answer",
+            "instruction",
+            "progress",
+            "result",
+            "note"
+          ],
+          "type": "string"
+        },
+        "recipient": {
+          "additionalProperties": false,
+          "properties": {
+            "taskId": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "task",
+                "orchestrator"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "idempotencyKey",
+        "recipient",
+        "kind",
+        "body"
+      ],
+      "type": "object"
+    },
+    "name": "send_task_message",
+    "outputSchema": {
+      "properties": {
+        "created": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "type": "string"
+        },
+        "messageId": {
+          "type": "string"
+        },
+        "recipient": {
+          "type": "object"
+        },
+        "sequence": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "created",
+        "messageId",
+        "sequence",
+        "recipient",
+        "createdAt"
+      ],
+      "type": "object"
+    },
+    "title": "Send task message"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "readOnlyHint": false
+    },
+    "description": "Wait until messages to you or changes to visible tasks commit after the cursor, or until the timeout. Always pass the returned cursor to the next call; optionally acknowledge messages you have handled.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "acknowledgeMessageIds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "cursor": {
+          "type": "string"
+        },
+        "maximumEvents": {
+          "maximum": 50,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "timeoutMilliseconds": {
+          "maximum": 20000,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "name": "wait_for_task_events",
+    "outputSchema": {
+      "properties": {
+        "cursor": {
+          "type": "string"
+        },
+        "events": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "hasMore": {
+          "type": "boolean"
+        },
+        "timedOut": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "events",
+        "cursor",
+        "hasMore",
+        "timedOut"
+      ],
+      "type": "object"
+    },
+    "title": "Wait for task events"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "readOnlyHint": false
+    },
+    "description": "As the task's current assignee, report progress, an advisory blocked reason (null clears it), or completion fields. Task status still follows your run.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "blockedReason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "completion": {
+          "additionalProperties": false,
+          "properties": {
+            "artifactIds": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "summary": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "summary"
+          ],
+          "type": "object"
+        },
+        "idempotencyKey": {
+          "type": "string"
+        },
+        "progress": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "idempotencyKey"
+      ],
+      "type": "object"
+    },
+    "name": "update_task",
+    "outputSchema": {
+      "properties": {
+        "created": {
+          "type": "boolean"
+        },
+        "task": {
+          "type": "object"
+        },
+        "updateId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "created",
+        "updateId",
+        "task"
+      ],
+      "type": "object"
+    },
+    "title": "Update task"
+  }
+]
