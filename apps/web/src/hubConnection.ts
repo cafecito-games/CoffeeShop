@@ -78,6 +78,7 @@ function isAgent(value: unknown): boolean {
     && isString(value.workspace)
     && isString(value.systemPrompt)
     && (value.canDelegate === undefined || typeof value.canDelegate === "boolean")
+    && (value.skills === undefined || isArrayOf(value.skills, isString))
     && isNumber(value.unread)
     && isString(value.updatedAt);
 }

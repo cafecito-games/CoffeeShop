@@ -163,7 +163,8 @@ func (client *Client) attach(ctx context.Context, connection *websocket.Conn) er
 		client.outbox = client.outbox[1:]
 	}
 	client.outboxEvents, client.outboxEventBytes = 0, 0
-	return write(ctx, connection, protocol.Outbound{Type: "sync.complete", NodeID: client.node.ID, ActiveRunIDs: client.activeRunIDs(), At: now()})
+	activeRunIDs := client.activeRunIDs()
+	return write(ctx, connection, protocol.Outbound{Type: "sync.complete", NodeID: client.node.ID, ActiveRunIDs: &activeRunIDs, At: now()})
 }
 
 func (client *Client) detach(connection *websocket.Conn) {

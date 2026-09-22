@@ -95,6 +95,7 @@ test("creates a normalized agent from a node-advertised configuration", () => {
     avatarShape: "bean",
     avatarColor: "sage",
     canDelegate: false,
+    skills: [],
     state: "idle",
     currentAction: "Available",
     harnessId: "codex-cli",
@@ -221,4 +222,26 @@ test("treats mapped non-open sockets as disconnected for configuration saves", (
   assert.equal(createConfiguredAgent(current, createInput, "later", liveNodes, () => "scout").ok, false);
   assert.equal(updateConfiguredAgent(current, "milo", { title: "Changed" }, "later", liveNodes).ok, false);
   assert.deepEqual(current, before);
+});
+
+test("normalizes agent skills into a sorted set of lowercase identifiers", () => {
+  const current = state();
+  const result = createConfiguredAgent(current, { ...createInput, skills: [" Rust ", "review", "rust"] }, "2026-02-01T00:00:00Z", connected(current), () => "scout");
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.deepEqual(result.agent.skills, ["review", "rust"]);
+  const unchanged = updateConfiguredAgent(current, "scout", { skills: ["rust", "review"] }, "2026-02-02T00:00:00Z", connected(current));
+  assert.equal(unchanged.ok && unchanged.changed, false);
+  const changed = updateConfiguredAgent(current, "scout", { skills: [] }, "2026-02-02T00:00:00Z", connected(current));
+  assert.equal(changed.ok && changed.changed, true);
+  assert.deepEqual(current.agents.find((item) => item.id === "scout")?.skills, []);
+});
+
+test("rejects malformed agent skills without echoing the submitted value", () => {
+  const current = state();
+  for (const skills of ["rust", [42], ["has space"], ["sk-secret value"], ["a".repeat(65)], Array.from({ length: 33 }, (_, index) => `skill-${index}`)]) {
+    const result = createConfiguredAgent(current, { ...createInput, skills }, "2026-02-01T00:00:00Z", connected(current), () => "scout");
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.equal(result.error.includes("secret"), false);
+  }
 });

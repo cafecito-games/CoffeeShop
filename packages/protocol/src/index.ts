@@ -68,6 +68,8 @@ export interface Agent {
   workspace: string;
   systemPrompt: string;
   canDelegate?: boolean;
+  /** Normalized lowercase skill identifiers the scheduler matches against task `skills` requirements. */
+  skills?: string[];
   unread: number;
   updatedAt: string;
 }
@@ -442,7 +444,11 @@ export const placementRequirementKinds = [
   "project-profile",
   "workspace",
   "node-offline",
-  "inventory-stale"
+  "inventory-stale",
+  "agent",
+  "capacity",
+  "protocol-version",
+  "assignment"
 ] as const;
 export type PlacementRequirementKind = typeof placementRequirementKinds[number];
 
@@ -452,6 +458,8 @@ export interface UnsatisfiedRequirement {
   requirement: string;
   /** Present when the explanation applies to one node rather than to every candidate. */
   nodeId?: string;
+  /** Present when the explanation applies to one candidate agent. */
+  agentId?: string;
   detail: string;
 }
 

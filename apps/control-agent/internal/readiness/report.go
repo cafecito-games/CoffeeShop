@@ -21,7 +21,7 @@ import (
 func BuildCapabilityReport(ctx context.Context, cfg config.Config, harnesses []protocol.HarnessProfile) protocol.NodeCapabilityReport {
 	_ = harnesses
 	observedAt := time.Now().UTC().Format(time.RFC3339Nano)
-	evidence := make([]protocol.NodeCapabilityEvidence, 0, 4+len(cfg.Labels)+len(cfg.Accelerators)+len(AllowlistedProbes))
+	evidence := make([]protocol.NodeCapabilityEvidence, 0, 5+len(cfg.Labels)+len(cfg.Accelerators)+len(cfg.Toolchains)+len(AllowlistedProbes))
 	evidence = append(evidence,
 		runtimeEvidence("os", runtime.GOOS, observedAt),
 		runtimeEvidence("architecture", runtime.GOARCH, observedAt),
@@ -53,6 +53,21 @@ func BuildCapabilityReport(ctx context.Context, cfg config.Config, harnesses []p
 			Source:          protocol.CapabilityEvidenceSourceConfigured,
 			Success:         true,
 			NormalizedValue: accelerator,
+			ObservedAt:      observedAt,
+		})
+	}
+	// A toolchain without a version is still worth reporting: the version is omitted rather than
+	// sent as an empty NormalizedValue, so a project profile can require the toolchain's presence
+	// without pinning it.
+	for _, toolchain := range cfg.Toolchains {
+		if looksSecretLike(toolchain.ID) || looksSecretLike(toolchain.Version) {
+			continue
+		}
+		evidence = append(evidence, protocol.NodeCapabilityEvidence{
+			CapabilityID:    "toolchain:" + toolchain.ID,
+			Source:          protocol.CapabilityEvidenceSourceConfigured,
+			Success:         true,
+			NormalizedValue: toolchain.Version,
 			ObservedAt:      observedAt,
 		})
 	}

@@ -33,6 +33,10 @@ func Discover(ctx context.Context) []protocol.HarnessProfile {
 			Available:   false,
 			AuthMode:    item.authMode,
 			Models:      item.models,
+			// Set explicitly even when unavailable: native CLI is the only transport this Barista
+			// can drive (ACP requires a separately configured adapter), and the hub reads the
+			// transports list to decide how it may dispatch to each harness.
+			Transports: []string{"native-cli"},
 		}
 		path, err := exec.LookPath(item.binary)
 		if err == nil {

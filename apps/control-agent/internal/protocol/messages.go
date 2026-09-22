@@ -74,24 +74,27 @@ type HubRPCError struct {
 }
 
 type Outbound struct {
-	Type            string                `json:"type"`
-	ProtocolVersion string                `json:"protocolVersion,omitempty"`
-	Node            *ComputeNode          `json:"node,omitempty"`
-	NodeID          string                `json:"nodeId,omitempty"`
-	ActiveRuns      int                   `json:"activeRuns"`
-	ActiveRunIDs    []string              `json:"activeRunIds,omitempty"`
-	RunID           string                `json:"runId,omitempty"`
-	Chunk           string                `json:"chunk,omitempty"`
-	Output          string                `json:"output,omitempty"`
-	Error           string                `json:"error,omitempty"`
-	At              string                `json:"at,omitempty"`
-	RequestID       string                `json:"requestId,omitempty"`
-	Operation       string                `json:"operation,omitempty"`
-	Arguments       json.RawMessage       `json:"arguments,omitempty"`
-	Event           *HarnessEvent         `json:"event,omitempty"`
-	Binding         *SessionBindingUpdate `json:"binding,omitempty"`
-	Lease           *WorkspaceLeaseUpdate `json:"lease,omitempty"`
-	Report          *NodeCapabilityReport `json:"report,omitempty"`
+	Type            string       `json:"type"`
+	ProtocolVersion string       `json:"protocolVersion,omitempty"`
+	Node            *ComputeNode `json:"node,omitempty"`
+	NodeID          string       `json:"nodeId,omitempty"`
+	ActiveRuns      int          `json:"activeRuns"`
+	// ActiveRunIDs is a pointer so sync.complete can encode an explicitly empty array
+	// ("activeRunIds":[]) when no runs survived the reconnect, while every other message type
+	// omits the field entirely by leaving the pointer nil.
+	ActiveRunIDs *[]string             `json:"activeRunIds,omitempty"`
+	RunID        string                `json:"runId,omitempty"`
+	Chunk        string                `json:"chunk,omitempty"`
+	Output       string                `json:"output,omitempty"`
+	Error        string                `json:"error,omitempty"`
+	At           string                `json:"at,omitempty"`
+	RequestID    string                `json:"requestId,omitempty"`
+	Operation    string                `json:"operation,omitempty"`
+	Arguments    json.RawMessage       `json:"arguments,omitempty"`
+	Event        *HarnessEvent         `json:"event,omitempty"`
+	Binding      *SessionBindingUpdate `json:"binding,omitempty"`
+	Lease        *WorkspaceLeaseUpdate `json:"lease,omitempty"`
+	Report       *NodeCapabilityReport `json:"report,omitempty"`
 }
 
 func DecodeInbound(data []byte) (Inbound, error) {

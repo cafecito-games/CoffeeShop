@@ -30,7 +30,7 @@ export function openConnectionLookup<T extends { readyState: number }>(
 
 type EditableAgentConfiguration = Pick<Agent,
   "name" | "title" | "summary" | "harnessId" | "model" | "computeNodeId" |
-  "workspace" | "systemPrompt" | "avatarShape" | "avatarColor" | "glyph" | "canDelegate">;
+  "workspace" | "systemPrompt" | "avatarShape" | "avatarColor" | "glyph" | "canDelegate" | "skills">;
 
 type ConfigurationFailure = { ok: false; kind: "invalid" | "not-found"; error: string };
 type CreateResult = { ok: true; agent: Agent; node: ComputeNode } | ConfigurationFailure;
@@ -40,7 +40,7 @@ const stringEditableKeys = [
   "name", "title", "summary", "harnessId", "model", "computeNodeId", "workspace",
   "systemPrompt", "avatarShape", "avatarColor"
 ] as const;
-const editableKeys = [...stringEditableKeys, "canDelegate"] as const;
+const editableKeys = [...stringEditableKeys, "canDelegate", "skills"] as const;
 const editableKeySet = new Set<string>(editableKeys);
 
 function invalid(error: string): ConfigurationFailure {
@@ -51,7 +51,30 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function isWorkspaceWithinRoot(workspace: string, root: string) {
+export const agentSkillLimits = { entries: 32, bytes: 64 } as const;
+const agentSkillPattern = /^[a-z0-9]+(-[a-z0-9]+)*$/;
+const encoder = new TextEncoder();
+
+/**
+ * Skills are lowercase kebab-case identifiers so a task requirement matches them exactly after
+ * lowercasing. Rejections name the position only, never the submitted value.
+ */
+function normalizeSkills(value: unknown): { ok: true; skills: string[] } | ConfigurationFailure {
+  if (!Array.isArray(value)) return invalid("skills must be an array of strings");
+  if (value.length > agentSkillLimits.entries) return invalid(`skills must have at most ${agentSkillLimits.entries} entries`);
+  const skills = new Set<string>();
+  for (const [index, entry] of value.entries()) {
+    if (typeof entry !== "string") return invalid(`skills[${index}] must be a string`);
+    const skill = entry.trim().toLowerCase();
+    if (encoder.encode(skill).length > agentSkillLimits.bytes || !agentSkillPattern.test(skill)) {
+      return invalid(`skills[${index}] must be lowercase letters, numbers, and single hyphens, at most ${agentSkillLimits.bytes} bytes`);
+    }
+    skills.add(skill);
+  }
+  return { ok: true, skills: [...skills].sort() };
+}
+
+export function isWorkspaceWithinRoot(workspace: string, root: string) {
   const paths = /^[A-Za-z]:[\\/]|^\\\\/.test(workspace) ? win32 : posix;
   if (!paths.isAbsolute(workspace) || !paths.isAbsolute(root)) return false;
   const relative = paths.relative(paths.normalize(root), paths.normalize(workspace));
@@ -63,9 +86,11 @@ function validateConfiguration(body: unknown, nodes: readonly ComputeNode[], con
   if (!isRecord(body)) return invalid("Request body must be an object");
   const unknown = Object.keys(body).find((key) => !editableKeySet.has(key));
   if (unknown) return invalid(`Unknown agent field: ${unknown}`);
-  const nonString = Object.keys(body).find((key) => key !== "canDelegate" && typeof body[key] !== "string");
+  const nonString = Object.keys(body).find((key) => key !== "canDelegate" && key !== "skills" && typeof body[key] !== "string");
   if (nonString) return invalid(`${nonString} must be a string`);
   if (Object.hasOwn(body, "canDelegate") && typeof body.canDelegate !== "boolean") return invalid("canDelegate must be a boolean");
+  const skills = Object.hasOwn(body, "skills") ? normalizeSkills(body.skills) : { ok: true as const, skills: existing?.skills ?? [] };
+  if (!skills.ok) return skills;
 
   const values: Record<string, string | undefined> = existing ? {
     name: existing.name,
@@ -131,13 +156,16 @@ function validateConfiguration(body: unknown, nodes: readonly ComputeNode[], con
       systemPrompt,
       avatarShape: values.avatarShape as AgentAvatarShape,
       avatarColor: values.avatarColor as AgentAvatarColor,
-      canDelegate: Object.hasOwn(body, "canDelegate") ? body.canDelegate as boolean : existing?.canDelegate ?? false
+      canDelegate: Object.hasOwn(body, "canDelegate") ? body.canDelegate as boolean : existing?.canDelegate ?? false,
+      skills: skills.skills
     }
   };
 }
 
 function configurationChanged(agent: Agent, configuration: EditableAgentConfiguration) {
-  return Object.entries(configuration).some(([key, value]) => agent[key as keyof Agent] !== value);
+  return Object.entries(configuration).some(([key, value]) => key === "skills"
+    ? JSON.stringify(agent.skills ?? []) !== JSON.stringify(value)
+    : agent[key as keyof Agent] !== value);
 }
 
 export function createConfiguredAgent(

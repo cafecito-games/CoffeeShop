@@ -20,9 +20,27 @@ func TestCancellationMessagesUseTypedWireContract(t *testing.T) {
 }
 
 func TestSyncCompleteMessageFollowsRegistrationAndOutbox(t *testing.T) {
-	data, err := json.Marshal(Outbound{Type: "sync.complete", NodeID: "node-one", ActiveRunIDs: []string{"run-one"}, At: "2026-09-11T12:00:00Z"})
+	activeRunIDs := []string{"run-one"}
+	data, err := json.Marshal(Outbound{Type: "sync.complete", NodeID: "node-one", ActiveRunIDs: &activeRunIDs, At: "2026-09-11T12:00:00Z"})
 	require.NoError(t, err)
 	require.JSONEq(t, `{"type":"sync.complete","nodeId":"node-one","activeRuns":0,"activeRunIds":["run-one"],"at":"2026-09-11T12:00:00Z"}`, string(data))
+}
+
+func TestSyncCompleteWithNoActiveRunsEncodesAnEmptyActiveRunIDsArray(t *testing.T) {
+	// The hub distinguishes "Barista reported its active set and it is empty" from "the field was
+	// absent"; only the former lets it redispatch queued runs immediately, so an empty set must
+	// encode as [] rather than being dropped by omitempty.
+	activeRunIDs := []string{}
+	data, err := json.Marshal(Outbound{Type: "sync.complete", NodeID: "node-one", ActiveRunIDs: &activeRunIDs, At: "2026-09-11T12:00:00Z"})
+	require.NoError(t, err)
+	require.JSONEq(t, `{"type":"sync.complete","nodeId":"node-one","activeRuns":0,"activeRunIds":[],"at":"2026-09-11T12:00:00Z"}`, string(data))
+}
+
+func TestHeartbeatOmitsActiveRunIDs(t *testing.T) {
+	data, err := json.Marshal(Outbound{Type: "heartbeat", NodeID: "node-one", ActiveRuns: 2, At: "2026-09-11T12:00:00Z"})
+	require.NoError(t, err)
+	require.NotContains(t, string(data), "activeRunIds")
+	require.JSONEq(t, `{"type":"heartbeat","nodeId":"node-one","activeRuns":2,"at":"2026-09-11T12:00:00Z"}`, string(data))
 }
 
 func TestHubRPCMessagesPreserveStructuredArgumentsAndResults(t *testing.T) {

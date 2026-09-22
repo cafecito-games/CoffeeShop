@@ -80,7 +80,11 @@ test("orchestration vocabularies keep their exact contents and order", () => {
     "project-profile",
     "workspace",
     "node-offline",
-    "inventory-stale"
+    "inventory-stale",
+    "agent",
+    "capacity",
+    "protocol-version",
+    "assignment"
   ]);
   assert.deepEqual(taskMessageKinds, ["question", "answer", "instruction", "progress", "result", "note"]);
   assert.deepEqual(sessionBindingStatuses, ["active", "idle", "closed", "replaced", "failed"]);
