@@ -35,6 +35,7 @@ tasks:
     cmds:
       - task: protocol:build
       - task: control-plane:build
+      - task: orchestrator-bridge:build
       - task: frontend:build
       - task: control-agent:build
 
@@ -145,6 +146,22 @@ tasks:
     desc: Type-check the control plane
     cmds:
       - pnpm --filter @coffee-shop/hub typecheck
+
+  orchestrator-bridge:build:
+    desc: Build the Claude Code orchestrator bridge
+    deps: [protocol:build]
+    cmds:
+      - pnpm --filter @coffee-shop/orchestrator-bridge build
+
+  orchestrator-bridge:test:
+    desc: Run orchestrator bridge tests
+    cmds:
+      - pnpm --filter @coffee-shop/orchestrator-bridge test
+
+  orchestrator-bridge:typecheck:
+    desc: Type-check the orchestrator bridge
+    cmds:
+      - pnpm --filter @coffee-shop/orchestrator-bridge typecheck
 
   control-agent:run:
     desc: Run Barista from source; append flags after --

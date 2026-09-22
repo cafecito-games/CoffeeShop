@@ -1,0 +1,22 @@
+{
+  "name": "@coffee-shop/orchestrator-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsx --test src/**/*.test.ts"
+  },
+  "dependencies": {
+    "@coffee-shop/protocol": "workspace:*",
+    "@modelcontextprotocol/sdk": "^1.20.0",
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.1",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.20.5"
+  }
+}
