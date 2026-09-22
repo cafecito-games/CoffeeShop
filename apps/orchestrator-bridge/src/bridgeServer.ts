@@ -55,6 +55,10 @@ export interface BridgeServerOptions {
   logError: (message: string) => void;
 }
 
+const unrememberedAttachmentInstruction =
+  "Coffee Shop could not tell which thread was created, so this session will not re-attach it automatically. "
+  + "Call attach_thread with the new thread id before relying on doorbells.";
+
 const channelFallbackInstruction =
   "If Coffee Shop channel events never arrive, poll get_thread_events with waitMilliseconds instead of waiting for a doorbell.";
 
@@ -107,17 +111,22 @@ function requestedWaitMilliseconds(toolArguments: Record<string, unknown>): numb
   return wait;
 }
 
+const nonEmptyString = (value: unknown): string | undefined =>
+  (typeof value === "string" && value !== "" ? value : undefined);
+
 /**
- * The thread a `create_thread` result refers to. The hub owns the result shape, so both the flat
- * and nested spellings are accepted and an unrecognised shape simply yields no attachment rather
- * than a wrong one.
+ * The thread a `create_thread` result refers to. The hub owns the result shape, so every spelling
+ * it plausibly uses is accepted and an unrecognised shape yields no attachment rather than a wrong
+ * one. The caller tells the model when nothing was recognised, because a silently unremembered
+ * attachment would stop being re-attached after a reconnect.
  */
 export function threadIdFromCreateResult(result: unknown): string | undefined {
   if (!isPlainObject(result)) return undefined;
-  if (typeof result.threadId === "string" && result.threadId !== "") return result.threadId;
+  const direct = nonEmptyString(result.threadId) ?? nonEmptyString(result.id);
+  if (direct !== undefined) return direct;
   const thread = result.thread;
-  if (isPlainObject(thread) && typeof thread.id === "string" && thread.id !== "") return thread.id;
-  return undefined;
+  if (!isPlainObject(thread)) return undefined;
+  return nonEmptyString(thread.id) ?? nonEmptyString(thread.threadId);
 }
 
 const threadIdArgument = (toolArguments: Record<string, unknown>): string | undefined => {
@@ -266,8 +275,13 @@ export class BridgeServer {
     switch (name) {
       case "create_thread": {
         const threadId = threadIdFromCreateResult(result);
-        if (threadId !== undefined) this.hub.rememberAttachment(threadId);
-        return result;
+        if (threadId !== undefined) {
+          this.hub.rememberAttachment(threadId);
+          return result;
+        }
+        this.logError("create_thread returned no recognisable thread id; the attachment will not survive a reconnect");
+        const unremembered = { attachmentRemembered: false, attachmentInstruction: unrememberedAttachmentInstruction };
+        return isPlainObject(result) ? { ...result, ...unremembered } : { context: result, ...unremembered };
       }
       case "attach_thread": {
         const threadId = threadIdArgument(toolArguments);

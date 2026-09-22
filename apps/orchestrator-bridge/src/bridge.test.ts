@@ -38,7 +38,10 @@ const waitFor = async (predicate: () => boolean, description: string, timeoutMil
   }
 };
 
-async function startHarness(hubOptions: FakeHubOptions = { scopes: ["orchestrate"] }, waitForReady = true): Promise<Harness> {
+/** Fake-hub behaviour plus the one bridge timing knob some scenarios need to shorten. */
+type HarnessOptions = FakeHubOptions & { requestTimeoutMilliseconds?: number };
+
+async function startHarness(hubOptions: HarnessOptions = { scopes: ["orchestrate"] }, waitForReady = true): Promise<Harness> {
   const hub = await FakeHub.start(hubOptions);
   const channelEvents: ChannelEvent[] = [];
   const errors: string[] = [];
@@ -54,7 +57,7 @@ async function startHarness(hubOptions: FakeHubOptions = { scopes: ["orchestrate
     initialReconnectDelayMilliseconds: 5,
     maximumReconnectDelayMilliseconds: 20,
     welcomeTimeoutMilliseconds: 500,
-    requestTimeoutMilliseconds: 1_500,
+    requestTimeoutMilliseconds: hubOptions.requestTimeoutMilliseconds ?? 1_500,
     random: () => 0,
     onDoorbell: (doorbell) => void bridge?.announceDoorbell(doorbell),
     onAttachmentReplaced: (replaced) => void bridge?.announceAttachmentReplaced(replaced),
@@ -407,28 +410,78 @@ test("sends heartbeats the hub contract accepts", async (t) => {
 });
 
 test("extends the request timeout for a long poll rather than cutting it short", async (t) => {
+  // The hub answers after the base timeout has already passed, so the call can only succeed if the
+  // requested wait was added to the deadline.
   const harness = await startHarness({
     scopes: ["orchestrate"],
     handle: async (request) => {
       if (request.tool !== "get_thread_events") return {};
-      await new Promise((resolve) => setTimeout(resolve, 200));
+      await new Promise((resolve) => setTimeout(resolve, 300));
       return { events: [], cursor: "cursor-1" };
-    }
+    },
+    requestTimeoutMilliseconds: 150
   });
   t.after(() => harness.close());
   const result = await harness.client.callTool(
-    { name: "get_thread_events", arguments: { threadId: "thread-1", waitMilliseconds: 150 } },
+    { name: "get_thread_events", arguments: { threadId: "thread-1", waitMilliseconds: 1_000 } },
     undefined,
     { timeout: 10_000 }
   );
   assert.deepEqual(parseToolResult(result), { events: [], cursor: "cursor-1" });
 });
 
-test("remembers the thread a create_thread result names", async (t) => {
-  const harness = await startHarness({ scopes: ["orchestrate"], handle: () => ({ thread: { id: "thread-created" } }) });
+test("gives up on a request the hub never answers instead of hanging the session", async (t) => {
+  const harness = await startHarness({
+    scopes: ["orchestrate"],
+    handle: () => new Promise(() => {}),
+    requestTimeoutMilliseconds: 120
+  });
   t.after(() => harness.close());
-  await harness.client.callTool({ name: "create_thread", arguments: { title: "Auth refactor", objective: "Ship it" } });
-  assert.deepEqual(harness.connection.attachedThreads(), ["thread-created"]);
+  const result = await harness.client.callTool({ name: "list_threads", arguments: {} }, undefined, { timeout: 10_000 });
+  assert.equal(result.isError, true);
+  const payload = parseToolResult(result) as { error: { code: string; message: string } };
+  assert.equal(payload.error.code, "hub_unavailable");
+  assert.match(payload.error.message, /did not answer list_threads/);
+});
+
+test("a long poll that outlives even its extended deadline still fails rather than hanging", async (t) => {
+  const harness = await startHarness({
+    scopes: ["orchestrate"],
+    handle: () => new Promise(() => {}),
+    requestTimeoutMilliseconds: 50
+  });
+  t.after(() => harness.close());
+  const result = await harness.client.callTool(
+    { name: "get_thread_events", arguments: { threadId: "thread-1", waitMilliseconds: 50 } },
+    undefined,
+    { timeout: 10_000 }
+  );
+  assert.equal((parseToolResult(result) as { error: { code: string } }).error.code, "hub_unavailable");
+});
+
+for (const shape of [
+  { threadId: "thread-created" },
+  { id: "thread-created" },
+  { thread: { id: "thread-created" } },
+  { thread: { threadId: "thread-created" } }
+]) {
+  test(`remembers the thread a create_thread result spells as ${JSON.stringify(shape)}`, async (t) => {
+    const harness = await startHarness({ scopes: ["orchestrate"], handle: () => shape });
+    t.after(() => harness.close());
+    await harness.client.callTool({ name: "create_thread", arguments: { title: "Auth refactor", objective: "Ship it" } });
+    assert.deepEqual(harness.connection.attachedThreads(), ["thread-created"]);
+  });
+}
+
+test("tells the model when a create_thread result names no thread it can re-attach", async (t) => {
+  const harness = await startHarness({ scopes: ["orchestrate"], handle: () => ({ created: true }) });
+  t.after(() => harness.close());
+  const result = parseToolResult(await harness.client.callTool({ name: "create_thread", arguments: { title: "Auth refactor", objective: "Ship it" } }));
+  assert.equal(result.created, true);
+  assert.equal(result.attachmentRemembered, false);
+  assert.match(String(result.attachmentInstruction), /attach_thread/);
+  assert.deepEqual(harness.connection.attachedThreads(), []);
+  assert.ok(harness.errors.some((message) => message.includes("no recognisable thread id")));
 });
 
 test("never writes the client secret into an error log", async (t) => {
