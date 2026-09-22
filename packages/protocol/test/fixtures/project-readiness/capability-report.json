@@ -1,0 +1,59 @@
+{
+  "nodeId": "node-one",
+  "projectAllowlist": ["cafecito-ios"],
+  "evidence": [
+    {
+      "capabilityId": "os",
+      "source": "runtime",
+      "success": true,
+      "rawValue": "Darwin Kernel Version 25.5.0",
+      "normalizedValue": "macos",
+      "observedAt": "2026-09-21T11:59:00Z"
+    },
+    {
+      "capabilityId": "architecture",
+      "source": "runtime",
+      "success": true,
+      "normalizedValue": "arm64",
+      "observedAt": "2026-09-21T11:59:00Z"
+    },
+    {
+      "capabilityId": "logical-cpu-count",
+      "source": "runtime",
+      "success": true,
+      "normalizedValue": "12",
+      "observedAt": "2026-09-21T11:59:00Z"
+    },
+    {
+      "capabilityId": "configured-memory-megabytes",
+      "source": "configured",
+      "success": true,
+      "normalizedValue": "32768",
+      "observedAt": "2026-09-21T11:59:00Z"
+    },
+    {
+      "capabilityId": "toolchain:xcode",
+      "source": "probe",
+      "success": true,
+      "rawValue": "Xcode 16.4\nBuild version 16F6",
+      "normalizedValue": "16.4",
+      "probeDefinitionVersion": "1",
+      "observedAt": "2026-09-21T11:59:00Z"
+    },
+    {
+      "capabilityId": "toolchain:go",
+      "source": "probe",
+      "success": true,
+      "normalizedValue": "1.24.0",
+      "probeDefinitionVersion": "1",
+      "observedAt": "2026-09-21T11:59:00Z"
+    },
+    {
+      "capabilityId": "label:ci",
+      "source": "configured",
+      "success": true,
+      "observedAt": "2026-09-21T11:59:00Z"
+    }
+  ],
+  "at": "2026-09-21T12:00:00Z"
+}

@@ -24,10 +24,11 @@ import (
 )
 
 type Client struct {
-	config config.Config
-	node   protocol.ComputeNode
-	runner *harness.Runner
-	bridge *mcpserver.Server
+	config                config.Config
+	node                  protocol.ComputeNode
+	runner                *harness.Runner
+	bridge                *mcpserver.Server
+	buildCapabilityReport func(context.Context) protocol.NodeCapabilityReport
 
 	connectionMu sync.Mutex
 	connection   *websocket.Conn
@@ -45,9 +46,9 @@ type rpcResult struct {
 	err    error
 }
 
-func NewClient(cfg config.Config, node protocol.ComputeNode, runner *harness.Runner) *Client {
+func NewClient(cfg config.Config, node protocol.ComputeNode, runner *harness.Runner, buildCapabilityReport func(context.Context) protocol.NodeCapabilityReport) *Client {
 	client := &Client{
-		config: cfg, node: node, runner: runner,
+		config: cfg, node: node, runner: runner, buildCapabilityReport: buildCapabilityReport,
 		runs: map[string]context.CancelFunc{}, cancelled: map[string]struct{}{}, pending: map[string]chan rpcResult{},
 	}
 	client.bridge = mcpserver.New(client.callHub, client.uploadArtifact)
@@ -112,6 +113,12 @@ func (client *Client) runOnce(ctx context.Context) (bool, error) {
 	heartbeatCtx, cancelHeartbeat := context.WithCancel(ctx)
 	defer cancelHeartbeat()
 	go client.heartbeat(heartbeatCtx)
+	go client.capabilityReportLoop(heartbeatCtx)
+
+	// Sent through client.send so a disconnected connection queues the report in the outbox and
+	// replays it on the next successful attach, giving resend-after-reconnect for free.
+	capabilityReport := client.buildCapabilityReport(ctx)
+	client.send(protocol.Outbound{Type: "capability.report", Report: &capabilityReport})
 
 	for {
 		_, data, err := connection.Read(ctx)
@@ -195,6 +202,20 @@ func (client *Client) heartbeat(ctx context.Context) {
 	}
 }
 
+func (client *Client) capabilityReportLoop(ctx context.Context) {
+	ticker := time.NewTicker(15 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			report := client.buildCapabilityReport(ctx)
+			client.send(protocol.Outbound{Type: "capability.report", Report: &report})
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
 func (client *Client) handle(ctx context.Context, message protocol.Inbound) {
 	switch message.Type {
 	case "ping":
@@ -210,13 +231,48 @@ func (client *Client) handle(ctx context.Context, message protocol.Inbound) {
 			client.send(protocol.Outbound{Type: "run.cancelled", RunID: message.RunID, At: now()})
 		}
 	case "dispatch":
-		client.dispatch(ctx, message.Run, message.Agent)
+		client.dispatch(ctx, message.Run, message.Agent, message.Execution)
 	default:
 		log.Printf("ignore unknown control-plane message type %q", message.Type)
 	}
 }
 
-func (client *Client) dispatch(ctx context.Context, run protocol.Run, agent protocol.Agent) {
+// unsupportedExecutionReason reports why a version-4 dispatch cannot be honored by this Barista,
+// or "" when it is fully supported. Barista only implements native CLI execution today: an ACP
+// transport, a session binding to resume, or a workspace lease to provision would each silently
+// fall back to plain native execution if not rejected explicitly, which is exactly what
+// registering control protocol version 4 must never allow (see docs/architecture.md's
+// compatibility policy). The version-4 run itself, not only the optional execution object, can
+// carry these fields (protocol.Run.Transport/SessionBindingID/WorkspaceLeaseID), so both are
+// checked: a hub could send run.transport="acp-v1" with no execution object at all, and that must
+// be rejected exactly like an execution object naming the same transport. Rejecting here, before
+// any process starts, keeps that promise regardless of what a hub scheduler eventually sends.
+func unsupportedExecutionReason(run protocol.Run, execution *protocol.DispatchExecution) string {
+	if run.Transport != "" && run.Transport != "native-cli" {
+		return fmt.Sprintf("unsupported execution: %s transport not available on this Barista", run.Transport)
+	}
+	if run.SessionBindingID != "" {
+		return "unsupported execution: session binding resume not available on this Barista"
+	}
+	if run.WorkspaceLeaseID != "" {
+		return "unsupported execution: workspace lease provisioning not available on this Barista"
+	}
+	if execution == nil {
+		return ""
+	}
+	if execution.Transport != "" && execution.Transport != "native-cli" {
+		return fmt.Sprintf("unsupported execution: %s transport not available on this Barista", execution.Transport)
+	}
+	if execution.SessionBinding != nil {
+		return "unsupported execution: session binding resume not available on this Barista"
+	}
+	if execution.WorkspaceLease != nil {
+		return "unsupported execution: workspace lease provisioning not available on this Barista"
+	}
+	return ""
+}
+
+func (client *Client) dispatch(ctx context.Context, run protocol.Run, agent protocol.Agent, execution *protocol.DispatchExecution) {
 	client.runsMu.Lock()
 	if _, cancelled := client.cancelled[run.ID]; cancelled {
 		client.runsMu.Unlock()
@@ -224,6 +280,11 @@ func (client *Client) dispatch(ctx context.Context, run protocol.Run, agent prot
 	}
 	if _, exists := client.runs[run.ID]; exists {
 		client.runsMu.Unlock()
+		return
+	}
+	if reason := unsupportedExecutionReason(run, execution); reason != "" {
+		client.runsMu.Unlock()
+		client.send(protocol.Outbound{Type: "run.failed", RunID: run.ID, Error: reason, At: now()})
 		return
 	}
 	if len(client.runs) >= client.config.Concurrency {

@@ -16,6 +16,7 @@ import (
 	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/controlplane"
 	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/harness"
 	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/protocol"
+	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/readiness"
 )
 
 var version = "dev"
@@ -66,7 +67,18 @@ func run(args []string) int {
 		Harnesses:      profiles,
 		Version:        version,
 	}
-	client := controlplane.NewClient(cfg, node, harness.NewRunner(profiles))
+	buildCapabilityReport := func(buildContext context.Context) protocol.NodeCapabilityReport {
+		return readiness.BuildCapabilityReport(buildContext, cfg, profiles)
+	}
+	report := buildCapabilityReport(ctx)
+	succeeded := 0
+	for _, entry := range report.Evidence {
+		if entry.Success {
+			succeeded++
+		}
+	}
+	log.Printf("node capability report ready: %d of %d evidence entries succeeded", succeeded, len(report.Evidence))
+	client := controlplane.NewClient(cfg, node, harness.NewRunner(profiles), buildCapabilityReport)
 	if err := client.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		log.Printf("Barista stopped: %v", err)
 		return 1

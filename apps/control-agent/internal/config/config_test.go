@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -118,4 +119,129 @@ func TestParseUsesWorkingDirectoryAsTheDefaultRoot(t *testing.T) {
 	want, err = filepath.Abs(want)
 	require.NoError(t, err)
 	require.Equal(t, want, cfg.WorkspaceRoots[0])
+}
+
+func TestParseReadsCapabilityValuesFromEnvironment(t *testing.T) {
+	t.Setenv("WORKSPACE_ROOTS", absoluteExistingRoot(t))
+	t.Setenv("BARISTA_PROJECT_ALLOWLIST", "coffee-shop,internal-tools")
+	t.Setenv("BARISTA_LABELS", "gpu,latency-sensitive")
+	t.Setenv("BARISTA_ACCELERATORS", "apple-m3-max,cuda")
+	t.Setenv("BARISTA_MEMORY_MEGABYTES", "32768")
+
+	cfg, err := Parse([]string{"--name", "Worker 1", "--id", "worker-1"})
+	require.NoError(t, err)
+	require.Equal(t, []string{"coffee-shop", "internal-tools"}, cfg.ProjectAllowlist)
+	require.Equal(t, []string{"gpu", "latency-sensitive"}, cfg.Labels)
+	require.Equal(t, []string{"apple-m3-max", "cuda"}, cfg.Accelerators)
+	require.Equal(t, 32768, cfg.MemoryMegabytes)
+}
+
+func TestParseAccumulatesRepeatedCapabilityFlags(t *testing.T) {
+	t.Setenv("WORKSPACE_ROOTS", absoluteExistingRoot(t))
+	t.Setenv("BARISTA_PROJECT_ALLOWLIST", "")
+	t.Setenv("BARISTA_LABELS", "")
+	t.Setenv("BARISTA_ACCELERATORS", "")
+
+	cfg, err := Parse([]string{
+		"--name", "Worker 1", "--id", "worker-1",
+		"--project", "coffee-shop", "--project", "internal-tools",
+		"--label", "gpu", "--label", "latency-sensitive",
+		"--accelerator", "cuda",
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{"coffee-shop", "internal-tools"}, cfg.ProjectAllowlist)
+	require.Equal(t, []string{"gpu", "latency-sensitive"}, cfg.Labels)
+	require.Equal(t, []string{"cuda"}, cfg.Accelerators)
+}
+
+func TestParseRejectsInvalidProjectID(t *testing.T) {
+	t.Setenv("WORKSPACE_ROOTS", absoluteExistingRoot(t))
+
+	_, err := Parse([]string{"--name", "Worker 1", "--id", "worker-1", "--project", "Coffee Shop"})
+	require.EqualError(t, err, `project id "Coffee Shop" must contain only letters, numbers, and hyphens`)
+}
+
+func TestParseDeduplicatesCapabilityValuesPreservingOrder(t *testing.T) {
+	t.Setenv("WORKSPACE_ROOTS", absoluteExistingRoot(t))
+
+	cfg, err := Parse([]string{
+		"--name", "Worker 1", "--id", "worker-1",
+		"--project", "coffee-shop", "--project", "internal-tools", "--project", "coffee-shop",
+		"--label", "gpu", "--label", "gpu",
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{"coffee-shop", "internal-tools"}, cfg.ProjectAllowlist)
+	require.Equal(t, []string{"gpu"}, cfg.Labels)
+}
+
+func TestParseRejectsOversizedLabelAndAccelerator(t *testing.T) {
+	// The bound matches protocol.LabelOrAcceleratorMaximumBytes (64), not an independently chosen
+	// number: a label/accelerator becomes a NodeCapabilityEvidence.NormalizedValue, and the hub's
+	// wire validator rejects the whole report if any entry exceeds that limit. The error names the
+	// field and its index only — never the rejected value, which config errors commonly log.
+	t.Setenv("WORKSPACE_ROOTS", absoluteExistingRoot(t))
+	oversized := strings.Repeat("x", 65)
+
+	_, err := Parse([]string{"--name", "Worker 1", "--id", "worker-1", "--label", oversized})
+	require.EqualError(t, err, "label at index 0 exceeds 64 bytes")
+	require.NotContains(t, err.Error(), oversized)
+	_, err = Parse([]string{"--name", "Worker 1", "--id", "worker-1", "--accelerator", oversized})
+	require.EqualError(t, err, "accelerator at index 0 exceeds 64 bytes")
+	require.NotContains(t, err.Error(), oversized)
+}
+
+func TestParseRejectsSecretLikeLabelsAndAccelerators(t *testing.T) {
+	// A kebab-case grammar alone does not exclude a lowercase, hyphenated secret shape, so this is
+	// a distinct rejection from TestParseRejectsLabelsAndAcceleratorsThatWouldNotFormAValidCapabilityID.
+	// The error must never contain the rejected value, since it is by definition a suspected secret.
+	t.Setenv("WORKSPACE_ROOTS", absoluteExistingRoot(t))
+	secret := "sk-abcdefghij1234567890"
+
+	_, err := Parse([]string{"--name", "Worker 1", "--id", "worker-1", "--label", secret})
+	require.EqualError(t, err, "label at index 0 looks like it contains a secret and was rejected")
+	require.NotContains(t, err.Error(), secret)
+
+	_, err = Parse([]string{"--name", "Worker 1", "--id", "worker-1", "--label", "gpu", "--label", secret})
+	require.EqualError(t, err, "label at index 1 looks like it contains a secret and was rejected", "the index reflects position, not just the first offender")
+
+	_, err = Parse([]string{"--name", "Worker 1", "--id", "worker-1", "--accelerator", secret})
+	require.EqualError(t, err, "accelerator at index 0 looks like it contains a secret and was rejected")
+	require.NotContains(t, err.Error(), secret)
+}
+
+func TestParseRejectsLabelsAndAcceleratorsThatWouldNotFormAValidCapabilityID(t *testing.T) {
+	// readiness.BuildCapabilityReport embeds every label/accelerator verbatim into a capability id
+	// ("label:<label>", "accelerator:<accelerator>"); a value the shared capability id grammar
+	// rejects would make the hub reject the whole capability report, not just that entry, so
+	// config load must fail closed on it instead. The error names the field and index only.
+	t.Setenv("WORKSPACE_ROOTS", absoluteExistingRoot(t))
+
+	_, err := Parse([]string{"--name", "Worker 1", "--id", "worker-1", "--label", "GPU Runner"})
+	require.EqualError(t, err, "label at index 0 must contain only lowercase letters, numbers, and hyphens")
+	require.NotContains(t, err.Error(), "GPU Runner")
+
+	_, err = Parse([]string{"--name", "Worker 1", "--id", "worker-1", "--accelerator", "Apple_M3_Max"})
+	require.EqualError(t, err, "accelerator at index 0 must contain only lowercase letters, numbers, and hyphens")
+	require.NotContains(t, err.Error(), "Apple_M3_Max")
+}
+
+func TestParseTreatsExplicitZeroMemoryAsUnset(t *testing.T) {
+	t.Setenv("WORKSPACE_ROOTS", absoluteExistingRoot(t))
+	t.Setenv("BARISTA_MEMORY_MEGABYTES", "0")
+
+	cfg, err := Parse([]string{"--name", "Worker 1", "--id", "worker-1"})
+	require.NoError(t, err)
+	require.Zero(t, cfg.MemoryMegabytes)
+}
+
+func TestParseRejectsNegativeMemory(t *testing.T) {
+	t.Setenv("WORKSPACE_ROOTS", absoluteExistingRoot(t))
+	t.Setenv("BARISTA_MEMORY_MEGABYTES", "-512")
+
+	_, err := Parse([]string{"--name", "Worker 1", "--id", "worker-1"})
+	require.EqualError(t, err, `BARISTA_MEMORY_MEGABYTES must be a non-negative integer`)
+
+	t.Setenv("BARISTA_MEMORY_MEGABYTES", "")
+	_, err = Parse([]string{"--name", "Worker 1", "--id", "worker-1", "--memory-megabytes", "-1"})
+	require.EqualError(t, err, "memory megabytes must not be negative")
 }

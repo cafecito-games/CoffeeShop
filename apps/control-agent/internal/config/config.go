@@ -7,22 +7,43 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
+
+	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/protocol"
 )
 
 const DefaultEndpoint = "http://localhost:8787"
 
+var projectIDPattern = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
+
+// labelMaximumBytes and capabilitySegmentPattern are not defined locally: a label or accelerator
+// is embedded verbatim into a capability id ("label:<label>", "accelerator:<accelerator>") and
+// then into that evidence entry's NormalizedValue, so config validation must enforce exactly the
+// grammar and byte bound protocol.LabelOrAcceleratorPattern/protocol.LabelOrAcceleratorMaximumBytes
+// already define as the single source of truth — a locally duplicated, looser bound (as this file
+// once had at 128 bytes against the protocol's 64) would make the hub reject the whole capability
+// report, not just the oversized entry.
+const labelMaximumBytes = protocol.LabelOrAcceleratorMaximumBytes
+const acceleratorMaximumBytes = protocol.LabelOrAcceleratorMaximumBytes
+
+var capabilitySegmentPattern = protocol.LabelOrAcceleratorPattern
+
 type Config struct {
-	ControlEndpoint string
-	Name            string
-	NodeID          string
-	Kind            string
-	WorkspaceRoots  []string
-	Concurrency     int
-	Token           string
-	VersionOnly     bool
+	ControlEndpoint  string
+	Name             string
+	NodeID           string
+	Kind             string
+	WorkspaceRoots   []string
+	Concurrency      int
+	Token            string
+	VersionOnly      bool
+	ProjectAllowlist []string
+	Labels           []string
+	Accelerators     []string
+	MemoryMegabytes  int // 0 means "not configured"; never reported as evidence when 0
 }
 
 type stringList []string
@@ -50,7 +71,14 @@ func Parse(args []string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	memoryMegabytes, err := envOptionalPositiveInt("BARISTA_MEMORY_MEGABYTES")
+	if err != nil {
+		return Config{}, err
+	}
 	roots := stringList(splitEnv("WORKSPACE_ROOTS"))
+	projects := stringList(splitEnv("BARISTA_PROJECT_ALLOWLIST"))
+	labels := stringList(splitEnv("BARISTA_LABELS"))
+	accelerators := stringList(splitEnv("BARISTA_ACCELERATORS"))
 	set := flag.NewFlagSet("barista", flag.ContinueOnError)
 	set.SetOutput(os.Stderr)
 	endpoint := set.String("control-endpoint", env("CONTROL_ENDPOINT", DefaultEndpoint), "Coffee Shop URL or WebSocket endpoint")
@@ -58,7 +86,11 @@ func Parse(args []string) (Config, error) {
 	nodeID := set.String("id", env("BARISTA_ID", slug(host)), "stable compute node id")
 	kind := set.String("kind", env("BARISTA_KIND", "local"), "compute node kind: local, home-server, or cloud")
 	set.Var(&roots, "workspace-root", "allowed workspace root; repeat the flag for multiple roots")
+	set.Var(&projects, "project", "project ID this node accepts work for; repeat the flag for multiple IDs")
+	set.Var(&labels, "label", "operator-assigned capability label (lowercase letters, numbers, and hyphens); repeat the flag for multiple labels")
+	set.Var(&accelerators, "accelerator", "hardware accelerator available on this node (lowercase letters, numbers, and hyphens); repeat the flag for multiple accelerators")
 	limit := set.Int("concurrency", concurrency, "maximum number of simultaneous runs")
+	memory := set.Int("memory-megabytes", memoryMegabytes, "configured system memory in megabytes (0 means not configured)")
 	token := set.String("token", os.Getenv("COFFEE_SHOP_TOKEN"), "control-plane token (prefer COFFEE_SHOP_TOKEN)")
 	versionOnly := set.Bool("version", false, "print the Barista version")
 	if err := set.Parse(args); err != nil {
@@ -91,17 +123,75 @@ func Parse(args []string) (Config, error) {
 	if *limit < 1 {
 		return Config{}, errors.New("concurrency must be at least one")
 	}
+	for _, project := range projects {
+		if !projectIDPattern.MatchString(project) {
+			return Config{}, fmt.Errorf("project id %q must contain only letters, numbers, and hyphens", project)
+		}
+	}
+	// Every rejection below names the field and its position, never the value itself: a label or
+	// accelerator is arbitrary operator-supplied text, this validation is exactly what screens it
+	// for a secret, and configuration errors are commonly logged, so the rejected value must never
+	// appear in the error even when rejection was for an unrelated reason (length or grammar).
+	for index, label := range labels {
+		if len(label) > labelMaximumBytes {
+			return Config{}, fmt.Errorf("label at index %d exceeds %d bytes", index, labelMaximumBytes)
+		}
+		if !capabilitySegmentPattern.MatchString(label) {
+			return Config{}, fmt.Errorf("label at index %d must contain only lowercase letters, numbers, and hyphens", index)
+		}
+		// A kebab-case grammar alone does not rule out a lowercase, hyphenated secret (for
+		// example "sk-abcdefghij1234567890"), and a label becomes a capability id and evidence
+		// value that Barista reports to the hub, so it is screened exactly like probe output.
+		if protocol.LooksSecretLike(label) {
+			return Config{}, fmt.Errorf("label at index %d looks like it contains a secret and was rejected", index)
+		}
+	}
+	for index, accelerator := range accelerators {
+		if len(accelerator) > acceleratorMaximumBytes {
+			return Config{}, fmt.Errorf("accelerator at index %d exceeds %d bytes", index, acceleratorMaximumBytes)
+		}
+		if !capabilitySegmentPattern.MatchString(accelerator) {
+			return Config{}, fmt.Errorf("accelerator at index %d must contain only lowercase letters, numbers, and hyphens", index)
+		}
+		if protocol.LooksSecretLike(accelerator) {
+			return Config{}, fmt.Errorf("accelerator at index %d looks like it contains a secret and was rejected", index)
+		}
+	}
+	if *memory < 0 {
+		return Config{}, errors.New("memory megabytes must not be negative")
+	}
 
 	return Config{
-		ControlEndpoint: wsEndpoint,
-		Name:            strings.TrimSpace(*name),
-		NodeID:          *nodeID,
-		Kind:            *kind,
-		WorkspaceRoots:  canonicalRoots,
-		Concurrency:     *limit,
-		Token:           *token,
-		VersionOnly:     *versionOnly,
+		ControlEndpoint:  wsEndpoint,
+		Name:             strings.TrimSpace(*name),
+		NodeID:           *nodeID,
+		Kind:             *kind,
+		WorkspaceRoots:   canonicalRoots,
+		Concurrency:      *limit,
+		Token:            *token,
+		VersionOnly:      *versionOnly,
+		ProjectAllowlist: deduplicate(projects),
+		Labels:           deduplicate(labels),
+		Accelerators:     deduplicate(accelerators),
+		MemoryMegabytes:  *memory,
 	}, nil
+}
+
+// deduplicate removes repeated entries while preserving first-seen order, mirroring the approach
+// canonicalizeRoots uses for workspace roots.
+func deduplicate(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	result := make([]string, 0, len(values))
+	seen := map[string]bool{}
+	for _, value := range values {
+		if !seen[value] {
+			result = append(result, value)
+			seen[value] = true
+		}
+	}
+	return result
 }
 
 func WebSocketEndpoint(raw string) (string, error) {
@@ -184,6 +274,22 @@ func envPositiveInt(key string, fallback int) (int, error) {
 	parsed, err := strconv.Atoi(value)
 	if err != nil || parsed < 1 {
 		return 0, fmt.Errorf("%s must be a positive integer", key)
+	}
+	return parsed, nil
+}
+
+// envOptionalPositiveInt reads an integer that may be legitimately absent. An empty value returns
+// 0, and an explicit 0 is indistinguishable from unset so it is also accepted: the caller treats
+// 0 as "not configured" and must never silently default it to a nonzero number. Only a negative
+// or non-integer value is rejected.
+func envOptionalPositiveInt(key string) (int, error) {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return 0, nil
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed < 0 {
+		return 0, fmt.Errorf("%s must be a non-negative integer", key)
 	}
 	return parsed, nil
 }

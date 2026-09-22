@@ -10,6 +10,7 @@ import {
   canSendToControlAgent,
   isControlProtocolVersion,
   supportsControlCapability,
+  validateNodeCapabilityReport,
   type Agent,
   type ComputeNode,
   type ControlAgentToHub,
@@ -20,6 +21,8 @@ import {
 import { createConfiguredAgent, markDisconnectedNodesOffline, openConnectionLookup, updateConfiguredAgent } from "./agentConfiguration.js";
 import { applyRunLifecycle, cancelPersistedRun, queuedRunsForNode, retryAsync, serializeAsync } from "./lifecycle.js";
 import { CoordinationError, createArtifact, delegateTask, taskContext } from "./coordination.js";
+import { recordNodeCapabilityReport } from "./nodeCapabilities.js";
+import { loadProjectProfilesFromFile, ProjectProfileRegistry } from "./projectProfiles.js";
 import { newEvent, newId, newMessage, Store } from "./store.js";
 import { newThread, updateThreadByOperator, updateThreadForRun } from "./threads.js";
 
@@ -344,6 +347,12 @@ wss.on("connection", (socket, request) => {
     } else if (message.type === "harness.event" || message.type === "session.binding" || message.type === "workspace.lease") {
       // Orchestration state is not persisted yet, so these messages never change hub state.
       return;
+    } else if (message.type === "capability.report") {
+      if (!supportsControlCapability(protocolVersion, "orchestration") || !nodeId) return;
+      const validated = validateNodeCapabilityReport(message.report);
+      if (!validated.ok || validated.value.nodeId !== nodeId) return;
+      recordNodeCapabilityReport(validated.value);
+      return;
     } else if (message.type.startsWith("run.")) {
       const runId = message.runId;
       const current = store.getRun(runId);
@@ -382,6 +391,19 @@ wss.on("connection", (socket, request) => {
     broadcast();
   });
 });
+
+const defaultProjectProfilesPath = fileURLToPath(new URL("../../../config/project-profiles.json", import.meta.url));
+const projectProfilesPath = process.env.PROJECT_PROFILES_PATH ?? defaultProjectProfilesPath;
+const projectProfilesResult = await loadProjectProfilesFromFile(projectProfilesPath);
+if (!projectProfilesResult.ok) {
+  if (projectProfilesResult.kind === "not-found" && !process.env.PROJECT_PROFILES_PATH) {
+    console.log("no project profiles configured; set PROJECT_PROFILES_PATH to enable project readiness");
+  } else {
+    throw new Error(`project profiles failed to load: ${projectProfilesResult.error}`);
+  }
+}
+const projectProfiles = new ProjectProfileRegistry(projectProfilesResult.ok ? projectProfilesResult.profiles : []);
+if (projectProfilesResult.ok) console.log(`loaded ${projectProfilesResult.profiles.length} project profile(s) from ${projectProfilesPath}`);
 
 await store.load();
 await store.transact((state) => markDisconnectedNodesOffline(state, liveControlAgents) || false);

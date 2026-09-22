@@ -67,7 +67,7 @@ The shared hub token is suitable for a private single-user tailnet, not an inter
 
 The repository is polyglot by application boundary. `apps/web` and `apps/hub` participate in the pnpm workspace. `apps/control-agent` is an independent Go 1.26 module joined by the root `go.work`. Root Task targets compose builds and tests without making a compute host install the TypeScript toolchain.
 
-The hub and frontend deploy together. Barista is built and distributed separately as a native executable. Its outbound `/control-agent` WebSocket currently registers protocol version `3`; the TypeScript and Go representations intentionally live on opposite sides of the deployment boundary. Version 2 introduced the `sync.complete` replay barrier, version 3 adds correlated hub RPC for the run-scoped MCP bridge, and version 4 adds the orchestration envelopes described below. The hub accepts versions 1 through 4 during rolling upgrades and rejects any other version before dispatch. Version 1 lifecycle reporting still fail-closes queued-run redispatch because it has no safe replay barrier; version 2 retains safe lifecycle and dispatch behavior without MCP.
+The hub and frontend deploy together. Barista is built and distributed separately as a native executable. Its outbound `/control-agent` WebSocket currently registers protocol version `4`; the TypeScript and Go representations intentionally live on opposite sides of the deployment boundary. Version 2 introduced the `sync.complete` replay barrier, version 3 adds correlated hub RPC for the run-scoped MCP bridge, and version 4 adds the orchestration envelopes described below. The hub accepts versions 1 through 4 during rolling upgrades and rejects any other version before dispatch. Version 1 lifecycle reporting still fail-closes queued-run redispatch because it has no safe replay barrier; version 2 retains safe lifecycle and dispatch behavior without MCP.
 
 ## Orchestration contracts (control protocol version 4)
 
@@ -102,7 +102,7 @@ Every status vocabulary has an explicit transition table in which terminal state
 - Each socket registers exactly one version. The hub records it and checks every outbound message against the capability that message requires, so version-4 dispatch fields, approval decisions, and other orchestration messages are never sent to version 1–3 peers.
 - Orchestration messages received on a version 1–3 connection are rejected without changing state; they are never reinterpreted as legacy output.
 - Snapshots persisted before version 4 load with empty orchestration collections. Migration never invents tasks, messages, bindings, approvals, or leases.
-- Barista advertises version 4 only once it consumes the version-4 dispatch fields, so a hub cannot request ACP execution from a Barista that would silently fall back to native behavior.
+- Barista registers version 4 to report capability evidence, and it rejects version-4 dispatch execution it cannot honor rather than falling back: a dispatch whose `execution` names a non-`native-cli` transport, or carries a `sessionBinding` or `workspaceLease`, is failed with an explicit error before any process starts, so a hub can never get silent native-behavior fallback from ACP execution it requested.
 
 ### Task graph persistence
 
@@ -111,6 +111,16 @@ Every status vocabulary has an explicit transition table in which terminal state
 The hub records each accepted batch as a hub-internal submission holding a SHA-256 digest of the normalized batch plus the source thread and run. Replaying the key in that thread with the same digest returns the original task IDs and writes nothing; any other input under the key is an `idempotency_conflict`. Submissions are persisted but not published in snapshots.
 
 Task status only changes through the protocol's transition table. A pending task becomes `ready` only when every dependency is satisfied; a failed, cancelled, or blocked `require-success` dependency blocks it, and blocking cascades. Cancelling a task never cancels its dependents implicitly. Runs are immutable attempts: each attempt is appended with the next one-based `attempt` number, a retryable failure returns the task to `ready` without touching earlier attempts, and results from a non-current attempt or for a terminal task are ignored. Loading fails on an unknown persisted task status or malformed task record rather than defaulting it, and migration never infers tasks from legacy `parentRunId` lineage.
+
+### Project execution profiles and node readiness
+
+A project profile (`ProjectProfile` in `packages/protocol/src/index.ts`) is a hub-authoritative, non-secret, versioned description of what a project needs from a node: operating system, architecture, CPU count, memory, accelerators, node-admin-declared labels, toolchains with optional version constraints, harness and transport support, and a workspace policy. The hub loads profiles from a documented JSON file — `config/project-profiles.example.json` is the checked-in illustrative example; a real deployment points `PROJECT_PROFILES_PATH` at its own file — that is separate from persisted runtime state and never contains secrets. `validateProjectProfile` rejects a profile outright if it looks like it contains one.
+
+A node proves what it actually has via bounded, provenance-tagged capability evidence. `runtime` facts are observed directly by Barista (operating system, architecture, logical CPU count, whether any workspace root is writable); `configured` declarations are supplied by a node administrator (labels, accelerators, memory); and `probe` results come from a small, Go-compiled allowlist of toolchain version checks — Go, Git, Node, pnpm, GCC, Clang, Xcode, plus a generic "first reported version" parser. Barista never accepts an executable name or argument list from the hub, a task, or any network message; every probe is a fixed `{binary, args}` pair chosen at compile time.
+
+`evaluateProjectReadiness`, a pure function in the protocol package shared by the hub, decides whether a node is ready for a project. It resolves each capability to `ok`, `missing`, `failed`, `stale` (older than a configurable TTL, or timestamped further in the future than a small clock-skew allowance), or `ambiguous` (disagreeing evidence from different sources), always using the freshest agreeing evidence regardless of report order, and reports every unmet hard requirement and unmet preference separately. A node-admin project allowlist and the existing `WORKSPACE_ROOTS` authorization are checked independently of the profile's own requirements and can never be widened by profile content.
+
+This vocabulary and evaluator are the extent of the current work; a scheduler that consumes `ProjectReadiness` to place tasks is separate.
 
 ## What to build next
 
