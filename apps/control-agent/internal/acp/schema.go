@@ -6,6 +6,8 @@ import "encoding/json"
 const (
 	methodInitialize        = "initialize"
 	methodSessionNew        = "session/new"
+	methodSessionResume     = "session/resume"
+	methodSessionLoad       = "session/load"
 	methodSessionPrompt     = "session/prompt"
 	methodSessionCancel     = "session/cancel"
 	methodSessionClose      = "session/close"
@@ -88,6 +90,17 @@ type mcpServerHTTP struct {
 type newSessionRequest struct {
 	Cwd        string          `json:"cwd"`
 	McpServers []mcpServerHTTP `json:"mcpServers"`
+}
+
+// resumeSessionRequest is the shared shape of session/resume and session/load.
+type resumeSessionRequest struct {
+	SessionID  string          `json:"sessionId"`
+	Cwd        string          `json:"cwd"`
+	McpServers []mcpServerHTTP `json:"mcpServers"`
+}
+
+type resumeSessionResponse struct {
+	ConfigOptions []sessionConfigOption `json:"configOptions"`
 }
 
 type newSessionResponse struct {

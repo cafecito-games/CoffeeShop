@@ -3,6 +3,7 @@ import { createArtifact, delegateTask, submitTasks, taskContext, updateTask } fr
 import { CoordinationError } from "./coordinationError.js";
 import { executionInventory, type InventoryEnvironment } from "./executionInventory.js";
 import { sendTaskMessage, TaskEventWaiters } from "./mailbox.js";
+import { orchestratorCursorAdvances, persistOrchestratorCursor } from "./orchestratorInbox.js";
 import type { State, Store } from "./store.js";
 import { updateThreadForRun } from "./threads.js";
 
@@ -98,8 +99,17 @@ export function createHubToolHandler(environment: HubToolEnvironment) {
         if (result.created) environment.broadcast();
         return { created: result.created, messageId: result.message.id, sequence: result.message.sequence, recipient: result.message.recipient, createdAt: result.message.createdAt };
       }
-      case "wait_for_task_events":
-        return environment.waiters.wait(sourceRunId, values, signal);
+      case "wait_for_task_events": {
+        const cursor = typeof values === "object" && values !== null ? (values as { cursor?: unknown }).cursor : undefined;
+        // The cursor acknowledges processing only once the whole call is valid; checking first keeps a
+        // wait that proves nothing from yielding before it registers.
+        const acknowledgeCursor = () => store.read((state) => orchestratorCursorAdvances(state, sourceRunId, cursor, "processed"))
+          ? persistOrchestratorCursor(store, sourceRunId, cursor, "processed").then((changed) => { if (changed) environment.broadcast(); })
+          : undefined;
+        const result = await environment.waiters.wait(sourceRunId, values, signal, acknowledgeCursor);
+        if (result.events.length && await persistOrchestratorCursor(store, sourceRunId, result.cursor, "delivered")) environment.broadcast();
+        return result;
+      }
       case "update_task": {
         const result = await updateTask(store, sourceRunId, values);
         if (result.created) environment.broadcast();

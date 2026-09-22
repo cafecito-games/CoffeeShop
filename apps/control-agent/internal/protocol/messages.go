@@ -3,9 +3,9 @@ package protocol
 import "encoding/json"
 
 // Version is the control protocol version Barista registers. Barista honors version-4 dispatch
-// execution for the native-cli and acp-v1 transports and for the workspace lease policies it can
-// provision, and rejects the session-binding field it does not implement yet, so registering as 4
-// never degrades execution to version-3 behavior.
+// execution for the native-cli and acp-v1 transports, for the workspace lease policies it can
+// provision, and for session resume where its adapter negotiated it, and rejects anything else,
+// so registering as 4 never degrades execution to version-3 behavior.
 const Version = "4"
 
 type HarnessProfile struct {

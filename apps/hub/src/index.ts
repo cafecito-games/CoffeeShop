@@ -33,6 +33,8 @@ import { retainedHarnessEvents } from "./harnessEvents.js";
 import { expireDueApprovals, receiveApprovalUndeliverable, receiveHarnessEvent, reconcileApprovals, resolveApproval } from "./harnessGateway.js";
 import { createRedactor } from "./redaction.js";
 import { dispatchMessageFor, runSchedulingPass, type SchedulingContext, type SchedulingPassResult } from "./scheduler.js";
+import { runContinuationPass, type ContinuationPassResult } from "./orchestratorInbox.js";
+import { receiveSessionBinding } from "./sessionBindings.js";
 import { newEvent, newId, newMessage, Store } from "./store.js";
 import { newThread, updateThreadByOperator, updateThreadForRun } from "./threads.js";
 import { cleanupWorkspaceLeaseByOperator, receiveWorkspaceLeaseUpdate, reconcileWorkspaceLeases, workspaceLeaseConfirmation } from "./workspaceLeases.js";
@@ -87,7 +89,7 @@ const deliverRun = async (runId: string, connection: ControlConnection<WebSocket
   const message = store.read((state) => {
     const run = state.runs.find((item) => item.id === runId && item.status === "queued" && item.dispatchedAt !== undefined);
     const agent = run && state.agents.find((item) => item.id === run.agentId);
-    return run && agent ? structuredClone(dispatchMessageFor(run, agent, state.agents, state.workspaceLeases)) : undefined;
+    return run && agent ? structuredClone(dispatchMessageFor(run, agent, state.agents, state.workspaceLeases, state)) : undefined;
   });
   if (!message || controlAgents.deliver(connection, message)) return;
   await store.transact((state) => {
@@ -115,6 +117,7 @@ const schedulingConnection = (nodeId: string) => {
  */
 const scheduleReadyTasks = coalesceAsync(async () => {
   let result: SchedulingPassResult = { changed: false, attempts: [] };
+  let continuations: ContinuationPassResult = { changed: false, continuations: [] };
   let approved = new Map<string, ControlConnection<WebSocket>>();
   await store.transact((state) => {
     approved = new Map();
@@ -128,14 +131,16 @@ const scheduleReadyTasks = coalesceAsync(async () => {
         return connection !== undefined;
       }
     };
-    result = runSchedulingPass(state, context, new Date().toISOString());
-    return result.changed;
+    const at = new Date().toISOString();
+    result = runSchedulingPass(state, context, at);
+    continuations = runContinuationPass(state, context, at);
+    return result.changed || continuations.changed;
   });
-  for (const attempt of result.attempts) {
+  for (const attempt of [...result.attempts, ...continuations.continuations]) {
     const connection = approved.get(attempt.runId);
     if (attempt.delivered && connection) await deliverRun(attempt.runId, connection);
   }
-  if (result.changed) broadcast();
+  if (result.changed || continuations.changed) broadcast();
 }, (error) => console.error("task scheduling failed", error));
 const requestScheduling = () => { void scheduleReadyTasks(); };
 
@@ -440,7 +445,7 @@ wss.on("connection", (socket, request) => {
           if (!task || task.assignment?.runId !== target.id || isTerminalTaskStatus(task.status)) return false;
         }
         const targetAgent = state.agents.find((item) => item.id === target.agentId);
-        if (!targetAgent || deliveryConnection(target.nodeId, dispatchMessageFor(target, targetAgent, state.agents, state.workspaceLeases)) !== connection) return false;
+        if (!targetAgent || deliveryConnection(target.nodeId, dispatchMessageFor(target, targetAgent, state.agents, state.workspaceLeases, state)) !== connection) return false;
         target.dispatchedAt = new Date().toISOString();
         targetAgent.state = "thinking";
         targetAgent.currentAction = "Starting work";
@@ -553,8 +558,11 @@ wss.on("connection", (socket, request) => {
           broadcast();
           requestScheduling();
         }
+      } else if (orchestration.type === "session.binding") {
+        const outcome = await receiveSessionBinding(store, nodeId, orchestration.runId, orchestration.binding, orchestration.at);
+        if (outcome.kind === "rejected") console.warn(`rejected session.binding from ${nodeId}: ${outcome.reason}`);
+        if (outcome.kind === "created" || outcome.kind === "resumed") broadcast();
       }
-      // Session bindings are not persisted yet, so they never change hub state.
     } else if (message.type === "capability.report") {
       if (!supportsControlCapability(protocolVersion, "orchestration") || !nodeId || !isCurrentSocket()) return;
       const validated = validateNodeCapabilityReport(message.report);

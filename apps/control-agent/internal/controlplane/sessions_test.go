@@ -360,14 +360,15 @@ func TestRejectedDispatchNeverStartsTheAdapterOrOpensASession(t *testing.T) {
 		Adapters: map[string]harness.ACPAdapter{"codex-cli": {Binary: executable, Environment: acptest.Environment("permission", record)}},
 	}))
 	client := NewClient(config.Config{Concurrency: 1, WorkspaceRoots: []string{directory}}, protocol.ComputeNode{ID: "node-one"}, runner, emptyCapabilityReport)
-	run := protocol.Run{ID: "run-acp", HarnessID: "codex-cli", Transport: harness.TransportACP, Workspace: directory, Prompt: "run the tests"}
-	// The adapter is available, so acp-v1 alone is admitted; resuming a session binding is not.
+	run := protocol.Run{ID: "run-acp", HarnessID: "codex-cli", Transport: harness.TransportACP, Workspace: directory, Prompt: "run the tests", SessionBindingID: "binding-one"}
+	// The adapter is available, so acp-v1 alone is admitted; resuming a session binding is not,
+	// because no startup probe negotiated resume or load for it.
 	client.handle(context.Background(), protocol.Inbound{Type: "dispatch", Run: run, Execution: &protocol.DispatchExecution{
 		Transport: harness.TransportACP, SessionBinding: &protocol.DispatchSessionBinding{ID: "binding-one", ProviderSessionID: "provider-session-one"},
 	}})
 
 	failed := waitForMessage(t, client, "run.failed")
-	require.Equal(t, "unsupported execution: session binding resume not available on this Barista", failed.Error)
+	require.Equal(t, "unsupported execution: session resume not available for this harness on this Barista", failed.Error)
 	require.Zero(t, client.activeRuns())
 	require.Nil(t, client.session("run-acp"))
 	time.Sleep(50 * time.Millisecond)

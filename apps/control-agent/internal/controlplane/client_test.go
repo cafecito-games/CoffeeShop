@@ -212,7 +212,7 @@ func TestDispatchRejectsSessionBindingResumeWithoutStartingAProcess(t *testing.T
 	require.Zero(t, client.activeRuns())
 	message := waitForMessage(t, client, "run.failed")
 	require.Equal(t, "run-one", message.RunID)
-	require.Equal(t, "unsupported execution: session binding resume not available on this Barista", message.Error)
+	require.Equal(t, "unsupported execution: the run's session binding is missing or names a different binding", message.Error)
 }
 
 func TestDispatchRejectsWorkspaceLeaseGrantWithoutStartingAProcess(t *testing.T) {
@@ -237,8 +237,8 @@ func TestDispatchWithNativeCliExecutionIsNotRejectedByTheExecutionGuard(t *testi
 	// A nil transport (plain dispatch) and an explicit "native-cli" transport with neither a
 	// session binding nor a workspace lease are both fully supported today; neither should ever
 	// produce the unsupported-execution run.failed message.
-	require.Equal(t, "", unsupportedExecutionReason(protocol.Run{}, nil, nil, nil))
-	require.Equal(t, "", unsupportedExecutionReason(protocol.Run{Transport: "native-cli"}, &protocol.DispatchExecution{Transport: "native-cli"}, nil, nil))
+	require.Equal(t, "", unsupportedExecutionReason(protocol.Run{}, nil, nil, nil, nil))
+	require.Equal(t, "", unsupportedExecutionReason(protocol.Run{Transport: "native-cli"}, &protocol.DispatchExecution{Transport: "native-cli"}, nil, nil, nil))
 }
 
 func TestDispatchRejectsUnsupportedTransportOnTheRunWithNoExecutionObject(t *testing.T) {
@@ -266,7 +266,7 @@ func TestDispatchRejectsRunLevelSessionBindingAndWorkspaceLeaseFields(t *testing
 	})
 	require.Zero(t, sessionBindingClient.activeRuns())
 	message := waitForMessage(t, sessionBindingClient, "run.failed")
-	require.Equal(t, "unsupported execution: session binding resume not available on this Barista", message.Error)
+	require.Equal(t, "unsupported execution: the run's session binding is missing or names a different binding", message.Error)
 
 	workspaceLeaseClient := NewClient(config.Config{Concurrency: 1}, protocol.ComputeNode{ID: "node-two"}, nil, emptyCapabilityReport)
 	workspaceLeaseClient.handle(context.Background(), protocol.Inbound{

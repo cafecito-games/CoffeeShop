@@ -200,6 +200,8 @@ export interface Snapshot {
   taskMessages?: TaskMessage[];
   taskMessageAcknowledgements?: TaskMessageAcknowledgement[];
   sessionBindings?: HarnessSessionBinding[];
+  /** Per-thread orchestrator inbox delivery state; see `OrchestratorInbox`. */
+  orchestratorInboxes?: OrchestratorInbox[];
   approvals?: ApprovalRequest[];
   workspaceLeases?: WorkspaceLease[];
   /** Version-4: bounded projections of accepted structured harness events, one per run. */
@@ -705,6 +707,8 @@ export interface HarnessSessionBinding {
   createdByRunId: string;
   lastRunId: string;
   replacedByBindingId?: string;
+  /** The ACP capabilities negotiated by the run that last used the session, once it started. */
+  capabilities?: AcpAgentCapabilities;
   createdAt: string;
   updatedAt: string;
 }
@@ -717,6 +721,89 @@ export interface HarnessSessionBindingUpdate {
   transport: HarnessTransport;
   status: SessionBindingStatus;
 }
+
+/**
+ * Bound on the delivery-only prompt a dispatch sends for a resumed session; mirrored by Barista's
+ * `protocol.SessionResumePromptMaximumBytes`.
+ */
+export const sessionResumePromptMaximumBytes = 64 * 1024;
+
+/*
+ * Orchestrator inboxes.
+ *
+ * The hub owns what a thread's orchestrator has been told. Journal sequences at or below
+ * `deliveredThrough` reached an orchestrator session (a continuation prompt that started, or a
+ * `wait_for_task_events` page); sequences at or below `processedThrough` were acknowledged by the
+ * orchestrator passing a cursor back. Only an explicit cursor advances `processedThrough`; provider
+ * session history never does. A wake is one continuation run created for a contiguous range of
+ * unprocessed sequences `(fromSequence, throughSequence]` when no orchestrator run is active.
+ */
+export const orchestratorWakeStatuses = ["scheduled", "delivered", "completed", "failed"] as const;
+export type OrchestratorWakeStatus = typeof orchestratorWakeStatuses[number];
+export const isOrchestratorWakeStatus = isOneOf(orchestratorWakeStatuses);
+
+/** How a continuation reached its orchestrator session. */
+export const orchestratorSessionOutcomes = ["resumed", "replaced", "new", "native"] as const;
+export type OrchestratorSessionOutcome = typeof orchestratorSessionOutcomes[number];
+
+export interface OrchestratorWake {
+  /** Derived from the thread, the sequence range, and the generation. */
+  id: string;
+  generation: number;
+  runId: string;
+  fromSequence: number;
+  throughSequence: number;
+  /** Relevant journal sequences within the range, in order. */
+  eventSequences: number[];
+  /** Whether every relevant event in the range had already reached an earlier session. */
+  redelivery: boolean;
+  /** The binding the continuation asked Barista to resume, when one was compatible. */
+  requestedSessionBindingId?: string;
+  sessionOutcome?: OrchestratorSessionOutcome;
+  /** The delivery-only prompt for a resumed session; kept only while the wake is `scheduled`. */
+  resumePrompt?: string;
+  status: OrchestratorWakeStatus;
+  /** For a failed wake: whether its prompt may have reached the orchestrator. */
+  failedAfterDelivery?: boolean;
+  /**
+   * Barista refused the dispatch only because its adapter cannot resume sessions; the binding stays
+   * idle, is never requested again, and the range is retried at once with a new session.
+   */
+  resumeRefused?: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface OrchestratorInbox {
+  threadId: string;
+  deliveredThrough: number;
+  processedThrough: number;
+  generation: number;
+  /** Wakes whose ranges were already delivered without being processed, since the last progress. */
+  redeliveries: number;
+  consecutiveFailures: number;
+  /** No new wake is created before this time after a failure. */
+  retryAfter?: string;
+  /** The most recent wakes, newest last and bounded by `orchestratorContinuationLimits.retainedWakes`. */
+  wakes: OrchestratorWake[];
+  updatedAt: string;
+}
+
+export const orchestratorContinuationLimits = {
+  eventsPerWake: 50,
+  maximumRedeliveries: 2,
+  retainedWakes: 20,
+  contextTasks: 50,
+  contextArtifacts: 20,
+  contextFieldBytes: 600,
+  contextBytes: 24 * 1024,
+  eventBodyBytes: 1_200,
+  deliveryBytes: 48 * 1024,
+  /** A continuation never dispatched within this time is cancelled so its claim can be retaken. */
+  undispatchedClaimMilliseconds: 10 * 60 * 1000,
+  retryBaseMilliseconds: 5_000,
+  retryMaximumMilliseconds: 10 * 60 * 1000
+} as const;
 
 /*
  * Normalized harness events.
@@ -1135,8 +1222,12 @@ export interface DispatchExecution {
   attempt?: number;
   /** `native-cli` permits an `acp-v1` run to fall back before its prompt; see `Run.fallbackTransport`. */
   fallbackTransport?: HarnessTransport;
-  /** Present when Barista should resume an existing provider session. */
-  sessionBinding?: { id: string; providerSessionId: string };
+  /**
+   * Present when Barista should resume an existing provider session. When the session resumes,
+   * Barista sends `resumePrompt` (if given) instead of the run prompt; when it cannot, it starts a
+   * new session with the run prompt, which always carries the bounded durable context.
+   */
+  sessionBinding?: { id: string; providerSessionId: string; resumePrompt?: string };
   workspaceLease?: WorkspaceLeaseGrant;
 }
 

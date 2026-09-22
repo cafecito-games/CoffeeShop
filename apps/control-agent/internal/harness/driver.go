@@ -42,9 +42,29 @@ type Invocation struct {
 	// Started is called at most once, immediately before the harness receives the prompt, with
 	// the transport the run actually uses. A run whose Started was never called did not start.
 	Started func(protocol.RunTransportSelection)
+	// Resume asks an ACP driver to continue an existing provider session. Drivers that cannot
+	// resume ignore it and run the run prompt, which carries the durable context a new session
+	// needs.
+	Resume *SessionResume
+	// Session is called at most once by a driver that established a provider session, after the
+	// session exists and before Started.
+	Session func(EstablishedSession)
 
 	// begin is installed by Runner.Execute; drivers call it when the prompt is about to be sent.
 	begin func(transportDetails)
+}
+
+// SessionResume identifies the provider session to continue and the prompt it receives if it does.
+type SessionResume struct {
+	ProviderSessionID string
+	// Prompt replaces the run prompt when the session resumed; empty keeps the run prompt.
+	Prompt string
+}
+
+// EstablishedSession is the provider session a run's prompt is about to be sent to.
+type EstablishedSession struct {
+	ProviderSessionID string
+	Resumed           bool
 }
 
 // transportDetails is what a driver knows about the transport it is about to start.
@@ -116,6 +136,16 @@ func (r *Runner) Admit(harnessID, transport, fallbackTransport string) error {
 	default:
 		return fmt.Errorf("%w: unknown harness transport", ErrDriverUnavailable)
 	}
+}
+
+// AdmitResume reports whether an acp-v1 run of the harness may ask to resume a provider session:
+// a verified adapter is available and its startup probe negotiated session resume or load. It
+// performs no execution.
+func (r *Runner) AdmitResume(harnessID string) error {
+	if err := r.acpAvailable(harnessID); err != nil {
+		return err
+	}
+	return r.acp.SupportsResume(harnessID)
 }
 
 // Execute dispatches the invocation to the driver for its transport.

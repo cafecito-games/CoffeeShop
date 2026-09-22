@@ -20,6 +20,7 @@ const (
 	WarningUpdateAfterComplete  = "acp-update-after-completion"
 	WarningPermissionMalformed  = "acp-permission-malformed"
 	WarningSessionCloseFailed   = "acp-session-close-failed"
+	WarningSessionNotResumed    = "acp-session-not-resumed"
 	WarningEventInvalid         = "acp-event-invalid"
 	warningPlanEntriesTruncated = "acp-plan-truncated"
 )
