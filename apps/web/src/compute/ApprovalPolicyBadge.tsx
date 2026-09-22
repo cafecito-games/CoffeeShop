@@ -18,9 +18,6 @@ const badges = {
   }
 } as const;
 
-/** The harnesses a node approval policy governs; others never show a policy. */
-export const approvalPolicyHarnessIds: readonly string[] = ["claude-cli", "codex-cli"];
-
 /** Whether a reported policy should be shown instead of the silent `manual` default. */
 export function isRelaxedOrUnrecognizedPolicy(policy: unknown, unrecognized?: boolean) {
   return unrecognized === true || policy === "auto" || policy === "bypass";

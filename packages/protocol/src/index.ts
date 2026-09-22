@@ -434,6 +434,8 @@ export type AcpAdapterSource = typeof acpAdapterSources[number];
 export const approvalPolicies = ["manual", "auto", "bypass"] as const;
 export type ApprovalPolicy = typeof approvalPolicies[number];
 export const isApprovalPolicy = isOneOf(approvalPolicies);
+/** The harnesses a node approval policy governs; mirrored by Barista's `harness.ApprovalPolicyHarnessIDs`. */
+export const approvalPolicyHarnessIds: readonly HarnessId[] = ["claude-cli", "codex-cli"];
 
 /** The harness warning code Barista emits when a run falls back to the native CLI. */
 export const transportNativeFallbackWarning = "transport-native-fallback";

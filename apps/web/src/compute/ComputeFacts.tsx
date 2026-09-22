@@ -1,5 +1,5 @@
-import type { ComputeNode, HarnessProfile } from "@coffee-shop/protocol";
-import { ApprovalPolicyBadge, approvalPolicyHarnessIds, isRelaxedOrUnrecognizedPolicy } from "./ApprovalPolicyBadge.js";
+import { approvalPolicyHarnessIds, type ComputeNode, type HarnessProfile } from "@coffee-shop/protocol";
+import { ApprovalPolicyBadge, isRelaxedOrUnrecognizedPolicy } from "./ApprovalPolicyBadge.js";
 
 function text(value: unknown, fallback = "Unavailable"): string {
   return typeof value === "string" && value.trim() ? value : fallback;
