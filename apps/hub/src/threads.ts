@@ -2,8 +2,11 @@ import { isActiveRunStatus, threadStatuses, type Thread, type ThreadStatus } fro
 import { CoordinationError } from "./coordinationError.js";
 import { newEvent, newId, type Store } from "./store.js";
 
-const maximumTitleLength = 120;
-const maximumObjectiveLength = 8_000;
+/** Bounds shared by every thread producer, including the external-orchestrator `create_thread`. */
+export const threadTitleLimit = 120;
+export const threadObjectiveLimit = 8_000;
+const maximumTitleLength = threadTitleLimit;
+const maximumObjectiveLength = threadObjectiveLimit;
 const maximumSummaryLength = 4_000;
 
 function record(value: unknown): Record<string, unknown> {
@@ -36,6 +39,26 @@ export function newThread(ownerAgentId: string, objective: string, createdBy: Th
     ownerAgentId,
     orchestrator: { kind: "agent", agentId: ownerAgentId },
     createdBy,
+    createdAt: at,
+    updatedAt: at
+  };
+}
+
+/**
+ * A thread driven by an external orchestrator client. It has no owner agent, so no scheduling pass
+ * can queue an orchestrator run against it, and `createdBy` stays `"agent"`: the thread was opened
+ * by a model rather than by an operator acting in the PWA, which is the distinction every existing
+ * reader of this field draws.
+ */
+export function newExternalThread(clientId: string, objective: string, title: string | undefined, at = new Date().toISOString()): Thread {
+  return {
+    id: newId("thread"),
+    title: title ?? threadTitleFromObjective(objective),
+    objective,
+    summary: "",
+    status: "active",
+    orchestrator: { kind: "external", clientId },
+    createdBy: "agent",
     createdAt: at,
     updatedAt: at
   };

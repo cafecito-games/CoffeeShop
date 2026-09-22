@@ -1,0 +1,72 @@
+{
+  "agents": [],
+  "nodes": [],
+  "runs": [],
+  "events": [
+    {
+      "type": "status",
+      "title": "Thread created",
+      "detail": "Auth refactor",
+      "threadId": "thread_mud0lpim_1hzazt",
+      "id": "evt_mud0lpim_wm27vh",
+      "createdAt": "2026-09-22T18:35:53.326Z"
+    }
+  ],
+  "messages": [],
+  "threads": [
+    {
+      "id": "thread_mud0lpim_1hzazt",
+      "title": "Auth refactor",
+      "objective": "Ship the auth refactor",
+      "summary": "",
+      "status": "active",
+      "orchestrator": {
+        "kind": "external",
+        "clientId": "orchestrator-client-0935b00fe18b4230"
+      },
+      "createdBy": "agent",
+      "createdAt": "2026-09-22T12:00:00.000Z",
+      "updatedAt": "2026-09-22T12:00:00.000Z"
+    }
+  ],
+  "delegations": [],
+  "artifacts": [],
+  "taskSubmissions": [],
+  "taskUpdates": [],
+  "taskEventJournal": [],
+  "taskEventStreams": [],
+  "runActivity": [],
+  "harnessEventStreams": [],
+  "harnessEvents": [],
+  "orchestratorInboxes": [],
+  "orchestratorClients": [
+    {
+      "id": "orchestrator-client-0935b00fe18b4230",
+      "name": "Christian's laptop",
+      "scopes": [
+        "orchestrate",
+        "resolve-approvals"
+      ],
+      "secretHash": "sha256:9f4e00fe7d1bba6e0b7e2f4364dda45b58e85510829c385a8b4569f1c31a926a",
+      "createdAt": "2026-09-22T12:00:00.000Z",
+      "lastSeenAt": "2026-09-22T12:00:00.000Z"
+    }
+  ],
+  "orchestratorAttachments": [
+    {
+      "id": "attachment_mud0lpim_v6hw0u",
+      "threadId": "thread_mud0lpim_1hzazt",
+      "clientId": "orchestrator-client-0935b00fe18b4230",
+      "connectionId": "connection_mud0lpik_hsljtc",
+      "attachedAt": "2026-09-22T12:00:00.000Z",
+      "lastHeartbeatAt": "2026-09-22T12:00:00.000Z",
+      "status": "attached"
+    }
+  ],
+  "tasks": [],
+  "taskMessages": [],
+  "taskMessageAcknowledgements": [],
+  "sessionBindings": [],
+  "approvals": [],
+  "workspaceLeases": []
+}

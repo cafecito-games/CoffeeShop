@@ -451,3 +451,54 @@ test("loads an externally orchestrated thread without an owner agent", async () 
   assert.deepEqual(thread.orchestrator, { kind: "external", clientId: "client-one" });
   assert.equal(threadOwnerAgentId(thread), undefined, "an external thread has no owner agent");
 });
+
+/*
+ * `state-with-external-orchestrator-attachment.json` was written byte-for-byte by
+ * `apps/hub/src/store.ts` (`private async save`) from records built by the real producers in this
+ * change: `apps/hub/src/orchestratorClients.ts:124` (`mintOrchestratorClient`) and a live
+ * `/orchestrator-client` connection driven through `client.hello`, `create_thread`, and
+ * `client.heartbeat` by `apps/hub/src/orchestratorClientGateway.ts:120`
+ * (`createOrchestratorClientGateway`). It is the shape on an operator's disk once a bridge has
+ * opened and attached a thread.
+ */
+const attachedFixturePath = fileURLToPath(new URL("../test-fixtures/state-with-external-orchestrator-attachment.json", import.meta.url));
+
+async function loadAttachedFixture(mutate: (state: Record<string, any>) => void = () => undefined) {
+  const directory = await mkdtemp(join(tmpdir(), "coffee-shop-store-"));
+  const path = join(directory, "state.json");
+  const persisted = JSON.parse(await readFile(attachedFixturePath, "utf8"));
+  mutate(persisted);
+  await writeFile(path, JSON.stringify(persisted, null, 2));
+  return { store: new Store(path), persisted };
+}
+
+test("loads a snapshot written by a live orchestrator-client connection byte for byte", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "coffee-shop-store-"));
+  const path = join(directory, "state.json");
+  const bytes = await readFile(attachedFixturePath);
+  await writeFile(path, bytes);
+  const store = new Store(path);
+  await store.load();
+
+  assert.deepEqual(await readFile(path), bytes, "a snapshot the hub just wrote is never rewritten on load");
+  const snapshot = store.snapshot();
+  assert.equal(snapshot.orchestratorAttachments!.length, 1);
+  assert.equal(snapshot.orchestratorAttachments![0].status, "attached");
+  assert.equal(snapshot.orchestratorAttachments![0].clientId, snapshot.orchestratorClients![0].id);
+  assert.equal(snapshot.orchestratorAttachments![0].threadId, snapshot.threads![0].id);
+  assert.deepEqual(snapshot.threads![0].orchestrator, { kind: "external", clientId: snapshot.orchestratorClients![0].id });
+  assert.ok(!JSON.stringify(snapshot).includes("secretHash"));
+});
+
+test("rejects a persisted attachment that names a client or thread the snapshot does not hold", async () => {
+  const cases: Array<[RegExp, (state: Record<string, any>) => void]> = [
+    [/names unknown orchestrator client/, (state) => { state.orchestratorAttachments[0].clientId = "orchestrator-client-absent"; }],
+    [/names unknown orchestrator client/, (state) => { state.orchestratorClients = []; }],
+    [/names unknown thread/, (state) => { state.orchestratorAttachments[0].threadId = "thread-absent"; }],
+    [/names unknown thread/, (state) => { state.threads = []; }]
+  ];
+  for (const [reason, mutate] of cases) {
+    const { store } = await loadAttachedFixture(mutate);
+    await assert.rejects(() => store.load(), reason, String(reason));
+  }
+});

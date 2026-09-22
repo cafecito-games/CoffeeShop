@@ -179,9 +179,11 @@ export function assertPersistedOrchestratorClientState(state: State) {
     attachmentIds.add(attachment.id);
     if (!isOrchestratorAttachmentStatus(attachment.status)) throw new Error(`${context} has an unknown status`);
   }
+  const threadIds = new Set<string>();
   for (const [index, thread] of (state.threads ?? []).entries()) {
     const context = `Persisted thread ${index}`;
     if (!isRecord(thread)) throw new Error(`${context} is not an object`);
+    if (isNonEmptyString(thread.id)) threadIds.add(thread.id);
     const orchestrator: unknown = thread.orchestrator;
     if (orchestrator === undefined) continue;
     if (!isRecord(orchestrator)) throw new Error(`${context} has a malformed orchestrator`);
@@ -195,6 +197,16 @@ export function assertPersistedOrchestratorClientState(state: State) {
     if (orchestrator.kind === "agent" && thread.ownerAgentId !== orchestrator.agentId) {
       throw new Error(`${context} disagrees with its own owner agent`);
     }
+  }
+  /*
+   * An attachment is a claim by one credential on one thread. A claim naming a credential or a
+   * thread that is not in this snapshot cannot be interpreted, let alone released, so the load
+   * fails rather than carrying a dangling attachment into a running hub.
+   */
+  for (const [index, attachment] of (state.orchestratorAttachments ?? []).entries()) {
+    const context = `Persisted orchestrator attachment ${index}`;
+    if (!clientIds.has(attachment.clientId)) throw new Error(`${context} names unknown orchestrator client ${attachment.clientId}`);
+    if (!threadIds.has(attachment.threadId)) throw new Error(`${context} names unknown thread ${attachment.threadId}`);
   }
 }
 
