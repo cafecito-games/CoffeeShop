@@ -12,6 +12,7 @@ import {
   isTerminalTaskStatus,
   orchestratorClientHeartbeatSeconds,
   supportsControlCapability,
+  threadOrchestrator,
   validateNodeCapabilityReport,
   validateOrchestrationControlAgentMessage,
   type Agent,
@@ -25,7 +26,7 @@ import { createConfiguredAgent, markDisconnectedNodesOffline, updateConfiguredAg
 import { ControlConnectionRegistry, type ControlConnection } from "./controlConnections.js";
 import { applyRunLifecycle, cancelPersistedRun, coalesceAsync, failLostTaskAttempts, isReportedByOwningNode, queuedRunsForNode, retryAsync, serializeAsync } from "./lifecycle.js";
 import { CoordinationError } from "./coordination.js";
-import { detachEveryAttachmentInState } from "./externalOrchestrators.js";
+import { detachEveryAttachmentInState, postOperatorMessageInState, type OperatorMessage } from "./externalOrchestrators.js";
 import { createHubToolHandler, hubToolError } from "./hubTools.js";
 import { TaskEventWaiters } from "./mailbox.js";
 import { forgetNodeCapabilityReport, getNodeCapabilityReport, recordNodeCapabilityReport } from "./nodeCapabilities.js";
@@ -222,6 +223,9 @@ app.post("/api/agents/:id/messages", async (req, res) => {
     await store.transact((state) => {
       let thread = requestedThreadId ? state.threads?.find((item) => item.id === requestedThreadId) : undefined;
       if (requestedThreadId && !thread) throw new CoordinationError("not_found", "Thread not found");
+      if (thread && threadOrchestrator(thread)?.kind === "external") {
+        throw new CoordinationError("forbidden", "An externally orchestrated thread takes messages at /api/threads/:id/messages");
+      }
       if (thread && thread.ownerAgentId !== agent.id) throw new CoordinationError("forbidden", "Continue this thread with its owner agent");
       if (thread?.status === "archived") throw new CoordinationError("thread_archived", "Archived threads are read-only");
       if (!thread) {
@@ -260,6 +264,39 @@ app.post("/api/handoffs", async (req, res) => {
   });
   const run = await queueRun(to, `Handoff from ${from.name}: ${task}`, { threadId: thread.id, depth: 1 });
   res.status(202).json(run);
+});
+
+/*
+ * An externally orchestrated thread has no owner agent, so an operator's message cannot start a
+ * run. It is appended to the thread orchestrator's mailbox instead, which makes it one more
+ * unacknowledged journal entry, and the doorbell policy rings the attached session about it.
+ */
+app.post("/api/threads/:id/messages", async (req, res) => {
+  const body = typeof req.body?.body === "string" ? req.body.body.trim() : "";
+  const requestedKey = typeof req.body?.idempotencyKey === "string" ? req.body.idempotencyKey.trim() : "";
+  if (!body) return res.status(400).json({ error: "Message is required" });
+  try {
+    let posted: OperatorMessage | undefined;
+    await store.transact((state) => {
+      posted = postOperatorMessageInState(state, { threadId: req.params.id, body, ...(requestedKey ? { idempotencyKey: requestedKey } : {}) }, new Date().toISOString());
+      return posted.created;
+    });
+    const message = posted!.message;
+    if (posted!.created) broadcast();
+    res.status(202).json({
+      created: posted!.created,
+      threadId: message.threadId,
+      messageId: message.id,
+      sequence: message.sequence,
+      createdAt: message.createdAt
+    });
+  } catch (error) {
+    const failure = error instanceof CoordinationError ? error : new CoordinationError("internal_error", "The thread could not accept the message", true);
+    const status = failure.code === "not_found" ? 404
+      : failure.code === "idempotency_conflict" || failure.code === "thread_inactive" || failure.code === "mailbox_full" ? 409
+        : 400;
+    res.status(status).json({ error: failure.message });
+  }
 });
 
 app.patch("/api/threads/:id", async (req, res) => {
@@ -660,7 +697,14 @@ await store.transact((state) => markDisconnectedNodesOffline(state, liveControlA
 // No bridge connection survives a restart, so no attachment persisted by the previous process may.
 await store.transact((state) => detachEveryAttachmentInState(state, new Date().toISOString()).length > 0);
 requestScheduling();
-setInterval(requestScheduling, 30_000).unref();
+// Every commit may have added an event an attached orchestrator is waiting for; the policy itself
+// decides whether that earns a ring.
+store.onCommit(() => orchestratorClients.ringAttachedThreads());
+setInterval(() => {
+  requestScheduling();
+  // A ring can also fall due without any commit, when a pending approval nears its expiry.
+  orchestratorClients.ringAttachedThreads();
+}, 30_000).unref();
 setInterval(() => {
   void expireDueApprovals(store, sendToControlAgent)
     .then((changed) => { if (changed) broadcast(); })

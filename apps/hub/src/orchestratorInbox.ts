@@ -4,6 +4,7 @@ import {
   isTerminalRunStatus,
   isTerminalTaskStatus,
   orchestratorContinuationLimits as limits,
+  threadOrchestrator,
   type Agent,
   type HarnessSessionBinding,
   type OrchestratorInbox,
@@ -65,6 +66,16 @@ const newInbox = (threadId: string, at: string): OrchestratorInbox => ({
 
 export const inboxFor = (state: Readonly<State>, threadId: string) => state.orchestratorInboxes?.find((inbox) => inbox.threadId === threadId);
 
+/**
+ * Whether a thread is driven by an operator's own session rather than by a hub-hosted agent run.
+ * The orchestrator kind decides it, never the owner agent field: a thread that carries both is
+ * still externally orchestrated, and the hub must never start a second orchestrator for it.
+ */
+export const isExternallyOrchestratedThread = (state: Readonly<State>, threadId: string) => {
+  const thread = (state.threads ?? []).find((item) => item.id === threadId);
+  return thread !== undefined && threadOrchestrator(thread)?.kind === "external";
+};
+
 function ensureInbox(state: State, threadId: string, at: string) {
   state.orchestratorInboxes ??= [];
   let inbox = state.orchestratorInboxes.find((item) => item.threadId === threadId);
@@ -119,6 +130,9 @@ function trimWakes(inbox: OrchestratorInbox) {
 export function reconcileOrchestratorInboxes(state: State, at: string) {
   let changed = false;
   for (const inbox of state.orchestratorInboxes ?? []) {
+    // An external thread never has a hub-hosted wake to reconcile, and must never acquire one
+    // through a resumed binding or a retaken claim.
+    if (isExternallyOrchestratedThread(state, inbox.threadId)) continue;
     for (const wake of inbox.wakes) {
       if (wake.status !== "scheduled" && wake.status !== "delivered") continue;
       const run = state.runs.find((item) => item.id === wake.runId);
@@ -301,12 +315,15 @@ function planThreadContinuation(state: State, thread: Thread, owner: Agent, cont
  * Reconciles wakes and creates at most one continuation per eligible thread, inside the scheduling
  * transaction. Placement uses the scheduler's own evaluation for the thread owner, so connectivity,
  * the reconnect barrier, protocol version, harness, transport, workspace, and capacity all apply.
+ * An externally orchestrated thread is skipped entirely: its orchestrator is an operator's own
+ * session, which the hub rings instead of replacing.
  */
 export function runContinuationPass(state: State, context: SchedulingContext, at: string): ContinuationPassResult {
   let changed = reconcileOrchestratorInboxes(state, at);
   const continuations: ScheduledContinuation[] = [];
   for (const thread of state.threads ?? []) {
     if (thread.status !== "active") continue;
+    if (threadOrchestrator(thread)?.kind === "external") continue;
     const owner = state.agents.find((agent) => agent.id === thread.ownerAgentId);
     if (!owner) continue;
     const continuation = planThreadContinuation(state, thread, owner, context, at);
