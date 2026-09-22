@@ -151,7 +151,7 @@ The allowlisted probes are fixed at compile time in `apps/control-agent/internal
 
 Validation for labels, accelerators, and toolchains:
 
-- ids are lowercase kebab-case (letters, numbers, hyphens) of at most 64 bytes; versions are normalized dotted numbers such as `1.80` or `22.9.0`;
+- ids are lowercase kebab-case (letters, numbers, hyphens) of at most 64 bytes; versions are normalized dotted numbers such as `1.80` or `22.9.0`, and an `@` with nothing after it is malformed;
 - two entries for the same toolchain id with different versions — including one with a version and one without — are a conflict and stop startup;
 - an empty entry is an error, whether it comes from an empty flag value or an empty comma segment in `BARISTA_LABELS`, `BARISTA_ACCELERATORS`, or `BARISTA_TOOLCHAINS` (for example `a,,b` or a trailing `a,`); a wholly empty or unset variable still means "none";
 - at most 32 labels, 32 accelerators, and 32 toolchains may be configured (exact duplicates are collapsed first);

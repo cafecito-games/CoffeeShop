@@ -179,6 +179,9 @@ function evaluateCandidate(task: Task, agent: Agent, profile: ProjectProfile | u
   const harness = node.harnesses.find((item) => item.id === agent.harnessId);
   const harnessAvailable = harness?.available === true;
   if (!harnessAvailable) add("harness", agent.harnessId, "harness is not reported available on the compute node");
+  if (harnessAvailable && !(harness.models.length ? harness.models.includes(agent.model) : agent.model === "default")) {
+    add("model", agent.model, "the compute node's harness no longer advertises the agent's model");
+  }
   const advertisedTransports = harnessAvailable ? (harness.transports ?? ["native-cli"]).filter(isHarnessTransport) : [];
   const transport = harnessTransports.find((item) => advertisedTransports.includes(item)
     && (requirements.transports === undefined || requirements.transports.includes(item))

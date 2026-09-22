@@ -237,7 +237,10 @@ func validatedToolchains(values []string, maximum int) ([]Toolchain, error) {
 		if strings.Count(value, "@") > 1 {
 			return nil, fmt.Errorf("toolchain at index %d must contain at most one \"@\"", index)
 		}
-		identifier, version, _ := strings.Cut(value, "@")
+		identifier, version, hasVersion := strings.Cut(value, "@")
+		if hasVersion && version == "" {
+			return nil, fmt.Errorf("toolchain at index %d has an empty version after \"@\"", index)
+		}
 		if len(identifier) > protocol.LabelOrAcceleratorMaximumBytes {
 			return nil, fmt.Errorf("toolchain at index %d exceeds %d bytes", index, protocol.LabelOrAcceleratorMaximumBytes)
 		}

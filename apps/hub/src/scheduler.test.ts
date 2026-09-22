@@ -330,3 +330,18 @@ test("an unsatisfiable task stays ready with exact per-candidate diagnostics and
     ]
   });
 });
+
+test("the agent's model must still be advertised by the node's current harness inventory", () => {
+  const withModels = node("node-alpha", { harnesses: [{ id: "codex-cli", label: "Codex", description: "", available: true, authMode: "local-account", models: ["gpt-5"] }] });
+  const advertised = fixture([agent("alpha", { model: "gpt-5" })], [withModels], [task("one")]);
+  assert.equal(placeTask(taskById(advertised, "one"), environment(advertised)).kind, "assigned");
+
+  const withdrawn = fixture([agent("alpha", { model: "gpt-4" })], [withModels], [task("one")]);
+  const decision = placeTask(taskById(withdrawn, "one"), environment(withdrawn));
+  assert.deepEqual(decision.diagnostic.unsatisfied, [
+    { kind: "model", requirement: "gpt-4", nodeId: "node-alpha", agentId: "alpha", detail: "the compute node's harness no longer advertises the agent's model" }
+  ]);
+
+  const defaultOnly = fixture([agent("alpha", { model: "gpt-5" })], [node("node-alpha")], [task("one")]);
+  assert.equal(placeTask(taskById(defaultOnly, "one"), environment(defaultOnly)).diagnostic.unsatisfied[0]?.kind, "model");
+});

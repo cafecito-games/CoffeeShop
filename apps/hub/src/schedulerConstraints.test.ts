@@ -487,6 +487,7 @@ test("preferences rank otherwise equal candidates without excluding them", () =>
       label: "preferred model",
       requirements: { preferences: { models: ["gpt-5"] } },
       agents: [agent("alpha"), agent("beta", { model: "gpt-5" })],
+      nodes: ["node-alpha", "node-beta"].map((id) => node(id, { harnesses: [harnessProfile("codex-cli", { models: ["default", "gpt-5"] })] })),
       expectedAgentId: "beta"
     },
     {

@@ -361,6 +361,7 @@ func TestParseRejectsInvalidToolchainEntries(t *testing.T) {
 		{"leading-zero version", "rust@01.2", "toolchain at index 0 has a version that is not a normalized dotted number"},
 		{"too many version segments", "rust@1.2.3.4.5", "toolchain at index 0 has a version that is not a normalized dotted number"},
 		{"double at", "rust@1.80@1", `toolchain at index 0 must contain at most one "@"`},
+		{"trailing at with empty version", "rust@", `toolchain at index 0 has an empty version after "@"`},
 		{"secret-like entry", "sk-abcdefghij1234567890", "toolchain at index 0 looks like it contains a secret and was rejected"},
 	}
 	for _, test := range tests {
