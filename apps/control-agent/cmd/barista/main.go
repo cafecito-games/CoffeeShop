@@ -26,6 +26,14 @@ func main() {
 }
 
 func run(args []string) int {
+	if len(args) > 0 {
+		switch args[0] {
+		case "setup":
+			return runSetup(args[1:])
+		case "doctor":
+			return runDoctor(args[1:])
+		}
+	}
 	cfg, err := config.Parse(args)
 	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
