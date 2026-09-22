@@ -108,6 +108,22 @@ describe("external thread messaging", () => {
     expect(third.idempotencyKey).not.toBe(keys[0]);
   });
 
+  it("sends an identical message again under a new key once the first one landed", async () => {
+    const apiFetch = vi.fn(async (_path: string, _init?: RequestInit) => new Response(JSON.stringify({ created: true, threadId: "thread-1" }), { status: 202 }));
+    renderDialog({ apiFetch });
+    await userEvent.type(screen.getByRole("textbox"), "Ping");
+    await userEvent.click(screen.getByRole("button", { name: "Send" }));
+    await screen.findByText(/Delivered to/);
+    await userEvent.type(screen.getByRole("textbox"), "Ping");
+    await userEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    const keys = apiFetch.mock.calls.map((call) => JSON.parse((call[1] as RequestInit).body as string).idempotencyKey);
+    expect(apiFetch.mock.calls).toHaveLength(2);
+    expect(JSON.parse((apiFetch.mock.calls[1][1] as RequestInit).body as string).body).toBe("Ping");
+    // A delivered message must not make a deliberate repeat look like a replay of the first.
+    expect(keys[1]).not.toBe(keys[0]);
+  });
+
   it("gives an edited draft its own idempotency key", async () => {
     const apiFetch = vi.fn(async (_path: string, _init?: RequestInit) => new Response(JSON.stringify({ error: "The thread's message limit has been reached" }), { status: 409 }));
     renderDialog({ apiFetch });
