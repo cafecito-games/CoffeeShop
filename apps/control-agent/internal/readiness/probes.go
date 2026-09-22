@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/protocol"
 )
@@ -160,37 +161,42 @@ func RunProbe(ctx context.Context, probe Probe) protocol.NodeCapabilityEvidence 
 	return evidence
 }
 
+// boundedString truncates to at most maximumBytes without splitting a multi-byte UTF-8 sequence.
+// A byte-index slice alone can cut a rune in half; Go's JSON encoder then replaces the orphaned
+// trailing bytes with the 3-byte U+FFFD replacement character, which can grow the encoded string
+// past the very byte limit this function exists to enforce.
 func boundedString(value string, maximumBytes int) string {
 	if len(value) <= maximumBytes {
 		return value
 	}
-	return value[:maximumBytes]
+	truncated := value[:maximumBytes]
+	for len(truncated) > 0 {
+		r, size := utf8.DecodeLastRuneInString(truncated)
+		if r != utf8.RuneError || size > 1 {
+			break
+		}
+		truncated = truncated[:len(truncated)-1]
+	}
+	return truncated
 }
 
-var dottedNumberPattern = regexp.MustCompile(`\d{1,4}(\.\d{1,4}){0,3}`)
+// dottedNumberPattern captures a maximal run of digits and dots with no per-segment or
+// per-count cap. The version grammar itself (protocol.IsNormalizedVersion) is the only bound
+// applied to the captured token: a capped quantifier here would silently truncate a malformed
+// token — for example an eight-digit build date — into a shorter prefix that happens to satisfy
+// the grammar, reporting a fabricated version instead of failing closed as unparseable.
+var dottedNumberPattern = regexp.MustCompile(`\d+(\.\d+)*`)
 
-// firstNormalizedVersion returns the first dotted-number run in text that also satisfies
-// protocol.IsNormalizedVersion, reusing the protocol grammar rather than reimplementing it.
+// firstNormalizedVersion returns the first maximal dotted-number run in text that also satisfies
+// protocol.IsNormalizedVersion, reusing the protocol grammar rather than reimplementing it. A
+// token that fails the grammar (too many segments, an oversized segment) is unparseable — it is
+// never truncated into a shorter, valid-looking substring.
 func firstNormalizedVersion(text string) (string, bool) {
 	match := dottedNumberPattern.FindString(text)
 	if match == "" || !protocol.IsNormalizedVersion(match) {
 		return "", false
 	}
 	return match, true
-}
-
-// lastNormalizedVersionOnFirstLine scans every dotted-number run on the first line and returns
-// the last normalized one. GCC prints a distribution package version before the actual compiler
-// version, so the first run cannot be trusted.
-func lastNormalizedVersionOnFirstLine(text string) (string, bool) {
-	firstLine, _, _ := strings.Cut(text, "\n")
-	matches := dottedNumberPattern.FindAllString(firstLine, -1)
-	for index := len(matches) - 1; index >= 0; index-- {
-		if protocol.IsNormalizedVersion(matches[index]) {
-			return matches[index], true
-		}
-	}
-	return "", false
 }
 
 // GenericVersionParser is the generic executable-version parser: the first normalized
@@ -209,8 +215,23 @@ func parseNodeVersion(rawOutput string) (string, bool) {
 	return firstNormalizedVersion(strings.TrimPrefix(strings.TrimSpace(rawOutput), "v"))
 }
 
+// parseGCCVersion locates the compiler version rather than trusting the last dotted-number run on
+// the line, which can be a distribution build identifier or part of a trailing build date, not
+// the version. Every observed real-world `gcc --version` first line — Debian/Ubuntu
+// ("gcc (Ubuntu 13.2.0-4ubuntu3) 13.2.0"), Homebrew ("gcc (Homebrew GCC 13.2.0) 13.2.0"), Red
+// Hat/Fedora ("gcc (GCC) 8.5.0 20210514 (Red Hat 8.5.0-20)"), and a plain upstream build
+// ("gcc (GCC) 13.2.0") — prints the actual compiler version as the first version-grammar token
+// after the line's first closing parenthesis; a distribution package suffix or a build date never
+// precedes that closing paren in any of these shapes. A build with no parenthetical at all falls
+// back to the first version-grammar token anywhere on the line. Either way, an ambiguous or
+// malformed token is reported unparseable rather than guessed at.
 func parseGCCVersion(rawOutput string) (string, bool) {
-	return lastNormalizedVersionOnFirstLine(rawOutput)
+	firstLine, _, _ := strings.Cut(rawOutput, "\n")
+	afterFirstParen := firstLine
+	if closingParen := strings.IndexByte(firstLine, ')'); closingParen >= 0 {
+		afterFirstParen = firstLine[closingParen+1:]
+	}
+	return firstNormalizedVersion(afterFirstParen)
 }
 
 // parseClangVersion scans from just after the word "version" when present (falling back to just

@@ -924,16 +924,19 @@ export function isNormalizedVersion(value: unknown): value is string {
   return value.split(".").every((segment) => segment === "0" || !segment.startsWith("0"));
 }
 
+// Rejection reasons here never interpolate `raw`: a version constraint is untrusted profile
+// input, and its rejection reason can be surfaced in a startup error or log line, so a secret
+// mistakenly placed in this field must never appear in that text.
 export function parseVersionConstraint(raw: unknown): Validation<VersionConstraint> {
   if (!isBoundedString(raw, 40)) return reject("version constraint must be a bounded string");
   for (const comparator of versionComparatorPrefixes) {
     if (raw.startsWith(comparator)) {
       const version = raw.slice(comparator.length);
-      if (!isNormalizedVersion(version)) return reject(`version constraint has an invalid version: ${raw}`);
+      if (!isNormalizedVersion(version)) return reject("version constraint has an invalid version");
       return accept({ comparator, version });
     }
   }
-  if (!isNormalizedVersion(raw)) return reject(`version constraint has an invalid version: ${raw}`);
+  if (!isNormalizedVersion(raw)) return reject("version constraint has an invalid version");
   return accept({ comparator: "=", version: raw });
 }
 
@@ -1113,22 +1116,22 @@ function validateRequirementSet(value: unknown, path: string): Validation<Requir
       return reject(`${path} toolchains must be a non-empty array`);
     }
     const seenCapabilityIds = new Set<string>();
-    for (const toolchain of toolchains) {
+    for (const [index, toolchain] of toolchains.entries()) {
       if (!isRecord(toolchain) || !hasOnlyKeys(toolchain, ["capabilityId", "label", "versionConstraint"])) {
-        return reject(`${path} toolchain must contain only declared fields`);
+        return reject(`${path} toolchain at index ${index} must contain only declared fields`);
       }
       if (!isBoundedNonEmptyString(toolchain.capabilityId, 64) || !capabilityIdPattern.test(toolchain.capabilityId)) {
-        return reject(`${path} toolchain capabilityId is malformed`);
+        return reject(`${path} toolchain at index ${index} has a malformed capabilityId`);
       }
       if (!isBoundedNonEmptyString(toolchain.label, 128)) {
-        return reject(`${path} toolchain label is malformed`);
+        return reject(`${path} toolchain at index ${index} has a malformed label`);
       }
       if (toolchain.versionConstraint !== undefined) {
         const constraint = parseVersionConstraint(toolchain.versionConstraint);
-        if (!constraint.ok) return reject(constraint.reason);
+        if (!constraint.ok) return reject(`${path} toolchain at index ${index} has an invalid versionConstraint`);
       }
       if (seenCapabilityIds.has(toolchain.capabilityId)) {
-        return reject(`duplicate toolchain requirement ${toolchain.capabilityId}`);
+        return reject(`${path} toolchain at index ${index} has a capabilityId duplicated from an earlier entry`);
       }
       seenCapabilityIds.add(toolchain.capabilityId);
     }
@@ -1162,6 +1165,13 @@ export function containsSecretLikeValue(value: unknown): boolean {
 }
 
 export function validateProjectProfile(value: unknown): Validation<ProjectProfile> {
+  // Scanned first, before any structural check: every other rejection reason below is a fixed,
+  // field-name-only string (never interpolated input), but scanning first means a secret can
+  // never leak through a structural-validation error even if a future edit reintroduces
+  // interpolation by mistake. containsSecretLikeValue tolerates arbitrary, even malformed, input.
+  if (containsSecretLikeValue(value)) {
+    return reject("project profile contains a secret-like value");
+  }
   if (!isRecord(value) || !hasOnlyKeys(value, ["schemaVersion", "id", "name", "repository", "workspacePolicy", "requirements"])) {
     return reject("project profile must contain only declared fields");
   }
@@ -1202,9 +1212,6 @@ export function validateProjectProfile(value: unknown): Validation<ProjectProfil
   if (requirements.preferred !== undefined) {
     const preferred = validateRequirementSet(requirements.preferred, "preferred");
     if (!preferred.ok) return reject(preferred.reason);
-  }
-  if (containsSecretLikeValue(value)) {
-    return reject("project profile contains a secret-like value");
   }
   return accept(value as unknown as ProjectProfile);
 }
@@ -1285,6 +1292,13 @@ export interface NodeCapabilityReport {
 }
 
 export function validateNodeCapabilityEvidence(value: unknown): Validation<NodeCapabilityEvidence> {
+  // Scanned first, before any structural check, for the same reason validateProjectProfile scans
+  // first: no rejection reason below interpolates the field's content, but this removes the class
+  // of leak entirely rather than relying on that staying true. isRecord guards the property
+  // access so a non-object `value` (rejected generically just below) never throws here.
+  if (isRecord(value) && containsSecretLikeValue({ rawValue: value.rawValue, normalizedValue: value.normalizedValue, diagnostic: value.diagnostic })) {
+    return reject("node capability evidence contains a secret-like value");
+  }
   if (!isRecord(value) || !hasOnlyKeys(value, ["capabilityId", "source", "success", "rawValue", "normalizedValue", "probeDefinitionVersion", "observedAt", "diagnostic"])) {
     return reject("node capability evidence must contain only declared fields");
   }
@@ -1313,9 +1327,6 @@ export function validateNodeCapabilityEvidence(value: unknown): Validation<NodeC
   if (!isTimestamp(value.observedAt)) {
     return reject("node capability evidence observedAt is malformed");
   }
-  if (containsSecretLikeValue({ rawValue: value.rawValue, normalizedValue: value.normalizedValue, diagnostic: value.diagnostic })) {
-    return reject("node capability evidence contains a secret-like value");
-  }
   return accept(value as unknown as NodeCapabilityEvidence);
 }
 
@@ -1339,12 +1350,12 @@ export function validateNodeCapabilityReport(value: unknown): Validation<NodeCap
     return reject("node capability report evidence is missing or exceeds its bound");
   }
   const seenEvidence = new Set<string>();
-  for (const entry of evidence) {
+  for (const [index, entry] of evidence.entries()) {
     const validated = validateNodeCapabilityEvidence(entry);
-    if (!validated.ok) return reject(validated.reason);
+    if (!validated.ok) return reject(`node capability report evidence at index ${index} is invalid`);
     const pair = `${validated.value.capabilityId}\u0000${validated.value.source}`;
     if (seenEvidence.has(pair)) {
-      return reject(`node capability report contains duplicate evidence for ${validated.value.capabilityId} via ${validated.value.source}`);
+      return reject(`node capability report evidence at index ${index} duplicates an earlier capabilityId/source pair`);
     }
     seenEvidence.add(pair);
   }

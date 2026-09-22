@@ -1,7 +1,6 @@
 package config
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -178,40 +177,52 @@ func TestParseDeduplicatesCapabilityValuesPreservingOrder(t *testing.T) {
 func TestParseRejectsOversizedLabelAndAccelerator(t *testing.T) {
 	// The bound matches protocol.LabelOrAcceleratorMaximumBytes (64), not an independently chosen
 	// number: a label/accelerator becomes a NodeCapabilityEvidence.NormalizedValue, and the hub's
-	// wire validator rejects the whole report if any entry exceeds that limit.
+	// wire validator rejects the whole report if any entry exceeds that limit. The error names the
+	// field and its index only — never the rejected value, which config errors commonly log.
 	t.Setenv("WORKSPACE_ROOTS", absoluteExistingRoot(t))
 	oversized := strings.Repeat("x", 65)
 
 	_, err := Parse([]string{"--name", "Worker 1", "--id", "worker-1", "--label", oversized})
-	require.EqualError(t, err, fmt.Sprintf("label %q exceeds 64 bytes", oversized))
+	require.EqualError(t, err, "label at index 0 exceeds 64 bytes")
+	require.NotContains(t, err.Error(), oversized)
 	_, err = Parse([]string{"--name", "Worker 1", "--id", "worker-1", "--accelerator", oversized})
-	require.EqualError(t, err, fmt.Sprintf("accelerator %q exceeds 64 bytes", oversized))
+	require.EqualError(t, err, "accelerator at index 0 exceeds 64 bytes")
+	require.NotContains(t, err.Error(), oversized)
 }
 
 func TestParseRejectsSecretLikeLabelsAndAccelerators(t *testing.T) {
 	// A kebab-case grammar alone does not exclude a lowercase, hyphenated secret shape, so this is
 	// a distinct rejection from TestParseRejectsLabelsAndAcceleratorsThatWouldNotFormAValidCapabilityID.
+	// The error must never contain the rejected value, since it is by definition a suspected secret.
 	t.Setenv("WORKSPACE_ROOTS", absoluteExistingRoot(t))
+	secret := "sk-abcdefghij1234567890"
 
-	_, err := Parse([]string{"--name", "Worker 1", "--id", "worker-1", "--label", "sk-abcdefghij1234567890"})
-	require.EqualError(t, err, `label "sk-abcdefghij1234567890" looks like it contains a secret and was rejected`)
+	_, err := Parse([]string{"--name", "Worker 1", "--id", "worker-1", "--label", secret})
+	require.EqualError(t, err, "label at index 0 looks like it contains a secret and was rejected")
+	require.NotContains(t, err.Error(), secret)
 
-	_, err = Parse([]string{"--name", "Worker 1", "--id", "worker-1", "--accelerator", "sk-abcdefghij1234567890"})
-	require.EqualError(t, err, `accelerator "sk-abcdefghij1234567890" looks like it contains a secret and was rejected`)
+	_, err = Parse([]string{"--name", "Worker 1", "--id", "worker-1", "--label", "gpu", "--label", secret})
+	require.EqualError(t, err, "label at index 1 looks like it contains a secret and was rejected", "the index reflects position, not just the first offender")
+
+	_, err = Parse([]string{"--name", "Worker 1", "--id", "worker-1", "--accelerator", secret})
+	require.EqualError(t, err, "accelerator at index 0 looks like it contains a secret and was rejected")
+	require.NotContains(t, err.Error(), secret)
 }
 
 func TestParseRejectsLabelsAndAcceleratorsThatWouldNotFormAValidCapabilityID(t *testing.T) {
 	// readiness.BuildCapabilityReport embeds every label/accelerator verbatim into a capability id
 	// ("label:<label>", "accelerator:<accelerator>"); a value the shared capability id grammar
 	// rejects would make the hub reject the whole capability report, not just that entry, so
-	// config load must fail closed on it instead.
+	// config load must fail closed on it instead. The error names the field and index only.
 	t.Setenv("WORKSPACE_ROOTS", absoluteExistingRoot(t))
 
 	_, err := Parse([]string{"--name", "Worker 1", "--id", "worker-1", "--label", "GPU Runner"})
-	require.EqualError(t, err, `label "GPU Runner" must contain only lowercase letters, numbers, and hyphens`)
+	require.EqualError(t, err, "label at index 0 must contain only lowercase letters, numbers, and hyphens")
+	require.NotContains(t, err.Error(), "GPU Runner")
 
 	_, err = Parse([]string{"--name", "Worker 1", "--id", "worker-1", "--accelerator", "Apple_M3_Max"})
-	require.EqualError(t, err, `accelerator "Apple_M3_Max" must contain only lowercase letters, numbers, and hyphens`)
+	require.EqualError(t, err, "accelerator at index 0 must contain only lowercase letters, numbers, and hyphens")
+	require.NotContains(t, err.Error(), "Apple_M3_Max")
 }
 
 func TestParseTreatsExplicitZeroMemoryAsUnset(t *testing.T) {

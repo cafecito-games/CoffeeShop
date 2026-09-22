@@ -244,6 +244,69 @@ test("containsSecretLikeValue matches the narrow denylist without heuristic scan
   assert.equal(containsSecretLikeValue(42), false);
 });
 
+test("no profile or evidence validator reason ever echoes the rejected value, including a secret", () => {
+  const secretToken = "sk-abcdefghij1234567890";
+  const valid = readFixture("valid-profile.json");
+
+  const secretInVersionConstraint = validateProjectProfile({
+    ...valid,
+    requirements: {
+      ...valid.requirements,
+      hard: {
+        ...valid.requirements.hard,
+        toolchains: [{ capabilityId: "toolchain:xcode", label: "Xcode", versionConstraint: secretToken }]
+      }
+    }
+  });
+  assert.equal(secretInVersionConstraint.ok, false);
+  assert.doesNotMatch(secretInVersionConstraint.reason, new RegExp(secretToken.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+
+  const secretConstraintDirectly = parseVersionConstraint(secretToken);
+  assert.equal(secretConstraintDirectly.ok, false);
+  assert.doesNotMatch(secretConstraintDirectly.reason, new RegExp(secretToken.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+
+  // A distinctive marker that fails the toolchain capabilityId grammar without matching the
+  // narrow secret denylist, so this exercises validateRequirementSet's own toolchain error path
+  // rather than being caught by validateProjectProfile's top-level secret scan first.
+  const marker = "NOT A SECRET BUT MALFORMED CAPABILITY ID 12345";
+  const malformedToolchainId = validateProjectProfile({
+    ...valid,
+    requirements: {
+      ...valid.requirements,
+      hard: {
+        ...valid.requirements.hard,
+        toolchains: [{ capabilityId: marker, label: "Xcode" }]
+      }
+    }
+  });
+  assert.equal(malformedToolchainId.ok, false);
+  assert.doesNotMatch(malformedToolchainId.reason, new RegExp(marker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+
+  const secretInEvidenceDiagnostic = validateNodeCapabilityEvidence({
+    capabilityId: "toolchain:xcode", source: "probe", success: false,
+    probeDefinitionVersion: "1", observedAt, diagnostic: `error: token ${secretToken} rejected`
+  });
+  assert.equal(secretInEvidenceDiagnostic.ok, false);
+  assert.doesNotMatch(secretInEvidenceDiagnostic.reason, new RegExp(secretToken.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+
+  const duplicateEvidenceReport = readFixture("capability-report.json");
+  const secretInDuplicateEvidence = validateNodeCapabilityReport({
+    ...duplicateEvidenceReport,
+    evidence: [
+      { ...duplicateEvidenceReport.evidence[0], capabilityId: "sk-abcdefghij1234567890-safe" },
+      { ...duplicateEvidenceReport.evidence[0], capabilityId: "sk-abcdefghij1234567890-safe" }
+    ]
+  });
+  assert.equal(secretInDuplicateEvidence.ok, false);
+  assert.doesNotMatch(secretInDuplicateEvidence.reason, /sk-abcdefghij1234567890-safe/);
+
+  // Structural validation must never even run far enough to interpolate a value: a secret placed
+  // in an otherwise-untouched field (name) is caught before any other field is inspected.
+  const secretBeforeStructuralValidation = validateProjectProfile({ ...valid, schemaVersion: 999, name: secretToken });
+  assert.equal(secretBeforeStructuralValidation.ok, false);
+  assert.equal(secretBeforeStructuralValidation.reason, "project profile contains a secret-like value");
+});
+
 test("profile fingerprints ignore key order, array order, and out-of-scope fields", () => {
   const profile = readFixture("valid-profile.json");
   const hard = profile.requirements.hard;

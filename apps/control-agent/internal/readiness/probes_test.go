@@ -5,8 +5,10 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/protocol"
 	"github.com/stretchr/testify/require"
@@ -143,6 +145,103 @@ func TestParsersRejectUnparseableOutput(t *testing.T) {
 			require.Empty(t, normalized)
 		})
 	}
+}
+
+func TestParseGCCVersionAcrossRealWorldDistributionShapes(t *testing.T) {
+	tests := []struct {
+		name       string
+		rawOutput  string
+		normalized string
+		ok         bool
+	}{
+		{
+			name:       "debian ubuntu package suffix before the real version",
+			rawOutput:  "gcc (Ubuntu 13.2.0-4ubuntu3) 13.2.0\nCopyright (C) 2023 Free Software Foundation, Inc.\n",
+			normalized: "13.2.0",
+			ok:         true,
+		},
+		{
+			name:       "homebrew package suffix before the real version",
+			rawOutput:  "gcc (Homebrew GCC 13.2.0) 13.2.0\nCopyright (C) 2023 Free Software Foundation, Inc.\n",
+			normalized: "13.2.0",
+			ok:         true,
+		},
+		{
+			// A naive "last dotted number on the line" parser returns "20" here (the release
+			// suffix of "8.5.0-20"), not the actual compiler version "8.5.0" that appears right
+			// after "(GCC)". This is the exact regression this parser exists to prevent.
+			name:       "red hat with a build date and a trailing vendor release suffix",
+			rawOutput:  "gcc (GCC) 8.5.0 20210514 (Red Hat 8.5.0-20)\n",
+			normalized: "8.5.0",
+			ok:         true,
+		},
+		{
+			name:       "red hat with a build date and no trailing parenthetical",
+			rawOutput:  "gcc (GCC) 4.8.5 20150623\n",
+			normalized: "4.8.5",
+			ok:         true,
+		},
+		{
+			name:       "plain upstream build with a single parenthetical and no suffix",
+			rawOutput:  "gcc (GCC) 13.2.0\n",
+			normalized: "13.2.0",
+			ok:         true,
+		},
+		{
+			name:       "no parenthetical at all falls back to the first version on the line",
+			rawOutput:  "gcc 13.2.0\n",
+			normalized: "13.2.0",
+			ok:         true,
+		},
+		{
+			name:      "a closing paren with no version anywhere after it is unparseable",
+			rawOutput: "gcc (GCC)\n",
+			ok:        false,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			normalized, ok := parseGCCVersion(test.rawOutput)
+			require.Equal(t, test.ok, ok)
+			require.Equal(t, test.normalized, normalized)
+		})
+	}
+}
+
+func TestFirstNormalizedVersionNeverTruncatesAMalformedTokenIntoAValidLookingOne(t *testing.T) {
+	// An eight-digit build date, if capped at four digits per segment the way the old pattern
+	// was, truncates into a fabricated but grammar-valid four-digit "version". The fix must
+	// capture the whole token and let the grammar reject it, not accept a shortened prefix.
+	normalized, ok := firstNormalizedVersion("build 20210514 complete")
+	require.False(t, ok)
+	require.Empty(t, normalized)
+
+	// Five dotted segments, similarly, must not be truncated down to the four the grammar allows.
+	normalized, ok = firstNormalizedVersion("version 1.2.3.4.5 reported")
+	require.False(t, ok)
+	require.Empty(t, normalized)
+
+	// A legitimate, in-grammar version at the very start of the text is still found; the fix only
+	// changes what happens with a malformed token, not with an already-valid one.
+	normalized, ok = firstNormalizedVersion("version 1.24.0 installed")
+	require.True(t, ok)
+	require.Equal(t, "1.24.0", normalized)
+}
+
+func TestBoundedStringTruncatesOnlyAtRuneBoundaries(t *testing.T) {
+	// "café" repeated so the multi-byte "é" (2 bytes: 0xC3 0xA9) straddles the byte limit.
+	value := strings.Repeat("café ", 20)
+	for limit := 1; limit <= len(value); limit++ {
+		truncated := boundedString(value, limit)
+		require.True(t, utf8.ValidString(truncated), "limit %d produced invalid UTF-8: %q", limit, truncated)
+		require.LessOrEqual(t, len(truncated), limit, "limit %d", limit)
+	}
+
+	// A limit that lands exactly one byte into a two-byte rune must drop that whole rune rather
+	// than keep its first byte.
+	multiByte := "ab" + "é" // 'é' is 0xC3 0xA9; landing the cut right after 0xC3 must not keep it.
+	require.Equal(t, "ab", boundedString(multiByte, 3))
+	require.Equal(t, "abé", boundedString(multiByte, 4))
 }
 
 func TestRunProbeReportsMissingBinary(t *testing.T) {

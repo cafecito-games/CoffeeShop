@@ -128,29 +128,33 @@ func Parse(args []string) (Config, error) {
 			return Config{}, fmt.Errorf("project id %q must contain only letters, numbers, and hyphens", project)
 		}
 	}
-	for _, label := range labels {
+	// Every rejection below names the field and its position, never the value itself: a label or
+	// accelerator is arbitrary operator-supplied text, this validation is exactly what screens it
+	// for a secret, and configuration errors are commonly logged, so the rejected value must never
+	// appear in the error even when rejection was for an unrelated reason (length or grammar).
+	for index, label := range labels {
 		if len(label) > labelMaximumBytes {
-			return Config{}, fmt.Errorf("label %q exceeds %d bytes", label, labelMaximumBytes)
+			return Config{}, fmt.Errorf("label at index %d exceeds %d bytes", index, labelMaximumBytes)
 		}
 		if !capabilitySegmentPattern.MatchString(label) {
-			return Config{}, fmt.Errorf("label %q must contain only lowercase letters, numbers, and hyphens", label)
+			return Config{}, fmt.Errorf("label at index %d must contain only lowercase letters, numbers, and hyphens", index)
 		}
 		// A kebab-case grammar alone does not rule out a lowercase, hyphenated secret (for
 		// example "sk-abcdefghij1234567890"), and a label becomes a capability id and evidence
 		// value that Barista reports to the hub, so it is screened exactly like probe output.
 		if protocol.LooksSecretLike(label) {
-			return Config{}, fmt.Errorf("label %q looks like it contains a secret and was rejected", label)
+			return Config{}, fmt.Errorf("label at index %d looks like it contains a secret and was rejected", index)
 		}
 	}
-	for _, accelerator := range accelerators {
+	for index, accelerator := range accelerators {
 		if len(accelerator) > acceleratorMaximumBytes {
-			return Config{}, fmt.Errorf("accelerator %q exceeds %d bytes", accelerator, acceleratorMaximumBytes)
+			return Config{}, fmt.Errorf("accelerator at index %d exceeds %d bytes", index, acceleratorMaximumBytes)
 		}
 		if !capabilitySegmentPattern.MatchString(accelerator) {
-			return Config{}, fmt.Errorf("accelerator %q must contain only lowercase letters, numbers, and hyphens", accelerator)
+			return Config{}, fmt.Errorf("accelerator at index %d must contain only lowercase letters, numbers, and hyphens", index)
 		}
 		if protocol.LooksSecretLike(accelerator) {
-			return Config{}, fmt.Errorf("accelerator %q looks like it contains a secret and was rejected", accelerator)
+			return Config{}, fmt.Errorf("accelerator at index %d looks like it contains a secret and was rejected", index)
 		}
 	}
 	if *memory < 0 {
