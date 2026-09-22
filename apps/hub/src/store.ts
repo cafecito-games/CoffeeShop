@@ -17,7 +17,7 @@ const emptyState = (): State => withOrchestrationDefaults({
 });
 
 export function addOrchestrationDefaults(state: State) {
-  const changed = orchestrationCollections.some((collection) => state[collection] === undefined);
+  const changed = orchestrationCollections.some((collection) => state[collection] == null);
   withOrchestrationDefaults(state);
   return changed;
 }

@@ -857,13 +857,15 @@ export function validateApprovalDecision(value: unknown): Validation<ApprovalDec
 }
 
 export function validateSessionBindingUpdate(value: unknown): Validation<HarnessSessionBindingUpdate> {
-  if (!isRecord(value) || !isOptional(value.bindingId, isIdentifier) || !isIdentifier(value.providerSessionId)) return reject("session binding is missing identity");
+  if (!isRecord(value) || !hasOnlyKeys(value, ["bindingId", "providerSessionId", "harnessId", "transport", "status"])) return reject("session binding must contain only declared fields");
+  if (!isOptional(value.bindingId, isIdentifier) || !isIdentifier(value.providerSessionId)) return reject("session binding is missing identity");
   if (!isHarnessId(value.harnessId) || !isHarnessTransport(value.transport) || !isSessionBindingStatus(value.status)) return reject("session binding has an unknown harness, transport, or status");
   return accept(value as unknown as HarnessSessionBindingUpdate);
 }
 
 export function validateWorkspaceLeaseUpdate(value: unknown): Validation<WorkspaceLeaseUpdate> {
-  if (!isRecord(value) || !isIdentifier(value.leaseId)) return reject("workspace lease update is missing identity");
+  if (!isRecord(value) || !hasOnlyKeys(value, ["leaseId", "status", "retentionReason", "detail"])) return reject("workspace lease update must contain only declared fields");
+  if (!isIdentifier(value.leaseId)) return reject("workspace lease update is missing identity");
   if (!isWorkspaceLeaseStatus(value.status)) return reject("workspace lease status is missing or unknown");
   if (value.status === "retained" ? !isWorkspaceRetentionReason(value.retentionReason) : value.retentionReason !== undefined) return reject("workspace lease retention reason does not match its status");
   if (!isOptional(value.detail, isDiagnostic)) return reject("workspace lease detail exceeds its bound");
@@ -878,6 +880,8 @@ export function validateOrchestrationControlAgentMessage(value: unknown, version
   if (!isRecord(value)) return reject("control message must be an object");
   if (value.type !== "harness.event" && value.type !== "session.binding" && value.type !== "workspace.lease") return reject("control message type is not an orchestration message");
   if (!supportsControlCapability(version, "orchestration")) return reject(`${value.type} requires control protocol version 4`);
+  const envelopeKeys = value.type === "harness.event" ? ["type", "event"] : ["type", "runId", value.type === "session.binding" ? "binding" : "lease", "at"];
+  if (!hasOnlyKeys(value, envelopeKeys)) return reject(`${value.type} envelope contains undeclared fields`);
   if (value.type === "harness.event") {
     const event = validateHarnessEvent(value.event);
     return event.ok ? accept({ type: value.type, event: event.value }) : reject(event.reason);

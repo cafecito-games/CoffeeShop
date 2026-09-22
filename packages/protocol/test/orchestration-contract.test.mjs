@@ -367,7 +367,12 @@ test("control-v4 fixtures validate as version-4 orchestration messages and are r
     assert.equal(accepted.ok, true, `${name} must validate for version 4: ${accepted.ok ? "" : accepted.reason}`);
     assert.deepEqual(JSON.parse(JSON.stringify(accepted.value)), fixture, `${name} round-trips unchanged`);
     assert.equal(validateOrchestrationControlAgentMessage(fixture, "3").ok, false, `${name} must be rejected for version 3`);
+    assert.equal(validateOrchestrationControlAgentMessage({ ...fixture, extra: 1 }, "4").ok, false, `${name} envelope rejects undeclared fields`);
   }
+  const binding = readFixture("session-binding.json");
+  assert.equal(validateOrchestrationControlAgentMessage({ ...binding, binding: { ...binding.binding, extra: 1 } }, "4").ok, false);
+  const lease = readFixture("workspace-lease.json");
+  assert.equal(validateOrchestrationControlAgentMessage({ ...lease, lease: { ...lease.lease, extra: 1 } }, "4").ok, false);
 });
 
 test("control-v4 dispatch, approval, and register fixtures honor their version gates", () => {

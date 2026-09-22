@@ -253,3 +253,11 @@ func TestHarnessEventEncodesRequiredEmptyFieldsAndOnlyItsVariantKeys(t *testing.
 	_, err := json.Marshal(HarnessEvent{Type: "session.teleport", RunID: "run-one"})
 	require.Error(t, err)
 }
+
+func TestHarnessEventValidationAcceptsClearedPlanAndRequiresTimestamps(t *testing.T) {
+	cleared := HarnessEvent{Type: "plan.updated", RunID: "run-one", Sequence: 2, At: "2026-09-21T12:00:00Z"}
+	require.NoError(t, cleared.Validate())
+
+	undated := HarnessEvent{Type: "warning", RunID: "run-one", Sequence: 1, At: "yesterday", Code: "stalled", Message: "No output"}
+	require.Error(t, undated.Validate())
+}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 	"strconv"
+	"time"
 )
 
 // LatestVersion mirrors the TypeScript source of truth. Version remains "3" because Barista
@@ -184,6 +185,12 @@ func isIdentifier(value string) bool {
 	return value != "" && len(value) <= identifierBytes
 }
 
+// isTimestamp requires the RFC 3339 form Barista emits, which the hub's Date.parse also accepts.
+func isTimestamp(value string) bool {
+	_, err := time.Parse(time.RFC3339Nano, value)
+	return isIdentifier(value) && err == nil
+}
+
 func isBounded(value string, limit int) bool {
 	return len(value) <= limit
 }
@@ -192,7 +199,7 @@ func (event HarnessEvent) Validate() error {
 	if !slices.Contains(HarnessEventTypes, event.Type) {
 		return fmt.Errorf("harness event type is missing or unknown: %q", event.Type)
 	}
-	if !isIdentifier(event.RunID) || event.Sequence < 0 || !isIdentifier(event.At) {
+	if !isIdentifier(event.RunID) || event.Sequence < 0 || !isTimestamp(event.At) {
 		return fmt.Errorf("%s is missing run identity, sequence, or timestamp", event.Type)
 	}
 	switch event.Type {
@@ -201,7 +208,7 @@ func (event HarnessEvent) Validate() error {
 			return fmt.Errorf("%s text exceeds its bound", event.Type)
 		}
 	case "plan.updated":
-		if event.Entries == nil || len(event.Entries) > planEntryLimit {
+		if len(event.Entries) > planEntryLimit {
 			return fmt.Errorf("plan.updated entries are missing or exceed their bound")
 		}
 		for _, entry := range event.Entries {
