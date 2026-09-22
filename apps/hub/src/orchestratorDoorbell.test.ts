@@ -25,6 +25,7 @@ import {
   doorbellEventKinds,
   doorbellFactsFor,
   doorbellSummaryLimit,
+  doorbellTitleLimit,
   postOperatorMessageInState,
   type DoorbellFacts,
   type DoorbellRingRecord
@@ -158,6 +159,15 @@ test("bounds the summary and never carries text a worker wrote", () => {
   assert.ok(decision.doorbell.summary.length <= doorbellSummaryLimit, `summary is ${decision.doorbell.summary.length} characters`);
   assert.ok(!decision.doorbell.summary.includes("\u0000"), "control characters are stripped");
   assert.match(decision.doorbell.summary, /3 tasks completed, 2 tasks failed, 1 task cancelled, 2 tasks blocked, 1 message/);
+});
+
+test("truncates a title without splitting a character written as a surrogate pair", () => {
+  const decision = ring(decideDoorbell(facts({ title: "\u{1F680}".repeat(80) }), undefined, "attach", at));
+
+  const truncated = /^Thread "([^"]*)"/.exec(decision.doorbell.summary)?.[1] ?? "";
+  assert.equal([...truncated].length, doorbellTitleLimit, "the title is bounded by whole characters");
+  // A lone surrogate cannot be encoded, so a summary that survives a UTF-8 round trip has none.
+  assert.equal(decision.doorbell.summary, Buffer.from(decision.doorbell.summary, "utf8").toString("utf8"));
 });
 
 test("every terminal task status and every message has exactly one doorbell kind", () => {

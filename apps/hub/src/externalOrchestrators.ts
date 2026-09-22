@@ -406,16 +406,21 @@ const readTime = (value: string | undefined) => {
   return Number.isFinite(parsed) ? parsed : undefined;
 };
 
+/**
+ * Truncates at a fixed position, so the same facts always read the same. Counting whole code
+ * points rather than code units keeps a character that is written as a surrogate pair from being
+ * cut in half.
+ */
+function truncate(value: string, limit: number) {
+  const characters = [...value];
+  return characters.length <= limit ? value : `${characters.slice(0, limit - 1).join("")}…`;
+}
+
 /** Collapses a title to one bounded single-line run, deterministically. */
 function boundedTitle(title: string) {
   const flattened = title.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/"/g, "'").replace(/\s+/g, " ").trim();
-  if (!flattened) return "untitled";
-  return flattened.length <= doorbellTitleLimit ? flattened : `${flattened.slice(0, doorbellTitleLimit - 1)}…`;
+  return flattened ? truncate(flattened, doorbellTitleLimit) : "untitled";
 }
-
-/** Truncates to the summary bound at a fixed position, so the same facts always read the same. */
-const boundedSummary = (summary: string) =>
-  (summary.length <= doorbellSummaryLimit ? summary : `${summary.slice(0, doorbellSummaryLimit - 1)}…`);
 
 /** The UTC `HH:MM` of an expiry the hub can read. */
 const expiryClock = (milliseconds: number) => new Date(milliseconds).toISOString().slice(11, 16);
@@ -432,7 +437,7 @@ export function doorbellSummary(facts: DoorbellFacts): string {
       + (earliest === undefined ? "" : ` (earliest expires ${expiryClock(earliest)}Z)`));
   }
   const body = parts.length > 0 ? parts.join(", ") : "new activity";
-  return boundedSummary(`Thread "${boundedTitle(facts.title)}": ${body}. Call get_thread_events.`);
+  return truncate(`Thread "${boundedTitle(facts.title)}": ${body}. Call get_thread_events.`, doorbellSummaryLimit);
 }
 
 /**
