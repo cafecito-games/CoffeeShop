@@ -18,3 +18,8 @@ export function getNodeCapabilityReport(nodeId: string): NodeCapabilityReport | 
 export function nodeCapabilityReportsSnapshot(): ReadonlyMap<string, NodeCapabilityReport> {
   return reports;
 }
+
+/** Drops a node's report so a new registration is never evaluated against a previous process's evidence. */
+export function forgetNodeCapabilityReport(nodeId: string): void {
+  reports.delete(nodeId);
+}

@@ -1,6 +1,7 @@
 import {
   canTransitionRun,
   isActiveRunStatus,
+  isTerminalTaskStatus,
   supportsControlCapability,
   type ControlAgentToHub,
   type ControlProtocolVersion,
@@ -36,6 +37,36 @@ export function serializeAsync<T>(handler: (value: T) => Promise<void>, onError:
   };
 }
 
+/**
+ * Runs `operation` for every request without overlapping itself: a request made while a run is in
+ * progress schedules exactly one more run after it, so bursts of triggers collapse into one pass.
+ * An error ends the current burst and is reported; the next request starts afresh.
+ */
+export function coalesceAsync(operation: () => Promise<void>, onError: (error: unknown) => void) {
+  let running: Promise<void> | undefined;
+  let requestedAgain = false;
+  const loop = async () => {
+    try {
+      do {
+        requestedAgain = false;
+        await operation();
+      } while (requestedAgain);
+    } catch (error) {
+      onError(error);
+    } finally {
+      running = undefined;
+    }
+  };
+  return () => {
+    if (running) {
+      requestedAgain = true;
+      return running;
+    }
+    running = loop();
+    return running;
+  };
+}
+
 export async function retryAsync<T>(operation: () => Promise<T>, attempts = 3): Promise<T> {
   let failure: unknown;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
@@ -49,10 +80,46 @@ export async function retryAsync<T>(operation: () => Promise<T>, attempts = 3): 
   throw failure;
 }
 
+/**
+ * Queued runs to redispatch after a reconnect barrier. A task attempt is included only while it is
+ * still its task's current, non-terminal assignment, so a replay can never resurrect cancelled or
+ * superseded work.
+ */
 export function queuedRunsForNode(snapshot: Snapshot, nodeId: string, activeRunIds: readonly string[], protocolVersion: ControlProtocolVersion) {
   if (!supportsControlCapability(protocolVersion, "replay-barrier")) return [];
   const active = new Set(activeRunIds);
-  return snapshot.runs.filter((run) => run.nodeId === nodeId && run.status === "queued" && !active.has(run.id));
+  const currentAttempt = (run: Run) => run.taskId === undefined || (snapshot.tasks ?? []).some((task) =>
+    task.id === run.taskId && task.assignment?.runId === run.id && !isTerminalTaskStatus(task.status));
+  return snapshot.runs.filter((run) => run.nodeId === nodeId && run.status === "queued" && !active.has(run.id) && currentAttempt(run));
+}
+
+/** A task is failed rather than retried once this many attempts have been lost. */
+export const maximumTaskAttempts = 3;
+export const lostComputeError = "Compute lost: Barista no longer reports this attempt as active";
+
+/**
+ * Runs after a version-4 reconnect barrier, once Barista has replayed every queued lifecycle
+ * message. A running task attempt that Barista no longer supervises can never report again, so it
+ * fails and, within the attempt budget, its task returns to `ready` for a new attempt. Queued
+ * attempts are left for redispatch; they never started, so resending the same run is safe.
+ */
+export function failLostTaskAttempts(state: State, nodeId: string, activeRunIds: readonly string[], at: string) {
+  const active = new Set(activeRunIds);
+  const lost: Run[] = [];
+  for (const run of state.runs) {
+    if (run.nodeId !== nodeId || run.taskId === undefined || run.status !== "running" || active.has(run.id)) continue;
+    run.status = "failed";
+    run.error = lostComputeError;
+    run.finishedAt = at;
+    const task = state.tasks?.find((item) => item.id === run.taskId);
+    state.messages.push(newMessage({ agentId: run.agentId, author: "system", body: `Run failed: ${lostComputeError}`, kind: "status", threadId: run.threadId, runId: run.id }));
+    state.events.unshift(newEvent({ type: "status", title: "Compute lost", detail: `Run ${run.id} was no longer active on ${nodeId}`, threadId: run.threadId, agentId: run.agentId, runId: run.id }));
+    updateAgentAfterRunEnded(state, run, at);
+    settleHarnessStateForTerminalRun(state, run.id, at);
+    applyAttemptOutcome(state, run.id, at, { retryable: (task?.attemptRunIds.length ?? maximumTaskAttempts) < maximumTaskAttempts });
+    lost.push(run);
+  }
+  return lost;
 }
 
 function activeRunForAgent(state: State, agentId: string, excludedRunId: string) {
@@ -64,10 +131,10 @@ function activeRunForAgent(state: State, agentId: string, excludedRunId: string)
     })[0];
 }
 
-function updateAgentAfterCancellation(state: State, cancelledRun: Run, at: string) {
-  const agent = state.agents.find((item) => item.id === cancelledRun.agentId);
+function updateAgentAfterRunEnded(state: State, endedRun: Run, at: string) {
+  const agent = state.agents.find((item) => item.id === endedRun.agentId);
   if (!agent) return;
-  const active = activeRunForAgent(state, agent.id, cancelledRun.id);
+  const active = activeRunForAgent(state, agent.id, endedRun.id);
   if (!active) {
     agent.state = "idle";
     agent.currentAction = "Available";
@@ -100,7 +167,7 @@ export function cancelRunInState(state: State, runId: string, at: string): Cance
   }));
   const thread = run.threadId ? state.threads?.find((item) => item.id === run.threadId) : undefined;
   if (thread) thread.updatedAt = at;
-  updateAgentAfterCancellation(state, run, at);
+  updateAgentAfterRunEnded(state, run, at);
   settleHarnessStateForTerminalRun(state, run.id, at);
   applyAttemptOutcome(state, run.id, at);
   return { kind: "cancelled", run };

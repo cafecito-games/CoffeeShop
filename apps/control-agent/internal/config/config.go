@@ -17,19 +17,27 @@ import (
 
 const DefaultEndpoint = "http://localhost:8787"
 
+// Bounds on the operator-declared inventory lists, applied after exact-duplicate removal so a
+// repeated entry costs nothing. Mirrored by the readiness report's evidence-entry bound.
+const (
+	MaximumLabels       = 32
+	MaximumAccelerators = 32
+	MaximumToolchains   = 32
+)
+
 var projectIDPattern = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
 
-// labelMaximumBytes and capabilitySegmentPattern are not defined locally: a label or accelerator
-// is embedded verbatim into a capability id ("label:<label>", "accelerator:<accelerator>") and
-// then into that evidence entry's NormalizedValue, so config validation must enforce exactly the
-// grammar and byte bound protocol.LabelOrAcceleratorPattern/protocol.LabelOrAcceleratorMaximumBytes
-// already define as the single source of truth — a locally duplicated, looser bound (as this file
-// once had at 128 bytes against the protocol's 64) would make the hub reject the whole capability
-// report, not just the oversized entry.
-const labelMaximumBytes = protocol.LabelOrAcceleratorMaximumBytes
-const acceleratorMaximumBytes = protocol.LabelOrAcceleratorMaximumBytes
-
-var capabilitySegmentPattern = protocol.LabelOrAcceleratorPattern
+// A Toolchain is an operator-declared toolchain identifier with an optional normalized version.
+// The grammar and byte bound come from protocol.LabelOrAcceleratorPattern/
+// protocol.LabelOrAcceleratorMaximumBytes and protocol.IsNormalizedVersion: a toolchain id is
+// embedded verbatim into a capability id ("toolchain:<id>") and its version into that evidence
+// entry's NormalizedValue, so config must enforce exactly what the protocol's single source of
+// truth defines — a locally duplicated, looser bound would make the hub reject the whole
+// capability report, not just the oversized entry.
+type Toolchain struct {
+	ID      string
+	Version string
+}
 
 type Config struct {
 	ControlEndpoint  string
@@ -43,6 +51,7 @@ type Config struct {
 	ProjectAllowlist []string
 	Labels           []string
 	Accelerators     []string
+	Toolchains       []Toolchain
 	MemoryMegabytes  int // 0 means "not configured"; never reported as evidence when 0
 }
 
@@ -54,6 +63,18 @@ func (values *stringList) Set(value string) error {
 	if item := strings.TrimSpace(value); item != "" {
 		*values = append(*values, item)
 	}
+	return nil
+}
+
+// strictStringList collects label, accelerator, and toolchain flag values. Unlike stringList it
+// keeps empty entries so Parse can reject them with the same field-and-index error the other
+// validation uses; the flag package's own error format would echo the rejected value.
+type strictStringList []string
+
+func (values *strictStringList) String() string { return strings.Join(*values, ",") }
+
+func (values *strictStringList) Set(value string) error {
+	*values = append(*values, strings.TrimSpace(value))
 	return nil
 }
 
@@ -77,8 +98,9 @@ func Parse(args []string) (Config, error) {
 	}
 	roots := stringList(splitEnv("WORKSPACE_ROOTS"))
 	projects := stringList(splitEnv("BARISTA_PROJECT_ALLOWLIST"))
-	labels := stringList(splitEnv("BARISTA_LABELS"))
-	accelerators := stringList(splitEnv("BARISTA_ACCELERATORS"))
+	labels := strictStringList(splitStrictEnv("BARISTA_LABELS"))
+	accelerators := strictStringList(splitStrictEnv("BARISTA_ACCELERATORS"))
+	toolchains := strictStringList(splitStrictEnv("BARISTA_TOOLCHAINS"))
 	set := flag.NewFlagSet("barista", flag.ContinueOnError)
 	set.SetOutput(os.Stderr)
 	endpoint := set.String("control-endpoint", env("CONTROL_ENDPOINT", DefaultEndpoint), "Coffee Shop URL or WebSocket endpoint")
@@ -89,6 +111,7 @@ func Parse(args []string) (Config, error) {
 	set.Var(&projects, "project", "project ID this node accepts work for; repeat the flag for multiple IDs")
 	set.Var(&labels, "label", "operator-assigned capability label (lowercase letters, numbers, and hyphens); repeat the flag for multiple labels")
 	set.Var(&accelerators, "accelerator", "hardware accelerator available on this node (lowercase letters, numbers, and hyphens); repeat the flag for multiple accelerators")
+	set.Var(&toolchains, "toolchain", "toolchain available on this node, as <id> or <id>@<version> (lowercase letters, numbers, and hyphens; dotted numeric version); repeat the flag for multiple toolchains")
 	limit := set.Int("concurrency", concurrency, "maximum number of simultaneous runs")
 	memory := set.Int("memory-megabytes", memoryMegabytes, "configured system memory in megabytes (0 means not configured)")
 	token := set.String("token", os.Getenv("COFFEE_SHOP_TOKEN"), "control-plane token (prefer COFFEE_SHOP_TOKEN)")
@@ -128,34 +151,21 @@ func Parse(args []string) (Config, error) {
 			return Config{}, fmt.Errorf("project id %q must contain only letters, numbers, and hyphens", project)
 		}
 	}
-	// Every rejection below names the field and its position, never the value itself: a label or
-	// accelerator is arbitrary operator-supplied text, this validation is exactly what screens it
-	// for a secret, and configuration errors are commonly logged, so the rejected value must never
-	// appear in the error even when rejection was for an unrelated reason (length or grammar).
-	for index, label := range labels {
-		if len(label) > labelMaximumBytes {
-			return Config{}, fmt.Errorf("label at index %d exceeds %d bytes", index, labelMaximumBytes)
-		}
-		if !capabilitySegmentPattern.MatchString(label) {
-			return Config{}, fmt.Errorf("label at index %d must contain only lowercase letters, numbers, and hyphens", index)
-		}
-		// A kebab-case grammar alone does not rule out a lowercase, hyphenated secret (for
-		// example "sk-abcdefghij1234567890"), and a label becomes a capability id and evidence
-		// value that Barista reports to the hub, so it is screened exactly like probe output.
-		if protocol.LooksSecretLike(label) {
-			return Config{}, fmt.Errorf("label at index %d looks like it contains a secret and was rejected", index)
-		}
+	// Every rejection below names the field and its position, never the value itself: an inventory
+	// entry is arbitrary operator-supplied text, this validation is exactly what screens it for a
+	// secret, and configuration errors are commonly logged, so the rejected value must never appear
+	// in the error even when rejection was for an unrelated reason (emptiness, length, or grammar).
+	validatedLabels, err := validatedCapabilitySegments("label", labels, MaximumLabels)
+	if err != nil {
+		return Config{}, err
 	}
-	for index, accelerator := range accelerators {
-		if len(accelerator) > acceleratorMaximumBytes {
-			return Config{}, fmt.Errorf("accelerator at index %d exceeds %d bytes", index, acceleratorMaximumBytes)
-		}
-		if !capabilitySegmentPattern.MatchString(accelerator) {
-			return Config{}, fmt.Errorf("accelerator at index %d must contain only lowercase letters, numbers, and hyphens", index)
-		}
-		if protocol.LooksSecretLike(accelerator) {
-			return Config{}, fmt.Errorf("accelerator at index %d looks like it contains a secret and was rejected", index)
-		}
+	validatedAccelerators, err := validatedCapabilitySegments("accelerator", accelerators, MaximumAccelerators)
+	if err != nil {
+		return Config{}, err
+	}
+	validatedToolchains, err := validatedToolchains(toolchains, MaximumToolchains)
+	if err != nil {
+		return Config{}, err
 	}
 	if *memory < 0 {
 		return Config{}, errors.New("memory megabytes must not be negative")
@@ -171,10 +181,88 @@ func Parse(args []string) (Config, error) {
 		Token:            *token,
 		VersionOnly:      *versionOnly,
 		ProjectAllowlist: deduplicate(projects),
-		Labels:           deduplicate(labels),
-		Accelerators:     deduplicate(accelerators),
+		Labels:           validatedLabels,
+		Accelerators:     validatedAccelerators,
+		Toolchains:       validatedToolchains,
 		MemoryMegabytes:  *memory,
 	}, nil
+}
+
+// validatedCapabilitySegments checks and deduplicates one plain-segment inventory list (labels,
+// accelerators). The secret screen runs before the length and grammar checks so a secret-looking
+// entry is never rejected under a message that hints at its shape instead.
+func validatedCapabilitySegments(field string, values []string, maximum int) ([]string, error) {
+	for index, value := range values {
+		if value == "" {
+			return nil, fmt.Errorf("%s at index %d is empty", field, index)
+		}
+		// A kebab-case grammar alone does not rule out a lowercase, hyphenated secret (for example
+		// "sk-abcdefghij1234567890"), and an inventory entry becomes a capability id and evidence
+		// value that Barista reports to the hub, so it is screened exactly like probe output.
+		if protocol.LooksSecretLike(value) {
+			return nil, fmt.Errorf("%s at index %d looks like it contains a secret and was rejected", field, index)
+		}
+		if len(value) > protocol.LabelOrAcceleratorMaximumBytes {
+			return nil, fmt.Errorf("%s at index %d exceeds %d bytes", field, index, protocol.LabelOrAcceleratorMaximumBytes)
+		}
+		if !protocol.LabelOrAcceleratorPattern.MatchString(value) {
+			return nil, fmt.Errorf("%s at index %d must contain only lowercase letters, numbers, and hyphens", field, index)
+		}
+	}
+	deduplicated := deduplicate(values)
+	if len(deduplicated) > maximum {
+		return nil, fmt.Errorf("at most %d %ss may be configured", maximum, field)
+	}
+	return deduplicated, nil
+}
+
+// validatedToolchains parses, checks, and deduplicates the toolchain list. An exact duplicate
+// (same id and version) is dropped like any other duplicate; two entries that name the same
+// toolchain id with different versions — including one with a version and one without — conflict,
+// because the hub would otherwise see two different claims about one capability.
+func validatedToolchains(values []string, maximum int) ([]Toolchain, error) {
+	if len(values) == 0 {
+		return nil, nil
+	}
+	result := make([]Toolchain, 0, len(values))
+	seenEntries := map[string]bool{}
+	seenIdentifiers := map[string]bool{}
+	for index, value := range values {
+		if value == "" {
+			return nil, fmt.Errorf("toolchain at index %d is empty", index)
+		}
+		if protocol.LooksSecretLike(value) {
+			return nil, fmt.Errorf("toolchain at index %d looks like it contains a secret and was rejected", index)
+		}
+		if strings.Count(value, "@") > 1 {
+			return nil, fmt.Errorf("toolchain at index %d must contain at most one \"@\"", index)
+		}
+		identifier, version, _ := strings.Cut(value, "@")
+		if len(identifier) > protocol.LabelOrAcceleratorMaximumBytes {
+			return nil, fmt.Errorf("toolchain at index %d exceeds %d bytes", index, protocol.LabelOrAcceleratorMaximumBytes)
+		}
+		if !protocol.LabelOrAcceleratorPattern.MatchString(identifier) {
+			return nil, fmt.Errorf("toolchain at index %d must contain only lowercase letters, numbers, and hyphens", index)
+		}
+		if version != "" && !protocol.IsNormalizedVersion(version) {
+			return nil, fmt.Errorf("toolchain at index %d has a version that is not a normalized dotted number", index)
+		}
+		if seenEntries[value] {
+			continue
+		}
+		seenEntries[value] = true
+		// Reaching here with an already-seen identifier means the same toolchain was declared with
+		// a different version (an identical declaration was deduplicated above).
+		if seenIdentifiers[identifier] {
+			return nil, fmt.Errorf("toolchain at index %d conflicts with an earlier entry for the same toolchain", index)
+		}
+		seenIdentifiers[identifier] = true
+		result = append(result, Toolchain{ID: identifier, Version: version})
+	}
+	if len(result) > maximum {
+		return nil, fmt.Errorf("at most %d toolchains may be configured", maximum)
+	}
+	return result, nil
 }
 
 // deduplicate removes repeated entries while preserving first-seen order, mirroring the approach
@@ -302,6 +390,21 @@ func splitEnv(key string) []string {
 	return strings.FieldsFunc(value, func(char rune) bool {
 		return char == ','
 	})
+}
+
+// splitStrictEnv splits a comma-separated environment value for the inventory lists (labels,
+// accelerators, toolchains). Unlike splitEnv it preserves empty segments — including a trailing
+// comma's — so Parse can reject them by index; a wholly empty or unset value still means "none".
+func splitStrictEnv(key string) []string {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return nil
+	}
+	entries := strings.Split(value, ",")
+	for index, entry := range entries {
+		entries[index] = strings.TrimSpace(entry)
+	}
+	return entries
 }
 
 func Platform() string { return runtime.GOOS + " · " + runtime.GOARCH }

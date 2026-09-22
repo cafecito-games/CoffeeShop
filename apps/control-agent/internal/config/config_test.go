@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -223,6 +224,202 @@ func TestParseRejectsLabelsAndAcceleratorsThatWouldNotFormAValidCapabilityID(t *
 	_, err = Parse([]string{"--name", "Worker 1", "--id", "worker-1", "--accelerator", "Apple_M3_Max"})
 	require.EqualError(t, err, "accelerator at index 0 must contain only lowercase letters, numbers, and hyphens")
 	require.NotContains(t, err.Error(), "Apple_M3_Max")
+}
+
+func TestParseRejectsEmptyInventoryFlagValues(t *testing.T) {
+	// An empty or whitespace-only flag value is a configuration mistake, not a silent no-op:
+	// scripts that interpolate variables into flags would otherwise enroll nothing where an entry
+	// was intended. The error names the field and index only, never the value.
+	t.Setenv("WORKSPACE_ROOTS", absoluteExistingRoot(t))
+	t.Setenv("BARISTA_LABELS", "")
+	t.Setenv("BARISTA_ACCELERATORS", "")
+	t.Setenv("BARISTA_TOOLCHAINS", "")
+	base := []string{"--name", "Worker 1", "--id", "worker-1"}
+	tests := []struct {
+		name    string
+		args    []string
+		message string
+	}{
+		{"empty label", []string{"--label", ""}, "label at index 0 is empty"},
+		{"whitespace-only label", []string{"--label", "  "}, "label at index 0 is empty"},
+		{"empty accelerator", []string{"--accelerator", ""}, "accelerator at index 0 is empty"},
+		{"whitespace-only accelerator", []string{"--accelerator", " "}, "accelerator at index 0 is empty"},
+		{"empty toolchain", []string{"--toolchain", ""}, "toolchain at index 0 is empty"},
+		{"whitespace-only toolchain", []string{"--toolchain", "  "}, "toolchain at index 0 is empty"},
+		{"second flag empty", []string{"--label", "gpu", "--label", ""}, "label at index 1 is empty"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := Parse(append(base, test.args...))
+			require.EqualError(t, err, test.message)
+		})
+	}
+}
+
+func TestParseRejectsEmptyInventoryEnvironmentSegments(t *testing.T) {
+	// A double comma or trailing comma in a BARISTA_* inventory list is rejected rather than
+	// collapsed: silently dropping the segment would hide the same configuration mistake the
+	// empty-flag test covers. A wholly empty or unset variable still means "none".
+	t.Setenv("WORKSPACE_ROOTS", absoluteExistingRoot(t))
+	t.Setenv("BARISTA_LABELS", "")
+	t.Setenv("BARISTA_ACCELERATORS", "")
+	t.Setenv("BARISTA_TOOLCHAINS", "")
+	base := []string{"--name", "Worker 1", "--id", "worker-1"}
+	tests := []struct {
+		name        string
+		environment string
+		value       string
+		message     string
+	}{
+		{"labels double comma", "BARISTA_LABELS", "gpu,,latency", "label at index 1 is empty"},
+		{"labels trailing comma", "BARISTA_LABELS", "gpu,", "label at index 1 is empty"},
+		{"labels whitespace segment", "BARISTA_LABELS", "gpu, ,latency", "label at index 1 is empty"},
+		{"accelerators double comma", "BARISTA_ACCELERATORS", "cuda,,metal", "accelerator at index 1 is empty"},
+		{"accelerators trailing comma", "BARISTA_ACCELERATORS", "cuda,", "accelerator at index 1 is empty"},
+		{"toolchains double comma", "BARISTA_TOOLCHAINS", "go,,rust", "toolchain at index 1 is empty"},
+		{"toolchains trailing comma", "BARISTA_TOOLCHAINS", "go,", "toolchain at index 1 is empty"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv(test.environment, test.value)
+			_, err := Parse(base)
+			require.EqualError(t, err, test.message)
+		})
+	}
+}
+
+func TestParseAcceptsToolchainsFromFlagsAndEnvironment(t *testing.T) {
+	t.Setenv("WORKSPACE_ROOTS", absoluteExistingRoot(t))
+	t.Setenv("BARISTA_LABELS", "")
+	t.Setenv("BARISTA_ACCELERATORS", "")
+	t.Setenv("BARISTA_TOOLCHAINS", "rust@1.80")
+
+	parsed, err := Parse([]string{
+		"--name", "Worker 1", "--id", "worker-1",
+		"--toolchain", "go",
+		"--toolchain", "node@22.9.0",
+	})
+	require.NoError(t, err)
+	require.Equal(t, []Toolchain{
+		{ID: "rust", Version: "1.80"},
+		{ID: "go"},
+		{ID: "node", Version: "22.9.0"},
+	}, parsed.Toolchains)
+}
+
+func TestParseDeduplicatesToolchainsPreservingOrder(t *testing.T) {
+	t.Setenv("WORKSPACE_ROOTS", absoluteExistingRoot(t))
+	t.Setenv("BARISTA_TOOLCHAINS", "")
+
+	parsed, err := Parse([]string{
+		"--name", "Worker 1", "--id", "worker-1",
+		"--toolchain", "go", "--toolchain", "rust@1.80", "--toolchain", "go", "--toolchain", "rust@1.80",
+	})
+	require.NoError(t, err)
+	require.Equal(t, []Toolchain{
+		{ID: "go"},
+		{ID: "rust", Version: "1.80"},
+	}, parsed.Toolchains)
+}
+
+func TestParseRejectsConflictingToolchainVersions(t *testing.T) {
+	t.Setenv("WORKSPACE_ROOTS", absoluteExistingRoot(t))
+	t.Setenv("BARISTA_TOOLCHAINS", "")
+	base := []string{"--name", "Worker 1", "--id", "worker-1"}
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{"versioned then unversioned", []string{"--toolchain", "go@1.21", "--toolchain", "go"}},
+		{"unversioned then versioned", []string{"--toolchain", "go", "--toolchain", "go@1.21"}},
+		{"different versions", []string{"--toolchain", "go@1.21", "--toolchain", "go@1.22"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := Parse(append(base, test.args...))
+			require.EqualError(t, err, "toolchain at index 1 conflicts with an earlier entry for the same toolchain")
+		})
+	}
+}
+
+func TestParseRejectsInvalidToolchainEntries(t *testing.T) {
+	// The error must never contain the rejected value: a toolchain entry is arbitrary
+	// operator-supplied text and this validation is the secret screen for it.
+	t.Setenv("WORKSPACE_ROOTS", absoluteExistingRoot(t))
+	t.Setenv("BARISTA_LABELS", "")
+	t.Setenv("BARISTA_ACCELERATORS", "")
+	t.Setenv("BARISTA_TOOLCHAINS", "")
+	base := []string{"--name", "Worker 1", "--id", "worker-1"}
+	tests := []struct {
+		name    string
+		value   string
+		message string
+	}{
+		{"invalid id grammar", "Rust_Tool", "toolchain at index 0 must contain only lowercase letters, numbers, and hyphens"},
+		{"oversize id", strings.Repeat("x", 65), "toolchain at index 0 exceeds 64 bytes"},
+		{"non-numeric version", "rust@1.x", "toolchain at index 0 has a version that is not a normalized dotted number"},
+		{"leading-zero version", "rust@01.2", "toolchain at index 0 has a version that is not a normalized dotted number"},
+		{"too many version segments", "rust@1.2.3.4.5", "toolchain at index 0 has a version that is not a normalized dotted number"},
+		{"double at", "rust@1.80@1", `toolchain at index 0 must contain at most one "@"`},
+		{"secret-like entry", "sk-abcdefghij1234567890", "toolchain at index 0 looks like it contains a secret and was rejected"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := Parse(append(base, "--toolchain", test.value))
+			require.EqualError(t, err, test.message)
+			require.NotContains(t, err.Error(), test.value)
+		})
+	}
+}
+
+func TestParseRejectsInventoryCountsAboveTheirBounds(t *testing.T) {
+	t.Setenv("WORKSPACE_ROOTS", absoluteExistingRoot(t))
+	t.Setenv("BARISTA_LABELS", "")
+	t.Setenv("BARISTA_ACCELERATORS", "")
+	t.Setenv("BARISTA_TOOLCHAINS", "")
+	tooMany := func(prefix string) []string {
+		values := make([]string, MaximumLabels+1)
+		for index := range values {
+			values[index] = fmt.Sprintf("%s-%02d", prefix, index)
+		}
+		return values
+	}
+	tests := []struct {
+		name    string
+		flag    string
+		values  []string
+		message string
+	}{
+		{"labels", "label", tooMany("label"), "at most 32 labels may be configured"},
+		{"accelerators", "accelerator", tooMany("accelerator"), "at most 32 accelerators may be configured"},
+		{"toolchains", "toolchain", tooMany("toolchain"), "at most 32 toolchains may be configured"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			args := []string{"--name", "Worker 1", "--id", "worker-1"}
+			for _, value := range test.values {
+				args = append(args, "--"+test.flag, value)
+			}
+			_, err := Parse(args)
+			require.EqualError(t, err, test.message)
+		})
+	}
+}
+
+func TestParseAcceptsInventoryAtExactlyTheBounds(t *testing.T) {
+	t.Setenv("WORKSPACE_ROOTS", absoluteExistingRoot(t))
+	args := []string{"--name", "Worker 1", "--id", "worker-1"}
+	for index := range MaximumLabels {
+		args = append(args, "--label", fmt.Sprintf("label-%02d", index))
+		args = append(args, "--accelerator", fmt.Sprintf("accelerator-%02d", index))
+		args = append(args, "--toolchain", fmt.Sprintf("toolchain-%02d", index))
+	}
+
+	parsed, err := Parse(args)
+	require.NoError(t, err)
+	require.Len(t, parsed.Labels, MaximumLabels)
+	require.Len(t, parsed.Accelerators, MaximumAccelerators)
+	require.Len(t, parsed.Toolchains, MaximumToolchains)
 }
 
 func TestParseTreatsExplicitZeroMemoryAsUnset(t *testing.T) {

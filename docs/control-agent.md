@@ -50,6 +50,7 @@ The web app’s **Compute → Add compute** flow generates a shell-quoted equiva
 | `BARISTA_PROJECT_ALLOWLIST` | Comma-separated project IDs this node accepts work for; empty means unrestricted |
 | `BARISTA_LABELS` | Comma-separated operator-assigned capability labels (lowercase letters, numbers, and hyphens) |
 | `BARISTA_ACCELERATORS` | Comma-separated hardware accelerators available on this node (lowercase letters, numbers, and hyphens) |
+| `BARISTA_TOOLCHAINS` | Comma-separated toolchains available on this node, each `<id>` or `<id>@<version>` |
 | `BARISTA_MEMORY_MEGABYTES` | Configured system memory in megabytes; absent or `0` means not configured |
 
 The UI deliberately emits `COFFEE_SHOP_TOKEN='replace-with-hub-token'`; it never reads the browser’s stored hub token into setup guidance. Replace the placeholder locally on the compute machine, or use a protected environment file when installing Barista as a service.
@@ -98,7 +99,7 @@ Claude Code receives the server through `--mcp-config`; Codex receives run-local
 
 Cancellation commands are idempotent from Barista's perspective. A cancel received before its matching dispatch prevents the process from starting and is acknowledged immediately; a cancel received during execution terminates the process tree and is acknowledged after cleanup without translating that intentional termination into `run.failed`. Tombstones survive control-plane reconnects for the lifetime of the Barista process, so a replayed dispatch cannot resurrect cancelled work. The hub persists cancellation before sending the command and remains authoritative if Barista is offline.
 
-On reconnect, protocol versions 2 and 3 send `register`, flush the lifecycle outbox, and then send `sync.complete` with any run IDs still active on Barista. The hub processes those messages in socket order and waits for the barrier before redispatching queued runs, excluding work Barista reports as active. Version 1 remains accepted during rolling upgrades so existing lifecycle events can settle, but queued-run redispatch is disabled for v1; upgrade that Barista to resume queued work safely.
+On reconnect, protocol versions 2 and 3 send `register`, flush the lifecycle outbox, and then send `sync.complete` with any run IDs still active on Barista. The hub processes those messages in socket order and waits for the barrier before redispatching queued runs, excluding work Barista reports as active. Version 4 always carries `activeRunIds` on `sync.complete`, even when empty (`"activeRunIds":[]`), so the hub can distinguish a reported-empty active set from an absent one. Version 1 remains accepted during rolling upgrades so existing lifecycle events can settle, but queued-run redispatch is disabled for v1; upgrade that Barista to resume queued work safely.
 
 ## Protocol versions
 
@@ -142,9 +143,23 @@ Barista logs discovery, connection state, enrolled roots, and failures to stdout
 
 ## Project capability evidence
 
-Barista reports what the node actually has as bounded capability evidence tagged with a provenance source. `runtime` facts (operating system, architecture, logical CPU count, workspace-root writability) and `probe` results (toolchain versions) come from direct observation; `configured` declarations (labels, accelerators, memory) are the node administrator's word. Every entry carries bounded diagnostics so a failed observation is explainable without leaking process output.
+Barista reports what the node actually has as bounded capability evidence tagged with a provenance source. `runtime` facts (operating system, architecture, logical CPU count, workspace-root writability) and `probe` results (toolchain versions) come from direct observation; `configured` declarations (labels, accelerators, toolchains, memory) are the node administrator's word. Every entry carries bounded diagnostics so a failed observation is explainable without leaking process output.
 
-The allowlisted probes are fixed at compile time in `apps/control-agent/internal/readiness`: a known set of `{binary, args}` pairs for Go, Git, Node, pnpm, GCC, Clang, and Xcode, plus a generic "first reported version" parser. Barista never accepts a command, executable name, or argument list from the hub, a task, or any network message, so a compromise of the control plane cannot turn a version check into arbitrary execution. `--project`, `--label`, `--accelerator`, and `--memory-megabytes` (and their `BARISTA_*` environment equivalents) are node-admin declarations, never trusted as proof.
+The allowlisted probes are fixed at compile time in `apps/control-agent/internal/readiness`: a known set of `{binary, args}` pairs for Go, Git, Node, pnpm, GCC, Clang, and Xcode, plus a generic "first reported version" parser. Barista never accepts a command, executable name, or argument list from the hub, a task, or any network message, so a compromise of the control plane cannot turn a version check into arbitrary execution. `--project`, `--label`, `--accelerator`, `--toolchain`, and `--memory-megabytes` (and their `BARISTA_*` environment equivalents) are node-admin declarations, never trusted as proof.
+
+`--toolchain <id>[@<version>]` (or an entry in the comma-separated `BARISTA_TOOLCHAINS`) declares a toolchain that is not covered by the probes — for example `--toolchain 'rust@1.80'` or `--toolchain zig`. It is reported as `configured` evidence with capability id `toolchain:<id>` and, when a version was given, that version as its normalized value; a toolchain declared without a version is reported as present but unversioned. A project profile toolchain requirement names `toolchain:<id>` as its `capabilityId` to match it, while probed toolchains keep their bare ids such as `go`.
+
+Validation for labels, accelerators, and toolchains:
+
+- ids are lowercase kebab-case (letters, numbers, hyphens) of at most 64 bytes; versions are normalized dotted numbers such as `1.80` or `22.9.0`;
+- two entries for the same toolchain id with different versions — including one with a version and one without — are a conflict and stop startup;
+- an empty entry is an error, whether it comes from an empty flag value or an empty comma segment in `BARISTA_LABELS`, `BARISTA_ACCELERATORS`, or `BARISTA_TOOLCHAINS` (for example `a,,b` or a trailing `a,`); a wholly empty or unset variable still means "none";
+- at most 32 labels, 32 accelerators, and 32 toolchains may be configured (exact duplicates are collapsed first);
+- secret-looking values are rejected, and no rejection error ever echoes the rejected value — it names the field and its index instead, since configuration errors are commonly logged.
+
+Environment lists are comma-separated, so a value can never contain a comma; prefer repeated flags when in doubt, and single-quote values in shells, for example `--toolchain 'rust@1.80'`.
+
+All of this inventory — labels, accelerators, toolchains, and configured memory — is worker-reported and never attested: the hub treats it as the node administrator's claim.
 
 The hub evaluates readiness by combining this evidence with a hub-loaded project profile; Barista does not decide whether it is ready for any project itself. A node administrator can additionally restrict the node to specific project IDs through the project allowlist, which the hub enforces independently of any profile's requirements.
 

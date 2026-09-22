@@ -2,6 +2,7 @@ package readiness
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"testing"
 
@@ -72,6 +73,63 @@ func TestBuildCapabilityReportOmitsUnsetConfiguredEvidence(t *testing.T) {
 		require.NotContains(t, entry.CapabilityID, "accelerator:")
 	}
 	require.Equal(t, protocol.NodeCapabilityEvidence{}, evidenceByCapabilityID(report, "configured-memory-megabytes"))
+}
+
+func TestBuildCapabilityReportProducesConfiguredToolchainEvidence(t *testing.T) {
+	cfg := config.Config{
+		NodeID:         "worker-1",
+		WorkspaceRoots: []string{t.TempDir()},
+		Toolchains: []config.Toolchain{
+			{ID: "rust", Version: "1.80"},
+			{ID: "go"},
+		},
+	}
+	report := BuildCapabilityReport(context.Background(), cfg, nil)
+
+	versioned := evidenceByCapabilityID(report, "toolchain:rust")
+	require.True(t, versioned.Success)
+	require.Equal(t, protocol.CapabilityEvidenceSourceConfigured, versioned.Source)
+	require.Equal(t, "1.80", versioned.NormalizedValue)
+	require.Equal(t, report.At, versioned.ObservedAt)
+
+	// A toolchain declared without a version is reported as present but unversioned: the
+	// NormalizedValue is omitted rather than sent as an empty string.
+	unversioned := evidenceByCapabilityID(report, "toolchain:go")
+	require.True(t, unversioned.Success)
+	require.Equal(t, protocol.CapabilityEvidenceSourceConfigured, unversioned.Source)
+	require.Empty(t, unversioned.NormalizedValue)
+	require.Equal(t, report.At, unversioned.ObservedAt)
+
+	for _, entry := range report.Evidence {
+		require.NoError(t, entry.Validate())
+	}
+	require.NoError(t, report.Validate())
+}
+
+// maxCapabilityEvidenceEntries in internal/protocol bounds a report at 256 entries; a node
+// configured at every inventory maximum (plus runtime facts, memory, and the allowlisted probes)
+// must still fit under it.
+func TestBuildCapabilityReportAtMaximumInventoryValidates(t *testing.T) {
+	labels := make([]string, config.MaximumLabels)
+	accelerators := make([]string, config.MaximumAccelerators)
+	toolchains := make([]config.Toolchain, config.MaximumToolchains)
+	for index := range labels {
+		labels[index] = fmt.Sprintf("label-%02d", index)
+		accelerators[index] = fmt.Sprintf("accelerator-%02d", index)
+		toolchains[index] = config.Toolchain{ID: fmt.Sprintf("toolchain-%02d", index)}
+	}
+	cfg := config.Config{
+		NodeID:          "worker-1",
+		WorkspaceRoots:  []string{t.TempDir()},
+		Labels:          labels,
+		Accelerators:    accelerators,
+		Toolchains:      toolchains,
+		MemoryMegabytes: 32768,
+	}
+	report := BuildCapabilityReport(context.Background(), cfg, nil)
+
+	require.NoError(t, report.Validate())
+	require.LessOrEqual(t, len(report.Evidence), 256)
 }
 
 func TestWorkspaceWritableSucceedsWhenAnyRootIsWritable(t *testing.T) {

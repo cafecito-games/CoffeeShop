@@ -9,6 +9,7 @@ import { WebSocket, WebSocketServer, type RawData } from "ws";
 import {
   canSendToControlAgent,
   isControlProtocolVersion,
+  isTerminalTaskStatus,
   supportsControlCapability,
   validateNodeCapabilityReport,
   validateOrchestrationControlAgentMessage,
@@ -20,13 +21,14 @@ import {
   type Run
 } from "@coffee-shop/protocol";
 import { createConfiguredAgent, markDisconnectedNodesOffline, openConnectionLookup, updateConfiguredAgent } from "./agentConfiguration.js";
-import { applyRunLifecycle, cancelPersistedRun, queuedRunsForNode, retryAsync, serializeAsync } from "./lifecycle.js";
+import { applyRunLifecycle, cancelPersistedRun, coalesceAsync, failLostTaskAttempts, queuedRunsForNode, retryAsync, serializeAsync } from "./lifecycle.js";
 import { CoordinationError, createArtifact, delegateTask, taskContext } from "./coordination.js";
-import { recordNodeCapabilityReport } from "./nodeCapabilities.js";
+import { forgetNodeCapabilityReport, getNodeCapabilityReport, recordNodeCapabilityReport } from "./nodeCapabilities.js";
 import { loadProjectProfilesFromFile, ProjectProfileRegistry } from "./projectProfiles.js";
 import { retainedHarnessEvents } from "./harnessEvents.js";
 import { expireDueApprovals, receiveApprovalUndeliverable, receiveHarnessEvent, reconcileApprovals, resolveApproval } from "./harnessGateway.js";
 import { createRedactor } from "./redaction.js";
+import { dispatchMessageFor, runSchedulingPass, type SchedulingContext, type SchedulingPassResult } from "./scheduler.js";
 import { newEvent, newId, newMessage, Store } from "./store.js";
 import { newThread, updateThreadByOperator, updateThreadForRun } from "./threads.js";
 
@@ -34,6 +36,8 @@ const app = express();
 const server = createServer(app);
 const controlAgents = new Map<string, WebSocket>();
 const controlAgentVersions = new WeakMap<WebSocket, ControlProtocolVersion>();
+/** Sockets that completed their reconnect barrier; only these receive scheduled task attempts. */
+const syncedControlAgents = new WeakSet<WebSocket>();
 const liveControlAgents = openConnectionLookup(controlAgents, WebSocket.OPEN);
 const clients = new Set<WebSocket>();
 const store = new Store();
@@ -59,24 +63,75 @@ const broadcast = () => {
   for (const socket of clients) if (socket.readyState === WebSocket.OPEN) socket.send(payload);
 };
 
-const sendToControlAgent = (nodeId: string, message: HubToControlAgent) => {
+/** Whether the node's current socket is open and registered a version that may receive `message`. */
+const deliveryPermitted = (nodeId: string, message: HubToControlAgent) => {
   const socket = controlAgents.get(nodeId);
   if (!socket || socket.readyState !== WebSocket.OPEN) return false;
   const version = controlAgentVersions.get(socket);
-  if (!version || !canSendToControlAgent(message, version)) return false;
+  return Boolean(version && canSendToControlAgent(message, version));
+};
+
+const sendToControlAgent = (nodeId: string, message: HubToControlAgent) => {
+  if (!deliveryPermitted(nodeId, message)) return false;
   try {
-    socket.send(JSON.stringify(message));
+    controlAgents.get(nodeId)!.send(JSON.stringify(message));
     return true;
   } catch {
     return false;
   }
 };
 
-const dispatchRun = (run: Run, agent: Agent) => {
-  const directory = store.snapshot().agents.filter((item) => item.id !== agent.id).map((item) => `${item.id} (${item.title})`).join(", ");
-  const dispatchAgent = { ...agent, systemPrompt: `${agent.systemPrompt}\n\nAvailable teammates: ${directory || "none"}` };
-  return sendToControlAgent(run.nodeId, { type: "dispatch", run, agent: dispatchAgent });
+/**
+ * Sends a queued run whose delivery decision is already persisted. When the send is refused the
+ * decision is withdrawn, so the run is never left marked dispatched; the reconnect barrier
+ * redelivers it either way, and no second attempt is created.
+ */
+const deliverRun = async (runId: string) => {
+  const message = store.read((state) => {
+    const run = state.runs.find((item) => item.id === runId && item.status === "queued" && item.dispatchedAt !== undefined);
+    const agent = run && state.agents.find((item) => item.id === run.agentId);
+    return run && agent ? structuredClone(dispatchMessageFor(run, agent, state.agents)) : undefined;
+  });
+  if (!message || sendToControlAgent(message.run.nodeId, message)) return;
+  await store.transact((state) => {
+    const run = state.runs.find((item) => item.id === runId);
+    if (!run || run.status !== "queued" || run.dispatchedAt !== message.run.dispatchedAt) return false;
+    delete run.dispatchedAt;
+    const agent = state.agents.find((item) => item.id === run.agentId);
+    if (agent?.state === "thinking") {
+      agent.state = "waiting";
+      agent.currentAction = "Waiting for compute";
+      agent.updatedAt = new Date().toISOString();
+    }
+  });
 };
+
+const schedulingContext: SchedulingContext = {
+  connection: (nodeId) => {
+    const socket = controlAgents.get(nodeId);
+    const version = socket && socket.readyState === WebSocket.OPEN ? controlAgentVersions.get(socket) : undefined;
+    return socket && version ? { protocolVersion: version, synced: syncedControlAgents.has(socket) } : undefined;
+  },
+  capabilityReport: getNodeCapabilityReport,
+  projectProfile: (projectId) => projectProfiles.get(projectId),
+  canDeliver: deliveryPermitted
+};
+
+/**
+ * Re-evaluates every ready task. Triggered by registration, reconnect barriers, capability
+ * reports, heartbeats that change capacity, run lifecycle changes, and operator changes; bursts
+ * collapse into one pass and passes never overlap.
+ */
+const scheduleReadyTasks = coalesceAsync(async () => {
+  let result: SchedulingPassResult = { changed: false, attempts: [] };
+  await store.transact((state) => {
+    result = runSchedulingPass(state, schedulingContext, new Date().toISOString());
+    return result.changed;
+  });
+  for (const attempt of result.attempts) if (attempt.delivered) await deliverRun(attempt.runId);
+  if (result.changed) broadcast();
+}, (error) => console.error("task scheduling failed", error));
+const requestScheduling = () => { void scheduleReadyTasks(); };
 
 async function queueRun(agent: Agent, prompt: string, options: { threadId: string; parentRunId?: string; depth?: number }) {
   const run: Run = {
@@ -84,22 +139,22 @@ async function queueRun(agent: Agent, prompt: string, options: { threadId: strin
     model: agent.model, workspace: agent.workspace, prompt, status: "queued", output: "",
     depth: options.depth ?? 0, parentRunId: options.parentRunId, createdAt: new Date().toISOString()
   };
-  const controlAgent = controlAgents.get(agent.computeNodeId);
-  const dispatched = Boolean(controlAgent && controlAgent.readyState === WebSocket.OPEN);
-  if (dispatched) run.dispatchedAt = new Date().toISOString();
+  let dispatched = false;
   await store.transact((state) => {
     const thread = state.threads?.find((item) => item.id === options.threadId);
     if (!thread) throw new CoordinationError("not_found", "Thread not found");
     if (thread.status !== "active") throw new CoordinationError("thread_inactive", "New work requires an active thread");
-    state.runs.unshift(run);
     agent = state.agents.find((item) => item.id === agent.id)!;
+    dispatched = deliveryPermitted(run.nodeId, dispatchMessageFor(run, agent, state.agents));
+    if (dispatched) run.dispatchedAt = new Date().toISOString();
+    state.runs.unshift(run);
     agent.state = dispatched ? "thinking" : "waiting";
     agent.currentAction = dispatched ? "Starting work" : "Waiting for compute";
     agent.updatedAt = new Date().toISOString();
     thread.updatedAt = run.createdAt;
     state.events.unshift(newEvent({ type: "run", title: `${agent.name} ${dispatched ? "received" : "queued"} a run`, detail: dispatched ? `Sent to ${agent.computeNodeId}` : `${agent.computeNodeId} is offline`, threadId: thread.id, agentId: agent.id, runId: run.id }));
   });
-  if (dispatched) dispatchRun(run, agent);
+  if (dispatched) await deliverRun(run.id);
   broadcast();
   return run;
 }
@@ -119,6 +174,7 @@ app.post("/api/agents", async (req, res) => {
   });
   if (!result?.ok) return res.status(400).json({ error: result?.error ?? "Invalid agent configuration" });
   broadcast();
+  requestScheduling();
   res.status(201).json(result.agent);
 });
 
@@ -191,7 +247,10 @@ app.patch("/api/agents/:id", async (req, res) => {
     if (!result.ok || !result.changed) return false;
   });
   if (!result?.ok) return res.status(result?.kind === "not-found" ? 404 : 400).json({ error: result?.error ?? "Invalid agent configuration" });
-  if (result.changed) broadcast();
+  if (result.changed) {
+    broadcast();
+    requestScheduling();
+  }
   res.json(result.agent);
 });
 
@@ -199,7 +258,10 @@ app.post("/api/runs/:id/cancel", async (req, res) => {
   const result = await cancelPersistedRun(store, req.params.id, sendToControlAgent);
   if (result.kind === "not-found") return res.status(404).json({ error: "Run not found" });
   if (result.kind === "conflict") return res.status(409).json({ error: `A ${result.run?.status} run cannot be cancelled` });
-  if (result.kind === "cancelled") broadcast();
+  if (result.kind === "cancelled") {
+    broadcast();
+    requestScheduling();
+  }
   res.json(result.run);
 });
 
@@ -295,21 +357,23 @@ wss.on("connection", (socket, request) => {
   const dispatchQueuedRuns = async (activeRunIds: readonly string[] = []) => {
     const queued = queuedRunsForNode(store.snapshot(), nodeId, activeRunIds, protocolVersion);
     for (const run of queued) {
-      let pendingRun: Run | undefined;
+      let permitted = false;
       await store.transact((state) => {
         const target = state.runs.find((item) => item.id === run.id && item.status === "queued");
         if (!target) return false;
-        target.dispatchedAt = new Date().toISOString();
-        const targetAgent = state.agents.find((item) => item.id === target.agentId);
-        if (targetAgent) {
-          targetAgent.state = "thinking";
-          targetAgent.currentAction = "Starting work";
-          targetAgent.updatedAt = target.dispatchedAt;
+        if (target.taskId !== undefined) {
+          const task = state.tasks?.find((item) => item.id === target.taskId);
+          if (!task || task.assignment?.runId !== target.id || isTerminalTaskStatus(task.status)) return false;
         }
-        pendingRun = target;
+        const targetAgent = state.agents.find((item) => item.id === target.agentId);
+        if (!targetAgent || !deliveryPermitted(target.nodeId, dispatchMessageFor(target, targetAgent, state.agents))) return false;
+        target.dispatchedAt = new Date().toISOString();
+        targetAgent.state = "thinking";
+        targetAgent.currentAction = "Starting work";
+        targetAgent.updatedAt = target.dispatchedAt;
+        permitted = true;
       });
-      const agent = pendingRun && store.getAgent(pendingRun.agentId);
-      if (agent && pendingRun) dispatchRun(pendingRun, agent);
+      if (permitted) await deliverRun(run.id);
     }
   };
   const respondToRpc = (requestId: string, runId: string, result?: unknown, error?: { code: string; message: string; retryable: boolean }) => {
@@ -335,6 +399,8 @@ wss.on("connection", (socket, request) => {
       protocolVersion = message.protocolVersion ?? "1";
       controlAgentVersions.set(socket, protocolVersion);
       controlAgents.set(nodeId, socket);
+      syncedControlAgents.delete(socket);
+      forgetNodeCapabilityReport(nodeId);
       await store.transact((state) => {
         const index = state.nodes.findIndex((node) => node.id === nodeId);
         const online: ComputeNode = { ...message.node, status: "online", lastSeen: new Date().toISOString() };
@@ -342,14 +408,29 @@ wss.on("connection", (socket, request) => {
         state.events.unshift(newEvent({ type: "node", title: `${online.name} connected`, detail: `${online.platform} · ${online.harnesses.filter((h) => h.available).map((h) => h.label).join(" + ")}` }));
       });
       broadcast();
+      requestScheduling();
     } else if (message.type === "sync.complete") {
       if (!supportsControlCapability(protocolVersion, "replay-barrier") || !nodeId || message.nodeId !== nodeId || typeof message.at !== "string" || (message.activeRunIds !== undefined && (!Array.isArray(message.activeRunIds) || !message.activeRunIds.every((id) => typeof id === "string")))) return;
-      await dispatchQueuedRuns(message.activeRunIds ?? []);
-      if (supportsControlCapability(protocolVersion, "orchestration") && message.activeRunIds !== undefined
-        && await reconcileApprovals(store, nodeId, message.activeRunIds, sendToControlAgent)) broadcast();
+      if (controlAgents.get(nodeId) !== socket) return;
+      const activeRunIds = message.activeRunIds;
+      if (supportsControlCapability(protocolVersion, "orchestration") && activeRunIds !== undefined) {
+        let lostAttempts = 0;
+        await store.transact((state) => {
+          lostAttempts = failLostTaskAttempts(state, nodeId, activeRunIds, new Date().toISOString()).length;
+          return lostAttempts > 0;
+        });
+        if (lostAttempts > 0) broadcast();
+      }
+      await dispatchQueuedRuns(activeRunIds ?? []);
+      if (supportsControlCapability(protocolVersion, "orchestration") && activeRunIds !== undefined
+        && await reconcileApprovals(store, nodeId, activeRunIds, sendToControlAgent)) broadcast();
+      syncedControlAgents.add(socket);
+      requestScheduling();
     } else if (message.type === "heartbeat") {
-      await store.transact((state) => { const node = state.nodes.find((item) => item.id === message.nodeId); if (node) { node.lastSeen = message.at; node.activeRuns = message.activeRuns; node.status = message.activeRuns ? "busy" : "online"; } });
+      let capacityChanged = false;
+      await store.transact((state) => { const node = state.nodes.find((item) => item.id === message.nodeId); if (node) { capacityChanged = node.activeRuns !== message.activeRuns; node.lastSeen = message.at; node.activeRuns = message.activeRuns; node.status = message.activeRuns ? "busy" : "online"; } });
       broadcast();
+      if (capacityChanged) requestScheduling();
     } else if (message.type === "hub.rpc.request") {
       if (!supportsControlCapability(protocolVersion, "hub-rpc") || !nodeId || typeof message.requestId !== "string" || typeof message.runId !== "string") return;
       const source = store.getRun(message.runId);
@@ -362,7 +443,7 @@ wss.on("connection", (socket, request) => {
           respondToRpc(message.requestId, message.runId, taskContext(store.snapshot(), message.runId, message.arguments));
         } else if (message.operation === "delegate_task") {
           const delegated = await delegateTask(store, message.runId, message.arguments, (id) => liveControlAgents.has(id));
-          if (delegated.created && delegated.dispatched) dispatchRun(delegated.run, delegated.agent);
+          if (delegated.created && delegated.dispatched) await deliverRun(delegated.run.id);
           respondToRpc(message.requestId, message.runId, {
             taskId: delegated.run.id,
             status: delegated.run.status,
@@ -402,10 +483,11 @@ wss.on("connection", (socket, request) => {
       }
       // Session bindings and workspace leases are not persisted yet, so they never change hub state.
     } else if (message.type === "capability.report") {
-      if (!supportsControlCapability(protocolVersion, "orchestration") || !nodeId) return;
+      if (!supportsControlCapability(protocolVersion, "orchestration") || !nodeId || controlAgents.get(nodeId) !== socket) return;
       const validated = validateNodeCapabilityReport(message.report);
       if (!validated.ok || validated.value.nodeId !== nodeId) return;
       recordNodeCapabilityReport(validated.value);
+      requestScheduling();
       return;
     } else if (message.type.startsWith("run.")) {
       const runId = message.runId;
@@ -434,6 +516,7 @@ wss.on("connection", (socket, request) => {
         }
       }
       broadcast();
+      if (message.type !== "run.output") requestScheduling();
     }
   }, (error) => console.error("control-agent message failed", error));
   socket.on("message", (raw) => { void handleMessage(raw); });
@@ -443,6 +526,7 @@ wss.on("connection", (socket, request) => {
     controlAgents.delete(nodeId);
     await store.transact((state) => { const node = state.nodes.find((item) => item.id === nodeId); if (node) { node.status = "offline"; node.activeRuns = 0; } });
     broadcast();
+    requestScheduling();
   });
 });
 
@@ -461,6 +545,8 @@ if (projectProfilesResult.ok) console.log(`loaded ${projectProfilesResult.profil
 
 await store.load();
 await store.transact((state) => markDisconnectedNodesOffline(state, liveControlAgents) || false);
+requestScheduling();
+setInterval(requestScheduling, 30_000).unref();
 setInterval(() => {
   void expireDueApprovals(store, sendToControlAgent)
     .then((changed) => { if (changed) broadcast(); })

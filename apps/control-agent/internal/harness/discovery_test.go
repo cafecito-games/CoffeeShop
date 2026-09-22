@@ -26,3 +26,13 @@ func TestDiscoverReportsInstalledHarnesses(t *testing.T) {
 		require.Truef(t, Available(profiles, id), "expected %s to be available: %#v", id, profiles)
 	}
 }
+
+// The transports list is a static property of this Barista build, not of the machine, so the
+// assertion must hold for every profile Discover returns regardless of which binaries exist.
+func TestDiscoverReportsNativeCLIAsTheOnlyTransport(t *testing.T) {
+	profiles := Discover(context.Background())
+	require.NotEmpty(t, profiles)
+	for _, profile := range profiles {
+		require.Equal(t, []string{"native-cli"}, profile.Transports)
+	}
+}

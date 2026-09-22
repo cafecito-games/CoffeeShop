@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import type { Agent, ComputeNode, HubToControlAgent, Run } from "@coffee-shop/protocol";
-import { applyRunLifecycle, cancelPersistedRun, cancelRunInState, queuedRunsForNode, retryAsync, serializeAsync } from "./lifecycle.js";
+import { applyRunLifecycle, cancelPersistedRun, cancelRunInState, coalesceAsync, queuedRunsForNode, retryAsync, serializeAsync } from "./lifecycle.js";
 import { type State, Store } from "./store.js";
 
 const at = "2026-09-11T12:00:00.000Z";
@@ -245,4 +245,46 @@ test("reconnect reconciliation does not redispatch runs Barista reports active",
   assert.deepEqual(queuedRunsForNode(snapshot, "node-one", ["run-one"], "3").map((item) => item.id), ["run-two"]);
   assert.deepEqual(queuedRunsForNode(snapshot, "node-one", ["run-one"], "4").map((item) => item.id), ["run-two"]);
   assert.deepEqual(queuedRunsForNode(snapshot, "node-one", [], "1"), [], "v1 has no safe replay barrier and must fail closed");
+});
+
+test("a request while a coalesced run is in progress schedules exactly one more run", async () => {
+  let concurrent = 0;
+  let maximumConcurrent = 0;
+  let completedRuns = 0;
+  let releaseFirstRun: (() => void) | undefined;
+  const firstRunGate = new Promise<void>((resolve) => { releaseFirstRun = resolve; });
+  const errors: unknown[] = [];
+  const request = coalesceAsync(async () => {
+    concurrent += 1;
+    maximumConcurrent = Math.max(maximumConcurrent, concurrent);
+    if (completedRuns === 0) await firstRunGate;
+    concurrent -= 1;
+    completedRuns += 1;
+  }, (error) => errors.push(error));
+
+  const first = request();
+  const second = request();
+  const third = request();
+  releaseFirstRun?.();
+  await Promise.all([first, second, third]);
+  assert.equal(completedRuns, 2, "three requests during one run collapse into one follow-up run");
+  assert.equal(maximumConcurrent, 1, "coalesced runs must never overlap");
+  assert.deepEqual(errors, []);
+});
+
+test("a coalesced run error reaches onError and a later request runs again", async () => {
+  const errors: string[] = [];
+  let runs = 0;
+  const request = coalesceAsync(async () => {
+    runs += 1;
+    if (runs === 1) throw new Error("coalesced failure");
+  }, (error) => errors.push((error as Error).message));
+
+  await request();
+  assert.equal(runs, 1);
+  assert.deepEqual(errors, ["coalesced failure"]);
+
+  await request();
+  assert.equal(runs, 2);
+  assert.deepEqual(errors, ["coalesced failure"]);
 });
