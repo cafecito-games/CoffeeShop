@@ -158,7 +158,7 @@ The ACP driver starts one adapter process and one session per run, in its own pr
 - `session/request_permission` resolved through a supplied callback. Absent, failed, timed-out, or invalid decisions never allow: Barista answers with the adapter's `reject_once` option when offered and `cancelled` otherwise. Malformed option lists are cancelled;
 - cancellation sends `session/cancel`, waits a bounded grace period for the prompt to end, and then kills the process tree with the same platform helpers as the native driver. `session/close` is sent after a successful turn when advertised.
 
-Adapter stderr is retained only as a bounded, redacted tail attached to failures. Tests exercise the client against a deterministic fake adapter (`internal/acp/acptest`) that the test binary re-executes over real pipes; its `codex-*` scenarios reproduce codex-acp's configuration options and agent identity and connect to the real MCP bridge.
+Adapter stderr is retained only as a bounded, redacted tail attached to failures. Tests exercise the client against a deterministic fake adapter (`internal/acp/acptest`) that the test binary re-executes over real pipes; its `codex-*` and `claude-*` scenarios reproduce codex-acp's and claude-agent-acp's configuration options and agent identity and connect to the real MCP bridge.
 
 ### ACP adapters
 
@@ -197,6 +197,20 @@ Barista's compiled-in Codex policy, not the manifest, controls how a run maps on
 - the adapter is given the discovered native Codex CLI as `CODEX_PATH`, so it never resolves Codex through `PATH`.
 
 Codex keeps its own authentication: ChatGPT login state in Codex's storage or an API key the operator already exports to Barista's environment. Barista never sets, reads, or forwards a provider credential, and the hub never receives one. An adapter that reports that authentication is required fails the run with that reason; sign in to Codex on the compute node and retry.
+
+### Claude over ACP
+
+The manifest pins `claude-acp` (`@agentclientprotocol/claude-agent-acp`) 0.79.0, the official ACP agent built on the Claude Agent SDK. Like codex-acp, it publishes no standalone signed release artifact, so package its `claude-agent-acp` CLI entry point and install it with `barista setup apply --manual-artifact claude-acp=<file> --manual-checksum claude-acp=<digest>`, or pin one with `--acp-adapter`. `barista doctor` reports whether the adapter is installed and ready.
+
+Barista's compiled-in Claude policy, not the manifest, controls how a run maps onto the adapter, and it never widens the native CLI's safety posture:
+
+- the canonical workspace is the session `cwd`, and the run's composed prompt is sent as one text block;
+- the session `mode` is set to `default`, claude-agent-acp's wire ID for its "Manual" permission preset: every tool call is sent to Barista as an ACP permission request rather than auto-approved. This is the same fail-closed posture as the native CLI's `--permission-mode auto` with unanswered prompts denied. Barista never selects `acceptEdits`, `auto`, or `bypassPermissions` — each would let the adapter approve a tool call, or an entire session, without a Coffee Shop decision. The mode is confirmed through session configuration before the prompt is sent, so neither the adapter's own default nor an inherited operator environment can weaken it;
+- the `default` model keeps Claude's own configured model, exactly like the native CLI without `--model`; any other model must be offered and applied by the adapter or the run fails;
+- the Coffee Shop MCP server is offered as an HTTP server with the run-scoped bearer header on stdin, and the prompt waits until the adapter has listed its tools. Unlike the native CLI, Coffee Shop tool calls are not pre-approved; Claude may ask for approval, which goes through the hub;
+- the adapter is given the discovered native `claude` CLI as `CLAUDE_CODE_EXECUTABLE`, so it never resolves Claude through `PATH`.
+
+Claude keeps its own authentication: the CLI's locally owned subscription login (or, for an operator who has instead configured API billing outside Coffee Shop, whatever credential that CLI install already resolves on its own). Barista never sets, reads, exports, or forwards a provider credential for either transport, never copies OAuth or session state between accounts or nodes, and never switches a subscription-authenticated node onto API billing to make ACP work — an adapter that reports authentication is required fails the run with that reason instead of falling back, so a fallback can never silently run under a different credential or billing mode than the one the operator configured for that node. Sign in to Claude on the compute node and retry. See `docs/anthropic-usage.md` for the subscription usage boundary this preserves, and re-check current Anthropic terms before broadening deployment.
 
 ## Credentials and enrollment
 

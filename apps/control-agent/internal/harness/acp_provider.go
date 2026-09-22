@@ -30,6 +30,7 @@ type ACPProvider struct {
 // A harness without an entry is never driven over ACP, whatever adapter is installed for it.
 func DefaultACPProviders() map[string]ACPProvider {
 	return map[string]ACPProvider{
-		"codex-cli": codexACPProvider(),
+		"claude-cli": claudeACPProvider(),
+		"codex-cli":  codexACPProvider(),
 	}
 }

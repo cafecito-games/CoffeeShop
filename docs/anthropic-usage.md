@@ -12,6 +12,16 @@ Anthropic documents all of the pieces Coffee Shop uses:
 
 Coffee Shop therefore starts the installed, official CLI as a child process on the subscriber's own compute machine. It does not imitate Anthropic's private network calls, extract OAuth credentials, use a Claude subscription token against the API, or set an API key.
 
+## The ACP adapter is an alternate transport for the same local CLI, not a new account
+
+Barista can also drive Claude through `claude-agent-acp`, the official Agent Client Protocol adapter built on the Claude Agent SDK (see `docs/control-agent.md#claude-over-acp`). This is a transport change only:
+
+- **Authentication never moves.** The adapter authenticates through the same locally owned CLI credential storage the native path already uses (or, if an operator has independently configured that node for API billing outside Coffee Shop, whatever credential that install already resolves). Barista never sets, reads, exports, or forwards a credential to or from the adapter, never copies OAuth or session state, and never provisions or accepts a credential through the hub or PWA on the operator's behalf.
+- **Billing mode is never inferred or switched.** Barista does not attempt to determine, from process success or output, whether a node is on a subscription or API billing, and never changes that classification to make an adapter run. An adapter that reports authentication is required fails the run with that reason; Barista does not fall back to a possibly-differently-authenticated native run to paper over it, so a fallback can never quietly cross a billing boundary.
+- **Permissions do not loosen.** The adapter session is forced into its `default` ("Manual") permission preset before every prompt — the same fail-closed behavior as the native CLI's `--permission-mode auto` with unanswered prompts denied — and every tool call is routed to Coffee Shop as an approval. `acceptEdits`, `auto`, and `bypassPermissions` are never selected.
+- **Native remains the default and the recommended path.** ACP is opt-in per node/adapter installation (see `barista setup`), reported and advertised separately from the native transport, and native execution is unaffected and unremoved when ACP is unavailable, unauthenticated, or not installed.
+- **Adapter provenance is not a subscription-equivalence proof.** A verified, correctly-versioned adapter proves Barista is driving the intended local software, not that Anthropic's terms treat ACP-mediated automation identically to interactive CLI use. Treat ACP as the same conservative single-account, own-compute-node use case described below, re-verify against current Anthropic documentation before relying on it, and prefer the native CLI path when in doubt.
+
 ## The important limitation
 
 Anthropic's Consumer Terms prohibit automated/non-human access except through an API key **or where Anthropic otherwise explicitly permits it**. The official Claude Code CLI documentation explicitly documents scripting and programmatic print mode, which is the permission this project relies on. The same terms also prohibit credential/account sharing, resale/competitive services, scraping, and bypassing protective measures.
