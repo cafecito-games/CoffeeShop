@@ -3,7 +3,7 @@ import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { newEvent, Store } from "./store.js";
+import { assertPersistedHarnessState, newEvent, Store, type State } from "./store.js";
 
 test("starts empty, persists state atomically, and loads it again", async () => {
   const directory = await mkdtemp(join(tmpdir(), "coffee-shop-store-"));
@@ -206,4 +206,72 @@ test("rejects uninterpretable persisted task state without rewriting the file", 
     await assert.rejects(store.load(), Error, `case ${index}: ${item.label}`);
     assert.equal(await readFile(path, "utf8"), contents, item.label);
   }
+});
+
+test("assertPersistedHarnessState rejects uninterpretable approvals and event streams", () => {
+  const persistedAt = "2026-01-01T00:00:00.000Z";
+  const validApproval = {
+    id: "approval-one", harnessApprovalId: "acp-approval-1", threadId: "thread-one", runId: "run-one",
+    nodeId: "node-one", title: "Run tests", options: [], status: "pending", requestedAt: persistedAt
+  };
+  const validStream = {
+    runId: "run-one", nodeId: "node-one", status: "open", lastSequence: 0, recentDigests: [],
+    retainedEvents: 0, retainedBytes: 0, retentionTruncated: false, createdAt: persistedAt, updatedAt: persistedAt
+  };
+  const base = { agents: [], nodes: [], runs: [], events: [], messages: [] };
+  const withState = (overrides: Record<string, unknown>): State => ({ ...base, ...overrides }) as State;
+  const cases: Array<{ label: string; state: State }> = [
+    { label: "unknown approval status", state: withState({ approvals: [{ ...validApproval, status: "queued" }] }) },
+    { label: "unknown approval delivery status", state: withState({ approvals: [{ ...validApproval, delivery: { status: "mailed", attempts: 0, updatedAt: persistedAt } }] }) },
+    { label: "approval missing harnessApprovalId", state: withState({ approvals: [{ ...validApproval, harnessApprovalId: "" }] }) },
+    { label: "unknown stream status", state: withState({ approvals: [], harnessEventStreams: [{ ...validStream, status: "paused" }] }) }
+  ];
+  for (const item of cases) {
+    assert.throws(() => assertPersistedHarnessState(item.state), Error, item.label);
+  }
+  assert.doesNotThrow(() => assertPersistedHarnessState(withState({ approvals: [validApproval], harnessEventStreams: [validStream] })));
+});
+
+test("loads a legacy state file without harness collections and backfills them", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "coffee-shop-store-"));
+  const path = join(directory, "state.json");
+  await writeFile(path, JSON.stringify({ agents: [], nodes: [], runs: [], events: [], messages: [] }));
+
+  const store = new Store(path);
+  await store.load();
+  const persisted = JSON.parse(await readFile(path, "utf8"));
+  for (const collection of ["runActivity", "harnessEventStreams", "harnessEvents"] as const) {
+    assert.deepEqual(persisted[collection], [], `${collection} is backfilled on disk`);
+  }
+  store.read((state) => {
+    assert.deepEqual(state.runActivity, []);
+    assert.deepEqual(state.harnessEventStreams, []);
+    assert.deepEqual(state.harnessEvents, []);
+  });
+});
+
+test("snapshots publish run activity but never retained harness events", async () => {
+  const harnessAt = "2026-09-21T12:00:00.000Z";
+  const directory = await mkdtemp(join(tmpdir(), "coffee-shop-store-"));
+  const store = new Store(join(directory, "state.json"));
+  await store.load();
+  await store.transact((state) => {
+    state.runActivity!.push({
+      runId: "run-one", nodeId: "node-one", threadId: "thread-one", streamStatus: "open", lastSequence: 1,
+      acceptedEvents: 1, message: { text: "hello", truncatedBytes: 0 }, thought: { text: "", truncatedBytes: 0 },
+      plan: [], toolCalls: [], diffs: [], terminals: [], warnings: [], unknownEvents: 0,
+      omitted: { toolCalls: 0, diffs: 0, terminals: 0, warnings: 0 }, summary: "hello", updatedAt: harnessAt
+    });
+    state.harnessEventStreams!.push({
+      runId: "run-one", nodeId: "node-one", status: "open", lastSequence: 1, recentDigests: [],
+      retainedEvents: 1, retainedBytes: 48, retentionTruncated: false, createdAt: harnessAt, updatedAt: harnessAt
+    });
+    state.harnessEvents!.push({
+      runId: "run-one", sequence: 1, receivedAt: harnessAt, event: { type: "message.delta", runId: "run-one", sequence: 1, at: harnessAt, text: "hello" }
+    });
+  });
+  const snapshot = store.snapshot();
+  assert.deepEqual(snapshot.runActivity?.map((activity) => activity.runId), ["run-one"]);
+  assert.ok(!("harnessEventStreams" in snapshot), "snapshots never publish event streams");
+  assert.ok(!("harnessEvents" in snapshot), "snapshots never publish retained events");
 });

@@ -193,6 +193,8 @@ export interface Snapshot {
   sessionBindings?: HarnessSessionBinding[];
   approvals?: ApprovalRequest[];
   workspaceLeases?: WorkspaceLease[];
+  /** Version-4: bounded projections of accepted structured harness events, one per run. */
+  runActivity?: RunActivity[];
   generatedAt: string;
 }
 
@@ -225,7 +227,8 @@ export type ControlAgentToHub =
   | { type: "harness.event"; event: HarnessEvent }
   | { type: "session.binding"; runId: string; binding: HarnessSessionBindingUpdate; at: string }
   | { type: "workspace.lease"; runId: string; lease: WorkspaceLeaseUpdate; at: string }
-  | { type: "capability.report"; report: NodeCapabilityReport };
+  | { type: "capability.report"; report: NodeCapabilityReport }
+  | { type: "approval.undeliverable"; runId: string; approvalId: string; reason: string; at: string };
 
 /** @deprecated Use HubToControlAgent. */
 export type HubToWorker = HubToControlAgent;
@@ -288,6 +291,7 @@ export function requiredCapabilityForControlAgentMessage(message: ControlAgentTo
     case "session.binding":
     case "workspace.lease":
     case "capability.report":
+    case "approval.undeliverable":
       return "orchestration";
     case "register":
     case "heartbeat":
@@ -659,11 +663,32 @@ export interface ApprovalOption {
   kind: ApprovalOptionKind;
 }
 
+/*
+ * Decision delivery is tracked separately from the resolution: `pending` is persisted but not yet
+ * written to Barista, `sent` was written to the owning socket, `applied` was confirmed by the
+ * harness's own `permission.resolved` event, and `not-applied` means the harness never received or
+ * never honored the decision (offline past expiry, replaced session, run ended, or refused).
+ */
+export const approvalDeliveryStatuses = ["pending", "sent", "applied", "not-applied"] as const;
+export type ApprovalDeliveryStatus = typeof approvalDeliveryStatuses[number];
+export const isApprovalDeliveryStatus = isOneOf(approvalDeliveryStatuses);
+
+export interface ApprovalDelivery {
+  status: ApprovalDeliveryStatus;
+  attempts: number;
+  updatedAt: string;
+  reason?: string;
+}
+
 export interface ApprovalRequest {
+  /** Hub-generated identity used by REST clients. */
   id: string;
+  /** The run-scoped identity Barista raised in `permission.requested`; only Barista interprets it. */
+  harnessApprovalId: string;
   threadId: string;
   taskId?: string;
   runId: string;
+  nodeId: string;
   sessionBindingId?: string;
   toolCallId?: string;
   title: string;
@@ -673,16 +698,105 @@ export interface ApprovalRequest {
   requestedAt: string;
   expiresAt?: string;
   resolvedAt?: string;
-  resolvedBy?: "operator" | "policy";
+  /** `system` records a resolution caused by expiry, run termination, or the harness itself. */
+  resolvedBy?: "operator" | "policy" | "system";
   selectedOptionId?: string;
+  /** The operator idempotency key that produced the resolution; an exact replay returns it unchanged. */
+  resolutionIdempotencyKey?: string;
+  /** Absent when no decision needs to reach Barista, such as a harness-side timeout. */
+  delivery?: ApprovalDelivery;
 }
 
-/** Sent to Barista; `approved` and `rejected` carry the selected option. */
+/**
+ * Sent to Barista; `approved` and `rejected` carry the selected option. `approvalId` is the
+ * harness approval identity from `permission.requested`, never the hub's REST identity.
+ */
 export interface ApprovalDecision {
   approvalId: string;
   runId: string;
   status: Exclude<ApprovalStatus, "pending">;
   selectedOptionId?: string;
+}
+
+/*
+ * Run activity.
+ *
+ * The hub's bounded, materialized projection of one run's accepted harness events, updated in the
+ * same transaction that accepts each event. Accumulated text keeps its most recent bytes: a
+ * positive `truncatedBytes` counts the leading bytes that were dropped. A diff marked `truncated`
+ * lost trailing text or, past the run's diff budget, all of its text. `omitted` counts items not
+ * projected because a per-run count limit was reached.
+ */
+export const harnessEventStreamStatuses = ["open", "closed", "failed"] as const;
+export type HarnessEventStreamStatus = typeof harnessEventStreamStatuses[number];
+
+export interface BoundedText {
+  text: string;
+  truncatedBytes: number;
+}
+
+export interface RunActivityToolCall {
+  toolCallId: string;
+  status: ToolCallStatus;
+  kind: ToolCallKind;
+  title: string;
+  detail?: string;
+  updatedAt: string;
+}
+
+export interface RunActivityDiff {
+  toolCallId?: string;
+  path: string;
+  oldText?: string;
+  newText: string;
+  truncated: boolean;
+  sequence: number;
+  at: string;
+}
+
+export interface RunActivityTerminal {
+  terminalId: string;
+  stdout: BoundedText;
+  stderr: BoundedText;
+  updatedAt: string;
+}
+
+export interface RunActivityWarning {
+  code: string;
+  message: string;
+  sequence: number;
+  at: string;
+}
+
+export interface RunActivityUsage {
+  inputTokens?: number;
+  outputTokens?: number;
+  cachedInputTokens?: number;
+  costUsd?: number;
+  updatedAt: string;
+}
+
+export interface RunActivity {
+  runId: string;
+  threadId?: string;
+  nodeId: string;
+  streamStatus: HarnessEventStreamStatus;
+  streamFailure?: string;
+  lastSequence: number;
+  acceptedEvents: number;
+  message: BoundedText;
+  thought: BoundedText;
+  plan: PlanEntry[];
+  toolCalls: RunActivityToolCall[];
+  diffs: RunActivityDiff[];
+  terminals: RunActivityTerminal[];
+  usage?: RunActivityUsage;
+  warnings: RunActivityWarning[];
+  unknownEvents: number;
+  omitted: { toolCalls: number; diffs: number; terminals: number; warnings: number };
+  /** The most recent agent message text, bounded for list views. */
+  summary: string;
+  updatedAt: string;
 }
 
 /*
@@ -776,7 +890,10 @@ const isIdentifier = (value: unknown): value is string => isBoundedString(value,
 const isOptional = (value: unknown, check: (value: unknown) => boolean) => value === undefined || check(value);
 const isNonNegativeInteger = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 const isNonNegativeNumber = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value) && value >= 0;
-const isTimestamp = (value: unknown): value is string => isIdentifier(value) && !Number.isNaN(Date.parse(value));
+const rfc3339Timestamp = /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])T([01]\d|2[0-3]):[0-5]\d:([0-5]\d|60)(\.\d{1,9})?(Z|[+-]([01]\d|2[0-3]):[0-5]\d)$/;
+/** Strict RFC 3339 with a mandatory offset, matching Barista's Go `time.RFC3339Nano` check. */
+export const isTimestamp = (value: unknown): value is string =>
+  isIdentifier(value) && rfc3339Timestamp.test(value) && !Number.isNaN(Date.parse(value));
 const isText = (value: unknown) => isBoundedString(value, harnessEventLimits.textBytes);
 const isDiagnostic = (value: unknown) => isBoundedString(value, harnessEventLimits.diagnosticBytes);
 
@@ -851,7 +968,8 @@ export function validateHarnessEvent(value: unknown): Validation<HarnessEvent> {
 }
 
 export function validateApprovalDecision(value: unknown): Validation<ApprovalDecision> {
-  if (!isRecord(value) || !isIdentifier(value.approvalId) || !isIdentifier(value.runId)) return reject("approval decision is missing identity");
+  if (!isRecord(value) || !hasOnlyKeys(value, ["approvalId", "runId", "status", "selectedOptionId"])) return reject("approval decision must contain only declared fields");
+  if (!isIdentifier(value.approvalId) || !isIdentifier(value.runId)) return reject("approval decision is missing identity");
   if (!isApprovalStatus(value.status) || value.status === "pending") return reject("approval decision status must be terminal");
   const selects = value.status === "approved" || value.status === "rejected";
   if (selects ? !isIdentifier(value.selectedOptionId) : value.selectedOptionId !== undefined) return reject("approval decision option does not match its status");
@@ -878,10 +996,20 @@ export function validateWorkspaceLeaseUpdate(value: unknown): Validation<Workspa
  * Validates a version-4 Barista→hub message on a connection that registered `version`. Messages
  * that need a newer version than the connection negotiated are rejected, never reinterpreted.
  */
-export function validateOrchestrationControlAgentMessage(value: unknown, version: ControlProtocolVersion): Validation<Extract<ControlAgentToHub, { type: "harness.event" | "session.binding" | "workspace.lease" }>> {
+export type OrchestrationControlAgentMessage = Extract<ControlAgentToHub, { type: "harness.event" | "session.binding" | "workspace.lease" | "approval.undeliverable" }>;
+const orchestrationControlAgentMessageTypes = ["harness.event", "session.binding", "workspace.lease", "approval.undeliverable"] as const;
+export const isOrchestrationControlAgentMessageType = isOneOf(orchestrationControlAgentMessageTypes);
+
+export function validateOrchestrationControlAgentMessage(value: unknown, version: ControlProtocolVersion): Validation<OrchestrationControlAgentMessage> {
   if (!isRecord(value)) return reject("control message must be an object");
-  if (value.type !== "harness.event" && value.type !== "session.binding" && value.type !== "workspace.lease") return reject("control message type is not an orchestration message");
+  if (!isOrchestrationControlAgentMessageType(value.type)) return reject("control message type is not an orchestration message");
   if (!supportsControlCapability(version, "orchestration")) return reject(`${value.type} requires control protocol version 4`);
+  if (value.type === "approval.undeliverable") {
+    if (!hasOnlyKeys(value, ["type", "runId", "approvalId", "reason", "at"])) return reject("approval.undeliverable envelope contains undeclared fields");
+    if (!isIdentifier(value.runId) || !isIdentifier(value.approvalId) || !isTimestamp(value.at)) return reject("approval.undeliverable is missing identity or timestamp");
+    if (!isDiagnostic(value.reason)) return reject("approval.undeliverable reason exceeds its bound");
+    return accept({ type: value.type, runId: value.runId, approvalId: value.approvalId, reason: value.reason, at: value.at });
+  }
   const envelopeKeys = value.type === "harness.event" ? ["type", "event"] : ["type", "runId", value.type === "session.binding" ? "binding" : "lease", "at"];
   if (!hasOnlyKeys(value, envelopeKeys)) return reject(`${value.type} envelope contains undeclared fields`);
   if (value.type === "harness.event") {

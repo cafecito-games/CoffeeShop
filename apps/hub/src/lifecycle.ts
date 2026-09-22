@@ -8,6 +8,7 @@ import {
   type Run,
   type Snapshot
 } from "@coffee-shop/protocol";
+import { settleHarnessStateForTerminalRun } from "./harnessEvents.js";
 import { newEvent, newMessage, type State, type Store } from "./store.js";
 import { applyAttemptOutcome, cancelTaskInState, type TaskCancellationResult } from "./tasks.js";
 
@@ -100,6 +101,7 @@ export function cancelRunInState(state: State, runId: string, at: string): Cance
   const thread = run.threadId ? state.threads?.find((item) => item.id === run.threadId) : undefined;
   if (thread) thread.updatedAt = at;
   updateAgentAfterCancellation(state, run, at);
+  settleHarnessStateForTerminalRun(state, run.id, at);
   applyAttemptOutcome(state, run.id, at);
   return { kind: "cancelled", run };
 }
@@ -209,6 +211,7 @@ export function applyRunLifecycle(state: State, message: RunLifecycleMessage) {
   }
   agent.updatedAt = message.at;
   if (thread) thread.updatedAt = message.at;
+  if (message.type === "run.completed" || message.type === "run.failed") settleHarnessStateForTerminalRun(state, run.id, message.at);
   if (message.type !== "run.output") applyAttemptOutcome(state, run.id, message.at);
   return true;
 }

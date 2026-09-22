@@ -6,10 +6,10 @@ import (
 	"slices"
 	"strconv"
 	"time"
+	"unicode/utf8"
 )
 
-// LatestVersion mirrors the TypeScript source of truth. Version remains "3" because Barista
-// registers the highest version whose fields it actually consumes.
+// LatestVersion mirrors the TypeScript source of truth.
 const LatestVersion = "4"
 
 // SupportedVersions lists every control protocol version accepted during rolling upgrades.
@@ -185,7 +185,7 @@ func isIdentifier(value string) bool {
 	return value != "" && len(value) <= identifierBytes
 }
 
-// isTimestamp requires the RFC 3339 form Barista emits, which the hub's Date.parse also accepts.
+// isTimestamp requires the RFC 3339 form Barista emits, which the hub's strict isTimestamp also accepts.
 func isTimestamp(value string) bool {
 	_, err := time.Parse(time.RFC3339Nano, value)
 	return isIdentifier(value) && err == nil
@@ -388,4 +388,50 @@ func (event HarnessEvent) MarshalJSON() ([]byte, error) {
 		}
 	}
 	return json.Marshal(encoded)
+}
+
+// HarnessEventMessage is the exact harness.event envelope. It is sent instead of Outbound because
+// the hub rejects orchestration envelopes that carry undeclared fields such as activeRuns.
+type HarnessEventMessage struct {
+	Type  string       `json:"type"`
+	Event HarnessEvent `json:"event"`
+}
+
+func NewHarnessEventMessage(event HarnessEvent) HarnessEventMessage {
+	return HarnessEventMessage{Type: "harness.event", Event: event}
+}
+
+// ApprovalUndeliverableMessage reports that an approval decision reached Barista but could not be
+// applied, because no live permission request matched it or it conflicted with one.
+type ApprovalUndeliverableMessage struct {
+	Type       string `json:"type"`
+	RunID      string `json:"runId"`
+	ApprovalID string `json:"approvalId"`
+	Reason     string `json:"reason"`
+	At         string `json:"at"`
+}
+
+func NewApprovalUndeliverableMessage(runID, approvalID, reason, at string) ApprovalUndeliverableMessage {
+	return ApprovalUndeliverableMessage{Type: "approval.undeliverable", RunID: runID, ApprovalID: approvalID, Reason: truncateDiagnostic(reason), At: at}
+}
+
+func (message ApprovalUndeliverableMessage) Validate() error {
+	if !isIdentifier(message.RunID) || !isIdentifier(message.ApprovalID) || !isTimestamp(message.At) {
+		return fmt.Errorf("approval.undeliverable is missing identity or timestamp")
+	}
+	if !isBounded(message.Reason, diagnosticBytes) {
+		return fmt.Errorf("approval.undeliverable reason exceeds its bound")
+	}
+	return nil
+}
+
+func truncateDiagnostic(value string) string {
+	if len(value) <= diagnosticBytes {
+		return value
+	}
+	cut := diagnosticBytes
+	for cut > 0 && !utf8.RuneStart(value[cut]) {
+		cut--
+	}
+	return value[:cut]
 }

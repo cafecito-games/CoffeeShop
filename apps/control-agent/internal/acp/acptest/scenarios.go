@@ -93,8 +93,7 @@ var Scenarios = map[string][]Step{
 		Frame(`{"jsonrpc":"2.0","id":"permission-1","method":"session/request_permission","params":{"sessionId":"{{session}}","toolCall":{"toolCallId":"call-1","title":"Write file"},"options":[{"optionId":"allow","name":"Allow","kind":"allow_once"},{"optionId":"reject","name":"Reject","kind":"reject_once"}]}}`),
 		Update(`{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"while waiting"}}`),
 		Frame(`{"jsonrpc":"2.0","id":99,"method":"fs/read_text_file","params":{"sessionId":"{{session}}","path":"/etc/passwd"}}`),
-		ExpectResponse(`99`, "read"),
-		ExpectResponse(`"permission-1"`, "permission"),
+		ExpectResponses(map[string]string{`99`: "read", `"permission-1"`: "permission"}),
 	}, Finish()),
 
 	"cancel-cooperative": join(Prompted(), []Step{

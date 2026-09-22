@@ -11,6 +11,7 @@ import {
   isControlProtocolVersion,
   supportsControlCapability,
   validateNodeCapabilityReport,
+  validateOrchestrationControlAgentMessage,
   type Agent,
   type ComputeNode,
   type ControlAgentToHub,
@@ -23,6 +24,9 @@ import { applyRunLifecycle, cancelPersistedRun, queuedRunsForNode, retryAsync, s
 import { CoordinationError, createArtifact, delegateTask, taskContext } from "./coordination.js";
 import { recordNodeCapabilityReport } from "./nodeCapabilities.js";
 import { loadProjectProfilesFromFile, ProjectProfileRegistry } from "./projectProfiles.js";
+import { retainedHarnessEvents } from "./harnessEvents.js";
+import { expireDueApprovals, receiveApprovalUndeliverable, receiveHarnessEvent, reconcileApprovals, resolveApproval } from "./harnessGateway.js";
+import { createRedactor } from "./redaction.js";
 import { newEvent, newId, newMessage, Store } from "./store.js";
 import { newThread, updateThreadByOperator, updateThreadForRun } from "./threads.js";
 
@@ -35,6 +39,7 @@ const clients = new Set<WebSocket>();
 const store = new Store();
 const token = process.env.COFFEE_SHOP_TOKEN;
 const port = Number(process.env.PORT ?? 8787);
+const redactor = createRedactor([token]);
 
 if (process.env.NODE_ENV === "production" && !token) {
   throw new Error("COFFEE_SHOP_TOKEN is required in production");
@@ -198,6 +203,35 @@ app.post("/api/runs/:id/cancel", async (req, res) => {
   res.json(result.run);
 });
 
+app.get("/api/approvals", (req, res) => {
+  const status = typeof req.query.status === "string" ? req.query.status : undefined;
+  const runId = typeof req.query.runId === "string" ? req.query.runId : undefined;
+  const threadId = typeof req.query.threadId === "string" ? req.query.threadId : undefined;
+  const approvals = (store.snapshot().approvals ?? []).filter((approval) =>
+    (!status || approval.status === status) && (!runId || approval.runId === runId) && (!threadId || approval.threadId === threadId));
+  res.json({ approvals });
+});
+
+app.get("/api/approvals/:id", (req, res) => {
+  const approval = store.snapshot().approvals?.find((item) => item.id === req.params.id);
+  if (!approval) return res.status(404).json({ error: "Approval not found" });
+  res.json({ approval });
+});
+
+app.post("/api/approvals/:id/resolution", async (req, res) => {
+  const response = await resolveApproval(store, req.params.id, req.body, sendToControlAgent);
+  if (response.changed) broadcast();
+  res.status(response.status).json(response.body);
+});
+
+app.get("/api/runs/:id/events", (req, res) => {
+  if (!store.getRun(req.params.id)) return res.status(404).json({ error: "Run not found" });
+  const after = Number(req.query.after ?? 0);
+  if (!Number.isSafeInteger(after) || after < 0) return res.status(400).json({ error: "after must be a non-negative integer" });
+  const events = store.read((state) => structuredClone(retainedHarnessEvents(state, req.params.id, after)));
+  res.json({ events: events.map((record) => record.event), activity: store.snapshot().runActivity?.find((item) => item.runId === req.params.id) });
+});
+
 app.put("/api/artifacts/:id/content", express.raw({ type: "application/octet-stream", limit: "10mb" }), async (req, res) => {
   const artifact = store.snapshot().artifacts?.find((item) => item.id === req.params.id);
   if (!artifact) return res.status(404).json({ error: "Artifact not found" });
@@ -306,6 +340,8 @@ wss.on("connection", (socket, request) => {
     } else if (message.type === "sync.complete") {
       if (!supportsControlCapability(protocolVersion, "replay-barrier") || !nodeId || message.nodeId !== nodeId || typeof message.at !== "string" || (message.activeRunIds !== undefined && (!Array.isArray(message.activeRunIds) || !message.activeRunIds.every((id) => typeof id === "string")))) return;
       await dispatchQueuedRuns(message.activeRunIds ?? []);
+      if (supportsControlCapability(protocolVersion, "orchestration") && message.activeRunIds !== undefined
+        && await reconcileApprovals(store, nodeId, message.activeRunIds, sendToControlAgent)) broadcast();
     } else if (message.type === "heartbeat") {
       await store.transact((state) => { const node = state.nodes.find((item) => item.id === message.nodeId); if (node) { node.lastSeen = message.at; node.activeRuns = message.activeRuns; node.status = message.activeRuns ? "busy" : "online"; } });
       broadcast();
@@ -344,9 +380,22 @@ wss.on("connection", (socket, request) => {
         const failure = error instanceof CoordinationError ? error : new CoordinationError("internal_error", "The hub could not complete the tool call", true);
         respondToRpc(message.requestId, message.runId, undefined, { code: failure.code, message: failure.message, retryable: failure.retryable });
       }
-    } else if (message.type === "harness.event" || message.type === "session.binding" || message.type === "workspace.lease") {
-      // Orchestration state is not persisted yet, so these messages never change hub state.
-      return;
+    } else if (message.type === "harness.event" || message.type === "session.binding" || message.type === "workspace.lease" || message.type === "approval.undeliverable") {
+      const validated = validateOrchestrationControlAgentMessage(decoded, protocolVersion);
+      if (!validated.ok) {
+        console.warn(`rejected ${message.type} from ${nodeId || "an unregistered Barista"}: ${validated.reason}`);
+        return;
+      }
+      if (!nodeId || controlAgents.get(nodeId) !== socket) return;
+      const orchestration = validated.value;
+      if (orchestration.type === "harness.event") {
+        const outcome = await receiveHarnessEvent(store, nodeId, orchestration.event, redactor, sendToControlAgent);
+        if (outcome.kind === "rejected") console.warn(`rejected harness.event from ${nodeId}: ${outcome.reason}`);
+        if (outcome.kind === "accepted" || outcome.kind === "stream-failed") broadcast();
+      } else if (orchestration.type === "approval.undeliverable") {
+        if (await receiveApprovalUndeliverable(store, nodeId, orchestration.runId, orchestration.approvalId, orchestration.reason, redactor, orchestration.at)) broadcast();
+      }
+      // Session bindings and workspace leases are not persisted yet, so they never change hub state.
     } else if (message.type === "capability.report") {
       if (!supportsControlCapability(protocolVersion, "orchestration") || !nodeId) return;
       const validated = validateNodeCapabilityReport(message.report);
@@ -407,4 +456,9 @@ if (projectProfilesResult.ok) console.log(`loaded ${projectProfilesResult.profil
 
 await store.load();
 await store.transact((state) => markDisconnectedNodesOffline(state, liveControlAgents) || false);
+setInterval(() => {
+  void expireDueApprovals(store, sendToControlAgent)
+    .then((changed) => { if (changed) broadcast(); })
+    .catch((error) => console.error("approval expiry failed", error));
+}, 15_000).unref();
 server.listen(port, "0.0.0.0", () => console.log(`Coffee Shop hub listening on http://localhost:${port}`));
