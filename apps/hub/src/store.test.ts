@@ -355,6 +355,15 @@ test("rejects a persisted approval whose resolver the hub cannot interpret", asy
   }
 });
 
+test("rejects a persisted approval that is not an object, with a diagnosable reason", async () => {
+  for (const approval of [null, "approval_one", 7, ["approval_one"]]) {
+    const { store } = await loadFixture((state) => {
+      state.approvals = [approval];
+    });
+    await assert.rejects(() => store.load(), /Persisted approval 0 is not an object/, JSON.stringify(approval ?? null));
+  }
+});
+
 test("keeps an already-migrated orchestrator resolution unchanged", async () => {
   const resolvedBy = { kind: "orchestrator", clientId: "client-one", attachmentId: "attachment-one" };
   const { store } = await loadFixture((state) => {
@@ -407,7 +416,13 @@ test("rejects persisted orchestrator records the hub cannot interpret", async ()
     ["repeats attachment id", (state) => { state.orchestratorAttachments = [attachment, { ...attachment }]; }],
     ["has an unknown orchestrator", (state) => { state.threads[0].orchestrator = { kind: "robot", agentId: "orchestrator" }; }],
     ["has an unknown orchestrator", (state) => { state.threads[0].orchestrator = { kind: "external" }; }],
-    ["has a malformed orchestrator", (state) => { state.threads[0].orchestrator = "agent"; }]
+    ["has a malformed orchestrator", (state) => { state.threads[0].orchestrator = "agent"; }],
+    ["still names an owner agent", (state) => { state.threads[0].orchestrator = { kind: "external", clientId: "client-one" }; }],
+    ["disagrees with its own owner agent", (state) => { state.threads[0].orchestrator = { kind: "agent", agentId: "someone-else" }; }],
+    ["disagrees with its own owner agent", (state) => {
+      state.threads[0].orchestrator = { kind: "agent", agentId: "orchestrator" };
+      delete state.threads[0].ownerAgentId;
+    }]
   ];
   for (const [reason, mutate] of cases) {
     const { store } = await loadFixture(mutate);

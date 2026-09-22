@@ -102,7 +102,7 @@ test("threadOrchestrator derives an agent orchestrator only from a persisted own
   assert.deepEqual(
     threadOrchestrator({ ownerAgentId: "lead", orchestrator: { kind: "external", clientId: "client-one" } }),
     { kind: "external", clientId: "client-one" },
-    "the explicit orchestrator wins over a stale owner agent"
+    "an explicit orchestrator is never overridden by an owner agent"
   );
 });
 

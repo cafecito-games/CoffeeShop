@@ -137,7 +137,8 @@ export function addThreadOrchestratorDefaults(state: State) {
 export function addApprovalResolverDefaults(state: State) {
   let changed = false;
   for (const [index, approval] of (state.approvals ?? []).entries()) {
-    const resolvedBy: unknown = (approval as { resolvedBy?: unknown }).resolvedBy;
+    if (!isRecord(approval)) throw new Error(`Persisted approval ${index} is not an object`);
+    const resolvedBy: unknown = approval.resolvedBy;
     if (typeof resolvedBy !== "string") continue;
     if (resolvedBy !== "operator" && resolvedBy !== "policy" && resolvedBy !== "system") {
       throw new Error(`Persisted approval ${index} has an unknown resolver`);
@@ -181,6 +182,13 @@ export function assertPersistedOrchestratorClientState(state: State) {
     if (!isRecord(orchestrator)) throw new Error(`${context} has a malformed orchestrator`);
     if (orchestrator.kind === "agent" ? !isNonEmptyString(orchestrator.agentId) : orchestrator.kind === "external" ? !isNonEmptyString(orchestrator.clientId) : true) {
       throw new Error(`${context} has an unknown orchestrator`);
+    }
+    // A leftover owner agent on an external thread would keep granting that agent owner authority.
+    if (orchestrator.kind === "external" && thread.ownerAgentId !== undefined) {
+      throw new Error(`${context} is externally orchestrated but still names an owner agent`);
+    }
+    if (orchestrator.kind === "agent" && thread.ownerAgentId !== orchestrator.agentId) {
+      throw new Error(`${context} disagrees with its own owner agent`);
     }
   }
 }
