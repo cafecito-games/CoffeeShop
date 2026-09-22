@@ -10,6 +10,7 @@ import {
   canSendToControlAgent,
   isControlProtocolVersion,
   isTerminalTaskStatus,
+  orchestratorClientHeartbeatSeconds,
   supportsControlCapability,
   validateNodeCapabilityReport,
   validateOrchestrationControlAgentMessage,
@@ -24,11 +25,13 @@ import { createConfiguredAgent, markDisconnectedNodesOffline, updateConfiguredAg
 import { ControlConnectionRegistry, type ControlConnection } from "./controlConnections.js";
 import { applyRunLifecycle, cancelPersistedRun, coalesceAsync, failLostTaskAttempts, isReportedByOwningNode, queuedRunsForNode, retryAsync, serializeAsync } from "./lifecycle.js";
 import { CoordinationError } from "./coordination.js";
+import { detachEveryAttachmentInState } from "./externalOrchestrators.js";
 import { createHubToolHandler, hubToolError } from "./hubTools.js";
 import { TaskEventWaiters } from "./mailbox.js";
 import { forgetNodeCapabilityReport, getNodeCapabilityReport, recordNodeCapabilityReport } from "./nodeCapabilities.js";
 import { registeredComputeNode } from "./nodeRegistration.js";
 import { createOrchestratorClientRevocations, operatorCredentialGuard, registerOrchestratorClientRoutes } from "./orchestratorClients.js";
+import { createOrchestratorClientGateway, orchestratorClientCloseCode } from "./orchestratorClientGateway.js";
 import { loadProjectProfilesFromFile, ProjectProfileRegistry } from "./projectProfiles.js";
 import { computeNodeProjectReadiness } from "./projectReadiness.js";
 import { retainedHarnessEvents } from "./harnessEvents.js";
@@ -65,6 +68,11 @@ const broadcast = () => {
   const payload = JSON.stringify({ type: "snapshot", data: store.snapshot() });
   for (const socket of clients) if (socket.readyState === WebSocket.OPEN) socket.send(payload);
 };
+
+const orchestratorClients = createOrchestratorClientGateway({ store, broadcast });
+orchestratorClientRevocations.onOrchestratorClientRevoked((clientId) => {
+  void orchestratorClients.revokeClient(clientId).catch((error) => console.error("orchestrator client revocation could not be applied to live sockets", error));
+});
 
 const sendToControlAgent = (nodeId: string, message: HubToControlAgent) => controlAgents.send(nodeId, message);
 /** Lease cleanup requests wait for the reconnect barrier so Barista's replayed reports land first. */
@@ -402,7 +410,9 @@ server.on("upgrade", (request, socket, head) => {
   const suppliedToken = request.headers.authorization?.replace(/^Bearer\s+/i, "") ?? url.searchParams.get("token");
   if (isControlAgent && token && suppliedToken !== token) return socket.destroy();
   if (url.pathname === "/events" && process.env.NODE_ENV === "production" && url.searchParams.get("token") !== token) return socket.destroy();
-  if (!isControlAgent && url.pathname !== "/events") return socket.destroy();
+  // An orchestrator client presents its own credential in its first frame, never in the URL, so the
+  // upgrade itself carries no secret and the operator token is not what authorizes it.
+  if (!isControlAgent && url.pathname !== "/events" && url.pathname !== "/orchestrator-client") return socket.destroy();
   wss.handleUpgrade(request, socket, head, (ws) => wss.emit("connection", ws, request));
 });
 
@@ -412,6 +422,20 @@ wss.on("connection", (socket, request) => {
     clients.add(socket);
     socket.send(JSON.stringify({ type: "snapshot", data: store.snapshot() }));
     socket.on("close", () => clients.delete(socket));
+    return;
+  }
+
+  if (url.pathname === "/orchestrator-client") {
+    const connection = orchestratorClients.accept({
+      send: (payload) => socket.send(payload),
+      close: (reason) => socket.close(orchestratorClientCloseCode, reason)
+    });
+    const receive = serializeAsync(
+      (raw: RawData) => connection.receive(raw.toString()),
+      (error) => console.error("orchestrator-client frame failed", error)
+    );
+    socket.on("message", (raw) => { void receive(raw); });
+    socket.on("close", () => { void connection.closed().catch((error) => console.error("orchestrator-client close failed", error)); });
     return;
   }
 
@@ -627,6 +651,8 @@ if (projectProfilesResult.ok) console.log(`loaded ${projectProfilesResult.profil
 
 await store.load();
 await store.transact((state) => markDisconnectedNodesOffline(state, liveControlAgents) || false);
+// No bridge connection survives a restart, so no attachment persisted by the previous process may.
+await store.transact((state) => detachEveryAttachmentInState(state, new Date().toISOString()).length > 0);
 requestScheduling();
 setInterval(requestScheduling, 30_000).unref();
 setInterval(() => {
@@ -634,6 +660,9 @@ setInterval(() => {
     .then((changed) => { if (changed) broadcast(); })
     .catch((error) => console.error("approval expiry failed", error));
 }, 15_000).unref();
+setInterval(() => {
+  void orchestratorClients.expireAttachments().catch((error) => console.error("orchestrator attachment expiry failed", error));
+}, orchestratorClientHeartbeatSeconds * 1000).unref();
 // PORT=0 asks the operating system for a free port; the log names the port actually bound.
 server.listen(port, "0.0.0.0", () => {
   const address = server.address();
