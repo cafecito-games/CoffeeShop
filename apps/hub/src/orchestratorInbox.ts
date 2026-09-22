@@ -14,7 +14,7 @@ import {
   type Thread
 } from "@coffee-shop/protocol";
 import { cancelRunInState } from "./lifecycle.js";
-import { decodeTaskEventCursor, resolveCaller } from "./mailbox.js";
+import { decodeTaskEventCursor, resolveCaller, resolveExternalCaller } from "./mailbox.js";
 import { continuationPrompts } from "./orchestratorContext.js";
 import { dispatchMessageFor, placeTask, type SchedulingContext } from "./scheduler.js";
 import { hasResumeCapability, nodeAdvertisesResume, sessionResumeUnavailableReason } from "./sessionBindings.js";
@@ -341,15 +341,48 @@ function cursorAdvance(state: Readonly<State>, sourceRunId: string, cursor: unkn
 
 export function recordOrchestratorCursor(state: State, sourceRunId: string, cursor: unknown, kind: "processed" | "delivered", at: string) {
   const advance = cursorAdvance(state, sourceRunId, cursor, kind);
-  if (!advance) return false;
-  const inbox = ensureInbox(state, advance.threadId, at);
+  return advance !== undefined && recordOrchestratorCursorForThread(state, advance.threadId, advance.sequence, kind, at);
+}
+
+/**
+ * Advances a thread's orchestrator inbox to a sequence the caller has already proved it may
+ * acknowledge. It is the thread-keyed half of `recordOrchestratorCursor`, for an orchestrator that
+ * is not a run: the inbox belongs to the thread, so it outlives connections and attachments.
+ */
+export function recordOrchestratorCursorForThread(state: State, threadId: string, sequence: number, kind: "processed" | "delivered", at: string) {
+  const current = inboxFor(state, threadId);
+  if (sequence <= (kind === "processed" ? current?.processedThrough ?? 0 : current?.deliveredThrough ?? 0)) return false;
+  const inbox = ensureInbox(state, threadId, at);
   if (kind === "processed") {
-    inbox.processedThrough = advance.sequence;
+    inbox.processedThrough = sequence;
     inbox.redeliveries = 0;
   }
-  inbox.deliveredThrough = Math.max(inbox.deliveredThrough, advance.sequence);
+  inbox.deliveredThrough = Math.max(inbox.deliveredThrough, sequence);
   inbox.updatedAt = at;
   return true;
+}
+
+/**
+ * Records an external orchestrator's acknowledgement. The attachment and the cursor are both
+ * re-checked inside the transaction that advances the inbox, so a cursor that stopped being valid —
+ * or an attachment that was replaced — cannot move a thread's acknowledged position.
+ */
+export async function persistExternalOrchestratorCursor(
+  store: Store,
+  connectionId: string,
+  threadId: string,
+  cursor: string,
+  kind: "processed" | "delivered",
+  at = new Date().toISOString()
+) {
+  let changed = false;
+  await store.transact((state) => {
+    const caller = resolveExternalCaller(state, connectionId, threadId);
+    const sequence = decodeTaskEventCursor(state, caller, cursor);
+    changed = recordOrchestratorCursorForThread(state, caller.thread.id, sequence, kind, at);
+    return changed;
+  });
+  return changed;
 }
 
 /** Whether `recordOrchestratorCursor` would change the inbox; synchronous and read-only. */

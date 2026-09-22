@@ -1,0 +1,341 @@
+{
+  "agents": [
+    {
+      "id": "orchestrator",
+      "name": "orchestrator",
+      "title": "orchestrator title",
+      "summary": "",
+      "glyph": "O",
+      "avatarShape": "cup",
+      "avatarColor": "amber",
+      "state": "idle",
+      "currentAction": "Available",
+      "harnessId": "codex-cli",
+      "model": "default",
+      "computeNodeId": "node-orchestrator",
+      "workspace": "/workspace/orchestrator",
+      "systemPrompt": "prompt for orchestrator",
+      "canDelegate": true,
+      "skills": [],
+      "unread": 0,
+      "updatedAt": "2026-09-13T12:00:00.000Z"
+    },
+    {
+      "id": "worker-a",
+      "name": "worker-a",
+      "title": "worker-a title",
+      "summary": "",
+      "glyph": "W",
+      "avatarShape": "cup",
+      "avatarColor": "amber",
+      "state": "idle",
+      "currentAction": "Available",
+      "harnessId": "codex-cli",
+      "model": "default",
+      "computeNodeId": "node-worker-a",
+      "workspace": "/workspace/worker-a",
+      "systemPrompt": "prompt for worker-a",
+      "canDelegate": false,
+      "skills": [],
+      "unread": 0,
+      "updatedAt": "2026-09-13T12:00:00.000Z"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "node-orchestrator",
+      "name": "node-orchestrator",
+      "kind": "local",
+      "platform": "test",
+      "status": "online",
+      "lastSeen": "2026-09-13T12:00:00.000Z",
+      "activeRuns": 0,
+      "concurrency": 2,
+      "workspaceRoots": [
+        "/workspace"
+      ],
+      "version": "test",
+      "harnesses": [
+        {
+          "id": "codex-cli",
+          "label": "Codex",
+          "description": "",
+          "binary": "/usr/local/bin/codex",
+          "available": true,
+          "authMode": "local-account",
+          "models": [
+            "default"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "node-worker-a",
+      "name": "node-worker-a",
+      "kind": "local",
+      "platform": "test",
+      "status": "online",
+      "lastSeen": "2026-09-13T12:00:00.000Z",
+      "activeRuns": 0,
+      "concurrency": 2,
+      "workspaceRoots": [
+        "/workspace"
+      ],
+      "version": "test",
+      "harnesses": [
+        {
+          "id": "codex-cli",
+          "label": "Codex",
+          "description": "",
+          "binary": "/usr/local/bin/codex",
+          "available": true,
+          "authMode": "local-account",
+          "models": [
+            "default"
+          ]
+        }
+      ]
+    }
+  ],
+  "runs": [
+    {
+      "id": "run-attempt",
+      "threadId": "thread-one",
+      "agentId": "worker-a",
+      "nodeId": "node-worker-a",
+      "harnessId": "codex-cli",
+      "model": "default",
+      "workspace": "/workspace/worker-a",
+      "prompt": "Write the migration carefully",
+      "status": "running",
+      "output": "",
+      "depth": 1,
+      "createdAt": "2026-09-13T12:00:00.000Z",
+      "startedAt": "2026-09-13T12:00:00.000Z",
+      "parentRunId": "run-root",
+      "taskId": "task_mud218c0_rx4jz5",
+      "attempt": 1
+    },
+    {
+      "id": "run-root",
+      "threadId": "thread-one",
+      "agentId": "orchestrator",
+      "nodeId": "node-orchestrator",
+      "harnessId": "codex-cli",
+      "model": "default",
+      "workspace": "/workspace/orchestrator",
+      "prompt": "Coordinate the work",
+      "status": "running",
+      "output": "",
+      "depth": 0,
+      "createdAt": "2026-09-13T12:00:00.000Z",
+      "startedAt": "2026-09-13T12:00:00.000Z"
+    }
+  ],
+  "events": [
+    {
+      "type": "status",
+      "title": "1 task submitted",
+      "detail": "Write the migration",
+      "threadId": "thread-one",
+      "agentId": "orchestrator",
+      "runId": "run-root",
+      "id": "evt_mud218c0_9cneqw",
+      "createdAt": "2026-09-22T19:15:57.168Z"
+    }
+  ],
+  "messages": [],
+  "threads": [
+    {
+      "id": "thread-one",
+      "title": "Ship the auth refactor",
+      "objective": "Ship the auth refactor",
+      "summary": "",
+      "status": "active",
+      "ownerAgentId": "orchestrator",
+      "orchestrator": {
+        "kind": "agent",
+        "agentId": "orchestrator"
+      },
+      "createdBy": "user",
+      "createdAt": "2026-09-13T12:00:00.000Z",
+      "updatedAt": "2026-09-22T19:15:57.172Z"
+    }
+  ],
+  "delegations": [],
+  "artifacts": [],
+  "taskSubmissions": [
+    {
+      "id": "tasksub_mud218c0_rh6crp",
+      "threadId": "thread-one",
+      "sourceRunId": "run-root",
+      "creatorAgentId": "orchestrator",
+      "idempotencyKey": "batch-one",
+      "digest": "9faaa5be21cdb8b9b46462383d7a02862f54a3ee828c4bf47b3864d0d31ac85d",
+      "tasks": [
+        {
+          "key": "migrate",
+          "taskId": "task_mud218c0_rx4jz5"
+        }
+      ],
+      "createdAt": "2026-09-22T19:15:57.167Z"
+    }
+  ],
+  "taskUpdates": [
+    {
+      "id": "taskupd_mud218c3_ga45eb",
+      "threadId": "thread-one",
+      "taskId": "task_mud218c0_rx4jz5",
+      "sourceRunId": "run-attempt",
+      "agentId": "worker-a",
+      "idempotencyKey": "update-one",
+      "digest": "79a9be6fe5651f1c05877edfa9505070d2acf818125a5603cc3afc2970ab00fd",
+      "createdAt": "2026-09-22T19:15:57.171Z"
+    }
+  ],
+  "taskEventJournal": [
+    {
+      "threadId": "thread-one",
+      "kind": "task",
+      "taskId": "task_mud218c0_rx4jz5",
+      "status": "ready",
+      "changes": [
+        "status"
+      ],
+      "sequence": 1,
+      "at": "2026-09-22T19:15:57.168Z"
+    },
+    {
+      "threadId": "thread-one",
+      "kind": "task",
+      "taskId": "task_mud218c0_rx4jz5",
+      "status": "running",
+      "previousStatus": "ready",
+      "changes": [
+        "status",
+        "attempt"
+      ],
+      "attemptRunId": "run-attempt",
+      "attempt": 1,
+      "sequence": 2,
+      "at": "2026-09-22T19:15:57.169Z"
+    },
+    {
+      "threadId": "thread-one",
+      "kind": "message",
+      "messageId": "taskmsg_mud218c2_h4zmv6",
+      "recipientKey": "task:task_mud218c0_rx4jz5",
+      "sequence": 3,
+      "at": "2026-09-22T19:15:57.170Z"
+    },
+    {
+      "threadId": "thread-one",
+      "kind": "task",
+      "taskId": "task_mud218c0_rx4jz5",
+      "status": "running",
+      "previousStatus": "running",
+      "changes": [
+        "progress"
+      ],
+      "attemptRunId": "run-attempt",
+      "attempt": 1,
+      "sequence": 4,
+      "at": "2026-09-22T19:15:57.171Z"
+    },
+    {
+      "threadId": "thread-one",
+      "kind": "message",
+      "messageId": "taskmsg_mud218c4_bu85p8",
+      "recipientKey": "orchestrator",
+      "sequence": 5,
+      "at": "2026-09-22T19:15:57.172Z"
+    }
+  ],
+  "taskEventStreams": [
+    {
+      "threadId": "thread-one",
+      "head": 5,
+      "floor": 0
+    }
+  ],
+  "runActivity": [],
+  "harnessEventStreams": [],
+  "harnessEvents": [],
+  "orchestratorInboxes": [],
+  "orchestratorClients": [],
+  "orchestratorAttachments": [],
+  "tasks": [
+    {
+      "id": "task_mud218c0_rx4jz5",
+      "threadId": "thread-one",
+      "title": "Write the migration",
+      "instructions": "Write the migration carefully",
+      "status": "running",
+      "requirements": {},
+      "dependencies": [],
+      "sourceRunId": "run-root",
+      "idempotencyKey": "batch-one",
+      "attemptRunIds": [
+        "run-attempt"
+      ],
+      "createdAt": "2026-09-22T19:15:57.167Z",
+      "updatedAt": "2026-09-22T19:15:57.171Z",
+      "assignment": {
+        "runId": "run-attempt",
+        "agentId": "worker-a",
+        "nodeId": "node-worker-a",
+        "harnessId": "codex-cli",
+        "transport": "native-cli",
+        "model": "default",
+        "assignedAt": "2026-09-13T12:00:00.000Z"
+      },
+      "progress": {
+        "runId": "run-attempt",
+        "updatedAt": "2026-09-22T19:15:57.171Z",
+        "summary": "Schema drafted"
+      }
+    }
+  ],
+  "taskMessages": [
+    {
+      "id": "taskmsg_mud218c2_h4zmv6",
+      "threadId": "thread-one",
+      "sender": {
+        "type": "orchestrator"
+      },
+      "recipient": {
+        "type": "task",
+        "taskId": "task_mud218c0_rx4jz5"
+      },
+      "sequence": 1,
+      "kind": "instruction",
+      "body": "Start with the schema",
+      "artifactIds": [],
+      "sourceRunId": "run-root",
+      "idempotencyKey": "message-one",
+      "createdAt": "2026-09-22T19:15:57.169Z"
+    },
+    {
+      "id": "taskmsg_mud218c4_bu85p8",
+      "threadId": "thread-one",
+      "sender": {
+        "type": "task",
+        "taskId": "task_mud218c0_rx4jz5"
+      },
+      "recipient": {
+        "type": "orchestrator"
+      },
+      "sequence": 1,
+      "kind": "progress",
+      "body": "Schema drafted",
+      "artifactIds": [],
+      "sourceRunId": "run-attempt",
+      "idempotencyKey": "message-two",
+      "createdAt": "2026-09-22T19:15:57.172Z"
+    }
+  ],
+  "taskMessageAcknowledgements": [],
+  "sessionBindings": [],
+  "approvals": [],
+  "workspaceLeases": []
+}

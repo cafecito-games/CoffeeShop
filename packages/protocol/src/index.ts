@@ -618,6 +618,26 @@ export interface PlacementDiagnostic {
   unsatisfied: UnsatisfiedRequirement[];
 }
 
+/*
+ * Source keys.
+ *
+ * Lineage and idempotency name the principal that produced a record, not the session it used. A
+ * hub-hosted orchestrator or worker is named by its run and an external orchestrator by its
+ * credential, so a retry that arrives over a new bridge connection — and therefore a new
+ * attachment — replays the original result instead of duplicating work. The two namespaces are
+ * disjoint because a hub identifier never contains a colon.
+ */
+export const runSourceKey = (runId: string) => `run:${runId}`;
+export const orchestratorClientSourceKey = (clientId: string) => `orchestrator-client:${clientId}`;
+
+/**
+ * The source key of a record that may predate the field. A record written before external
+ * orchestrators existed carries only `sourceRunId`, and its key is derived from it, so an existing
+ * persisted record keeps the identity it was written with.
+ */
+export const recordSourceKey = (record: { sourceKey?: string; sourceRunId?: string }): string | undefined =>
+  record.sourceKey ?? (record.sourceRunId === undefined ? undefined : runSourceKey(record.sourceRunId));
+
 export interface Task {
   id: string;
   threadId: string;
@@ -627,8 +647,10 @@ export interface Task {
   requirements: ExecutionRequirements;
   dependencies: TaskDependency[];
   placementOverride?: PlacementOverride;
-  /** The run that submitted this task; absent for operator-created tasks. */
+  /** The run that submitted this task; absent for operator-created and externally submitted tasks. */
   sourceRunId?: string;
+  /** The submitting principal; written only when it is not the run named by `sourceRunId`. */
+  sourceKey?: string;
   idempotencyKey: string;
   assignment?: TaskAssignment;
   placement?: PlacementDiagnostic;
@@ -679,6 +701,8 @@ export interface TaskMessage {
   inReplyToMessageId?: string;
   artifactIds?: string[];
   sourceRunId?: string;
+  /** The sending principal; written only when it is not the run named by `sourceRunId`. */
+  sourceKey?: string;
   idempotencyKey: string;
   createdAt: string;
 }

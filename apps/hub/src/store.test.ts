@@ -4,7 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { threadOrchestrator, threadOwnerAgentId } from "@coffee-shop/protocol";
+import { recordSourceKey, runSourceKey, threadOrchestrator, threadOwnerAgentId } from "@coffee-shop/protocol";
+import { submitTasks, updateTask } from "./coordination.js";
+import { sendTaskMessage } from "./mailbox.js";
 import { assertPersistedHarnessState, newEvent, Store, type State } from "./store.js";
 
 test("starts empty, persists state atomically, and loads it again", async () => {
@@ -501,4 +503,66 @@ test("rejects a persisted attachment that names a client or thread the snapshot 
     const { store } = await loadAttachedFixture(mutate);
     await assert.rejects(() => store.load(), reason, String(reason));
   }
+});
+
+/*
+ * Source-key compatibility.
+ *
+ * `state-with-run-submitted-tasks.json` was written byte-for-byte by the store at
+ * d8c0e853f775b8e0c0608a3fde7fa0df2692c92d (`apps/hub/src/store.ts:563`, `private async save`) from
+ * records built by that revision's real producers, driven through `apps/hub/src/hubTools.ts:56`
+ * (`createHubToolHandler`): `apps/hub/src/threads.ts:29` (`newThread`), `apps/hub/src/tasks.ts:395`
+ * (`submitTaskBatch`), `apps/hub/src/tasks.ts:529` (`assignTaskAttempt`),
+ * `apps/hub/src/mailbox.ts:342` (`sendTaskMessage`), and `apps/hub/src/coordination.ts:399`
+ * (`updateTask`). None of its records carries a source key, because that revision had none: it is
+ * the shape on an operator's disk today.
+ */
+const runSubmittedFixturePath = fileURLToPath(new URL("../test-fixtures/state-with-run-submitted-tasks.json", import.meta.url));
+
+async function loadRunSubmittedFixture() {
+  const directory = await mkdtemp(join(tmpdir(), "coffee-shop-store-"));
+  const path = join(directory, "state.json");
+  const bytes = await readFile(runSubmittedFixturePath);
+  await writeFile(path, bytes);
+  const store = new Store(path);
+  await store.load();
+  return { store, path, bytes };
+}
+
+test("loads a state file written before source keys existed without rewriting it", async () => {
+  const { store, path, bytes } = await loadRunSubmittedFixture();
+
+  assert.deepEqual(await readFile(path), bytes, "a snapshot the hub just wrote is never rewritten on load");
+  store.read((state) => {
+    assert.ok(!JSON.stringify(state).includes("sourceKey"), "no source key is invented for an existing record");
+    assert.equal(recordSourceKey(state.tasks![0]), runSourceKey("run-root"), "a task keeps the identity it was written with");
+    assert.equal(recordSourceKey(state.taskSubmissions![0]), runSourceKey("run-root"));
+    assert.deepEqual(state.taskMessages!.map((message) => recordSourceKey(message)), [runSourceKey("run-root"), runSourceKey("run-attempt")]);
+    assert.equal(state.taskUpdates![0].sourceRunId, "run-attempt");
+  });
+});
+
+test("replays a submission, a message, and a task update persisted before source keys existed", async () => {
+  const { store } = await loadRunSubmittedFixture();
+  const taskId = store.read((state) => state.tasks![0].id);
+  const persisted = () => JSON.stringify(store.read((state) => [state.tasks, state.taskSubmissions, state.taskMessages, state.taskUpdates]));
+  const before = persisted();
+
+  const submission = await submitTasks(store, "run-root", {
+    idempotencyKey: "batch-one",
+    tasks: [{ key: "migrate", title: "Write the migration", instructions: "Write the migration carefully" }]
+  });
+  const message = await sendTaskMessage(store, "run-root", {
+    idempotencyKey: "message-one",
+    recipient: { type: "task", taskId },
+    kind: "instruction",
+    body: "Start with the schema"
+  });
+  const update = await updateTask(store, "run-attempt", { idempotencyKey: "update-one", progress: "Schema drafted" });
+
+  assert.equal(submission.created, false, "a persisted batch still replays rather than conflicting");
+  assert.deepEqual(submission.taskIdsByKey, { migrate: taskId });
+  assert.equal(message.created, false, "a persisted message still replays");
+  assert.equal(update.created, false, "a persisted task update still replays");
+  assert.equal(persisted(), before, "a replay writes nothing");
 });

@@ -69,7 +69,14 @@ const broadcast = () => {
   for (const socket of clients) if (socket.readyState === WebSocket.OPEN) socket.send(payload);
 };
 
-const orchestratorClients = createOrchestratorClientGateway({ store, broadcast });
+const taskEventWaiters = new TaskEventWaiters(store);
+const orchestratorClients = createOrchestratorClientGateway({
+  store,
+  broadcast,
+  waiters: taskEventWaiters,
+  inventory: () => ({ connection: schedulingConnection, capabilityReport: getNodeCapabilityReport }),
+  schedule: () => scheduleReadyTasks()
+});
 orchestratorClientRevocations.onOrchestratorClientRevoked((clientId) => {
   void orchestratorClients.revokeClient(clientId).catch((error) => console.error("orchestrator client revocation could not be applied to live sockets", error));
 });
@@ -150,7 +157,6 @@ const scheduleReadyTasks = coalesceAsync(async () => {
 }, (error) => console.error("task scheduling failed", error));
 const requestScheduling = () => { void scheduleReadyTasks(); };
 
-const taskEventWaiters = new TaskEventWaiters(store);
 const handleHubTool = createHubToolHandler({
   store,
   waiters: taskEventWaiters,
