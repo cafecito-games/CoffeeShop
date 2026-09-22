@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useReducer, useState } from "react";
 import { Prohibit, ShieldWarning, WarningCircle, X } from "@phosphor-icons/react";
 import type { Agent, ApprovalOption, ApprovalRequest, ComputeNode, Run, Task } from "@coffee-shop/protocol";
 import { AccessibleDialog } from "../AccessibleDialog.js";
@@ -29,13 +29,31 @@ function ApprovalDialog({ approval, agents, nodes, runs, tasks, canMutate, onClo
   const [pendingOptionId, setPendingOptionId] = useState("");
   const [confirmingOptionId, setConfirmingOptionId] = useState("");
   const [notice, setNotice] = useState<{ tone: "info" | "error"; text: string } | undefined>(undefined);
-  const [latest, setLatest] = useState(approval);
+  // Only the local resolution response is ever held in state: the displayed approval itself is
+  // always derived from the live snapshot prop, so a resolution or expiry recorded elsewhere (a
+  // reconnect, another operator, or the hub's own expiry sweep) is reflected as soon as the next
+  // snapshot arrives, rather than staying frozen at whatever this dialog first opened with.
+  const [overlay, setOverlay] = useState<ApprovalRequest | undefined>(undefined);
+  useEffect(() => { setOverlay(undefined); }, [approval]);
+  const latest = overlay ?? approval;
   const run = runs.find((item) => item.id === latest.runId);
   const node = nodes.find((item) => item.id === latest.nodeId);
   const agent = run ? agents.find((item) => item.id === run.agentId) : undefined;
   const task = latest.taskId ? tasks.find((item) => item.id === latest.taskId) : undefined;
   const titleId = "approval-dialog-title";
   const busy = pendingOptionId !== "";
+
+  // Nothing else re-renders this dialog at the exact moment `expiresAt` passes, so a timer forces
+  // one: otherwise a dialog left open across an expiry would keep offering "pending" actions on a
+  // decision the hub has already stopped honoring.
+  const [, forceExpiryCheck] = useReducer((count: number) => count + 1, 0);
+  useEffect(() => {
+    if (!latest.expiresAt) return;
+    const delay = Date.parse(latest.expiresAt) - Date.now();
+    if (delay <= 0) return;
+    const timer = setTimeout(forceExpiryCheck, delay + 50);
+    return () => clearTimeout(timer);
+  }, [latest.expiresAt]);
   const expired = latest.expiresAt !== undefined && Date.parse(latest.expiresAt) <= Date.now();
 
   async function resolve(body: Record<string, unknown>, optionKey: string): Promise<ResolutionOutcome> {
@@ -48,7 +66,7 @@ function ApprovalDialog({ approval, agents, nodes, runs, tasks, canMutate, onClo
         body: JSON.stringify({ idempotencyKey: randomIdempotencyKey(), expectedStatus: "pending", ...body })
       });
       const payload = await response.json().catch(() => ({})) as { approval?: ApprovalRequest; error?: string };
-      if (payload.approval) setLatest(payload.approval);
+      if (payload.approval) setOverlay(payload.approval);
       if (response.status === 200) return { approval: payload.approval };
       if (response.status === 409) return { error: "This approval already changed. Showing the current state instead." };
       if (response.status === 422) return { error: "That option is no longer offered. Showing the current state instead." };

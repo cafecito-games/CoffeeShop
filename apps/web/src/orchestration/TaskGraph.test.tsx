@@ -72,4 +72,38 @@ describe("TaskGraph", () => {
     expect(screen.getByText("ghost-agent (unavailable)")).toBeInTheDocument();
     expect(screen.getByText("ghost-node (unavailable)")).toBeInTheDocument();
   });
+
+  it("never labels a terminal task without an assignment as 'Not yet placed'", () => {
+    const completed = task({ id: "task-completed", title: "Design the contract", status: "completed", attemptRunIds: ["run-design"] });
+    const cancelled = task({ id: "task-cancelled", title: "Abandoned idea", status: "cancelled", attemptRunIds: [] });
+    render(<TaskGraph tasks={[completed, cancelled]} threadId="thread-1" agents={agents} nodes={nodes} taskMessages={[]} taskMessageAcknowledgements={[]} apiFetch={noopFetch} onInspectRun={vi.fn()} />);
+    expect(screen.queryByText(/Not yet placed/)).not.toBeInTheDocument();
+    expect(screen.getByText("Completed · 1 attempt(s).")).toBeInTheDocument();
+    expect(screen.getByText("Cancelled · no attempts were made.")).toBeInTheDocument();
+  });
+
+  it("names the blocking dependency for a blocked task instead of saying it is unplaced", () => {
+    const dependency = task({ id: "task-dep", title: "Provision the database", status: "failed" });
+    const blocked = task({
+      id: "task-blocked", title: "Run the migration", status: "blocked",
+      dependencies: [{ taskId: "task-dep", policy: "require-success" }]
+    });
+    render(<TaskGraph tasks={[dependency, blocked]} threadId="thread-1" agents={agents} nodes={nodes} taskMessages={[]} taskMessageAcknowledgements={[]} apiFetch={noopFetch} onInspectRun={vi.fn()} />);
+    expect(screen.getByText("Blocked by Provision the database.")).toBeInTheDocument();
+  });
+
+  it("renders placement diagnostics for an assigned or running task, not only pending/ready/blocked", () => {
+    const running = task({
+      status: "running",
+      assignment: { runId: "run-1", agentId: "agent-1", nodeId: "node-1", harnessId: "claude-cli", transport: "native-cli", model: "sonnet", assignedAt: "2026-01-01T00:00:00Z" },
+      attemptRunIds: ["run-1"],
+      placement: {
+        evaluatedAt: "2026-01-01T00:00:00Z",
+        eligibleNodeIds: ["node-1"],
+        unsatisfied: [{ kind: "capacity", requirement: "1 slot", detail: "the assigned node is now at capacity" }]
+      }
+    });
+    render(<TaskGraph tasks={[running]} threadId="thread-1" agents={agents} nodes={nodes} taskMessages={[]} taskMessageAcknowledgements={[]} apiFetch={noopFetch} onInspectRun={vi.fn()} />);
+    expect(screen.getByText(/1 slot — the assigned node is now at capacity/)).toBeInTheDocument();
+  });
 });

@@ -1,5 +1,5 @@
 import type { Agent, ApprovalRequest, ComputeNode, Run, Task } from "@coffee-shop/protocol";
-import { render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { ApprovalsView } from "./ApprovalsView.js";
@@ -83,5 +83,41 @@ describe("ApprovalsView", () => {
     const body = JSON.parse((apiFetch.mock.calls[0][1] as RequestInit).body as string);
     expect(body).toMatchObject({ expectedStatus: "pending", cancel: true });
     expect(body.optionId).toBeUndefined();
+  });
+
+  it("stops offering pending actions the moment a live snapshot update resolves the open approval elsewhere", async () => {
+    const apiFetch = vi.fn();
+    const pending = approval({});
+    const rendered = render(<ApprovalsView approvals={[pending]} agents={agents} nodes={nodes} runs={runs} tasks={tasks} canMutate apiFetch={apiFetch} />);
+    await userEvent.click(screen.getByRole("button", { name: /Write to config.json/ }));
+    expect(screen.getByRole("button", { name: /^Allow once/ })).toBeInTheDocument();
+
+    const resolvedElsewhere = { ...pending, status: "approved" as const, resolvedAt: "2026-01-01T00:05:00Z", resolvedBy: "operator" as const, selectedOptionId: "opt-once" };
+    rendered.rerender(<ApprovalsView approvals={[resolvedElsewhere]} agents={agents} nodes={nodes} runs={runs} tasks={tasks} canMutate apiFetch={apiFetch} />);
+
+    expect(screen.queryByRole("button", { name: /^Allow once/ })).not.toBeInTheDocument();
+    expect(screen.getByText(/already approved; no further action can be taken here/)).toBeInTheDocument();
+    expect(apiFetch).not.toHaveBeenCalled();
+  });
+
+  it("disables the pending actions on its own once expiresAt passes while the dialog stays open", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+    try {
+      const expiring = approval({ expiresAt: "2026-01-01T00:00:05Z" });
+      render(<ApprovalsView approvals={[expiring]} agents={agents} nodes={nodes} runs={runs} tasks={tasks} canMutate apiFetch={vi.fn()} />);
+      fireEvent.click(screen.getByRole("button", { name: /Write to config.json/ }));
+      expect(screen.getByRole("button", { name: /^Allow once/ })).toBeInTheDocument();
+
+      act(() => {
+        vi.setSystemTime(new Date("2026-01-01T00:00:06Z"));
+        vi.advanceTimersByTime(6_100);
+      });
+
+      expect(screen.queryByRole("button", { name: /^Allow once/ })).not.toBeInTheDocument();
+      expect(screen.getByText("This approval expired before it was resolved.")).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -46,4 +46,59 @@ describe("OrchestrationView", () => {
     );
     expect(screen.getByText("No orchestrated threads yet")).toBeInTheDocument();
   });
+
+  it("wires each tab to its panel per the WAI-ARIA tabs pattern", () => {
+    render(
+      <OrchestrationView
+        threads={threads} tasks={tasks} taskMessages={[]} taskMessageAcknowledgements={[]}
+        approvals={approvals} workspaceLeases={[]} agents={agents} nodes={nodes} runs={[]}
+        canMutate apiFetch={vi.fn(async () => new Response(JSON.stringify({ profile: { id: "p", name: "p" }, readiness: [] }), { status: 200 }))}
+        onInspectRun={vi.fn()}
+      />
+    );
+    const tasksTab = screen.getByRole("tab", { name: /^Tasks/ });
+    const approvalsTab = screen.getByRole("tab", { name: /Approvals/ });
+    const leasesTab = screen.getByRole("tab", { name: "Leases" });
+    const panel = screen.getByRole("tabpanel");
+
+    expect(tasksTab).toHaveAttribute("aria-controls", panel.id);
+    expect(panel).toHaveAttribute("aria-labelledby", tasksTab.id);
+    expect(tasksTab).toHaveAttribute("tabindex", "0");
+    expect(approvalsTab).toHaveAttribute("tabindex", "-1");
+    expect(leasesTab).toHaveAttribute("tabindex", "-1");
+  });
+
+  it("moves and activates tabs with arrow keys, and jumps with Home/End", async () => {
+    const user = userEvent.setup();
+    render(
+      <OrchestrationView
+        threads={threads} tasks={tasks} taskMessages={[]} taskMessageAcknowledgements={[]}
+        approvals={approvals} workspaceLeases={[]} agents={agents} nodes={nodes} runs={[]}
+        canMutate apiFetch={vi.fn(async () => new Response(JSON.stringify({ profile: { id: "p", name: "p" }, readiness: [] }), { status: 200 }))}
+        onInspectRun={vi.fn()}
+      />
+    );
+    const tasksTab = screen.getByRole("tab", { name: /^Tasks/ });
+    tasksTab.focus();
+
+    await user.keyboard("{ArrowRight}");
+    const approvalsTab = screen.getByRole("tab", { name: /Approvals/ });
+    expect(approvalsTab).toHaveFocus();
+    expect(approvalsTab).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByText("Approve write")).toBeInTheDocument();
+
+    await user.keyboard("{End}");
+    const leasesTab = screen.getByRole("tab", { name: "Leases" });
+    expect(leasesTab).toHaveFocus();
+    expect(leasesTab).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByText("No workspace leases")).toBeInTheDocument();
+
+    await user.keyboard("{Home}");
+    expect(tasksTab).toHaveFocus();
+    expect(tasksTab).toHaveAttribute("aria-selected", "true");
+
+    await user.keyboard("{ArrowLeft}");
+    expect(leasesTab).toHaveFocus();
+    expect(leasesTab).toHaveAttribute("aria-selected", "true");
+  });
 });

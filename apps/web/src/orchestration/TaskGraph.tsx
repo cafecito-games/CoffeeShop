@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { CaretDown, CaretRight, Envelope, TerminalWindow } from "@phosphor-icons/react";
-import { dependencyOutcome, type Agent, type ComputeNode, type Run, type Task, type TaskMessage, type TaskMessageAcknowledgement } from "@coffee-shop/protocol";
+import { dependencyOutcome, isTerminalTaskStatus, type Agent, type ComputeNode, type Run, type Task, type TaskDependency, type TaskMessage, type TaskMessageAcknowledgement } from "@coffee-shop/protocol";
 import { participantLabel, placementRequirementLabels, taskMessageKindLabels, taskStatusLabels, timeAgo } from "./orchestrationLabels.js";
 import { ReadinessPanel } from "./ReadinessPanel.js";
 
@@ -9,6 +9,38 @@ const dependencyOutcomeLabels: Record<ReturnType<typeof dependencyOutcome>, stri
   satisfied: "Satisfied",
   blocking: "Blocking"
 };
+
+interface DependencyDetail {
+  dependency: TaskDependency;
+  dependencyTask: Task | undefined;
+  outcome: ReturnType<typeof dependencyOutcome>;
+}
+
+function dependencyDetailsFor(task: Task, byId: Map<string, Task>): DependencyDetail[] {
+  return task.dependencies.map((dependency) => {
+    const dependencyTask = byId.get(dependency.taskId);
+    const outcome = dependencyTask ? dependencyOutcome(dependency.policy, dependencyTask.status) : "waiting";
+    return { dependency, dependencyTask, outcome };
+  });
+}
+
+/**
+ * What to show in place of the assignment block for a task with no assignment. A terminal task
+ * never says "Not yet placed" — that label only ever applies while placement could still happen.
+ */
+function unplacedOutcomeText(task: Task, dependencyDetails: DependencyDetail[]): string {
+  if (!isTerminalTaskStatus(task.status)) {
+    return `Not yet placed${task.attemptRunIds.length > 0 ? ` · ${task.attemptRunIds.length} previous attempt(s)` : ""}.`;
+  }
+  if (task.status === "blocked") {
+    const blocking = dependencyDetails.find((detail) => detail.outcome === "blocking");
+    const label = blocking ? blocking.dependencyTask?.title ?? `task ${blocking.dependency.taskId} (unavailable)` : "an unmet dependency";
+    return `Blocked by ${label}.`;
+  }
+  return task.attemptRunIds.length > 0
+    ? `${taskStatusLabels[task.status]} · ${task.attemptRunIds.length} attempt(s).`
+    : `${taskStatusLabels[task.status]} · no attempts were made.`;
+}
 
 function taskDepth(task: Task, byId: Map<string, Task>, seen: Set<string> = new Set()): number {
   if (seen.has(task.id) || task.dependencies.length === 0) return 0;
@@ -86,25 +118,22 @@ export function TaskGraph({ tasks, threadId, agents, nodes, taskMessages, taskMe
       {ordered.map((task) => {
         const depth = taskDepth(task, byId);
         const agent = task.assignment ? agents.find((item) => item.id === task.assignment!.agentId) : undefined;
-        const showPlacement = task.placement && (task.status === "pending" || task.status === "ready" || task.status === "blocked");
+        const dependencyDetails = dependencyDetailsFor(task, byId);
+        const showPlacement = task.placement !== undefined && task.placement.unsatisfied.length > 0;
         return (
           <li key={task.id} className="task-card" style={{ "--task-depth": depth } as { [key: string]: number }}>
             <header className="task-card-heading">
               <span className={`task-status task-status-${task.status}`}>{taskStatusLabels[task.status]}</span>
               <h3>{task.title}</h3>
             </header>
-            {task.dependencies.length > 0 && (
+            {dependencyDetails.length > 0 && (
               <ul className="task-dependencies">
-                {task.dependencies.map((dependency) => {
-                  const dependencyTask = byId.get(dependency.taskId);
-                  const outcome = dependencyTask ? dependencyOutcome(dependency.policy, dependencyTask.status) : "waiting";
-                  return (
-                    <li key={dependency.taskId} className={`dependency-outcome-${outcome}`}>
-                      {dependencyTask?.title ?? `Task ${dependency.taskId} (unavailable)`}
-                      <small>{dependencyOutcomeLabels[outcome]} · {dependency.policy === "require-success" ? "requires success" : "allows failure"}</small>
-                    </li>
-                  );
-                })}
+                {dependencyDetails.map(({ dependency, dependencyTask, outcome }) => (
+                  <li key={dependency.taskId} className={`dependency-outcome-${outcome}`}>
+                    {dependencyTask?.title ?? `Task ${dependency.taskId} (unavailable)`}
+                    <small>{dependencyOutcomeLabels[outcome]} · {dependency.policy === "require-success" ? "requires success" : "allows failure"}</small>
+                  </li>
+                ))}
               </ul>
             )}
             {task.assignment ? (
@@ -115,7 +144,7 @@ export function TaskGraph({ tasks, threadId, agents, nodes, taskMessages, taskMe
                 <div><dt>Attempts</dt><dd>{task.attemptRunIds.length}</dd></div>
               </dl>
             ) : (
-              <p className="task-unassigned">Not yet placed{task.attemptRunIds.length > 0 ? ` · ${task.attemptRunIds.length} previous attempt(s)` : ""}.</p>
+              <p className="task-unassigned">{unplacedOutcomeText(task, dependencyDetails)}</p>
             )}
             {task.attemptRunIds.length > 0 && (
               <div className="task-attempts">
