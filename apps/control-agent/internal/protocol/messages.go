@@ -3,8 +3,9 @@ package protocol
 import "encoding/json"
 
 // Version is the control protocol version Barista registers. Barista honors version-4 dispatch
-// execution for the native-cli and acp-v1 transports and rejects the session-binding and
-// workspace-lease fields it does not implement yet, so registering as 4 never degrades them.
+// execution for the native-cli and acp-v1 transports and for the workspace lease policies it can
+// provision, and rejects the session-binding field it does not implement yet, so registering as 4
+// never degrades execution to version-3 behavior.
 const Version = "4"
 
 type HarnessProfile struct {
@@ -55,15 +56,19 @@ type Run struct {
 }
 
 type Inbound struct {
-	Type      string             `json:"type"`
-	RunID     string             `json:"runId,omitempty"`
-	Run       Run                `json:"run,omitempty"`
-	Agent     Agent              `json:"agent,omitempty"`
-	Execution *DispatchExecution `json:"execution,omitempty"`
-	Decision  *ApprovalDecision  `json:"decision,omitempty"`
-	RequestID string             `json:"requestId,omitempty"`
-	Result    json.RawMessage    `json:"result,omitempty"`
-	RPCError  *HubRPCError       `json:"error,omitempty"`
+	Type      string               `json:"type"`
+	RunID     string               `json:"runId,omitempty"`
+	Run       Run                  `json:"run,omitempty"`
+	Agent     Agent                `json:"agent,omitempty"`
+	Execution *DispatchExecution   `json:"execution,omitempty"`
+	Decision  *ApprovalDecision    `json:"decision,omitempty"`
+	Lease     *WorkspaceLeaseGrant `json:"lease,omitempty"`
+	Mode      string               `json:"mode,omitempty"`
+	LeaseID   string               `json:"leaseId,omitempty"`
+	Status    string               `json:"status,omitempty"`
+	RequestID string               `json:"requestId,omitempty"`
+	Result    json.RawMessage      `json:"result,omitempty"`
+	RPCError  *HubRPCError         `json:"error,omitempty"`
 }
 
 type HubRPCError struct {

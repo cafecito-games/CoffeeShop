@@ -34,10 +34,12 @@ import { createRedactor } from "./redaction.js";
 import { dispatchMessageFor, runSchedulingPass, type SchedulingContext, type SchedulingPassResult } from "./scheduler.js";
 import { newEvent, newId, newMessage, Store } from "./store.js";
 import { newThread, updateThreadByOperator, updateThreadForRun } from "./threads.js";
+import { cleanupWorkspaceLeaseByOperator, receiveWorkspaceLeaseUpdate, reconcileWorkspaceLeases, workspaceLeaseConfirmation } from "./workspaceLeases.js";
 
 const app = express();
 const server = createServer(app);
 const controlAgents = new ControlConnectionRegistry<WebSocket>(WebSocket.OPEN);
+const controlKeepaliveMilliseconds = 15_000;
 const liveControlAgents = { has: (nodeId: string) => controlAgents.has(nodeId) };
 const clients = new Set<WebSocket>();
 const store = new Store();
@@ -64,6 +66,11 @@ const broadcast = () => {
 };
 
 const sendToControlAgent = (nodeId: string, message: HubToControlAgent) => controlAgents.send(nodeId, message);
+/** Lease cleanup requests wait for the reconnect barrier so Barista's replayed reports land first. */
+const sendAfterBarrier = (nodeId: string, message: HubToControlAgent) => {
+  const connection = controlAgents.current(nodeId);
+  return connection !== undefined && controlAgents.barrierPassed(connection) && controlAgents.send(nodeId, message);
+};
 
 type DispatchMessage = Extract<HubToControlAgent, { type: "dispatch" }>;
 /** The connection a dispatch may be approved against now: current, past its barrier, and version-compatible. */
@@ -79,7 +86,7 @@ const deliverRun = async (runId: string, connection: ControlConnection<WebSocket
   const message = store.read((state) => {
     const run = state.runs.find((item) => item.id === runId && item.status === "queued" && item.dispatchedAt !== undefined);
     const agent = run && state.agents.find((item) => item.id === run.agentId);
-    return run && agent ? structuredClone(dispatchMessageFor(run, agent, state.agents)) : undefined;
+    return run && agent ? structuredClone(dispatchMessageFor(run, agent, state.agents, state.workspaceLeases)) : undefined;
   });
   if (!message || controlAgents.deliver(connection, message)) return;
   await store.transact((state) => {
@@ -152,7 +159,7 @@ async function queueRun(agent: Agent, prompt: string, options: { threadId: strin
     if (!thread) throw new CoordinationError("not_found", "Thread not found");
     if (thread.status !== "active") throw new CoordinationError("thread_inactive", "New work requires an active thread");
     agent = state.agents.find((item) => item.id === agent.id)!;
-    connection = deliveryConnection(run.nodeId, dispatchMessageFor(run, agent, state.agents));
+    connection = deliveryConnection(run.nodeId, dispatchMessageFor(run, agent, state.agents, state.workspaceLeases));
     const dispatched = connection !== undefined;
     if (dispatched) run.dispatchedAt = new Date().toISOString();
     state.runs.unshift(run);
@@ -269,8 +276,30 @@ app.post("/api/runs/:id/cancel", async (req, res) => {
   if (result.kind === "cancelled") {
     broadcast();
     requestScheduling();
+    reconcileWorkspaceLeases(store, result.run!.nodeId, [], sendAfterBarrier);
   }
   res.json(result.run);
+});
+
+app.get("/api/workspace-leases", (req, res) => {
+  const filters = ["status", "nodeId", "runId", "taskId"] as const;
+  const query = Object.fromEntries(filters.map((key) => [key, typeof req.query[key] === "string" ? req.query[key] : undefined]));
+  const leases = (store.snapshot().workspaceLeases ?? []).filter((lease) => filters.every((key) => query[key] === undefined || lease[key] === query[key]));
+  res.json({ leases });
+});
+
+app.post("/api/workspace-leases/:id/cleanup", async (req, res) => {
+  try {
+    const result = await cleanupWorkspaceLeaseByOperator(store, req.params.id, sendAfterBarrier);
+    if (result.kind === "not-found") return res.status(404).json({ error: "Workspace lease not found" });
+    if (result.kind === "conflict") return res.status(409).json({ error: result.reason });
+    broadcast();
+    if (!result.sent) return res.status(503).json({ error: "The lease's compute node is not connected; retry once it reconnects", lease: result.lease });
+    res.status(202).json({ lease: result.lease });
+  } catch (error) {
+    console.error("workspace lease cleanup request failed", error);
+    if (!res.headersSent) res.status(500).json({ error: "The workspace lease cleanup request failed" });
+  }
 });
 
 app.get("/api/approvals", (req, res) => {
@@ -363,6 +392,16 @@ wss.on("connection", (socket, request) => {
   let nodeId = "";
   let protocolVersion: ControlProtocolVersion = "1";
   const socketClosed = new AbortController();
+  // Keepalive: a socket that misses a pong is terminated, so an open connection is a live one and a
+  // half-open socket never blocks its Barista's reconnect for long.
+  let answeredPing = true;
+  socket.on("pong", () => { answeredPing = true; });
+  const keepalive = setInterval(() => {
+    if (!answeredPing) return socket.terminate();
+    answeredPing = false;
+    socket.ping();
+  }, controlKeepaliveMilliseconds);
+  keepalive.unref();
   const isCurrentSocket = () => {
     const connection = controlAgents.connectionFor(socket);
     return connection !== undefined && controlAgents.isCurrent(connection);
@@ -380,7 +419,7 @@ wss.on("connection", (socket, request) => {
           if (!task || task.assignment?.runId !== target.id || isTerminalTaskStatus(task.status)) return false;
         }
         const targetAgent = state.agents.find((item) => item.id === target.agentId);
-        if (!targetAgent || deliveryConnection(target.nodeId, dispatchMessageFor(target, targetAgent, state.agents)) !== connection) return false;
+        if (!targetAgent || deliveryConnection(target.nodeId, dispatchMessageFor(target, targetAgent, state.agents, state.workspaceLeases)) !== connection) return false;
         target.dispatchedAt = new Date().toISOString();
         targetAgent.state = "thinking";
         targetAgent.currentAction = "Starting work";
@@ -409,9 +448,15 @@ wss.on("connection", (socket, request) => {
     const message = decoded as ControlAgentToHub;
     if (message.type === "register") {
       if (message.protocolVersion !== undefined && !isControlProtocolVersion(message.protocolVersion)) return socket.close(1002, "unsupported control protocol");
+      if (typeof message.node?.id !== "string" || !controlAgents.admits(message.node.id, socket)) {
+        return socket.close(1008, "node is already connected");
+      }
       nodeId = message.node.id;
       protocolVersion = message.protocolVersion ?? "1";
       controlAgents.register(nodeId, socket, protocolVersion);
+      // Acknowledges the registration: Barista replays its queued lifecycle messages only after this,
+      // so nothing it queued is ever written to a socket the hub refused.
+      sendToControlAgent(nodeId, { type: "ping" });
       forgetNodeCapabilityReport(nodeId);
       await store.transact((state) => {
         const index = state.nodes.findIndex((node) => node.id === nodeId);
@@ -436,6 +481,9 @@ wss.on("connection", (socket, request) => {
       }
       if (!controlAgents.markSynced(connection)) return;
       await dispatchQueuedRuns(connection, activeRunIds ?? []);
+      if (supportsControlCapability(protocolVersion, "orchestration") && activeRunIds !== undefined) {
+        reconcileWorkspaceLeases(store, nodeId, activeRunIds, sendAfterBarrier);
+      }
       if (supportsControlCapability(protocolVersion, "orchestration") && activeRunIds !== undefined
         && await reconcileApprovals(store, nodeId, activeRunIds, sendToControlAgent)) broadcast();
       requestScheduling();
@@ -474,8 +522,18 @@ wss.on("connection", (socket, request) => {
         if (outcome.kind === "accepted" || outcome.kind === "stream-failed") broadcast();
       } else if (orchestration.type === "approval.undeliverable") {
         if (await receiveApprovalUndeliverable(store, nodeId, orchestration.runId, orchestration.approvalId, orchestration.reason, redactor, orchestration.at)) broadcast();
+      } else if (orchestration.type === "workspace.lease") {
+        const outcome = await receiveWorkspaceLeaseUpdate(store, nodeId, orchestration.runId, orchestration.lease, redactor, orchestration.at);
+        if (outcome.kind === "rejected") console.warn(`rejected workspace.lease from ${nodeId}: ${outcome.reason}`);
+        const confirmation = outcome.kind === "rejected" ? undefined
+          : store.read((state) => workspaceLeaseConfirmation(state, nodeId, orchestration.runId, orchestration.lease.leaseId));
+        if (confirmation) sendToControlAgent(nodeId, confirmation);
+        if (outcome.kind === "applied") {
+          broadcast();
+          requestScheduling();
+        }
       }
-      // Session bindings and workspace leases are not persisted yet, so they never change hub state.
+      // Session bindings are not persisted yet, so they never change hub state.
     } else if (message.type === "capability.report") {
       if (!supportsControlCapability(protocolVersion, "orchestration") || !nodeId || !isCurrentSocket()) return;
       const validated = validateNodeCapabilityReport(message.report);
@@ -515,6 +573,7 @@ wss.on("connection", (socket, request) => {
   }, (error) => console.error("control-agent message failed", error));
   socket.on("message", (raw) => { void handleMessage(raw); });
   socket.on("close", async () => {
+    clearInterval(keepalive);
     socketClosed.abort();
     if (!nodeId) return;
     if (!controlAgents.release(socket)) return;

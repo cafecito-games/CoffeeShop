@@ -47,6 +47,39 @@ func waitForMessage(t *testing.T, client *Client, messageType string) protocol.O
 	return protocol.Outbound{}
 }
 
+// acknowledgeRegistration answers a register the way the hub does once it admits the connection.
+func acknowledgeRegistration(t *testing.T, ctx context.Context, connection *websocket.Conn) {
+	t.Helper()
+	require.NoError(t, connection.Write(ctx, websocket.MessageText, []byte(`{"type":"ping"}`)))
+}
+
+func TestRefusedRegistrationKeepsTheLifecycleOutbox(t *testing.T) {
+	received := make(chan []string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		connection, err := websocket.Accept(writer, request, nil)
+		require.NoError(t, err)
+		_, data, err := connection.Read(request.Context())
+		require.NoError(t, err)
+		var message protocol.Outbound
+		require.NoError(t, json.Unmarshal(data, &message))
+		connection.Close(websocket.StatusPolicyViolation, "node is already connected")
+		received <- []string{message.Type}
+	}))
+	defer server.Close()
+
+	client := NewClient(config.Config{
+		ControlEndpoint: strings.Replace(server.URL, "http://", "ws://", 1), Concurrency: 1,
+	}, protocol.ComputeNode{ID: "node-one"}, nil, emptyCapabilityReport)
+	client.send(protocol.Outbound{Type: "run.completed", RunID: "run-one", Output: "done", At: now()})
+	connected, err := client.runOnce(context.Background())
+	require.Error(t, err)
+	require.False(t, connected)
+	require.Equal(t, []string{"register"}, <-received, "nothing queued is written to a refused socket")
+	queued := outboundMessages(t, client)
+	require.Len(t, queued, 1)
+	require.Equal(t, "run.completed", queued[0].Type)
+}
+
 func emptyCapabilityReport(context.Context) protocol.NodeCapabilityReport {
 	return protocol.NodeCapabilityReport{}
 }
@@ -74,6 +107,7 @@ func TestRunOnceAuthenticatesAndRegisters(t *testing.T) {
 			return
 		}
 		result.err = json.Unmarshal(data, &result.message)
+		acknowledgeRegistration(t, request.Context(), connection)
 		messages <- result
 	}))
 	defer server.Close()
@@ -111,6 +145,9 @@ func TestReconnectFlushesLifecycleBeforeCompletingSync(t *testing.T) {
 			var message protocol.Outbound
 			require.NoError(t, json.Unmarshal(data, &message))
 			got = append(got, message)
+			if message.Type == "register" {
+				acknowledgeRegistration(t, request.Context(), connection)
+			}
 		}
 		messages <- got
 	}))
@@ -193,15 +230,15 @@ func TestDispatchRejectsWorkspaceLeaseGrantWithoutStartingAProcess(t *testing.T)
 	require.Zero(t, client.activeRuns())
 	message := waitForMessage(t, client, "run.failed")
 	require.Equal(t, "run-one", message.RunID)
-	require.Equal(t, "unsupported execution: workspace lease provisioning not available on this Barista", message.Error)
+	require.Equal(t, "unsupported execution: the workspace lease grant does not belong to the run", message.Error)
 }
 
 func TestDispatchWithNativeCliExecutionIsNotRejectedByTheExecutionGuard(t *testing.T) {
 	// A nil transport (plain dispatch) and an explicit "native-cli" transport with neither a
 	// session binding nor a workspace lease are both fully supported today; neither should ever
 	// produce the unsupported-execution run.failed message.
-	require.Equal(t, "", unsupportedExecutionReason(protocol.Run{}, nil, nil))
-	require.Equal(t, "", unsupportedExecutionReason(protocol.Run{Transport: "native-cli"}, &protocol.DispatchExecution{Transport: "native-cli"}, nil))
+	require.Equal(t, "", unsupportedExecutionReason(protocol.Run{}, nil, nil, nil))
+	require.Equal(t, "", unsupportedExecutionReason(protocol.Run{Transport: "native-cli"}, &protocol.DispatchExecution{Transport: "native-cli"}, nil, nil))
 }
 
 func TestDispatchRejectsUnsupportedTransportOnTheRunWithNoExecutionObject(t *testing.T) {
@@ -239,7 +276,7 @@ func TestDispatchRejectsRunLevelSessionBindingAndWorkspaceLeaseFields(t *testing
 	})
 	require.Zero(t, workspaceLeaseClient.activeRuns())
 	message = waitForMessage(t, workspaceLeaseClient, "run.failed")
-	require.Equal(t, "unsupported execution: workspace lease provisioning not available on this Barista", message.Error)
+	require.Equal(t, "unsupported execution: the run's workspace lease grant is missing or names a different lease", message.Error)
 }
 
 func TestActiveCancellationAcknowledgesWithoutFailureOrCompletion(t *testing.T) {
@@ -280,6 +317,9 @@ func TestRunOnceSendsCapabilityReportAfterRegistration(t *testing.T) {
 			var message protocol.Outbound
 			require.NoError(t, json.Unmarshal(data, &message))
 			got = append(got, message)
+			if message.Type == "register" {
+				acknowledgeRegistration(t, request.Context(), connection)
+			}
 			if message.Type == "capability.report" {
 				break
 			}

@@ -4,6 +4,7 @@ import {
   resolveNodeCapability,
   satisfiesMinimumQuantity,
   supportsControlCapability,
+  workspaceLeaseGrant,
   type Agent,
   type ComputeNode,
   type ControlProtocolVersion,
@@ -20,12 +21,14 @@ import {
   type ResolvedNodeCapability,
   type Run,
   type Task,
-  type UnsatisfiedRequirement
+  type UnsatisfiedRequirement,
+  type WorkspaceLease
 } from "@coffee-shop/protocol";
 import { isWorkspaceWithinRoot } from "./agentConfiguration.js";
 import { computeNodeProjectReadiness, defaultEvidenceTTLMilliseconds } from "./projectReadiness.js";
 import { newEvent, newId, type State } from "./store.js";
 import { assignTaskAttempt, readyTasks, taskReadiness } from "./tasks.js";
+import { dispatchableLease, exclusiveWorkspaceHolder, leasedIsolation, planWorkspaceLease } from "./workspaceLeases.js";
 
 /*
  * Task placement.
@@ -61,6 +64,7 @@ export interface PlacementEnvironment {
   connection(nodeId: string): NodeConnection | undefined;
   capabilityReport(nodeId: string): NodeCapabilityReport | undefined;
   projectProfile(projectId: string): ProjectProfile | undefined;
+  workspaceLeases?: readonly WorkspaceLease[];
   now: string;
   evidenceTTLMilliseconds?: number;
 }
@@ -89,6 +93,9 @@ export type PlacementDecision =
   | { kind: "unsatisfied"; diagnostic: PlacementDiagnostic };
 
 export const placementDiagnosticLimit = 200;
+
+/** Stands in for the not-yet-issued run and lease identities when checking that a lease can be planned. */
+const placementProbeIdentity = "placement";
 
 const compareText = (left: string, right: string) => (left < right ? -1 : left > right ? 1 : 0);
 
@@ -252,8 +259,22 @@ function evaluateCandidate(task: Task, agent: Agent, profile: ProjectProfile | u
     for (const unmet of readiness.unmetHardRequirements) add("project-profile", `${unmet.kind} ${unmet.requirement}`, unmet.detail);
   }
 
+  const leases = environment.workspaceLeases ?? [];
+  const isolation = leasedIsolation(profile);
+  if (profile && isolation !== undefined) {
+    const resolved = resolve(`workspace-lease:${isolation}`);
+    if (resolved.state !== "ok") evidenceFailure("workspace", `${isolation} workspace lease`, resolved, "");
+    const plan = planWorkspaceLease({ task, agent, node, profile, runId: placementProbeIdentity, leaseId: placementProbeIdentity, at: environment.now });
+    if (!plan.ok) add("workspace", plan.requirement, plan.detail);
+    else if (isolation === "exclusive-existing" && exclusiveWorkspaceHolder(leases, node.id, plan.lease.worktreePath)) {
+      add("capacity", "exclusive workspace", "another workspace lease holds this workspace");
+    }
+  }
+
   if (usage.used >= usage.concurrency) add("capacity", `${usage.concurrency} slots`, `${usage.used} slots are reserved or reported active`);
-  if (environment.runs.some((run) => run.agentId === agent.id && run.taskId !== undefined && isActiveRunStatus(run.status))) {
+  const sharesAgentWorkspace = (run: Run) => leases.find((lease) => lease.id === run.workspaceLeaseId)?.policy !== "git-worktree";
+  if (isolation !== "git-worktree" && environment.runs.some((run) => run.agentId === agent.id && run.taskId !== undefined
+    && isActiveRunStatus(run.status) && sharesAgentWorkspace(run))) {
     add("capacity", "idle agent", "agent already has an active task attempt in its workspace");
   }
 
@@ -355,13 +376,19 @@ export function placeTask(task: Task, environment: PlacementEnvironment): Placem
   };
 }
 
-/** The dispatch message for a run; task attempts also carry their version-4 execution. */
-export function dispatchMessageFor(run: Run, agent: Agent, agents: readonly Agent[]): Extract<HubToControlAgent, { type: "dispatch" }> {
+/**
+ * The dispatch message for a run; task attempts also carry their version-4 execution. A leased
+ * attempt carries its grant only while the lease may still be provisioned, so a settled lease can
+ * never be resurrected by a replayed dispatch: Barista rejects a run naming a lease without one.
+ */
+export function dispatchMessageFor(run: Run, agent: Agent, agents: readonly Agent[], leases: readonly WorkspaceLease[] = []): Extract<HubToControlAgent, { type: "dispatch" }> {
   const directory = agents.filter((item) => item.id !== agent.id).map((item) => `${item.id} (${item.title})`).join(", ");
   const dispatchAgent = { ...agent, systemPrompt: `${agent.systemPrompt}\n\nAvailable teammates: ${directory || "none"}` };
   if (run.taskId === undefined) return { type: "dispatch", run, agent: dispatchAgent };
   const execution: DispatchExecution = { transport: run.transport ?? "native-cli", taskId: run.taskId, attempt: run.attempt };
   if (run.transport === "acp-v1" && run.fallbackTransport === "native-cli") execution.fallbackTransport = "native-cli";
+  const lease = dispatchableLease(leases, run.id, run.workspaceLeaseId);
+  if (lease) execution.workspaceLease = workspaceLeaseGrant(lease);
   return { type: "dispatch", run, agent: dispatchAgent, execution };
 }
 
@@ -434,6 +461,7 @@ export function runSchedulingPass(state: State, context: SchedulingContext, at: 
       connection: context.connection,
       capabilityReport: context.capabilityReport,
       projectProfile: context.projectProfile,
+      workspaceLeases: state.workspaceLeases,
       evidenceTTLMilliseconds: context.evidenceTTLMilliseconds,
       now: at
     });
@@ -461,9 +489,26 @@ export function runSchedulingPass(state: State, context: SchedulingContext, at: 
       transport: candidate.transport,
       ...(candidate.fallbackTransport ? { fallbackTransport: candidate.fallbackTransport } : {})
     };
+    const profile = task.requirements.projectProfileId === undefined ? undefined : context.projectProfile(task.requirements.projectProfileId);
+    if (profile && leasedIsolation(profile) !== undefined) {
+      const node = state.nodes.find((item) => item.id === candidate.nodeId)!;
+      const plan = planWorkspaceLease({ task, agent, node, profile, runId: run.id, leaseId: newId("lease"), at });
+      if (!plan.ok) {
+        changed = recordPlacement(task, {
+          evaluatedAt: at,
+          eligibleNodeIds: [],
+          unsatisfied: [{ kind: "workspace", requirement: plan.requirement, nodeId: candidate.nodeId, agentId: candidate.agentId, detail: plan.detail }]
+        }) || changed;
+        continue;
+      }
+      state.workspaceLeases ??= [];
+      state.workspaceLeases.push(plan.lease);
+      run.workspaceLeaseId = plan.lease.id;
+      run.workspace = plan.lease.worktreePath;
+    }
     assignTaskAttempt(state, task.id, run, at);
     task.placement = decision.diagnostic;
-    const delivered = context.canDeliver(run.nodeId, dispatchMessageFor(run, agent, state.agents));
+    const delivered = context.canDeliver(run.nodeId, dispatchMessageFor(run, agent, state.agents, state.workspaceLeases));
     if (delivered) run.dispatchedAt = at;
     agent.state = delivered ? "thinking" : "waiting";
     agent.currentAction = delivered ? "Starting task" : "Waiting for compute";

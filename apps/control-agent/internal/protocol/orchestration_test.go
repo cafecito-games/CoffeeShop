@@ -34,7 +34,8 @@ func TestDispatchFixtureRoundTripsVersionFourExecution(t *testing.T) {
 	require.NotNil(t, inbound.Execution)
 	require.Equal(t, "acp-v1", inbound.Execution.Transport)
 	require.Equal(t, "provider-session-7", inbound.Execution.SessionBinding.ProviderSessionID)
-	require.Equal(t, "/srv/workspaces/repo/.coffee-shop/task-one", inbound.Execution.WorkspaceLease.WorktreePath)
+	require.Equal(t, "/srv/workspaces/.coffee-shop/worktrees/lease-one", inbound.Execution.WorkspaceLease.WorktreePath)
+	require.NoError(t, inbound.Execution.WorkspaceLease.Validate())
 
 	encoded, err := json.Marshal(inbound.Execution)
 	require.NoError(t, err)
@@ -125,7 +126,7 @@ func TestProtocolVocabulariesMatchTypeScriptSourceOfTruth(t *testing.T) {
 		{"ApprovalOptionKinds", []string{"allow-once", "allow-always", "reject-once", "reject-always"}, ApprovalOptionKinds},
 		{"SessionBindingStatuses", []string{"active", "idle", "closed", "replaced", "failed"}, SessionBindingStatuses},
 		{"WorkspaceLeaseStatuses", []string{"requested", "provisioning", "active", "released", "cleaning", "retained", "cleaned", "failed"}, WorkspaceLeaseStatuses},
-		{"WorkspaceRetentionReasons", []string{"dirty", "identity-mismatch", "ambiguous", "operator-hold"}, WorkspaceRetentionReasons},
+		{"WorkspaceRetentionReasons", []string{"dirty", "untracked", "diverged", "locked", "unregistered", "identity-mismatch", "ambiguous", "operator-hold", "policy"}, WorkspaceRetentionReasons},
 		{"PlanEntryStatuses", []string{"pending", "in-progress", "completed"}, PlanEntryStatuses},
 		{"PlanEntryPriorities", []string{"high", "medium", "low"}, PlanEntryPriorities},
 		{"ToolCallStatuses", []string{"pending", "in-progress", "completed", "failed"}, ToolCallStatuses},

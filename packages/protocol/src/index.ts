@@ -270,6 +270,8 @@ export type HubToControlAgent =
   | { type: "cancel"; runId: string }
   | { type: "hub.rpc.response"; requestId: string; runId: string; result?: unknown; error?: HubRpcError }
   | { type: "approval.decision"; decision: ApprovalDecision }
+  | { type: "workspace.cleanup"; runId: string; lease: WorkspaceLeaseGrant; mode: WorkspaceCleanupMode }
+  | { type: "workspace.lease.confirmed"; runId: string; leaseId: string; status: WorkspaceLeaseStatus }
   | { type: "ping" };
 
 export type ControlAgentToHub =
@@ -329,6 +331,8 @@ export function requiredCapabilityForHubMessage(message: HubToControlAgent): Con
     case "dispatch":
       return message.execution !== undefined || hasVersion4RunFields(message.run) ? "orchestration" : undefined;
     case "approval.decision":
+    case "workspace.cleanup":
+    case "workspace.lease.confirmed":
       return "orchestration";
     case "hub.rpc.response":
       return "hub-rpc";
@@ -939,9 +943,11 @@ export interface RunActivity {
 }
 
 /*
- * Workspace leases grant one run exclusive use of an isolated worktree and branch. Barista enforces
- * containment; the hub records identity. `retained` keeps data for operator attention and is left
- * only through an explicit cleanup.
+ * Workspace leases grant one run exclusive use of an isolated workspace. The hub owns lease identity
+ * and desired lifecycle; Barista owns what actually exists on disk and enforces containment. A
+ * `git-worktree` lease is a dedicated Git worktree and branch beneath a Barista-managed directory of
+ * an authorized root; an `exclusive-existing` lease is exclusive use of an existing checkout.
+ * `retained` keeps data for operator attention and is left only through an explicit cleanup.
  */
 export const workspaceLeaseStatuses = ["requested", "provisioning", "active", "released", "cleaning", "retained", "cleaned", "failed"] as const;
 export type WorkspaceLeaseStatus = typeof workspaceLeaseStatuses[number];
@@ -950,7 +956,7 @@ export const isWorkspaceLeaseStatus = isOneOf(workspaceLeaseStatuses);
 
 const workspaceLeaseTransitions: Readonly<Record<WorkspaceLeaseStatus, readonly WorkspaceLeaseStatus[]>> = {
   requested: ["provisioning", "failed"],
-  provisioning: ["active", "retained", "failed"],
+  provisioning: ["active", "released", "retained", "failed"],
   active: ["released", "retained"],
   released: ["cleaning", "retained"],
   cleaning: ["cleaned", "retained", "failed"],
@@ -962,8 +968,89 @@ const workspaceLeaseTransitions: Readonly<Record<WorkspaceLeaseStatus, readonly 
 export const isTerminalWorkspaceLeaseStatus = (status: WorkspaceLeaseStatus) => terminalWorkspaceLeaseStatuses.includes(status);
 export const canTransitionWorkspaceLease = (from: WorkspaceLeaseStatus, to: WorkspaceLeaseStatus) => workspaceLeaseTransitions[from].includes(to);
 
-export const workspaceRetentionReasons = ["dirty", "identity-mismatch", "ambiguous", "operator-hold"] as const;
+export const workspaceRetentionReasons = [
+  "dirty",
+  "untracked",
+  "diverged",
+  "locked",
+  "unregistered",
+  "identity-mismatch",
+  "ambiguous",
+  "operator-hold",
+  "policy"
+] as const;
 export type WorkspaceRetentionReason = typeof workspaceRetentionReasons[number];
+
+export const workspaceIsolationPolicies = ["git-worktree", "exclusive-existing"] as const;
+export type WorkspaceIsolationPolicy = typeof workspaceIsolationPolicies[number];
+export const isWorkspaceIsolationPolicy = isOneOf(workspaceIsolationPolicies);
+
+/** `retain` keeps every finished workspace; `when-unchanged` removes one only when nothing would be lost. */
+export const workspaceCleanupPolicies = ["retain", "when-unchanged"] as const;
+export type WorkspaceCleanupPolicy = typeof workspaceCleanupPolicies[number];
+export const isWorkspaceCleanupPolicy = isOneOf(workspaceCleanupPolicies);
+
+/*
+ * Lease naming grammar, mirrored exactly by Barista's `internal/workspace` package. Every value is
+ * derived from hub-issued identities, never from task text, so a model cannot choose a path,
+ * branch, or repository.
+ */
+export const workspaceLeaseIdentityPattern = /^[a-z0-9][a-z0-9_-]{0,95}$/;
+export const workspaceLeaseManagedDirectory = ".coffee-shop/worktrees";
+export const workspaceLeaseBranchPrefix = "coffee-shop/";
+export const workspaceLeaseBaseBranchPattern = /^[A-Za-z0-9][A-Za-z0-9._-]*(\/[A-Za-z0-9][A-Za-z0-9._-]*)*$/;
+export const workspaceLeaseBaseBranchMaximumBytes = 200;
+export const resolvedRevisionPattern = /^([0-9a-f]{40}|[0-9a-f]{64})$/;
+
+export const isWorkspaceLeaseIdentity = (value: unknown): value is string =>
+  typeof value === "string" && workspaceLeaseIdentityPattern.test(value);
+
+/** A default branch Barista can resolve as `refs/heads/<name>`; Git's own ref rules are applied again on the node. */
+export const isWorkspaceLeaseBaseBranch = (value: unknown): value is string =>
+  typeof value === "string"
+  && byteLength(value) <= workspaceLeaseBaseBranchMaximumBytes
+  && workspaceLeaseBaseBranchPattern.test(value)
+  && !value.includes("..")
+  && !value.split("/").some((component) => component.endsWith(".") || component.endsWith(".lock"));
+
+export const workspaceLeaseBaseRef = (defaultBranch: string) => `refs/heads/${defaultBranch}`;
+export const workspaceLeaseBranch = (taskId: string, runId: string) => `${workspaceLeaseBranchPrefix}${taskId}/${runId}`;
+export const workspaceLeaseWorktreePath = (root: string, leaseId: string) =>
+  `${root.endsWith("/") ? root : `${root}/`}${workspaceLeaseManagedDirectory}/${leaseId}`;
+
+const schemeRepositoryUrlPattern = /^([A-Za-z][A-Za-z0-9+.-]*:\/\/)([^/]*)([\s\S]*)$/;
+
+/**
+ * The credential-free identity of a repository URL, or undefined when none can be proven. Userinfo
+ * is removed by splitting at the last `@`, exactly as URL parsers do, so a password containing a
+ * raw `@` never survives: for a `scheme://` URL within its authority (the text before the next
+ * `/`), and for an scp-style `user@host:path` or other scheme-less location within the text
+ * before the first `/`. One trailing `/` and `.git` are ignored. A result whose authority still
+ * contains `@`, that lacks a host, or that looks like it carries a secret anywhere is rejected
+ * rather than repaired. Barista applies the identical rules (`protocol.NormalizeRepositoryIdentity`),
+ * so the hub never stores or displays a credential embedded in a configured URL.
+ */
+export function normalizeRepositoryIdentity(url: string): string | undefined {
+  let authority: string;
+  let identity: string;
+  let requiresHost: boolean;
+  const scheme = schemeRepositoryUrlPattern.exec(url);
+  if (scheme) {
+    authority = scheme[2].slice(scheme[2].lastIndexOf("@") + 1);
+    identity = `${scheme[1]}${authority}${scheme[3]}`;
+    requiresHost = !scheme[1].toLowerCase().startsWith("file:");
+  } else {
+    const slash = url.indexOf("/");
+    const prefix = slash < 0 ? url : url.slice(0, slash);
+    identity = url.slice(prefix.lastIndexOf("@") + 1);
+    authority = identity.split(/[/:]/, 1)[0];
+    requiresHost = !url.startsWith("/");
+  }
+  if (identity.endsWith("/")) identity = identity.slice(0, -1);
+  if (identity.endsWith(".git")) identity = identity.slice(0, -4);
+  if (identity.length === 0 || authority.includes("@") || (requiresHost && authority.length === 0) || containsSecretLikeValue(identity)) return undefined;
+  return identity;
+}
 
 export interface WorkspaceLease {
   id: string;
@@ -971,28 +1058,75 @@ export interface WorkspaceLease {
   taskId: string;
   runId: string;
   nodeId: string;
-  repository: string;
-  /** Canonical authorized workspace root containing the worktree. */
+  projectProfileId: string;
+  policy: WorkspaceIsolationPolicy;
+  cleanup: WorkspaceCleanupPolicy;
+  /** Credential-free repository identity Barista must find among the checkout's remotes (`git-worktree` only). */
+  repository?: string;
+  /** Canonical authorized workspace root containing the checkout and the worktree. */
   root: string;
-  baseRevision: string;
-  branch: string;
+  /** The operator-configured checkout the lease is provisioned from. */
+  sourcePath: string;
+  /** The requested base ref, always `refs/heads/<default branch>` (`git-worktree` only). */
+  baseRevision?: string;
+  /** The commit Barista resolved the base ref to; fixed once reported. */
+  resolvedBaseRevision?: string;
+  branch?: string;
+  /** The isolated cwd; equal to `sourcePath` for `exclusive-existing`. */
   worktreePath: string;
   status: WorkspaceLeaseStatus;
   retentionReason?: WorkspaceRetentionReason;
+  /** Bounded, credential-free diagnostic from the most recent Barista report. */
+  detail?: string;
+  /** When an operator last asked Barista to clean up this lease; the request alone changes no status. */
+  cleanupRequestedAt?: string;
   createdAt: string;
   updatedAt: string;
 }
 
-/** The lease identity the hub grants in a version-4 dispatch. */
-export type WorkspaceLeaseGrant = Pick<WorkspaceLease, "id" | "repository" | "root" | "baseRevision" | "branch" | "worktreePath">;
+/** The lease identity the hub grants in a version-4 dispatch or cleanup request. */
+export type WorkspaceLeaseGrant = Pick<WorkspaceLease,
+  "id" | "status" | "policy" | "cleanup" | "repository" | "root" | "sourcePath" | "baseRevision" | "resolvedBaseRevision" | "branch" | "worktreePath">;
+
+export function workspaceLeaseGrant(lease: WorkspaceLease): WorkspaceLeaseGrant {
+  const grant: WorkspaceLeaseGrant = {
+    id: lease.id,
+    status: lease.status,
+    policy: lease.policy,
+    cleanup: lease.cleanup,
+    root: lease.root,
+    sourcePath: lease.sourcePath,
+    worktreePath: lease.worktreePath
+  };
+  if (lease.repository !== undefined) grant.repository = lease.repository;
+  if (lease.baseRevision !== undefined) grant.baseRevision = lease.baseRevision;
+  if (lease.resolvedBaseRevision !== undefined) grant.resolvedBaseRevision = lease.resolvedBaseRevision;
+  if (lease.branch !== undefined) grant.branch = lease.branch;
+  return grant;
+}
+
+/*
+ * Harness launch waits for the hub: Barista starts a leased run only after the hub has persisted
+ * the lease as `active` and answered with `workspace.lease.confirmed` for that exact run and lease.
+ * A send or queued report alone never counts as persisted.
+ */
 
 /** What Barista reports while provisioning, releasing, or cleaning a lease. */
 export interface WorkspaceLeaseUpdate {
   leaseId: string;
   status: WorkspaceLeaseStatus;
   retentionReason?: WorkspaceRetentionReason;
+  /** The commit the base ref resolved to, reported once the worktree exists. */
+  resolvedBaseRevision?: string;
   detail?: string;
 }
+
+/**
+ * Why the hub asks Barista to reconcile a lease: `reconcile` after its run ended without Barista
+ * settling the lease, `operator` for an explicit cleanup of a retained lease.
+ */
+export const workspaceCleanupModes = ["reconcile", "operator"] as const;
+export type WorkspaceCleanupMode = typeof workspaceCleanupModes[number];
 
 /** Version-4 dispatch fields; never sent to peers that registered an older version. */
 export interface DispatchExecution {
@@ -1159,10 +1293,11 @@ export function validateRunTransportSelection(value: unknown): Validation<RunTra
 }
 
 export function validateWorkspaceLeaseUpdate(value: unknown): Validation<WorkspaceLeaseUpdate> {
-  if (!isRecord(value) || !hasOnlyKeys(value, ["leaseId", "status", "retentionReason", "detail"])) return reject("workspace lease update must contain only declared fields");
+  if (!isRecord(value) || !hasOnlyKeys(value, ["leaseId", "status", "retentionReason", "resolvedBaseRevision", "detail"])) return reject("workspace lease update must contain only declared fields");
   if (!isIdentifier(value.leaseId)) return reject("workspace lease update is missing identity");
   if (!isWorkspaceLeaseStatus(value.status)) return reject("workspace lease status is missing or unknown");
   if (value.status === "retained" ? !isWorkspaceRetentionReason(value.retentionReason) : value.retentionReason !== undefined) return reject("workspace lease retention reason does not match its status");
+  if (!isOptional(value.resolvedBaseRevision, (revision) => typeof revision === "string" && resolvedRevisionPattern.test(revision))) return reject("workspace lease resolved base revision is malformed");
   if (!isOptional(value.detail, isDiagnostic)) return reject("workspace lease detail exceeds its bound");
   return accept(value as unknown as WorkspaceLeaseUpdate);
 }
@@ -1313,6 +1448,10 @@ export interface ToolchainRequirement {
 export interface WorkspacePolicy {
   requireWritable: boolean;
   allowedRepositories?: string[];
+  /** When present, every task attempt for the project runs in an exclusive workspace lease. */
+  isolation?: WorkspaceIsolationPolicy;
+  /** What happens to a finished lease's workspace; defaults to `retain`. Requires `isolation`. */
+  cleanup?: WorkspaceCleanupPolicy;
 }
 
 export interface RequirementSet {
@@ -1497,7 +1636,7 @@ export function validateProjectProfile(value: unknown): Validation<ProjectProfil
     }
   }
   const workspacePolicy = value.workspacePolicy;
-  if (!isRecord(workspacePolicy) || !hasOnlyKeys(workspacePolicy, ["requireWritable", "allowedRepositories"])) {
+  if (!isRecord(workspacePolicy) || !hasOnlyKeys(workspacePolicy, ["requireWritable", "allowedRepositories", "isolation", "cleanup"])) {
     return reject("project profile workspace policy must contain only declared fields");
   }
   if (typeof workspacePolicy.requireWritable !== "boolean") {
@@ -1505,6 +1644,18 @@ export function validateProjectProfile(value: unknown): Validation<ProjectProfil
   }
   if (workspacePolicy.allowedRepositories !== undefined && !isUniqueBoundedStringArray(workspacePolicy.allowedRepositories, 512)) {
     return reject("project profile allowedRepositories must be a non-empty array of unique non-empty strings");
+  }
+  if (workspacePolicy.isolation !== undefined && !isWorkspaceIsolationPolicy(workspacePolicy.isolation)) {
+    return reject("project profile workspace isolation is unknown");
+  }
+  if (workspacePolicy.cleanup !== undefined && (workspacePolicy.isolation === undefined || !isWorkspaceCleanupPolicy(workspacePolicy.cleanup))) {
+    return reject("project profile workspace cleanup is unknown or has no isolation policy");
+  }
+  if (workspacePolicy.isolation === "git-worktree") {
+    const repository = value.repository as Record<string, unknown> | undefined;
+    if (repository === undefined) return reject("project profile git-worktree isolation requires a repository");
+    if (!isWorkspaceLeaseBaseBranch(repository.defaultBranch)) return reject("project profile repository default branch is not a valid branch name");
+    if (normalizeRepositoryIdentity(repository.url as string) === undefined) return reject("project profile repository url has no credential-free identity");
   }
   const requirements = value.requirements;
   if (!isRecord(requirements) || !hasOnlyKeys(requirements, ["hard", "preferred"])) {
