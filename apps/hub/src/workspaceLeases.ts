@@ -109,6 +109,7 @@ export function planWorkspaceLease(input: LeasePlanInput): LeasePlanResult {
   const repository = profile.repository;
   if (repository === undefined) return unsatisfied("workspace lease", "git-worktree isolation requires a project repository");
   const identity = normalizeRepositoryIdentity(repository.url);
+  if (identity === undefined) return unsatisfied("workspace lease", "the project repository url has no credential-free identity");
   if (requested?.repository !== undefined && normalizeRepositoryIdentity(requested.repository) !== identity) {
     return unsatisfied("workspace lease", "a leased task cannot name a repository other than its project's");
   }

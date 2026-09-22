@@ -1,0 +1,18 @@
+[
+  { "url": "https://user:p@ss@host/repo", "identity": "https://host/repo" },
+  { "url": "https://user:pa%40ss@host/repo", "identity": "https://host/repo" },
+  { "url": "ssh://git@host/repo", "identity": "ssh://host/repo" },
+  { "url": "git@host:org/repo.git", "identity": "host:org/repo" },
+  { "url": "https://host/org/repo", "identity": "https://host/org/repo" },
+  { "url": "https://user:secret@example.com/org/repo.git", "identity": "https://example.com/org/repo" },
+  { "url": "https://example.com/org/repo/", "identity": "https://example.com/org/repo" },
+  { "url": "https://a@b@c@example.com:8443/org/repo.git", "identity": "https://example.com:8443/org/repo" },
+  { "url": "user:p@ss@host:org/repo.git", "identity": "host:org/repo" },
+  { "url": "host:org/repo", "identity": "host:org/repo" },
+  { "url": "/srv/git/repo.git", "identity": "/srv/git/repo" },
+  { "url": "file:///srv/git/repo.git", "identity": "file:///srv/git/repo" },
+  { "url": "https://host/org/repo@v2", "identity": "https://host/org/repo@v2" },
+  { "url": "https://host/ghp_abcdefghijklmnopqrstuvwxyz0123456789/repo", "identity": null },
+  { "url": "https://user@", "identity": null },
+  { "url": "", "identity": null }
+]

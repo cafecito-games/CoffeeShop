@@ -562,7 +562,7 @@ func (manager *Manager) verifyRepository(ctx context.Context, grant protocol.Wor
 	}
 	for entry := range strings.SplitSeq(strings.TrimSuffix(string(output), "\x00"), "\x00") {
 		_, url, found := strings.Cut(entry, "\n")
-		if found && protocol.NormalizeRepositoryIdentity(url) == grant.Repository {
+		if identity, ok := protocol.NormalizeRepositoryIdentity(url); found && ok && identity == grant.Repository {
 			return ""
 		}
 	}

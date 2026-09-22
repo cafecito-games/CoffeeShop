@@ -551,3 +551,22 @@ test("a confirmation is derived only after the active report is persisted", asyn
   assert.equal(replayed.kind, "unchanged");
   assert.equal(store.read((state) => workspaceLeaseConfirmation(state, "node-one", "run-one", "lease-one"))?.status, "active");
 });
+
+test("planWorkspaceLease persists no part of a password containing a raw @", () => {
+  const result = planWorkspaceLease({
+    task: task(), agent: agent(), node: node(),
+    profile: profile({ repository: { url: "https://user:p@ss@example.com/org/repo.git", defaultBranch: "main" } }),
+    runId: "run-one", leaseId: "lease-one", at
+  });
+  assert.equal(result.ok, true);
+  if (result.ok) assert.equal(result.lease.repository, "https://example.com/org/repo");
+});
+
+test("planWorkspaceLease refuses a repository url with no credential-free identity", () => {
+  const result = planWorkspaceLease({
+    task: task(), agent: agent(), node: node(),
+    profile: profile({ repository: { url: "https://user@", defaultBranch: "main" } }),
+    runId: "run-one", leaseId: "lease-one", at
+  });
+  assert.equal(result.ok, false);
+});

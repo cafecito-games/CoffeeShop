@@ -1018,15 +1018,37 @@ export const workspaceLeaseBranch = (taskId: string, runId: string) => `${worksp
 export const workspaceLeaseWorktreePath = (root: string, leaseId: string) =>
   `${root.endsWith("/") ? root : `${root}/`}${workspaceLeaseManagedDirectory}/${leaseId}`;
 
+const schemeRepositoryUrlPattern = /^([A-Za-z][A-Za-z0-9+.-]*:\/\/)([^/]*)([\s\S]*)$/;
+
 /**
- * The credential-free identity of a repository URL: userinfo is dropped from `scheme://` URLs and
- * one trailing `/` and `.git` are ignored. Barista compares remotes by this same normalization, so
- * the hub never needs to store or display a credential embedded in a configured URL.
+ * The credential-free identity of a repository URL, or undefined when none can be proven. Userinfo
+ * is removed by splitting at the last `@`, exactly as URL parsers do, so a password containing a
+ * raw `@` never survives: for a `scheme://` URL within its authority (the text before the next
+ * `/`), and for an scp-style `user@host:path` or other scheme-less location within the text
+ * before the first `/`. One trailing `/` and `.git` are ignored. A result whose authority still
+ * contains `@`, that lacks a host, or that looks like it carries a secret anywhere is rejected
+ * rather than repaired. Barista applies the identical rules (`protocol.NormalizeRepositoryIdentity`),
+ * so the hub never stores or displays a credential embedded in a configured URL.
  */
-export function normalizeRepositoryIdentity(url: string) {
-  let identity = url.replace(/^([A-Za-z][A-Za-z0-9+.-]*:\/\/)[^/@]*@/, "$1");
+export function normalizeRepositoryIdentity(url: string): string | undefined {
+  let authority: string;
+  let identity: string;
+  let requiresHost: boolean;
+  const scheme = schemeRepositoryUrlPattern.exec(url);
+  if (scheme) {
+    authority = scheme[2].slice(scheme[2].lastIndexOf("@") + 1);
+    identity = `${scheme[1]}${authority}${scheme[3]}`;
+    requiresHost = !scheme[1].toLowerCase().startsWith("file:");
+  } else {
+    const slash = url.indexOf("/");
+    const prefix = slash < 0 ? url : url.slice(0, slash);
+    identity = url.slice(prefix.lastIndexOf("@") + 1);
+    authority = identity.split(/[/:]/, 1)[0];
+    requiresHost = !url.startsWith("/");
+  }
   if (identity.endsWith("/")) identity = identity.slice(0, -1);
   if (identity.endsWith(".git")) identity = identity.slice(0, -4);
+  if (identity.length === 0 || authority.includes("@") || (requiresHost && authority.length === 0) || containsSecretLikeValue(identity)) return undefined;
   return identity;
 }
 
@@ -1633,7 +1655,7 @@ export function validateProjectProfile(value: unknown): Validation<ProjectProfil
     const repository = value.repository as Record<string, unknown> | undefined;
     if (repository === undefined) return reject("project profile git-worktree isolation requires a repository");
     if (!isWorkspaceLeaseBaseBranch(repository.defaultBranch)) return reject("project profile repository default branch is not a valid branch name");
-    if (normalizeRepositoryIdentity(repository.url as string).length === 0) return reject("project profile repository url is malformed");
+    if (normalizeRepositoryIdentity(repository.url as string) === undefined) return reject("project profile repository url has no credential-free identity");
   }
   const requirements = value.requirements;
   if (!isRecord(requirements) || !hasOnlyKeys(requirements, ["hard", "preferred"])) {

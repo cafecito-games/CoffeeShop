@@ -29,7 +29,7 @@ var (
 	workspaceLeaseIdentityPattern   = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,95}$`)
 	workspaceLeaseBaseBranchPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$`)
 	resolvedRevisionPattern         = regexp.MustCompile(`^([0-9a-f]{40}|[0-9a-f]{64})$`)
-	repositoryUserinfoPattern       = regexp.MustCompile(`^([A-Za-z][A-Za-z0-9+.-]*://)[^/@]*@`)
+	schemeRepositoryURLPattern      = regexp.MustCompile(`^([A-Za-z][A-Za-z0-9+.-]*://)([^/]*)((?s).*)$`)
 )
 
 // WorkspaceLeaseTransitions is the canonical lease state machine, identical to the TypeScript table.
@@ -109,12 +109,34 @@ func WorkspaceLeaseBranch(taskID, runID string) string {
 	return WorkspaceLeaseBranchPrefix + taskID + "/" + runID
 }
 
-// NormalizeRepositoryIdentity drops userinfo from scheme URLs and ignores one trailing "/" and
-// ".git", exactly like the TypeScript normalizeRepositoryIdentity.
-func NormalizeRepositoryIdentity(url string) string {
-	identity := repositoryUserinfoPattern.ReplaceAllString(url, "$1")
+// NormalizeRepositoryIdentity returns the credential-free identity of a repository URL, or false
+// when none can be proven, applying exactly the rules of the TypeScript normalizeRepositoryIdentity:
+// userinfo is removed by splitting at the last "@" (within a scheme URL's authority, or within the
+// text before the first "/" of an scp-style or other scheme-less location), one trailing "/" and
+// ".git" are ignored, and a result whose authority still contains "@", that lacks a host, or that
+// looks secret-like is rejected rather than repaired.
+func NormalizeRepositoryIdentity(url string) (string, bool) {
+	var authority, identity string
+	var requiresHost bool
+	if match := schemeRepositoryURLPattern.FindStringSubmatch(url); match != nil {
+		authority = match[2][strings.LastIndex(match[2], "@")+1:]
+		identity = match[1] + authority + match[3]
+		requiresHost = !strings.HasPrefix(strings.ToLower(match[1]), "file:")
+	} else {
+		prefix, _, _ := strings.Cut(url, "/")
+		identity = url[strings.LastIndex(prefix, "@")+1:]
+		authority = identity
+		if index := strings.IndexAny(identity, "/:"); index >= 0 {
+			authority = identity[:index]
+		}
+		requiresHost = !strings.HasPrefix(url, "/")
+	}
 	identity = strings.TrimSuffix(identity, "/")
-	return strings.TrimSuffix(identity, ".git")
+	identity = strings.TrimSuffix(identity, ".git")
+	if identity == "" || strings.Contains(authority, "@") || (requiresHost && authority == "") || LooksSecretLike(identity) {
+		return "", false
+	}
+	return identity, true
 }
 
 // Validate checks the grant's shape and grammar only. Whether this Barista may provision it —
@@ -150,7 +172,7 @@ func (grant WorkspaceLeaseGrant) Validate() error {
 		}
 		return nil
 	}
-	if grant.Repository == "" || !isBounded(grant.Repository, 512) || NormalizeRepositoryIdentity(grant.Repository) != grant.Repository {
+	if identity, ok := NormalizeRepositoryIdentity(grant.Repository); !ok || !isBounded(grant.Repository, 512) || identity != grant.Repository {
 		return fmt.Errorf("workspace lease repository identity is missing or not normalized")
 	}
 	if !strings.HasPrefix(grant.BaseRevision, "refs/heads/") || !IsWorkspaceLeaseBaseBranch(strings.TrimPrefix(grant.BaseRevision, "refs/heads/")) {

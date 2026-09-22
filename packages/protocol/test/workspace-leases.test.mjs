@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
@@ -13,19 +14,18 @@ import {
 
 const at = "2026-09-21T12:00:00Z";
 
-test("normalizeRepositoryIdentity drops credentials from scheme urls and one trailing .git or slash", () => {
-  const cases = [
-    ["https://user:secret@example.com/org/repo.git", "https://example.com/org/repo"],
-    ["https://example.com/org/repo.git", "https://example.com/org/repo"],
-    ["https://example.com/org/repo/", "https://example.com/org/repo"],
-    ["https://example.com/org/repo", "https://example.com/org/repo"],
-    ["ssh://git@github.com/org/repo.git", "ssh://github.com/org/repo"],
-    ["git@github.com:org/repo.git", "git@github.com:org/repo"],
-    ["git@github.com:org/repo", "git@github.com:org/repo"]
-  ];
-  for (const [url, expected] of cases) {
-    assert.equal(normalizeRepositoryIdentity(url), expected, url);
+test("normalizeRepositoryIdentity matches the shared cross-language fixture", () => {
+  const cases = JSON.parse(readFileSync(new URL("./fixtures/repository-identities.json", import.meta.url), "utf8"));
+  assert.ok(cases.length >= 5);
+  for (const { url, identity } of cases) {
+    assert.equal(normalizeRepositoryIdentity(url), identity ?? undefined, url);
   }
+});
+
+test("normalizeRepositoryIdentity never keeps any part of a password containing a raw @", () => {
+  const identity = normalizeRepositoryIdentity("https://user:p@ss@host/repo");
+  assert.equal(identity, "https://host/repo");
+  assert.equal(identity.includes("ss"), false);
 });
 
 test("isWorkspaceLeaseBaseBranch accepts resolvable branch names and rejects Git-ref violations", () => {
