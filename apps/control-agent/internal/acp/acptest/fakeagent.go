@@ -228,6 +228,35 @@ func ExpectResponse(id string, key string) Step {
 	}
 }
 
+// ExpectResponses reads one response per entry of keys, which maps request ids to recording keys,
+// accepting them in any order because concurrently serviced requests may complete in any order.
+func ExpectResponses(keys map[string]string) Step {
+	return func(agent *Agent) error {
+		remaining := make(map[string]string, len(keys))
+		for id, key := range keys {
+			remaining[id] = key
+		}
+		for len(remaining) > 0 {
+			message, err := agent.read()
+			if err != nil {
+				return err
+			}
+			id := strings.TrimSpace(string(message.ID))
+			key, expected := remaining[id]
+			if !expected || message.Method != "" {
+				return fmt.Errorf("expected a response to one of %v, received %s %s", keys, message.ID, message.Method)
+			}
+			delete(remaining, id)
+			if message.Result != nil {
+				agent.responses[key] = message.Result
+			} else {
+				agent.responses[key] = message.Error
+			}
+		}
+		return nil
+	}
+}
+
 // Sleep pauses the scenario.
 func Sleep(duration time.Duration) Step {
 	return func(*Agent) error {

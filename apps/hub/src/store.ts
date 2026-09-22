@@ -4,6 +4,9 @@ import { fileURLToPath } from "node:url";
 import {
   agentAvatarColors,
   agentAvatarShapes,
+  harnessEventStreamStatuses,
+  isApprovalDeliveryStatus,
+  isApprovalStatus,
   isTaskDependencyPolicy,
   isTaskStatus,
   orchestrationCollections,
@@ -13,6 +16,7 @@ import {
   type Thread,
   type TimelineEvent
 } from "@coffee-shop/protocol";
+import type { HarnessEventStream, StoredHarnessEvent } from "./harnessEvents.js";
 
 /** The hub's durable record of one accepted task batch, used to answer idempotent replays. */
 export interface TaskSubmission {
@@ -30,6 +34,8 @@ export interface TaskSubmission {
 /** Hub-internal collections that are persisted but never published in snapshots. */
 interface HubOnlyState {
   taskSubmissions?: TaskSubmission[];
+  harnessEventStreams?: HarnessEventStream[];
+  harnessEvents?: StoredHarnessEvent[];
 }
 
 export type State = Omit<Snapshot, "generatedAt"> & HubOnlyState;
@@ -43,14 +49,39 @@ const emptyState = (): State => withOrchestrationDefaults({
   threads: [],
   delegations: [],
   artifacts: [],
-  taskSubmissions: []
+  taskSubmissions: [],
+  runActivity: [],
+  harnessEventStreams: [],
+  harnessEvents: []
 });
 
 export function addOrchestrationDefaults(state: State) {
-  const changed = orchestrationCollections.some((collection) => state[collection] == null) || state.taskSubmissions == null;
+  const changed = orchestrationCollections.some((collection) => state[collection] == null) || state.taskSubmissions == null
+    || state.runActivity == null || state.harnessEventStreams == null || state.harnessEvents == null;
   withOrchestrationDefaults(state);
   state.taskSubmissions ??= [];
+  state.runActivity ??= [];
+  state.harnessEventStreams ??= [];
+  state.harnessEvents ??= [];
   return changed;
+}
+
+/** Rejects persisted approvals and event streams whose status the hub cannot interpret. */
+export function assertPersistedHarnessState(state: State) {
+  for (const [index, approval] of (state.approvals ?? []).entries()) {
+    const context = `Persisted approval ${index}`;
+    if (!isRecord(approval) || !isNonEmptyString(approval.id) || !isNonEmptyString(approval.runId) || !isNonEmptyString(approval.harnessApprovalId) || !isNonEmptyString(approval.nodeId)) {
+      throw new Error(`${context} is missing its identity`);
+    }
+    if (!isApprovalStatus(approval.status)) throw new Error(`${context} has an unknown status`);
+    if (approval.delivery !== undefined && (!isRecord(approval.delivery) || !isApprovalDeliveryStatus(approval.delivery.status))) throw new Error(`${context} has an unknown delivery status`);
+  }
+  for (const [index, stream] of (state.harnessEventStreams ?? []).entries()) {
+    if (!isRecord(stream) || !isNonEmptyString(stream.runId) || !(harnessEventStreamStatuses as readonly unknown[]).includes(stream.status)
+      || !Number.isSafeInteger(stream.lastSequence) || !Array.isArray(stream.recentDigests)) {
+      throw new Error(`Persisted harness event stream ${index} is malformed`);
+    }
+  }
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
@@ -244,12 +275,13 @@ export class Store {
     const addedThreads = addThreadDefaults(loaded);
     const addedOrchestration = addOrchestrationDefaults(loaded);
     assertPersistedTaskState(loaded);
+    assertPersistedHarnessState(loaded);
     if (removedDemoRecords || addedAgentAvatars || addedCoordination || addedThreads || addedOrchestration) await this.save(loaded);
     this.state = loaded;
   }
 
   snapshot(): Snapshot {
-    const { taskSubmissions: _taskSubmissions, ...published } = this.state;
+    const { taskSubmissions: _taskSubmissions, harnessEventStreams: _harnessEventStreams, harnessEvents: _harnessEvents, ...published } = this.state;
     return structuredClone({ ...published, generatedAt: new Date().toISOString() });
   }
 

@@ -30,15 +30,19 @@ type Client struct {
 	bridge                *mcpserver.Server
 	buildCapabilityReport func(context.Context) protocol.NodeCapabilityReport
 
-	connectionMu sync.Mutex
-	connection   *websocket.Conn
-	outbox       [][]byte
-	runsMu       sync.Mutex
-	runs         map[string]context.CancelFunc
-	cancelled    map[string]struct{}
-	pendingMu    sync.Mutex
-	pending      map[string]chan rpcResult
-	requestID    atomic.Uint64
+	connectionMu     sync.Mutex
+	connection       *websocket.Conn
+	outbox           [][]byte
+	outboxEvents     int
+	outboxEventBytes int
+	sessionsMu       sync.Mutex
+	sessions         map[string]*runSession
+	runsMu           sync.Mutex
+	runs             map[string]context.CancelFunc
+	cancelled        map[string]struct{}
+	pendingMu        sync.Mutex
+	pending          map[string]chan rpcResult
+	requestID        atomic.Uint64
 }
 
 type rpcResult struct {
@@ -50,6 +54,7 @@ func NewClient(cfg config.Config, node protocol.ComputeNode, runner *harness.Run
 	client := &Client{
 		config: cfg, node: node, runner: runner, buildCapabilityReport: buildCapabilityReport,
 		runs: map[string]context.CancelFunc{}, cancelled: map[string]struct{}{}, pending: map[string]chan rpcResult{},
+		sessions: map[string]*runSession{},
 	}
 	client.bridge = mcpserver.New(client.callHub, client.uploadArtifact)
 	return client
@@ -157,6 +162,7 @@ func (client *Client) attach(ctx context.Context, connection *websocket.Conn) er
 		}
 		client.outbox = client.outbox[1:]
 	}
+	client.outboxEvents, client.outboxEventBytes = 0, 0
 	return write(ctx, connection, protocol.Outbound{Type: "sync.complete", NodeID: client.node.ID, ActiveRunIDs: client.activeRunIDs(), At: now()})
 }
 
@@ -169,7 +175,7 @@ func (client *Client) detach(connection *websocket.Conn) {
 	}
 }
 
-func (client *Client) send(message protocol.Outbound) {
+func (client *Client) send(message any) {
 	data, err := json.Marshal(message)
 	if err != nil {
 		log.Printf("encode outbound message: %v", err)
@@ -181,7 +187,7 @@ func (client *Client) send(message protocol.Outbound) {
 		client.outbox = append(client.outbox, data)
 		return
 	}
-	writeContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	writeContext, cancel := context.WithTimeout(context.Background(), writeTimeout)
 	defer cancel()
 	if err := writeBytes(writeContext, client.connection, data); err != nil {
 		client.outbox = append(client.outbox, data)
@@ -232,6 +238,8 @@ func (client *Client) handle(ctx context.Context, message protocol.Inbound) {
 		}
 	case "dispatch":
 		client.dispatch(ctx, message.Run, message.Agent, message.Execution)
+	case "approval.decision":
+		client.applyApprovalDecision(message.Decision)
 	default:
 		log.Printf("ignore unknown control-plane message type %q", message.Type)
 	}
@@ -321,13 +329,24 @@ func (client *Client) dispatch(ctx context.Context, run protocol.Run, agent prot
 			return
 		}
 		defer client.bridge.Revoke(capability.Token)
+		session := client.openSession(run.ID)
+		defer client.closeSession(session)
 		client.send(protocol.Outbound{Type: "run.started", RunID: run.ID, At: now()})
-		result, err := client.runner.Run(runContext, run, agent, workspace, capability, func(chunk string) {
+		invocation := harness.Invocation{Run: run, Agent: agent, Workspace: workspace, MCP: capability, Output: func(chunk string) {
 			if runContext.Err() != nil {
 				return
 			}
 			client.send(protocol.Outbound{Type: "run.output", RunID: run.ID, Chunk: chunk, At: now()})
-		})
+		}}
+		if protocol.SupportsCapability(protocol.Version, protocol.CapabilityOrchestration) {
+			invocation.Events = func(event protocol.HarnessEvent) {
+				if runContext.Err() == nil {
+					session.forward(event)
+				}
+			}
+			invocation.Permission = session.permission
+		}
+		result, err := client.runner.Execute(runContext, invocation)
 		if err != nil {
 			if errors.Is(runContext.Err(), context.Canceled) {
 				return
@@ -487,5 +506,7 @@ func write(ctx context.Context, connection *websocket.Conn, message protocol.Out
 func writeBytes(ctx context.Context, connection *websocket.Conn, data []byte) error {
 	return connection.Write(ctx, websocket.MessageText, data)
 }
+
+const writeTimeout = 10 * time.Second
 
 func now() string { return time.Now().UTC().Format(time.RFC3339Nano) }

@@ -77,6 +77,7 @@ Barista sends:
 - `session.binding` (version 4): the provider session a run created, resumed, idled, or replaced;
 - `workspace.lease` (version 4): provisioning, release, cleanup, or retention of a workspace lease.
 - `capability.report` (version 4): bounded runtime, configured, and probed node capability evidence sent once per connection and refreshed periodically.
+- `approval.undeliverable` (version 4): an approval decision Barista could not apply because no live permission request matched it, the option was not offered, or a different decision was already applied.
 
 The hub sends `hub.rpc.response` with either a structured result or a typed error. Protocol version 3 adds these RPC messages. They are not placed in the reconnect lifecycle outbox: a disconnected call fails promptly, while mutation idempotency makes an explicit retry safe.
 
@@ -102,6 +103,8 @@ On reconnect, protocol versions 2 and 3 send `register`, flush the lifecycle out
 ## Protocol versions
 
 Barista registers exactly one control protocol version per connection. The Go package defines every version the hub accepts and the capability each introduced: `replay-barrier` in 2, `hub-rpc` in 3, and `orchestration` in 4. Barista registers version 4 to report capability evidence, and it rejects version-4 dispatch execution it cannot honor rather than falling back: a dispatch `execution` naming a transport other than `native-cli`, or carrying a `sessionBinding` or `workspaceLease`, is failed with an explicit `run.failed` error before any process starts. Approval decisions, ACP dispatch, session-binding resume, and workspace-lease provisioning remain separate work. The hub rejects unknown versions before dispatch and never sends a message whose capability the registered version lacks.
+
+Barista sends each normalized harness event in an exact `{ type: "harness.event", event }` envelope and assigns its own per-run sequence starting at 1. While disconnected it queues at most 2,048 events or 8 MiB of them; further ordinary events are dropped and reported by one `barista-events-dropped` warning once forwarding resumes, while permission events and lifecycle messages are always queued. A permission callback waits only for a decision on a request that was actually forwarded to the hub, and only for the run and approval that raised it. Structured events and permission forwarding are enabled because Barista registers version 4; a build registering an older version refuses every permission request. Both are wired only after the dispatch guard accepts the execution, so a rejected dispatch never starts a harness.
 
 ACP runs only between Barista and a locally installed harness adapter. Barista translates ACP updates into the normalized `harness.event` vocabulary; ACP frames and schema names never reach the hub, and MCP remains the model-facing tool protocol.
 
