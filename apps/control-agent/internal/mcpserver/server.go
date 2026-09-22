@@ -18,6 +18,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/protocol"
 )
 
 const (
@@ -26,6 +28,17 @@ const (
 )
 
 type Caller func(context.Context, string, string, json.RawMessage) (json.RawMessage, error)
+
+// ToolError is a typed hub tool failure. Retryable failures, such as a lost control-plane
+// connection, are safe to repeat with the same idempotency key.
+type ToolError struct {
+	Code      string `json:"code"`
+	Message   string `json:"message"`
+	Retryable bool   `json:"retryable"`
+}
+
+func (err *ToolError) Error() string { return err.Code + ": " + err.Message }
+
 type Uploader func(context.Context, string, io.Reader, int64) error
 
 type Config struct {
@@ -157,7 +170,7 @@ func (server *Server) serveHTTP(writer http.ResponseWriter, request *http.Reques
 			"protocolVersion": protocolVersion,
 			"capabilities":    map[string]any{"tools": map[string]any{}},
 			"serverInfo":      map[string]string{"name": "coffee-shop-hub", "version": "1"},
-			"instructions":    "Use get_task_context for the durable thread and task lineage. Refine or complete the thread with update_thread. Post durable outputs with post_artifact. Delegate only bounded work when delegate_task is available; retain the returned task id and inspect it later with get_task_context.",
+			"instructions":    instructions,
 		}})
 	case "tools/list":
 		writeRPC(writer, rpcResponse{JSONRPC: "2.0", ID: message.ID, Result: map[string]any{"tools": tools(activeGrant.canDelegate)}})
@@ -186,17 +199,22 @@ func (server *Server) callTool(writer http.ResponseWriter, request *http.Request
 		writeRPC(writer, rpcResponse{JSONRPC: "2.0", ID: message.ID, Error: &rpcError{Code: -32602, Message: "Invalid tool arguments"}})
 		return
 	}
-	if params.Name == "delegate_task" && !activeGrant.canDelegate {
-		writeToolError(writer, message.ID, "This run is not allowed to delegate tasks")
-		return
-	}
-	if params.Name != "get_task_context" && params.Name != "delegate_task" && params.Name != "post_artifact" && params.Name != "update_thread" {
+	if !protocol.IsHubToolName(params.Name) {
 		writeRPC(writer, rpcResponse{JSONRPC: "2.0", ID: message.ID, Error: &rpcError{Code: -32602, Message: "Unknown tool"}})
 		return
 	}
+	if protocol.IsDelegationHubToolName(params.Name) && !activeGrant.canDelegate {
+		writeToolError(writer, message.ID, &ToolError{Code: "forbidden", Message: "This run is not allowed to delegate tasks"})
+		return
+	}
 	arguments := params.Arguments
-	if len(arguments) == 0 {
+	if len(arguments) == 0 || string(arguments) == "null" {
 		arguments = json.RawMessage(`{}`)
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(arguments, &object); err != nil || object == nil {
+		writeToolError(writer, message.ID, &ToolError{Code: "invalid_arguments", Message: "Tool arguments must be a JSON object"})
+		return
 	}
 	var (
 		result json.RawMessage
@@ -208,12 +226,12 @@ func (server *Server) callTool(writer http.ResponseWriter, request *http.Request
 		result, err = server.caller(request.Context(), activeGrant.runID, params.Name, arguments)
 	}
 	if err != nil {
-		writeToolError(writer, message.ID, err.Error())
+		writeToolError(writer, message.ID, asToolError(err))
 		return
 	}
-	var structured any
-	if err := json.Unmarshal(result, &structured); err != nil {
-		writeToolError(writer, message.ID, "Hub returned an invalid tool result")
+	var structured map[string]any
+	if err := json.Unmarshal(result, &structured); err != nil || structured == nil {
+		writeToolError(writer, message.ID, &ToolError{Code: "invalid_result", Message: "Hub returned an invalid tool result", Retryable: true})
 		return
 	}
 	writeRPC(writer, rpcResponse{JSONRPC: "2.0", ID: message.ID, Result: map[string]any{
@@ -317,75 +335,20 @@ func writeRPC(writer http.ResponseWriter, response rpcResponse) {
 	_ = json.NewEncoder(writer).Encode(response)
 }
 
-func writeToolError(writer http.ResponseWriter, id json.RawMessage, message string) {
+// asToolError keeps typed hub failures and reports anything else, such as an artifact that could
+// not be read or uploaded, as a non-retryable tool failure with its local description.
+func asToolError(err error) *ToolError {
+	var typed *ToolError
+	if errors.As(err, &typed) {
+		return typed
+	}
+	return &ToolError{Code: "tool_failed", Message: err.Error()}
+}
+
+func writeToolError(writer http.ResponseWriter, id json.RawMessage, failure *ToolError) {
+	text, _ := json.Marshal(map[string]*ToolError{"error": failure})
 	writeRPC(writer, rpcResponse{JSONRPC: "2.0", ID: id, Result: map[string]any{
-		"content": []map[string]string{{"type": "text", "text": message}},
+		"content": []map[string]string{{"type": "text", "text": string(text)}},
 		"isError": true,
 	}})
-}
-
-func tools(canDelegate bool) []map[string]any {
-	result := []map[string]any{
-		tool("get_task_context", "Get task context", "Get the durable thread and current task or a related parent or child task, including delegation status and artifacts.", map[string]any{
-			"type": "object", "properties": map[string]any{"taskId": map[string]string{"type": "string"}}, "additionalProperties": false,
-		}, map[string]any{
-			"type": "object", "properties": map[string]any{
-				"thread": map[string]any{"type": "object"},
-				"task":   map[string]any{"type": "object"}, "delegations": map[string]any{"type": "array"},
-				"artifacts": map[string]any{"type": "array"}, "availableAgents": map[string]any{"type": "array"},
-				"limits": map[string]any{"type": "object"}, "version": map[string]string{"type": "string"},
-			}, "required": []string{"thread", "task", "delegations", "artifacts", "availableAgents", "limits", "version"},
-		}, true),
-		tool("post_artifact", "Post artifact", "Publish a regular file from the current run workspace. Use a relative path and a stable idempotency key.", map[string]any{
-			"type": "object",
-			"properties": map[string]any{
-				"relativePath": map[string]string{"type": "string"}, "title": map[string]string{"type": "string"},
-				"kind":      map[string]any{"type": "string", "enum": []string{"patch", "report", "test-results", "log", "image", "other"}},
-				"mediaType": map[string]string{"type": "string"}, "summary": map[string]string{"type": "string"},
-				"idempotencyKey": map[string]string{"type": "string"},
-			},
-			"required": []string{"relativePath", "title", "kind", "mediaType", "idempotencyKey"}, "additionalProperties": false,
-		}, map[string]any{
-			"type": "object", "properties": map[string]any{
-				"id": map[string]string{"type": "string"}, "runId": map[string]string{"type": "string"},
-				"title": map[string]string{"type": "string"}, "kind": map[string]string{"type": "string"},
-				"downloadPath": map[string]string{"type": "string"}, "uploaded": map[string]string{"type": "boolean"},
-			}, "required": []string{"id", "runId", "title", "kind", "downloadPath", "uploaded"},
-		}, false),
-		tool("update_thread", "Update thread", "Refine the current thread title, objective, or summary, or mark it active or completed. Archival is reserved for the operator.", map[string]any{
-			"type": "object",
-			"properties": map[string]any{
-				"title": map[string]string{"type": "string"}, "objective": map[string]string{"type": "string"},
-				"summary": map[string]string{"type": "string"},
-				"status":  map[string]any{"type": "string", "enum": []string{"active", "completed"}},
-			},
-			"additionalProperties": false, "minProperties": 1,
-		}, map[string]any{
-			"type": "object", "properties": map[string]any{"thread": map[string]any{"type": "object"}}, "required": []string{"thread"},
-		}, false),
-	}
-	if canDelegate {
-		result = append(result, tool("delegate_task", "Delegate task", "Create a bounded child task for another available agent. Use a stable idempotency key and retain the returned task id.", map[string]any{
-			"type": "object",
-			"properties": map[string]any{
-				"agentId": map[string]string{"type": "string"}, "task": map[string]string{"type": "string"},
-				"artifactIds":    map[string]any{"type": "array", "items": map[string]string{"type": "string"}},
-				"idempotencyKey": map[string]string{"type": "string"},
-			},
-			"required": []string{"agentId", "task", "idempotencyKey"}, "additionalProperties": false,
-		}, map[string]any{
-			"type": "object", "properties": map[string]any{
-				"taskId": map[string]string{"type": "string"}, "status": map[string]string{"type": "string"},
-				"agentId": map[string]string{"type": "string"}, "created": map[string]string{"type": "boolean"},
-			}, "required": []string{"taskId", "status", "agentId", "created"},
-		}, false))
-	}
-	return result
-}
-
-func tool(name, title, description string, inputSchema, outputSchema map[string]any, readOnly bool) map[string]any {
-	return map[string]any{
-		"name": name, "title": title, "description": description, "inputSchema": inputSchema, "outputSchema": outputSchema,
-		"annotations": map[string]bool{"readOnlyHint": readOnly, "destructiveHint": false, "idempotentHint": true},
-	}
 }

@@ -1,5 +1,5 @@
 import { isActiveRunStatus, threadStatuses, type Thread, type ThreadStatus } from "@coffee-shop/protocol";
-import { CoordinationError } from "./coordination.js";
+import { CoordinationError } from "./coordinationError.js";
 import { newEvent, newId, type Store } from "./store.js";
 
 const maximumTitleLength = 120;
@@ -56,7 +56,7 @@ function applyStatus(thread: Thread, status: ThreadStatus, at: string) {
 function requestedChanges(argumentsValue: unknown, allowArchive: boolean) {
   const values = record(argumentsValue);
   const unknown = Object.keys(values).find((key) => !["title", "objective", "summary", "status"].includes(key));
-  if (unknown) throw new CoordinationError("invalid_arguments", `Unknown thread field: ${unknown}`);
+  if (unknown) throw new CoordinationError("invalid_arguments", "Thread changes contain an unknown field");
   const title = optionalString(values, "title", maximumTitleLength);
   const objective = optionalString(values, "objective", maximumObjectiveLength);
   let summary: string | undefined;

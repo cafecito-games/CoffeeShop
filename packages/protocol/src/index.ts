@@ -200,8 +200,57 @@ export interface Snapshot {
   generatedAt: string;
 }
 
-export const hubToolNames = ["get_task_context", "delegate_task", "post_artifact", "update_thread"] as const;
+/*
+ * Run-scoped hub tools. Barista's MCP bridge (apps/control-agent/internal/protocol/hubtools.go)
+ * lists exactly these names; a Go test reads this declaration to keep the two in sync. Tools in
+ * `delegationHubToolNames` are listed and served only to agents allowed to delegate.
+ */
+export const hubToolNames = [
+  "get_task_context",
+  "delegate_task",
+  "post_artifact",
+  "update_thread",
+  "get_execution_inventory",
+  "submit_tasks",
+  "send_task_message",
+  "wait_for_task_events",
+  "update_task"
+] as const;
 export type HubToolName = typeof hubToolNames[number];
+export const delegationHubToolNames: readonly HubToolName[] = ["delegate_task", "get_execution_inventory", "submit_tasks"];
+export const isHubToolName = (value: unknown): value is HubToolName => typeof value === "string" && (hubToolNames as readonly string[]).includes(value);
+
+/**
+ * Bounds of the orchestration tools. `maximumWaitMilliseconds` is mirrored by Barista's
+ * `protocol.MaximumWaitMilliseconds`, which must stay below its hub RPC timeout.
+ */
+export const orchestrationToolLimits = {
+  idempotencyKeyLength: 128,
+  correlationIdLength: 128,
+  messageBodyLength: 4_000,
+  messageArtifacts: 8,
+  messagesPerThread: 1_000,
+  messagesPerSender: 250,
+  acknowledgementsPerCall: 50,
+  progressSummaryLength: 2_000,
+  blockedReasonLength: 1_000,
+  completionSummaryLength: 8_000,
+  completionArtifacts: 16,
+  updatesPerTask: 200,
+  cursorLength: 512,
+  defaultWaitMilliseconds: 15_000,
+  maximumWaitMilliseconds: 20_000,
+  maximumEventsPerWait: 50,
+  concurrentWaitsPerRun: 2,
+  retainedEventsPerThread: 2_000,
+  contextTasks: 100,
+  contextMessages: 20,
+  tasksPerSourceRun: 128,
+  inventoryAgents: 64,
+  inventoryNodes: 32,
+  inventoryCapabilitiesPerNode: 64,
+  inventoryModelsPerHarness: 16
+} as const;
 
 export interface HubRpcError {
   code: string;
@@ -486,9 +535,20 @@ export interface Task {
   attemptRunIds: string[];
   result?: string;
   error?: string;
+  /** The latest report from the task's current assignee; it never changes the task's status. */
+  progress?: TaskProgress;
   createdAt: string;
   updatedAt: string;
   finishedAt?: string;
+}
+
+export interface TaskProgress {
+  summary?: string;
+  /** Advisory: the assignee is waiting on something. Distinct from the terminal `blocked` status. */
+  blockedReason?: string;
+  completion?: { summary: string; artifactIds: string[] };
+  runId: string;
+  updatedAt: string;
 }
 
 /*
@@ -533,6 +593,38 @@ export interface TaskMessageAcknowledgement {
 
 /** Opaque to models; only the hub interprets its contents. */
 export type MailboxCursor = string;
+
+/** A message as its recipient sees it; acknowledgement state comes from the separate records. */
+export interface TaskMessageView {
+  id: string;
+  sender: TaskMessageParticipant;
+  recipient: TaskMessageParticipant;
+  sequence: number;
+  kind: TaskMessageKind;
+  body: string;
+  correlationId?: string;
+  inReplyToMessageId?: string;
+  artifactIds: string[];
+  acknowledged: boolean;
+  createdAt: string;
+}
+
+export const taskEventChanges = ["status", "attempt", "progress"] as const;
+export type TaskEventChange = typeof taskEventChanges[number];
+
+/** One committed change visible to a caller, ordered by a thread-scoped `sequence`. */
+export type TaskMailboxEvent =
+  | { type: "message"; sequence: number; at: string; message: TaskMessageView }
+  | {
+    type: "task";
+    sequence: number;
+    at: string;
+    taskId: string;
+    status: TaskStatus;
+    previousStatus?: TaskStatus;
+    changes: TaskEventChange[];
+    attempt?: { runId: string; number: number };
+  };
 
 /*
  * Harness session bindings associate an opaque provider session with the Coffee Shop agent, node,

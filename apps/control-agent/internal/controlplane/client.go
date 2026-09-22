@@ -172,7 +172,7 @@ func (client *Client) detach(connection *websocket.Conn) {
 	defer client.connectionMu.Unlock()
 	if client.connection == connection {
 		client.connection = nil
-		client.failPending(errors.New("control plane disconnected"))
+		client.failPending(&mcpserver.ToolError{Code: "hub_unavailable", Message: "The control plane disconnected; retry with the same idempotency key", Retryable: true})
 	}
 }
 
@@ -382,22 +382,24 @@ func (client *Client) callHub(ctx context.Context, runID, operation string, argu
 	connection := client.connection
 	if connection == nil {
 		client.connectionMu.Unlock()
-		return nil, errors.New("control plane is unavailable")
+		return nil, &mcpserver.ToolError{Code: "hub_unavailable", Message: "The control plane is unavailable; retry with the same idempotency key", Retryable: true}
 	}
 	writeContext, cancel := context.WithTimeout(ctx, 10*time.Second)
 	err = writeBytes(writeContext, connection, data)
 	cancel()
 	client.connectionMu.Unlock()
 	if err != nil {
-		return nil, fmt.Errorf("send hub tool request: %w", err)
+		return nil, &mcpserver.ToolError{Code: "hub_unavailable", Message: "The hub tool request could not be sent; retry with the same idempotency key", Retryable: true}
 	}
+	timer := time.NewTimer(hubRequestTimeout)
+	defer timer.Stop()
 	select {
 	case received := <-response:
 		return received.result, received.err
 	case <-ctx.Done():
 		return nil, ctx.Err()
-	case <-time.After(30 * time.Second):
-		return nil, errors.New("hub tool request timed out")
+	case <-timer.C:
+		return nil, &mcpserver.ToolError{Code: "hub_timeout", Message: "The hub tool request timed out; retry with the same idempotency key", Retryable: true}
 	}
 }
 
@@ -410,7 +412,7 @@ func (client *Client) resolveRPC(message protocol.Inbound) {
 		return
 	}
 	if message.RPCError != nil {
-		response <- rpcResult{err: fmt.Errorf("%s: %s", message.RPCError.Code, message.RPCError.Message)}
+		response <- rpcResult{err: &mcpserver.ToolError{Code: message.RPCError.Code, Message: message.RPCError.Message, Retryable: message.RPCError.Retryable}}
 		return
 	}
 	response <- rpcResult{result: message.Result}
@@ -509,5 +511,9 @@ func writeBytes(ctx context.Context, connection *websocket.Conn, data []byte) er
 }
 
 const writeTimeout = 10 * time.Second
+
+// hubRequestTimeout bounds one correlated hub RPC. It exceeds the longest wait_for_task_events
+// long-poll, protocol.MaximumWaitMilliseconds, so a wait always answers before Barista gives up.
+const hubRequestTimeout = 30 * time.Second
 
 func now() string { return time.Now().UTC().Format(time.RFC3339Nano) }

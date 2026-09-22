@@ -82,6 +82,16 @@ func TestRunnerExecutesDiscoveredBinaryAndNormalizesOutput(t *testing.T) {
 	require.Equal(t, []string{"fake result"}, chunks)
 }
 
+func TestClaudeWorkersAreNotAllowedDelegationTools(t *testing.T) {
+	_, args, err := commandFor(protocol.Run{HarnessID: "claude-cli", Model: "default", Prompt: "test"}, protocol.Agent{}, mcpserver.Config{URL: "http://127.0.0.1:1234/mcp", Token: "worker"})
+	require.NoError(t, err)
+	joined := strings.Join(args, " ")
+	require.Contains(t, joined, "mcp__coffee_shop_hub__send_task_message")
+	for _, name := range protocol.DelegationHubToolNames {
+		require.NotContains(t, joined, "mcp__coffee_shop_hub__"+name)
+	}
+}
+
 func TestHarnessCommandsInjectRunScopedMCPWithoutPuttingTokenInArguments(t *testing.T) {
 	configuration := mcpserver.Config{URL: "http://127.0.0.1:1234/mcp", Token: "do-not-leak", CanDelegate: true}
 	for _, harnessID := range []string{"claude-cli", "codex-cli"} {
@@ -90,7 +100,9 @@ func TestHarnessCommandsInjectRunScopedMCPWithoutPuttingTokenInArguments(t *test
 		joined := strings.Join(args, " ")
 		require.Contains(t, joined, "coffee_shop_hub")
 		if harnessID == "claude-cli" {
-			require.Contains(t, joined, "update_thread")
+			require.Contains(t, joined, "mcp__coffee_shop_hub__update_thread")
+			require.Contains(t, joined, "mcp__coffee_shop_hub__wait_for_task_events")
+			require.Contains(t, joined, "mcp__coffee_shop_hub__submit_tasks")
 		}
 		require.Contains(t, joined, "COFFEE_SHOP_MCP_TOKEN")
 		require.NotContains(t, joined, configuration.Token)
