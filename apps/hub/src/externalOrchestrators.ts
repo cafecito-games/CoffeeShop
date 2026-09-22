@@ -1,14 +1,21 @@
 import {
+  isTerminalTaskStatus,
+  orchestrationToolLimits,
   orchestratorClientHeartbeatExpirySeconds,
   threadOrchestrator,
   type OrchestratorAttachment,
   type OrchestratorAttachmentStatus,
+  type OrchestratorHubToClient,
+  type TaskMessage,
+  type TaskMessageParticipant,
   type Thread,
   type ThreadStatus,
   type Validation
 } from "@coffee-shop/protocol";
+import { CoordinationError } from "./coordinationError.js";
 import { inboxFor, pendingOrchestratorEvents } from "./orchestratorInbox.js";
 import { newEvent, newId, type State } from "./store.js";
+import { participantKey, type TaskEventEntry } from "./taskEvents.js";
 import { newExternalThread, threadObjectiveLimit, threadTitleLimit } from "./threads.js";
 
 /*
@@ -256,4 +263,308 @@ export function createExternalThreadInState(
   const outcome = attachThreadInState(state, { threadId: thread.id, clientId: request.clientId, connectionId: request.connectionId }, at);
   if (outcome.kind !== "attached") throw new Error("A newly created external thread could not be attached");
   return { thread, attachment: outcome.attachment };
+}
+
+/*
+ * Doorbell policy.
+ *
+ * A doorbell is a push, never a delivery: it tells an attached session that its thread has
+ * something waiting, and the orchestrator then pulls through `get_thread_events`. The
+ * acknowledged cursor stays the only delivery truth, so nothing a ring decides is ever persisted;
+ * losing one costs latency and never events.
+ *
+ * Everything a doorbell says is built from hub-owned structured fields — the thread's own title,
+ * counts of unacknowledged journal entries by kind, and the earliest approval expiry. Worker
+ * output reaches the model only through tool results it asked for, never through a summary pushed
+ * into an operator's session without review.
+ */
+
+/** The doorbell frame, exactly as `@coffee-shop/protocol` declares it. */
+export type Doorbell = Extract<OrchestratorHubToClient, { type: "doorbell" }>;
+
+/** At most one ring per thread within this window. */
+export const doorbellDebounceMilliseconds = 2_000;
+/** A pending approval this close to expiry earns one further ring, once. */
+export const doorbellApprovalWarningMilliseconds = 3 * 60_000;
+/** The hard bound on a summary; the wire allows far more than an operator wants to read. */
+export const doorbellSummaryLimit = 300;
+/** How much of a summary a thread title may spend. */
+export const doorbellTitleLimit = 60;
+
+/** What a doorbell counts. Each unacknowledged journal entry has exactly one of these kinds. */
+export const doorbellEventKinds = ["completed", "failed", "cancelled", "blocked", "message"] as const;
+export type DoorbellEventKind = typeof doorbellEventKinds[number];
+export type DoorbellCounts = Record<DoorbellEventKind, number>;
+
+const doorbellKindForTerminalStatus: Readonly<Record<string, DoorbellEventKind>> = {
+  completed: "completed",
+  failed: "failed",
+  cancelled: "cancelled",
+  blocked: "blocked"
+};
+
+/**
+ * The kind a pending journal entry counts as. A task entry that is relevant without a terminal
+ * status is one that reported itself blocked, so an unrecognized status is counted as blocked
+ * rather than dropped: a doorbell may undercount nothing.
+ */
+export function doorbellEventKindFor(entry: TaskEventEntry): DoorbellEventKind {
+  if (entry.kind === "message") return "message";
+  if (!entry.changes.includes("status") || !isTerminalTaskStatus(entry.status)) return "blocked";
+  return doorbellKindForTerminalStatus[entry.status] ?? "blocked";
+}
+
+/** A pending approval, reduced to the fields a doorbell may report. */
+export interface DoorbellApproval {
+  id: string;
+  expiresAt?: string;
+}
+
+/** The hub-owned facts one ring may report; by construction it holds no worker-authored text. */
+export interface DoorbellFacts {
+  threadId: string;
+  title: string;
+  /** Unacknowledged orchestrator-relevant journal entries. */
+  pending: number;
+  /** The highest unacknowledged sequence, or 0 when nothing is pending. */
+  throughSequence: number;
+  counts: DoorbellCounts;
+  approvals: DoorbellApproval[];
+}
+
+const emptyDoorbellCounts = (): DoorbellCounts => ({ completed: 0, failed: 0, cancelled: 0, blocked: 0, message: 0 });
+
+/**
+ * Reads what a thread's attached orchestrator still has waiting. Returns `undefined` for a thread
+ * that does not exist or is orchestrated by an agent, so no caller can ring a thread the hub drives
+ * itself.
+ */
+export function doorbellFactsFor(state: Readonly<State>, threadId: string): DoorbellFacts | undefined {
+  const thread = (state.threads ?? []).find((item) => item.id === threadId);
+  if (thread === undefined || threadOrchestrator(thread)?.kind !== "external") return undefined;
+  const entries = pendingOrchestratorEvents(state, threadId, inboxFor(state, threadId)?.processedThrough ?? 0);
+  const counts = emptyDoorbellCounts();
+  for (const entry of entries) counts[doorbellEventKindFor(entry)] += 1;
+  const approvals = (state.approvals ?? [])
+    .filter((approval) => {
+      if (approval.status !== "pending") return false;
+      const run = state.runs.find((item) => item.id === approval.runId);
+      return (run?.threadId ?? approval.threadId) === threadId;
+    })
+    .map((approval) => ({ id: approval.id, ...(approval.expiresAt === undefined ? {} : { expiresAt: approval.expiresAt }) }));
+  return {
+    threadId,
+    title: thread.title,
+    pending: entries.length,
+    throughSequence: entries.at(-1)?.sequence ?? 0,
+    counts,
+    approvals
+  };
+}
+
+/**
+ * What one attachment remembers about its own rings. It is in-memory by design: attaching rings the
+ * backlog, so a hub restart costs at most one extra ring and never a missed one.
+ */
+export interface DoorbellRingRecord {
+  rungAt: string;
+  rungThroughSequence: number;
+  /** Approvals a ring has already reported, so an approval earns exactly one ring when it opens. */
+  rungApprovalIds: readonly string[];
+  /** Approvals already rung because their expiry was near, so each earns exactly one such ring. */
+  warnedApprovalIds: readonly string[];
+}
+
+/** `attach` rings a backlog immediately; `change` is every other re-evaluation. */
+export type DoorbellTrigger = "attach" | "change";
+
+export type DoorbellDecision =
+  | { kind: "ring"; doorbell: Doorbell; record: DoorbellRingRecord }
+  /** Suppressed by the debounce window; re-evaluate after this delay to coalesce the burst. */
+  | { kind: "wait"; retryAfterMilliseconds: number }
+  | { kind: "quiet" };
+
+const singular: Readonly<Record<DoorbellEventKind, string>> = {
+  completed: "task completed",
+  failed: "task failed",
+  cancelled: "task cancelled",
+  blocked: "task blocked",
+  message: "message"
+};
+
+const plural: Readonly<Record<DoorbellEventKind, string>> = {
+  completed: "tasks completed",
+  failed: "tasks failed",
+  cancelled: "tasks cancelled",
+  blocked: "tasks blocked",
+  message: "messages"
+};
+
+/** A timestamp the hub wrote, in milliseconds, or `undefined` when it cannot be read. */
+const readTime = (value: string | undefined) => {
+  const parsed = value === undefined ? Number.NaN : Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+};
+
+/**
+ * Truncates at a fixed position, so the same facts always read the same. Counting whole code
+ * points rather than code units keeps a character that is written as a surrogate pair from being
+ * cut in half.
+ */
+function truncate(value: string, limit: number) {
+  const characters = [...value];
+  return characters.length <= limit ? value : `${characters.slice(0, limit - 1).join("")}…`;
+}
+
+/** Collapses a title to one bounded single-line run, deterministically. */
+function boundedTitle(title: string) {
+  const flattened = title.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/"/g, "'").replace(/\s+/g, " ").trim();
+  return flattened ? truncate(flattened, doorbellTitleLimit) : "untitled";
+}
+
+/** The UTC `HH:MM` of an expiry the hub can read. */
+const expiryClock = (milliseconds: number) => new Date(milliseconds).toISOString().slice(11, 16);
+
+/** The one sentence a doorbell carries; built from `facts` alone and bounded. */
+export function doorbellSummary(facts: DoorbellFacts): string {
+  const parts = doorbellEventKinds
+    .filter((kind) => facts.counts[kind] > 0)
+    .map((kind) => `${facts.counts[kind]} ${(facts.counts[kind] === 1 ? singular : plural)[kind]}`);
+  if (facts.approvals.length > 0) {
+    const expiries = facts.approvals.map((approval) => readTime(approval.expiresAt)).filter((value): value is number => value !== undefined);
+    const earliest = expiries.length > 0 ? Math.min(...expiries) : undefined;
+    parts.push(`${facts.approvals.length} approval${facts.approvals.length === 1 ? "" : "s"} pending`
+      + (earliest === undefined ? "" : ` (earliest expires ${expiryClock(earliest)}Z)`));
+  }
+  const body = parts.length > 0 ? parts.join(", ") : "new activity";
+  return truncate(`Thread "${boundedTitle(facts.title)}": ${body}. Call get_thread_events.`, doorbellSummaryLimit);
+}
+
+/**
+ * Decides whether to ring, given what is waiting, what the last ring covered, and the clock. Pure:
+ * the caller injects `now` and owns both the socket and the record, so the policy itself is
+ * testable without waiting for a window to pass.
+ */
+export function decideDoorbell(
+  facts: DoorbellFacts,
+  previous: DoorbellRingRecord | undefined,
+  trigger: DoorbellTrigger,
+  now: string
+): DoorbellDecision {
+  if (facts.pending === 0 && facts.approvals.length === 0) return { kind: "quiet" };
+  const at = readTime(now);
+  const rung = new Set(previous?.rungApprovalIds ?? []);
+  const warned = new Set(previous?.warnedApprovalIds ?? []);
+  const expiringSoon = at === undefined ? [] : facts.approvals.filter((approval) => {
+    const expiresAt = readTime(approval.expiresAt);
+    return expiresAt !== undefined && expiresAt - at <= doorbellApprovalWarningMilliseconds;
+  });
+  const newEvents = facts.throughSequence > (previous?.rungThroughSequence ?? 0);
+  // An approval opens no journal entry, so it is its own reason to ring, once when it opens and
+  // once more as its expiry closes in.
+  const newApprovals = facts.approvals.some((approval) => !rung.has(approval.id));
+  const newlyExpiring = expiringSoon.some((approval) => !warned.has(approval.id));
+  // Attaching rings the backlog at once, but only what the last ring for this attachment did not
+  // already cover; an attachment that has just been rung is not rung twice for the same events.
+  if (!newEvents && !newApprovals && !newlyExpiring) return { kind: "quiet" };
+  if (trigger !== "attach" && previous !== undefined) {
+    const since = at === undefined ? undefined : at - (readTime(previous.rungAt) ?? Number.NaN);
+    // A clock the hub cannot read never shortens the window; it only ever suppresses a ring.
+    if (since === undefined || Number.isNaN(since)) return { kind: "quiet" };
+    if (since < doorbellDebounceMilliseconds) return { kind: "wait", retryAfterMilliseconds: doorbellDebounceMilliseconds - since };
+  }
+  const stillPending = new Set(facts.approvals.map((approval) => approval.id));
+  return {
+    kind: "ring",
+    doorbell: {
+      type: "doorbell",
+      threadId: facts.threadId,
+      pending: facts.pending,
+      approvals: facts.approvals.length,
+      urgent: facts.approvals.length > 0,
+      summary: doorbellSummary(facts)
+    },
+    record: {
+      rungAt: now,
+      rungThroughSequence: Math.max(previous?.rungThroughSequence ?? 0, facts.throughSequence),
+      // Only approvals still pending are remembered, so the record stays as small as the backlog.
+      rungApprovalIds: [...stillPending].sort(),
+      warnedApprovalIds: [...new Set([...[...warned].filter((id) => stillPending.has(id)), ...expiringSoon.map((approval) => approval.id)])].sort()
+    }
+  };
+}
+
+/*
+ * Operator messages to an externally orchestrated thread.
+ *
+ * An external thread has no owner agent, so a message an operator posts to it cannot queue a run.
+ * It is appended to the orchestrator's mailbox instead, which makes it one more unacknowledged
+ * journal entry the orchestrator pulls and acknowledges like any other.
+ */
+
+const operatorParticipant: TaskMessageParticipant = { type: "operator" };
+/** The sending principal recorded on an operator's message; it names no run and no credential. */
+export const operatorSourceKey = "operator";
+
+export interface OperatorMessageRequest {
+  threadId: string;
+  body: string;
+  /** Supplied by the client to make a retry safe; one is generated when it is absent. */
+  idempotencyKey?: string;
+}
+
+export interface OperatorMessage {
+  created: boolean;
+  message: TaskMessage;
+}
+
+/**
+ * Records an operator's message to an external thread's orchestrator. A thread that does not exist
+ * and one the hub orchestrates itself are refused identically, because neither can receive one.
+ * Replaying an idempotency key with the same body returns the original message.
+ */
+export function postOperatorMessageInState(state: State, request: OperatorMessageRequest, at: string): OperatorMessage {
+  const thread = (state.threads ?? []).find((item) => item.id === request.threadId);
+  if (thread === undefined || threadOrchestrator(thread)?.kind !== "external") throw new CoordinationError("not_found", "Thread not found");
+  const body = request.body.trim();
+  if (!body) throw new CoordinationError("invalid_arguments", "A message needs a body");
+  if (body.length > orchestrationToolLimits.messageBodyLength) {
+    throw new CoordinationError("invalid_arguments", `A message body must be at most ${orchestrationToolLimits.messageBodyLength} characters`);
+  }
+  const idempotencyKey = request.idempotencyKey?.trim() || newId("opmsg");
+  if (idempotencyKey.length > orchestrationToolLimits.idempotencyKeyLength) {
+    throw new CoordinationError("invalid_arguments", `idempotencyKey must be at most ${orchestrationToolLimits.idempotencyKeyLength} characters`);
+  }
+  state.taskMessages ??= [];
+  const threadMessages = state.taskMessages.filter((message) => message.threadId === thread.id);
+  const fromOperator = threadMessages.filter((message) => participantKey(message.sender) === participantKey(operatorParticipant));
+  const replay = fromOperator.find((message) => message.idempotencyKey === idempotencyKey);
+  if (replay !== undefined) {
+    if (replay.body !== body) throw new CoordinationError("idempotency_conflict", "The idempotency key was already used with a different message");
+    return { created: false, message: replay };
+  }
+  if (thread.status !== "active") throw new CoordinationError("thread_inactive", "Messages require an active thread");
+  if (threadMessages.length >= orchestrationToolLimits.messagesPerThread || fromOperator.length >= orchestrationToolLimits.messagesPerSender) {
+    throw new CoordinationError("mailbox_full", "The thread's message limit has been reached");
+  }
+  const recipientKey = participantKey({ type: "orchestrator" });
+  const sequence = 1 + threadMessages
+    .filter((message) => participantKey(message.recipient) === recipientKey)
+    .reduce((latest, message) => Math.max(latest, message.sequence), 0);
+  const message: TaskMessage = {
+    id: newId("taskmsg"),
+    threadId: thread.id,
+    sender: { ...operatorParticipant },
+    recipient: { type: "orchestrator" },
+    sequence,
+    kind: "instruction",
+    body,
+    artifactIds: [],
+    sourceKey: operatorSourceKey,
+    idempotencyKey,
+    createdAt: at
+  };
+  state.taskMessages.push(message);
+  thread.updatedAt = at;
+  return { created: true, message };
 }

@@ -38,8 +38,11 @@ import { externalThreadContext } from "./orchestratorContext.js";
 import { persistExternalOrchestratorCursor } from "./orchestratorInbox.js";
 import { updateThreadForExternalOrchestrator } from "./threads.js";
 import {
+  attachedAttachmentForThread,
   attachThreadInState,
   createExternalThreadInState,
+  decideDoorbell,
+  doorbellFactsFor,
   detachClientInState,
   detachConnectionInState,
   detachThreadInState,
@@ -51,6 +54,8 @@ import {
   recordHeartbeatInState,
   type AttachOutcome,
   type DetachOutcome,
+  type DoorbellRingRecord,
+  type DoorbellTrigger,
   type ExternalThreadCreation
 } from "./externalOrchestrators.js";
 import { touchOrchestratorClient, verifyOrchestratorClient } from "./orchestratorClients.js";
@@ -119,6 +124,12 @@ export interface OrchestratorClientGateway {
   revokeClient(clientId: string): Promise<void>;
   /** Detaches connections silent past the heartbeat expiry; returns whether anything changed. */
   expireAttachments(): Promise<boolean>;
+  /**
+   * Re-evaluates the doorbell policy for every attached thread and rings the ones it says to ring.
+   * Safe to call from a commit listener and from a timer: it never throws, never writes, and never
+   * blocks.
+   */
+  ringAttachedThreads(): void;
   /** Live, welcomed connections; used by tests and diagnostics. */
   connectionCount(): number;
 }
@@ -219,7 +230,8 @@ const liveClient = (state: Readonly<State>, clientId: string): OrchestratorClien
 interface LiveConnection {
   connectionId: string;
   clientId: string;
-  send(message: OrchestratorHubToClient): void;
+  /** Returns whether the frame reached the socket. */
+  send(message: OrchestratorHubToClient): boolean;
   close(reason: OrchestratorClientCloseReason): void;
 }
 
@@ -234,6 +246,42 @@ export function createOrchestratorClientGateway({
   sendToControlAgent = () => false
 }: OrchestratorClientGatewayDependencies): OrchestratorClientGateway {
   const connections = new Map<string, LiveConnection>();
+  /*
+   * Doorbells, keyed by attachment: a replaced attachment starts with no history, so the connection
+   * that takes a thread over is rung for the whole backlog, and the one it replaced is never rung
+   * again. Nothing here is persisted, because a ring is not a delivery — only the acknowledged
+   * cursor is.
+   */
+  const ringRecords = new Map<string, DoorbellRingRecord>();
+  const pendingRings = new Map<string, unknown>();
+
+  /** Re-evaluates one thread and rings its attached connection if the policy says to. */
+  const ringThread = (threadId: string, trigger: DoorbellTrigger) => {
+    const scheduled = pendingRings.get(threadId);
+    if (scheduled !== undefined) {
+      pendingRings.delete(threadId);
+      timers.clearTimeout(scheduled);
+    }
+    const attachment = store.read((state) => attachedAttachmentForThread(state, threadId));
+    if (attachment === undefined) return;
+    const connection = connections.get(attachment.connectionId);
+    if (connection === undefined) return;
+    const facts = store.read((state) => doorbellFactsFor(state, threadId));
+    if (facts === undefined) return;
+    const decision = decideDoorbell(facts, ringRecords.get(attachment.id), trigger, now());
+    if (decision.kind === "wait") {
+      // The burst is coalesced: one re-evaluation at the end of the window rings with the counts
+      // as they stand then, rather than once per event.
+      pendingRings.set(threadId, timers.setTimeout(() => {
+        pendingRings.delete(threadId);
+        ringThread(threadId, "change");
+      }, decision.retryAfterMilliseconds));
+      return;
+    }
+    if (decision.kind !== "ring") return;
+    // A ring that never reached the socket is not recorded, so the same backlog rings again.
+    if (connection.send(decision.doorbell)) ringRecords.set(attachment.id, decision.record);
+  };
 
   const gateway: OrchestratorClientGateway = {
     accept(transport) {
@@ -242,21 +290,24 @@ export function createOrchestratorClientGateway({
       let finished = false;
       const inFlight = new Set<string>();
 
-      const send = (message: OrchestratorHubToClient) => {
-        if (finished) return;
+      /** Puts one frame on the socket; the result reports whether it actually got there. */
+      const send = (message: OrchestratorHubToClient): boolean => {
+        if (finished) return false;
         const validated = validateOrchestratorHubMessage(message);
         if (!validated.ok) {
           // The hub never puts a frame the bridge would reject on the wire. A result too large for
           // the protocol becomes a failure the caller can act on instead of a dropped response.
           console.error(`orchestrator-client frame refused by its own contract: ${validated.reason}`);
-          if (message.type !== "rpc.response") return;
+          if (message.type !== "rpc.response") return false;
           send({ type: "rpc.response", requestId: message.requestId, error: { code: "hub_unavailable", message: "The hub could not encode a result for this call" } });
-          return;
+          return false;
         }
         try {
           transport.send(JSON.stringify(validated.value));
+          return true;
         } catch (error) {
           console.error("orchestrator-client frame could not be sent", error);
+          return false;
         }
       };
 
@@ -350,6 +401,8 @@ export function createOrchestratorClientGateway({
         if (attached.kind !== "attached") return failure("forbidden", "The thread is not orchestrated by this client");
         broadcast();
         if (attached.replaced !== undefined) notifyReplaced(attached.replaced);
+        // Attaching rings whatever is already waiting, which is why no ring is ever persisted.
+        ringThread(threadId.value, "attach");
         const view = store.read((state) => {
           const thread = (state.threads ?? []).find((item) => item.id === threadId.value);
           return thread === undefined ? undefined : structuredClone(externalThreadView(state, thread));
@@ -585,12 +638,13 @@ export function createOrchestratorClientGateway({
         send({ type: "rpc.response", requestId, ...outcome });
       };
 
-      const refuseUndecodable = (decoded: unknown, reason: string) => {
+      const refuseUndecodable = (decoded: unknown, reason: string): void => {
         if (connectionId === undefined) return close("unauthorized");
         // After the welcome a bad frame is answered, not fatal, so one malformed call never costs a
         // bridge its attachments. Only a frame that names its own request can be answered.
         if (isRecord(decoded) && decoded.type === "rpc.request" && typeof decoded.requestId === "string" && decoded.requestId.length > 0) {
-          return send({ type: "rpc.response", requestId: decoded.requestId, error: { code: "invalid_arguments", message: reason } });
+          send({ type: "rpc.response", requestId: decoded.requestId, error: { code: "invalid_arguments", message: reason } });
+          return;
         }
         console.warn(`ignored an orchestrator-client frame: ${reason}`);
       };
@@ -668,6 +722,20 @@ export function createOrchestratorClientGateway({
       if (expired.length === 0) return false;
       broadcast();
       return true;
+    },
+
+    ringAttachedThreads() {
+      try {
+        const attached = store.read((state) => (state.orchestratorAttachments ?? [])
+          .filter((attachment) => attachment.status === "attached")
+          .map((attachment) => ({ id: attachment.id, threadId: attachment.threadId })));
+        const live = new Set(attached.map((attachment) => attachment.id));
+        for (const attachmentId of [...ringRecords.keys()]) if (!live.has(attachmentId)) ringRecords.delete(attachmentId);
+        for (const attachment of attached) ringThread(attachment.threadId, "change");
+      } catch (error) {
+        // A doorbell is a convenience; a thread whose ring failed is still pulled by its cursor.
+        console.error("orchestrator doorbells could not be evaluated", error);
+      }
     },
 
     connectionCount() {
