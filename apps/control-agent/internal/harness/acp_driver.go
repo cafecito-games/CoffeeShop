@@ -18,10 +18,13 @@ import (
 const (
 	mcpServerName              = "coffee_shop_hub"
 	defaultShutdownGracePeriod = 5 * time.Second
-	// pipeReleaseDelay bounds how long Barista waits for adapter stdout to close after killing
-	// the process tree, covering a descendant that escaped the tree while holding the pipe.
+	// pipeReleaseDelay bounds each wait for adapter stdio to close after killing the process tree,
+	// covering a descendant that escaped the tree while holding a pipe.
 	pipeReleaseDelay = 3 * time.Second
 )
+
+// errShutdownAbandoned reports that adapter supervision stopped waiting for stdio or process exit.
+var errShutdownAbandoned = errors.New("ACP adapter stdio did not close after its process tree was terminated")
 
 // Warning codes the ACP driver adds to the normalized event stream.
 const (
@@ -146,7 +149,7 @@ func (driver *ACPDriver) Execute(ctx context.Context, invocation Invocation) (st
 		exited <- command.Wait()
 	}()
 	client.Close()
-	waitErr, forced := driver.shutdown(runErr == nil, exited, killProcessTree, stdout.Close)
+	waitErr, forced := driver.shutdown(runErr == nil, exited, killProcessTree, func() { _ = stdin.Close() }, func() { _ = stdout.Close() })
 
 	if runErr != nil {
 		if diagnostic := stderr.String(); diagnostic != "" {
@@ -166,9 +169,11 @@ func (driver *ACPDriver) Execute(ctx context.Context, invocation Invocation) (st
 }
 
 // shutdown lets a successful adapter exit on its own within the grace period and terminates the
-// process tree immediately after a failure. It returns the process wait error and whether the
-// tree had to be killed after a successful turn.
-func (driver *ACPDriver) shutdown(graceful bool, exited <-chan error, killProcessTree func(), releasePipe func() error) (error, bool) {
+// process tree immediately after a failure. Every wait after that is bounded: a descendant that
+// escaped the process tree may still hold adapter stdin or stdout, so Barista closes its own pipe
+// ends to unblock the connection and finally stops waiting rather than holding the run slot. It
+// returns the process wait error and whether the tree had to be killed after a successful turn.
+func (driver *ACPDriver) shutdown(graceful bool, exited <-chan error, killProcessTree, releaseInput, releaseOutput func()) (error, bool) {
 	if graceful {
 		timer := time.NewTimer(driver.options.ShutdownGracePeriod)
 		defer timer.Stop()
@@ -179,15 +184,18 @@ func (driver *ACPDriver) shutdown(graceful bool, exited <-chan error, killProces
 		}
 	}
 	killProcessTree()
-	release := time.NewTimer(pipeReleaseDelay)
-	defer release.Stop()
-	select {
-	case err := <-exited:
-		return err, graceful
-	case <-release.C:
-		_ = releasePipe()
-		return <-exited, graceful
+	releaseInput()
+	for _, release := range []func(){releaseOutput, func() {}} {
+		timer := time.NewTimer(pipeReleaseDelay)
+		select {
+		case err := <-exited:
+			timer.Stop()
+			return err, graceful
+		case <-timer.C:
+		}
+		release()
 	}
+	return errShutdownAbandoned, graceful
 }
 
 func canonicalDirectory(workspace string) (string, error) {
