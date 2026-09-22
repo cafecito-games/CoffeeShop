@@ -11,6 +11,7 @@ import {
 } from "@coffee-shop/protocol";
 import { CoordinationError } from "./coordinationError.js";
 import { assertVisibleArtifacts, mailboxSummary, notVisible, resolveCaller, taskVisibility } from "./mailbox.js";
+import { staticPlacementFailures } from "./scheduler.js";
 import { newEvent, newId, type State, type Store, type TaskUpdateRecord } from "./store.js";
 import { submitTaskBatch, taskContextProjection, type TaskBatchResult } from "./tasks.js";
 import { threadTitleFromObjective } from "./threads.js";
@@ -235,6 +236,30 @@ export interface DelegationResult {
   task?: Task;
 }
 
+const ineligibleTarget = () => new CoordinationError("target_ineligible", "The target agent cannot run delegated work with its current configuration");
+
+/**
+ * Rejects a legacy delegation target that could never be placed: a missing agent, the caller
+ * itself, or an agent whose harness, model, transport, or workspace its node does not support.
+ * A target that is only offline, busy, or awaiting fresh evidence stays eligible and is queued.
+ */
+function assertEligibleTarget(state: Readonly<State>, sourceRunId: string, targetAgentId: string, probe: Task) {
+  const source = state.runs.find((run) => run.id === sourceRunId);
+  const target = state.agents.find((agent) => agent.id === targetAgentId);
+  if (!source || !target || target.id === source.agentId) throw ineligibleTarget();
+  const failures = staticPlacementFailures(probe, target, {
+    agents: state.agents,
+    nodes: state.nodes,
+    runs: state.runs,
+    // Static requirement kinds never depend on the connection, evidence, or profiles.
+    connection: () => undefined,
+    capabilityReport: () => undefined,
+    projectProfile: () => undefined,
+    now: new Date().toISOString()
+  });
+  if (failures.length) throw ineligibleTarget();
+}
+
 const legacyIdempotencyKey = (key: string) => `delegate_task:${createHash("sha256").update(key).digest("hex").slice(0, 48)}`;
 
 /**
@@ -261,21 +286,26 @@ export async function delegateTask(store: Store, sourceRunId: string, argumentsV
       if (!child) throw new CoordinationError("inconsistent_state", "The prior delegated task is unavailable", true);
       return { kind: "legacy" as const, result: { taskId: child.id, status: child.status, agentId: legacy.toAgentId, created: false } };
     }
-    if (targetAgentId === caller.agent.id) throw new CoordinationError("invalid_target", "An agent cannot delegate to itself");
-    if (!state.agents.some((agent) => agent.id === targetAgentId)) throw new CoordinationError("invalid_target", "The target agent does not exist");
     const attached = artifactIds.map((id) => state.artifacts?.find((artifact) => artifact.id === id && artifact.runId === caller.run.id && artifact.uploaded));
     if (attached.some((artifact) => !artifact)) throw new CoordinationError("invalid_artifact", "Every attached artifact must be uploaded by the source task");
     return { kind: "submit" as const, attached: attached as Artifact[] };
   });
   if (preflight.kind === "legacy") return preflight.result;
   const references = preflight.attached.map((artifact) => `${artifact.title} (${artifact.downloadPath})`).join(", ");
+  const delegated = { key: "delegated", title: threadTitleFromObjective(instructions), instructions: references ? `${instructions}\n\nRelevant artifacts: ${references}` : instructions };
+  const placementOverride: PlacementOverride = { agentId: targetAgentId, authorizedBy: "policy" };
+  const probe: Task = {
+    id: "delegation-probe", threadId: "", title: delegated.title, instructions: delegated.instructions, status: "ready",
+    requirements: {}, dependencies: [], placementOverride, idempotencyKey: "", attemptRunIds: [], createdAt: at, updatedAt: at
+  };
   const submitted = await submitTaskBatch(store, sourceRunId, {
     idempotencyKey: legacyIdempotencyKey(idempotencyKey),
-    tasks: [{ key: "delegated", title: threadTitleFromObjective(instructions), instructions: references ? `${instructions}\n\nRelevant artifacts: ${references}` : instructions }]
+    tasks: [delegated]
   }, at, {
-    placementOverrides: { delegated: { agentId: targetAgentId, authorizedBy: "policy" } },
+    placementOverrides: { delegated: placementOverride },
     maximumSourceTasks: maxChildrenPerRun,
-    maximumSourceDepth: maxDelegationDepth
+    maximumSourceDepth: maxDelegationDepth,
+    assertAcceptable: (state, runId) => assertEligibleTarget(state, runId, targetAgentId, probe)
   });
   const task = submitted.tasks[0];
   return { taskId: task.id, status: task.status, agentId: targetAgentId, created: submitted.created, task };

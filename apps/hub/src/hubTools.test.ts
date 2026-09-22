@@ -109,3 +109,40 @@ test("revoked, unknown, and terminal sources fail closed", async () => {
   }
   assert.equal(store.snapshot().tasks?.length, 0);
 });
+
+test("legacy delegation to a statically ineligible target fails without writing anything", async () => {
+  const store = await orchestrationStore();
+  const hub = fixtureHandler(store);
+  await store.transact((state) => {
+    state.agents.find((agent) => agent.id === "worker-b")!.model = "unadvertised-model";
+    state.agents.find((agent) => agent.id === "worker-c")!.harnessId = "claude-cli";
+    state.agents.push({ ...state.agents.find((agent) => agent.id === "worker-a")!, id: "worker-outside", workspace: "/elsewhere/worker" });
+  });
+  const before = store.read((state) => JSON.stringify([state.tasks, state.runs, state.taskSubmissions]));
+  for (const agentId of ["worker-b", "worker-c", "worker-outside", "orchestrator", "missing-agent"]) {
+    const failure = await hub.call("delegate_task", rootRunId, { agentId, task: "Review", idempotencyKey: `review-${agentId}` }).catch((error: unknown) => error);
+    assert.ok(failure instanceof CoordinationError, agentId);
+    assert.deepEqual([failure.code, failure.retryable], ["target_ineligible", false], agentId);
+  }
+  assert.equal(store.read((state) => JSON.stringify([state.tasks, state.runs, state.taskSubmissions])), before);
+});
+
+test("legacy delegation to an offline or busy target still queues a pinned task", async () => {
+  const store = await orchestrationStore();
+  const hub = fixtureHandler(store);
+  await store.transact((state) => {
+    const node = state.nodes.find((item) => item.id === "node-worker-a")!;
+    node.status = "offline";
+    node.activeRuns = node.concurrency;
+  });
+  const delegated = await hub.call("delegate_task", rootRunId, { agentId: "worker-a", task: "Review", idempotencyKey: "review-offline" }) as { taskId: string; status: string; created: boolean };
+  assert.deepEqual(outputViolations("delegate_task", delegated), []);
+  assert.equal(delegated.created, true);
+  assert.equal(delegated.status, "ready");
+  assert.deepEqual(store.snapshot().tasks?.find((task) => task.id === delegated.taskId)?.placementOverride, { agentId: "worker-a", authorizedBy: "policy" });
+  assert.equal(store.snapshot().runs.length, 2);
+
+  await store.transact((state) => { state.agents.find((agent) => agent.id === "worker-a")!.model = "unadvertised-model"; });
+  const replay = await hub.call("delegate_task", rootRunId, { agentId: "worker-a", task: "Review", idempotencyKey: "review-offline" }) as { taskId: string; created: boolean };
+  assert.deepEqual([replay.taskId, replay.created], [delegated.taskId, false], "an exact replay returns the original task even after the target changed");
+});

@@ -23,7 +23,8 @@ function agent(id: string, canDelegate = false): Agent {
 function node(id: string): ComputeNode {
   return {
     id, name: id, kind: "local", platform: "test", status: "online", lastSeen: at, activeRuns: 0,
-    concurrency: 2, workspaceRoots: ["/workspace"], harnesses: [], version: "test"
+    concurrency: 2, workspaceRoots: ["/workspace"], version: "test",
+    harnesses: [{ id: "codex-cli", label: "Codex", description: "", available: true, authMode: "local-account", models: ["default"] }]
   };
 }
 
@@ -93,11 +94,11 @@ test("legacy delegation submits one pinned task through the task graph and is id
   );
   await assert.rejects(
     delegateTask(store, "run-source", { ...argumentsValue, agentId: "orchestrator", idempotencyKey: "self" }, at),
-    (error: unknown) => error instanceof CoordinationError && error.code === "invalid_target"
+    (error: unknown) => error instanceof CoordinationError && error.code === "target_ineligible" && !error.retryable
   );
   await assert.rejects(
     delegateTask(store, "run-source", { ...argumentsValue, agentId: "missing", idempotencyKey: "missing" }, at),
-    (error: unknown) => error instanceof CoordinationError && error.code === "invalid_target"
+    (error: unknown) => error instanceof CoordinationError && error.code === "target_ineligible" && !error.retryable
   );
   assert.equal(store.snapshot().tasks?.length, 1);
 });

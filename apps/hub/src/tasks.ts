@@ -259,6 +259,8 @@ export interface TaskBatchOptions {
   maximumSourceTasks?: number;
   /** Source runs at or beyond this depth cannot submit. */
   maximumSourceDepth?: number;
+  /** Extra policy checked against the authoritative state before a new batch is created; never for a replay. */
+  assertAcceptable?: (state: Readonly<State>, sourceRunId: string) => void;
 }
 
 function findLocalCycle(batch: NormalizedTaskBatch) {
@@ -336,6 +338,7 @@ function planTaskBatch(state: Readonly<State>, sourceRunId: string, batch: Norma
       + (state.delegations ?? []).filter((delegation) => delegation.parentRunId === source.run.id).length;
     if (prior + batch.tasks.length > options.maximumSourceTasks) throw new CoordinationError("fanout_limit", "The task delegation limit has been reached");
   }
+  options.assertAcceptable?.(state, source.run.id);
   const keys = new Set(batch.tasks.map((task) => task.key));
   for (const [key, override] of Object.entries(options.placementOverrides ?? {})) {
     if (!keys.has(key)) throw invalid("A placement override names a task key outside the batch");

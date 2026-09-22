@@ -263,6 +263,21 @@ function evaluateCandidate(task: Task, agent: Agent, profile: ProjectProfile | u
   };
 }
 
+/**
+ * Requirement kinds decided by agent configuration and the node's registered inventory rather
+ * than by momentary node state such as connectivity, capacity, or evidence freshness.
+ */
+export const staticPlacementRequirementKinds: readonly PlacementRequirementKind[] = ["skill", "harness", "model", "transport", "workspace"];
+
+/**
+ * The hard requirements `agent` can never satisfy for `task` until its configuration or its
+ * node's registered harnesses change, from the same evaluation placement uses. Connectivity,
+ * capacity, and capability evidence are transient and are never reported here.
+ */
+export function staticPlacementFailures(task: Task, agent: Agent, environment: PlacementEnvironment): UnsatisfiedRequirement[] {
+  return evaluateCandidate(task, agent, undefined, environment).unsatisfied.filter((entry) => staticPlacementRequirementKinds.includes(entry.kind));
+}
+
 function compareEligible(left: CandidateEvaluation, right: CandidateEvaluation) {
   const leftRanks = left.ranks!;
   const rightRanks = right.ranks!;
