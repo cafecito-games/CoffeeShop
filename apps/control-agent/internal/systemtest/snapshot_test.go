@@ -16,9 +16,12 @@ type snapshot struct {
 	SessionBindings     []sessionBinding    `json:"sessionBindings"`
 	OrchestratorInboxes []orchestratorInbox `json:"orchestratorInboxes"`
 	Approvals           []approval          `json:"approvals"`
-	WorkspaceLeases     []workspaceLease    `json:"workspaceLeases"`
-	RunActivity         []map[string]any    `json:"runActivity"`
-	Events              []timelineEvent     `json:"events"`
+	// Orchestrator credentials as published: the secret hash is hub-only and never appears here.
+	OrchestratorClients     []orchestratorClient     `json:"orchestratorClients"`
+	OrchestratorAttachments []orchestratorAttachment `json:"orchestratorAttachments"`
+	WorkspaceLeases         []workspaceLease         `json:"workspaceLeases"`
+	RunActivity             []map[string]any         `json:"runActivity"`
+	Events                  []timelineEvent          `json:"events"`
 }
 
 type agent struct {
@@ -197,6 +200,25 @@ type approval struct {
 	Delivery          *approvalDelivery `json:"delivery"`
 }
 
+type orchestratorClient struct {
+	ID         string   `json:"id"`
+	Name       string   `json:"name"`
+	Scopes     []string `json:"scopes"`
+	CreatedAt  string   `json:"createdAt"`
+	LastSeenAt string   `json:"lastSeenAt"`
+	RevokedAt  string   `json:"revokedAt"`
+}
+
+type orchestratorAttachment struct {
+	ID           string `json:"id"`
+	ThreadID     string `json:"threadId"`
+	ClientID     string `json:"clientId"`
+	ConnectionID string `json:"connectionId"`
+	Status       string `json:"status"`
+	AttachedAt   string `json:"attachedAt"`
+	DetachedAt   string `json:"detachedAt"`
+}
+
 type workspaceLease struct {
 	ID              string `json:"id"`
 	TaskID          string `json:"taskId"`
@@ -297,6 +319,48 @@ func (current snapshot) messagesIn(threadID string) []taskMessage {
 	result := []taskMessage{}
 	for _, item := range current.TaskMessages {
 		if item.ThreadID == threadID {
+			result = append(result, item)
+		}
+	}
+	return result
+}
+
+// attachmentsFor returns a thread's attachments in the order the hub recorded them.
+func (current snapshot) attachmentsFor(threadID string) []orchestratorAttachment {
+	result := []orchestratorAttachment{}
+	for _, item := range current.OrchestratorAttachments {
+		if item.ThreadID == threadID {
+			result = append(result, item)
+		}
+	}
+	return result
+}
+
+// attachedTo returns the thread's single live attachment, if it has one.
+func (current snapshot) attachedTo(threadID string) (orchestratorAttachment, bool) {
+	for _, item := range current.attachmentsFor(threadID) {
+		if item.Status == "attached" {
+			return item, true
+		}
+	}
+	return orchestratorAttachment{}, false
+}
+
+func (current snapshot) orchestratorClient(clientID string) (orchestratorClient, bool) {
+	for _, item := range current.OrchestratorClients {
+		if item.ID == clientID {
+			return item, true
+		}
+	}
+	return orchestratorClient{}, false
+}
+
+// hubHostedOrchestratorRuns returns the thread's runs that are not task attempts, which is what a
+// hub-hosted orchestrator run is. An externally orchestrated thread must never have one.
+func (current snapshot) hubHostedOrchestratorRuns(threadID string) []run {
+	result := []run{}
+	for _, item := range current.Runs {
+		if item.ThreadID == threadID && item.TaskID == "" {
 			result = append(result, item)
 		}
 	}

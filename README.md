@@ -2,11 +2,12 @@
 
 Coffee Shop is a local-first control plane for persistent, purpose-built coding agents. An agent has a stable identity and purpose; a harness decides how it works; a compute node decides where it works. The PWA makes that system visible from one place.
 
-This repository contains three deployable applications:
+This repository contains four deployable applications:
 
 - `apps/web`: the React/Vite operator PWA;
 - `apps/hub`: the TypeScript control plane, REST API, WebSocket gateway, and durable JSON store;
-- `apps/control-agent`: **Barista**, a Go 1.26 system agent for every compute machine.
+- `apps/control-agent`: **Barista**, a Go 1.26 system agent for every compute machine;
+- `apps/orchestrator-bridge`: the local stdio MCP server that lets your own Claude Code session orchestrate a thread.
 
 Barista is a single binary. It discovers installed Claude Code and Codex CLIs, keeps their credentials on the compute machine, connects outbound to Coffee Shop, enforces workspace allowlists, and runs dispatched work. A compute host does not need Node, pnpm, a repository clone, or an inbound port.
 
@@ -101,13 +102,14 @@ Keep a subscription-backed compute node private to the account owner. Do not exp
 ## Repository map
 
 ```text
-apps/web               React PWA and responsive operator interface
-apps/hub               REST API, WebSocket gateway, scheduler, persistence
-apps/control-agent     Go Barista daemon and harness adapters
-packages/protocol      Shared TypeScript domain and wire contracts
-docs                   Architecture, operations, security, and provider notes
-Taskfile.yml           Language-neutral development and CI entry points
-go.work                Go workspace for Go applications in the monorepo
+apps/web                  React PWA and responsive operator interface
+apps/hub                  REST API, WebSocket gateway, scheduler, persistence
+apps/control-agent        Go Barista daemon and harness adapters
+apps/orchestrator-bridge  Stdio MCP bridge for an external Claude Code orchestrator
+packages/protocol         Shared TypeScript domain and wire contracts
+docs                      Architecture, operations, security, and provider notes
+Taskfile.yml              Language-neutral development and CI entry points
+go.work                   Go workspace for Go applications in the monorepo
 ```
 
 ## Production control plane

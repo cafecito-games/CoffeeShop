@@ -64,6 +64,8 @@ func prepare(m *testing.M) (int, error) {
 		filepath.Join(repositoryRoot, "apps", "hub", "src", "index.ts"),
 		filepath.Join(repositoryRoot, "apps", "hub", "node_modules", "tsx"),
 		filepath.Join(repositoryRoot, "packages", "protocol", "dist", "index.js"),
+		filepath.Join(repositoryRoot, "apps", "orchestrator-bridge", "src", "index.ts"),
+		filepath.Join(repositoryRoot, "apps", "orchestrator-bridge", "node_modules", "tsx"),
 	} {
 		if _, err := os.Stat(required); err != nil {
 			return 0, fmt.Errorf("%s is missing; run `task install` and `task protocol:build` first", required)
