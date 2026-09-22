@@ -104,6 +104,22 @@ The TypeScript source of truth is `packages/protocol/src/index.ts`; Go wire stru
 
 `/worker` remains accepted by the hub as a temporary compatibility endpoint for older Node workers, but new agents use `/control-agent`.
 
+## Harness drivers
+
+`internal/harness` selects a driver from the run's transport. `native-cli` (the default, and the only transport this release dispatches) runs the Claude or Codex CLI directly. `acp-v1` runs the generic ACP driver, which is available only for a harness with an explicitly configured adapter: an absolute path to an executable file, started without a shell or `PATH` lookup. A missing or non-executable adapter reports the driver as unavailable; Barista never silently substitutes the native CLI.
+
+The ACP driver starts one adapter process and one session per run, in its own process group, with `COFFEE_SHOP_TOKEN` and `COFFEE_SHOP_MCP_TOKEN` removed from the inherited environment. The client in `internal/acp` implements the ACP v1 subset Barista needs using only the standard library:
+
+- newline-delimited UTF-8 JSON-RPC 2.0 on stdio; any stdout line that is not one JSON-RPC object, a frame larger than 4 MiB, or output ending mid-frame fails the run and terminates the adapter;
+- connection-scoped integer request IDs that are never reused, at most 32 pending client requests, 16 concurrent agent requests, and a 64-frame outbound queue; an unknown or duplicated response ID fails the session rather than guessing a correlation;
+- `initialize` offering protocol version 1 with no file-system or terminal capabilities; any other selected version is an incompatibility, and an adapter that requires authentication is reported rather than authenticated;
+- `session/new` with the canonical workspace path and, only when the adapter advertises HTTP MCP support, the run-scoped `coffee_shop_hub` server. The bearer header crosses local stdin only; it is never placed in arguments or the environment and is redacted from every event, result, and error;
+- `session/prompt` with streamed `session/update` notifications normalized into `harness.event` values. Unknown update variants and notifications become bounded `unknown` diagnostics; a malformed known variant fails the run; updates after the prompt response are ignored with a single warning;
+- `session/request_permission` resolved through a supplied callback. Absent, failed, timed-out, or invalid decisions never allow: Barista answers with the adapter's `reject_once` option when offered and `cancelled` otherwise. Malformed option lists are cancelled;
+- cancellation sends `session/cancel`, waits a bounded grace period for the prompt to end, and then kills the process tree with the same platform helpers as the native driver. `session/close` is sent after a successful turn when advertised.
+
+Adapter stderr is retained only as a bounded, redacted tail attached to failures. Tests exercise the client against a deterministic fake adapter (`internal/acp/acptest`) that the test binary re-executes over real pipes.
+
 ## Credentials and enrollment
 
 `COFFEE_SHOP_TOKEN` authenticates the WebSocket through an `Authorization: Bearer` header. Do not pass durable secrets with `--token` in production because process listings and shell history may expose them.
