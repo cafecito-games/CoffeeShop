@@ -92,7 +92,7 @@ describe("ApprovalsView", () => {
     await userEvent.click(screen.getByRole("button", { name: /Write to config.json/ }));
     expect(screen.getByRole("button", { name: /^Allow once/ })).toBeInTheDocument();
 
-    const resolvedElsewhere = { ...pending, status: "approved" as const, resolvedAt: "2026-01-01T00:05:00Z", resolvedBy: "operator" as const, selectedOptionId: "opt-once" };
+    const resolvedElsewhere = { ...pending, status: "approved" as const, resolvedAt: "2026-01-01T00:05:00Z", resolvedBy: { kind: "operator" } as const, selectedOptionId: "opt-once" };
     rendered.rerender(<ApprovalsView approvals={[resolvedElsewhere]} agents={agents} nodes={nodes} runs={runs} tasks={tasks} canMutate apiFetch={apiFetch} />);
 
     expect(screen.queryByRole("button", { name: /^Allow once/ })).not.toBeInTheDocument();

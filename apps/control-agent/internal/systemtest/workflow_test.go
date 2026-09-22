@@ -244,7 +244,7 @@ func TestOrchestratorWorkflow(t *testing.T) {
 		}
 		return true, ""
 	})
-	if approved := settled.approvalsFor(alphaRun.ID)[0]; approved.SelectedOptionID != "allow" || approved.ResolvedBy != "operator" {
+	if approved := settled.approvalsFor(alphaRun.ID)[0]; approved.SelectedOptionID != "allow" || approved.ResolvedBy.kind() != "operator" {
 		t.Fatalf("alpha approval did not record the operator's decision: %+v", approved)
 	}
 

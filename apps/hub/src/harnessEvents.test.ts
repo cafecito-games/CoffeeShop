@@ -182,7 +182,7 @@ test("permission requests open pending approvals and harness cancellations resol
 
   assert.equal(accept(current, permissionResolved(2, "cancelled")).kind, "accepted");
   assert.equal(current.approvals![0].status, "cancelled");
-  assert.equal(current.approvals![0].resolvedBy, "system");
+  assert.deepEqual(current.approvals![0].resolvedBy, { kind: "system" });
 });
 
 test("accepted events advance stream counters, are retained in order, and filter by sequence", () => {
@@ -531,7 +531,7 @@ test("settling a terminal run closes its stream, empties digests, and cancels pe
   assert.deepEqual(stream.recentDigests, []);
   assert.equal(current.runActivity![0].streamStatus, "closed");
   assert.equal(current.approvals![0].status, "cancelled");
-  assert.equal(current.approvals![0].resolvedBy, "system");
+  assert.deepEqual(current.approvals![0].resolvedBy, { kind: "system" });
 });
 
 test("settling a terminal run leaves a failed stream failed", () => {

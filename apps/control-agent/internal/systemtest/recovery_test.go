@@ -382,7 +382,7 @@ func TestApprovalExpiry(t *testing.T) {
 	expired := cluster.eventually("the approval to expire by itself", func(current snapshot) (bool, string) {
 		for _, candidate := range current.approvalsFor(attemptRun.ID) {
 			if candidate.ID == raised.ID {
-				return candidate.Status == "expired" && candidate.ResolvedBy == "system", candidate.Status + " by " + candidate.ResolvedBy
+				return candidate.Status == "expired" && candidate.ResolvedBy.kind() == "system", candidate.Status + " by " + candidate.ResolvedBy.kind()
 			}
 		}
 		return false, "the approval vanished"
