@@ -634,4 +634,8 @@ setInterval(() => {
     .then((changed) => { if (changed) broadcast(); })
     .catch((error) => console.error("approval expiry failed", error));
 }, 15_000).unref();
-server.listen(port, "0.0.0.0", () => console.log(`Coffee Shop hub listening on http://localhost:${port}`));
+// PORT=0 asks the operating system for a free port; the log names the port actually bound.
+server.listen(port, "0.0.0.0", () => {
+  const address = server.address();
+  console.log(`Coffee Shop hub listening on http://localhost:${typeof address === "object" && address ? address.port : port}`);
+});
