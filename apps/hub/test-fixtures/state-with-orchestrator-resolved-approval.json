@@ -1,0 +1,358 @@
+{
+  "agents": [
+    {
+      "id": "worker-a",
+      "name": "worker-a",
+      "title": "worker-a title",
+      "summary": "",
+      "glyph": "W",
+      "avatarShape": "cup",
+      "avatarColor": "amber",
+      "state": "idle",
+      "currentAction": "Available",
+      "harnessId": "codex-cli",
+      "model": "default",
+      "computeNodeId": "node-worker-a",
+      "workspace": "/workspace/worker-a",
+      "systemPrompt": "secret prompt for worker-a",
+      "canDelegate": false,
+      "skills": [],
+      "unread": 0,
+      "updatedAt": "2026-09-13T12:00:00.000Z"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "node-worker-a",
+      "name": "node-worker-a",
+      "kind": "local",
+      "platform": "test",
+      "status": "online",
+      "lastSeen": "2026-09-13T12:00:00.000Z",
+      "activeRuns": 0,
+      "concurrency": 2,
+      "workspaceRoots": [
+        "/workspace"
+      ],
+      "version": "test",
+      "harnesses": [
+        {
+          "id": "codex-cli",
+          "label": "Codex",
+          "description": "",
+          "binary": "/usr/local/bin/codex",
+          "available": true,
+          "authMode": "local-account",
+          "models": [
+            "default"
+          ]
+        }
+      ]
+    }
+  ],
+  "runs": [
+    {
+      "id": "run-task_mud3ejw3_vecuo2",
+      "threadId": "thread_mud3ejw1_i4d5wn",
+      "agentId": "worker-a",
+      "nodeId": "node-worker-a",
+      "harnessId": "codex-cli",
+      "model": "default",
+      "workspace": "/workspace/worker-a",
+      "prompt": "Coordinate the work",
+      "status": "running",
+      "output": "",
+      "depth": 1,
+      "createdAt": "2026-09-13T12:00:00.000Z",
+      "startedAt": "2026-09-13T12:00:00.000Z",
+      "taskId": "task_mud3ejw3_vecuo2",
+      "attempt": 1
+    }
+  ],
+  "events": [
+    {
+      "type": "status",
+      "title": "Approval approved",
+      "detail": "Write to config.json",
+      "threadId": "thread_mud3ejw1_i4d5wn",
+      "agentId": "worker-a",
+      "runId": "run-task_mud3ejw3_vecuo2",
+      "id": "evt_mud3ejw6_flnbhr",
+      "createdAt": "2026-09-22T19:54:18.294Z"
+    },
+    {
+      "type": "status",
+      "title": "Approval requested",
+      "detail": "Write to config.json",
+      "threadId": "thread_mud3ejw1_i4d5wn",
+      "agentId": "worker-a",
+      "runId": "run-task_mud3ejw3_vecuo2",
+      "id": "evt_mud3ejw5_bs7xlt",
+      "createdAt": "2026-09-22T19:54:18.293Z"
+    },
+    {
+      "type": "status",
+      "title": "1 task submitted",
+      "detail": "Write the migration",
+      "threadId": "thread_mud3ejw1_i4d5wn",
+      "id": "evt_mud3ejw3_ggu7hw",
+      "createdAt": "2026-09-22T19:54:18.291Z"
+    },
+    {
+      "type": "status",
+      "title": "Thread created",
+      "detail": "Ship the auth refactor",
+      "threadId": "thread_mud3ejw1_i4d5wn",
+      "id": "evt_mud3ejw1_peahip",
+      "createdAt": "2026-09-22T19:54:18.289Z"
+    }
+  ],
+  "messages": [],
+  "threads": [
+    {
+      "id": "thread_mud3ejw1_i4d5wn",
+      "title": "Ship the auth refactor",
+      "objective": "Ship the auth refactor",
+      "summary": "",
+      "status": "active",
+      "orchestrator": {
+        "kind": "external",
+        "clientId": "orchestrator-client-18ba5782cf46e2b2"
+      },
+      "createdBy": "agent",
+      "createdAt": "2026-09-13T12:00:00.000Z",
+      "updatedAt": "2026-09-13T12:00:00.000Z"
+    }
+  ],
+  "delegations": [],
+  "artifacts": [],
+  "taskSubmissions": [
+    {
+      "id": "tasksub_mud3ejw3_1biwq1",
+      "threadId": "thread_mud3ejw1_i4d5wn",
+      "sourceKey": "orchestrator-client:orchestrator-client-18ba5782cf46e2b2",
+      "idempotencyKey": "batch-1",
+      "digest": "e6b92bbd1bd9190df620520a3fda31251a08a3bdaef2eee9cba17ba5d31f7f4a",
+      "tasks": [
+        {
+          "key": "one",
+          "taskId": "task_mud3ejw3_vecuo2"
+        }
+      ],
+      "createdAt": "2026-09-13T12:00:00.000Z"
+    }
+  ],
+  "taskUpdates": [],
+  "taskEventJournal": [
+    {
+      "threadId": "thread_mud3ejw1_i4d5wn",
+      "kind": "task",
+      "taskId": "task_mud3ejw3_vecuo2",
+      "status": "ready",
+      "changes": [
+        "status"
+      ],
+      "sequence": 1,
+      "at": "2026-09-22T19:54:18.291Z"
+    },
+    {
+      "threadId": "thread_mud3ejw1_i4d5wn",
+      "kind": "task",
+      "taskId": "task_mud3ejw3_vecuo2",
+      "status": "assigned",
+      "previousStatus": "ready",
+      "changes": [
+        "status",
+        "attempt"
+      ],
+      "attemptRunId": "run-task_mud3ejw3_vecuo2",
+      "attempt": 1,
+      "sequence": 2,
+      "at": "2026-09-22T19:54:18.292Z"
+    }
+  ],
+  "taskEventStreams": [
+    {
+      "threadId": "thread_mud3ejw1_i4d5wn",
+      "head": 2,
+      "floor": 0
+    }
+  ],
+  "runActivity": [
+    {
+      "runId": "run-task_mud3ejw3_vecuo2",
+      "nodeId": "node-worker-a",
+      "streamStatus": "open",
+      "lastSequence": 1,
+      "acceptedEvents": 1,
+      "message": {
+        "text": "",
+        "truncatedBytes": 0
+      },
+      "thought": {
+        "text": "",
+        "truncatedBytes": 0
+      },
+      "plan": [],
+      "toolCalls": [],
+      "diffs": [],
+      "terminals": [],
+      "warnings": [],
+      "unknownEvents": 0,
+      "omitted": {
+        "toolCalls": 0,
+        "diffs": 0,
+        "terminals": 0,
+        "warnings": 0
+      },
+      "summary": "",
+      "updatedAt": "2026-09-13T12:00:00.000Z",
+      "threadId": "thread_mud3ejw1_i4d5wn"
+    }
+  ],
+  "harnessEventStreams": [
+    {
+      "runId": "run-task_mud3ejw3_vecuo2",
+      "nodeId": "node-worker-a",
+      "status": "open",
+      "lastSequence": 1,
+      "recentDigests": [
+        {
+          "sequence": 1,
+          "digest": "b9c3cce0097d89850940d965394077ed49a7a66929f49f75f7a79527e459f4e7"
+        }
+      ],
+      "retainedEvents": 1,
+      "retainedBytes": 348,
+      "retentionTruncated": false,
+      "createdAt": "2026-09-13T12:00:00.000Z",
+      "updatedAt": "2026-09-13T12:00:00.000Z"
+    }
+  ],
+  "harnessEvents": [
+    {
+      "runId": "run-task_mud3ejw3_vecuo2",
+      "sequence": 1,
+      "receivedAt": "2026-09-13T12:00:00.000Z",
+      "event": {
+        "type": "permission.requested",
+        "runId": "run-task_mud3ejw3_vecuo2",
+        "sequence": 1,
+        "at": "2026-09-13T12:00:00.000Z",
+        "approvalId": "acp-1",
+        "toolCallId": "call-1",
+        "title": "Write to config.json",
+        "detail": "config.json, 14 lines changed",
+        "options": [
+          {
+            "id": "allow",
+            "label": "Allow once",
+            "kind": "allow-once"
+          },
+          {
+            "id": "reject",
+            "label": "Reject",
+            "kind": "reject-once"
+          }
+        ]
+      }
+    }
+  ],
+  "orchestratorInboxes": [],
+  "orchestratorClients": [
+    {
+      "id": "orchestrator-client-18ba5782cf46e2b2",
+      "name": "Christian's laptop",
+      "scopes": [
+        "orchestrate",
+        "resolve-approvals"
+      ],
+      "secretHash": "sha256:a03a860f3c0f0ad07702adfe302284f7143ecc90433f9c903322e06b9bc9f0d0",
+      "createdAt": "2026-09-13T12:00:00.000Z",
+      "lastSeenAt": "2026-09-13T12:00:00.000Z"
+    }
+  ],
+  "orchestratorAttachments": [
+    {
+      "id": "attachment_mud3ejw1_kstm3t",
+      "threadId": "thread_mud3ejw1_i4d5wn",
+      "clientId": "orchestrator-client-18ba5782cf46e2b2",
+      "connectionId": "connection_mud3ejw0_ezc4zo",
+      "attachedAt": "2026-09-13T12:00:00.000Z",
+      "lastHeartbeatAt": "2026-09-13T12:00:00.000Z",
+      "status": "attached"
+    }
+  ],
+  "tasks": [
+    {
+      "id": "task_mud3ejw3_vecuo2",
+      "threadId": "thread_mud3ejw1_i4d5wn",
+      "title": "Write the migration",
+      "instructions": "Write the migration carefully",
+      "status": "assigned",
+      "requirements": {},
+      "dependencies": [],
+      "sourceKey": "orchestrator-client:orchestrator-client-18ba5782cf46e2b2",
+      "idempotencyKey": "batch-1",
+      "attemptRunIds": [
+        "run-task_mud3ejw3_vecuo2"
+      ],
+      "createdAt": "2026-09-13T12:00:00.000Z",
+      "updatedAt": "2026-09-13T12:00:00.000Z",
+      "assignment": {
+        "runId": "run-task_mud3ejw3_vecuo2",
+        "agentId": "worker-a",
+        "nodeId": "node-worker-a",
+        "harnessId": "codex-cli",
+        "transport": "native-cli",
+        "model": "default",
+        "assignedAt": "2026-09-13T12:00:00.000Z"
+      }
+    }
+  ],
+  "taskMessages": [],
+  "taskMessageAcknowledgements": [],
+  "sessionBindings": [],
+  "approvals": [
+    {
+      "id": "approval_mud3ejw5_o2vn3y",
+      "harnessApprovalId": "acp-1",
+      "threadId": "thread_mud3ejw1_i4d5wn",
+      "runId": "run-task_mud3ejw3_vecuo2",
+      "nodeId": "node-worker-a",
+      "title": "Write to config.json",
+      "options": [
+        {
+          "id": "allow",
+          "label": "Allow once",
+          "kind": "allow-once"
+        },
+        {
+          "id": "reject",
+          "label": "Reject",
+          "kind": "reject-once"
+        }
+      ],
+      "status": "approved",
+      "requestedAt": "2026-09-13T12:00:00.000Z",
+      "expiresAt": "2026-09-13T12:09:00.000Z",
+      "taskId": "task_mud3ejw3_vecuo2",
+      "toolCallId": "call-1",
+      "detail": "config.json, 14 lines changed",
+      "resolvedAt": "2026-09-13T12:00:00.000Z",
+      "resolvedBy": {
+        "kind": "orchestrator",
+        "clientId": "orchestrator-client-18ba5782cf46e2b2",
+        "attachmentId": "attachment_mud3ejw1_kstm3t"
+      },
+      "delivery": {
+        "status": "sent",
+        "attempts": 1,
+        "updatedAt": "2026-09-13T12:00:00.000Z"
+      },
+      "selectedOptionId": "allow",
+      "resolutionIdempotencyKey": "orchestrator-1"
+    }
+  ],
+  "workspaceLeases": []
+}

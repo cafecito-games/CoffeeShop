@@ -75,7 +75,8 @@ const orchestratorClients = createOrchestratorClientGateway({
   broadcast,
   waiters: taskEventWaiters,
   inventory: () => ({ connection: schedulingConnection, capabilityReport: getNodeCapabilityReport }),
-  schedule: () => scheduleReadyTasks()
+  schedule: () => scheduleReadyTasks(),
+  sendToControlAgent: (nodeId, message) => sendToControlAgent(nodeId, message)
 });
 orchestratorClientRevocations.onOrchestratorClientRevoked((clientId) => {
   void orchestratorClients.revokeClient(clientId).catch((error) => console.error("orchestrator client revocation could not be applied to live sockets", error));

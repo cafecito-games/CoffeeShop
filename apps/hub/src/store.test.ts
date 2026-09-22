@@ -385,6 +385,56 @@ test("keeps an already-migrated orchestrator resolution unchanged", async () => 
   assert.deepEqual(store.snapshot().approvals![0].resolvedBy, resolvedBy);
 });
 
+test("loads a pre-union approval resolution written by an older hub, byte for byte, as an operator resolution", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "coffee-shop-store-"));
+  const path = join(directory, "state.json");
+  const bytes = await readFile(fixturePath);
+  assert.match(bytes.toString("utf8"), /"resolvedBy": "operator"/, "the fixture still carries the string an older hub wrote");
+  await writeFile(path, bytes);
+  const store = new Store(path);
+
+  await store.load();
+
+  assert.deepEqual(store.snapshot().approvals![0].resolvedBy, { kind: "operator" }, "an older resolution is attributed to the operator who made it");
+  const rewritten = JSON.parse(await readFile(path, "utf8"));
+  assert.deepEqual(rewritten.approvals[0].resolvedBy, { kind: "operator" }, "the migration is persisted once");
+  assert.equal(rewritten.approvals[0].resolutionIdempotencyKey, "operator-1", "nothing else about the resolution changes");
+});
+
+/*
+ * `state-with-orchestrator-resolved-approval.json` was written byte-for-byte by
+ * `apps/hub/src/store.ts:562` (`private async save`) from records built by the real producers in
+ * this change: `apps/hub/src/orchestratorClients.ts:121` (`mintOrchestratorClient`),
+ * `apps/hub/src/tasks.ts:558` (`assignTaskAttempt`), `apps/hub/src/approvals.ts:103`
+ * (`openApproval`) reached through `apps/hub/src/harnessGateway.ts:42` (`receiveHarnessEvent`),
+ * and a live `/orchestrator-client` connection driven through `client.hello`, `create_thread`,
+ * `submit_tasks`, and `resolve_approval` by `apps/hub/src/orchestratorClientGateway.ts:226`
+ * (`createOrchestratorClientGateway`), which records the resolution through
+ * `apps/hub/src/approvals.ts:487` (`resolveApprovalForOrchestrator`). It is the shape on an
+ * operator's disk once a scoped orchestrator has answered a worker approval.
+ */
+const orchestratorResolvedFixturePath = fileURLToPath(new URL("../test-fixtures/state-with-orchestrator-resolved-approval.json", import.meta.url));
+
+test("loads an orchestrator-resolved approval written by a live connection byte for byte", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "coffee-shop-store-"));
+  const path = join(directory, "state.json");
+  const bytes = await readFile(orchestratorResolvedFixturePath);
+  await writeFile(path, bytes);
+  const store = new Store(path);
+
+  await store.load();
+
+  assert.deepEqual(await readFile(path), bytes, "a snapshot the hub just wrote is never rewritten on load");
+  const snapshot = store.snapshot();
+  const approval = snapshot.approvals![0];
+  const attachment = snapshot.orchestratorAttachments![0];
+  assert.equal(approval.status, "approved");
+  assert.equal(approval.selectedOptionId, "allow");
+  assert.deepEqual(approval.resolvedBy, { kind: "orchestrator", clientId: attachment.clientId, attachmentId: attachment.id });
+  assert.equal(snapshot.tasks!.find((task) => task.id === approval.taskId)!.threadId, attachment.threadId, "the audited decision names the thread it was made on");
+  assert.ok(!JSON.stringify(snapshot).includes("secretHash"));
+});
+
 test("snapshots publish orchestrator clients without their secret hash", async () => {
   const at = "2026-09-22T12:00:00.000Z";
   const { store } = await loadFixture();

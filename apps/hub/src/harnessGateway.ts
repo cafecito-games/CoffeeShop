@@ -100,6 +100,36 @@ const latestApproval = (store: Store, approvalId: string) =>
   store.read((state) => structuredClone((state.approvals ?? []).find((approval) => approval.id === approvalId)));
 
 /**
+ * Delivers the decision a committed resolution produced, when one still needs delivering, and
+ * returns whether any state changed. It never revisits the resolution itself: if delivery
+ * bookkeeping fails, the resolution stays committed with a `delivery` that reconciliation or an
+ * exact replay can still carry to Barista.
+ */
+export async function deliverApprovalResolution(store: Store, approvalId: string, resolution: ApprovalResolutionResult, send: ControlAgentSender, at: string) {
+  const needed = resolution.kind === "resolved"
+    || (resolution.kind === "replayed" && resolution.approval.delivery?.status === "pending")
+    || (resolution.kind === "conflict" && resolution.changed);
+  if (!needed) return false;
+  let deliverable: ApprovalRequest[] = [];
+  let changed = false;
+  try {
+    await store.transact((state) => {
+      const approval = (state.approvals ?? []).find((item) => item.id === approvalId);
+      if (!approval) return false;
+      const before = JSON.stringify(approval.delivery);
+      deliverable = structuredClone(approvalsAwaitingDelivery(state, [approval], at));
+      changed = before !== JSON.stringify(approval.delivery);
+      return changed;
+    });
+  } catch (error) {
+    console.error("approval delivery could not be prepared", error);
+    deliverable = [];
+    changed = false;
+  }
+  return (await deliverApprovalDecisions(store, deliverable, send, at)).length > 0 || changed;
+}
+
+/**
  * Operator resolution of an approval. The resolution is committed first; a failed write returns
  * 500 and sends nothing. Delivery happens afterwards and never changes the committed resolution:
  * if delivery bookkeeping fails, the response still reports the committed approval, whose
@@ -121,30 +151,7 @@ export async function resolveApproval(store: Store, approvalId: string, body: un
   if (resolution.kind === "not-found") return { status: 404, body: { error: "Approval not found" }, changed: false };
   if (resolution.kind === "option-not-offered") return { status: 422, body: { error: "The selected option was not offered by this approval", approval: resolution.approval }, changed: false };
 
-  const pendingDelivery = resolution.kind === "resolved"
-    || (resolution.kind === "replayed" && resolution.approval.delivery?.status === "pending")
-    || (resolution.kind === "conflict" && resolution.changed);
-  let deliveryChanged = false;
-  if (pendingDelivery) {
-    let deliverable: ApprovalRequest[] = [];
-    try {
-      await store.transact((state) => {
-        const approval = (state.approvals ?? []).find((item) => item.id === approvalId);
-        if (!approval) return false;
-        const before = JSON.stringify(approval.delivery);
-        deliverable = structuredClone(approvalsAwaitingDelivery(state, [approval], at));
-        deliveryChanged = before !== JSON.stringify(approval.delivery);
-        return deliveryChanged;
-      });
-    } catch (error) {
-      // The resolution is committed and its delivery stays pending, so reconciliation or an exact
-      // replay can still deliver it; the response reports that committed state.
-      console.error("approval delivery could not be prepared", error);
-      deliverable = [];
-      deliveryChanged = false;
-    }
-    deliveryChanged = (await deliverApprovalDecisions(store, deliverable, send, at)).length > 0 || deliveryChanged;
-  }
+  const deliveryChanged = await deliverApprovalResolution(store, approvalId, resolution, send, at);
   const approval = latestApproval(store, approvalId)!;
   const changed = resolution.kind === "resolved" || (resolution.kind === "conflict" && resolution.changed) || deliveryChanged;
   if (resolution.kind === "conflict") return { status: 409, body: { error: resolution.reason, approval }, changed };
