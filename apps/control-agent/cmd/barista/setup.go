@@ -45,47 +45,37 @@ func runSetup(args []string) int {
 	}
 }
 
-// nameValueFlag collects repeated NAME=VALUE flags into a map. A value without the NAME=VALUE
-// shape is rejected naming the flag, never echoing the value back — the value half of a malformed
-// pair is still operator-supplied text.
-type nameValueFlag struct {
-	flagName string
-	values   map[string]string
-}
-
-func (pairFlag *nameValueFlag) String() string {
-	if pairFlag.values == nil {
-		return ""
-	}
-	pairs := make([]string, 0, len(pairFlag.values))
-	for name, value := range pairFlag.values {
-		pairs = append(pairs, name+"="+value)
-	}
-	return strings.Join(pairs, ",")
-}
-
-func (pairFlag *nameValueFlag) Set(value string) error {
-	name, item, found := strings.Cut(value, "=")
-	if !found || name == "" || item == "" {
-		return fmt.Errorf("%s must be NAME=VALUE", pairFlag.flagName)
-	}
-	if pairFlag.values == nil {
-		pairFlag.values = make(map[string]string)
-	}
-	pairFlag.values[name] = item
-	return nil
-}
-
-// repeatedFlag collects a plain repeatable string flag.
+// repeatedFlag collects a plain repeatable string flag. Set never rejects a value: Go's flag
+// package wraps any error a flag.Value.Set returns in its own "invalid value %q for flag -%s: ..."
+// message, which echoes the raw value regardless of what the wrapped error itself says — so a
+// flag whose value might carry a secret (a manual-artifact path, a checksum, a host) must never
+// validate inside Set. Every such flag is collected here as plain, unvalidated strings and
+// validated afterward, once flag.Parse has returned, with an error this package writes itself,
+// naming only the flag.
 type repeatedFlag []string
 
 func (values *repeatedFlag) String() string { return strings.Join(*values, ",") }
 
 func (values *repeatedFlag) Set(value string) error {
-	if item := strings.TrimSpace(value); item != "" {
-		*values = append(*values, item)
-	}
+	*values = append(*values, value)
 	return nil
+}
+
+// parseNameValuePairs validates a repeated NAME=VALUE flag's collected values after flag.Parse has
+// already run, returning an error that names only flagName — never the offending value, which may
+// itself be secret-like operator-supplied text (an artifact path, a checksum). A duplicate name
+// overwrites its earlier entry, matching how a repeated flag with a later occurrence is normally
+// expected to win.
+func parseNameValuePairs(flagName string, values []string) (map[string]string, error) {
+	pairs := make(map[string]string, len(values))
+	for _, value := range values {
+		name, item, found := strings.Cut(value, "=")
+		if !found || name == "" || item == "" {
+			return nil, fmt.Errorf("%s must be NAME=VALUE", flagName)
+		}
+		pairs[name] = item
+	}
+	return pairs, nil
 }
 
 // loadSetupManifest resolves the manifest exactly the same way for plan and apply: the embedded
@@ -179,12 +169,10 @@ func runSetupApply(args []string) int {
 	dataRoot := set.String("data-root", setup.DefaultDataRoot(), "Barista-owned data root; never $HOME itself")
 	manifestPath := set.String("manifest", "", "path to an adapter manifest JSON file (default: the manifest embedded in this binary)")
 	planPath := set.String("plan", "", "path to the plan JSON file produced by `barista setup plan` (required)")
-	var allowedHosts repeatedFlag
-	manualArtifacts := &nameValueFlag{flagName: "--manual-artifact"}
-	manualChecksums := &nameValueFlag{flagName: "--manual-checksum"}
+	var allowedHosts, manualArtifactValues, manualChecksumValues repeatedFlag
 	set.Var(&allowedHosts, "allowed-host", "download host an archive adapter may redirect to; repeat the flag for multiple hosts")
-	set.Var(manualArtifacts, "manual-artifact", "adapterID=PATH local artifact for a manual adapter; repeat the flag per adapter")
-	set.Var(manualChecksums, "manual-checksum", "adapterID=SHA256 operator-asserted checksum for a manual adapter; repeat the flag per adapter")
+	set.Var(&manualArtifactValues, "manual-artifact", "adapterID=PATH local artifact for a manual adapter; repeat the flag per adapter")
+	set.Var(&manualChecksumValues, "manual-checksum", "adapterID=SHA256 operator-asserted checksum for a manual adapter; repeat the flag per adapter")
 	if err := set.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -197,6 +185,20 @@ func runSetupApply(args []string) int {
 	}
 	if *planPath == "" {
 		fmt.Fprintln(os.Stderr, "setup apply: apply requires --plan")
+		return 2
+	}
+	// --manual-artifact and --manual-checksum are validated here, after flag.Parse has already
+	// returned, specifically so a malformed value is never handed to flag.Value.Set: the flag
+	// package's own error wrapping echoes a Set error's raw argument regardless of what the
+	// wrapped error text says, and these values may be secret-like operator-supplied text.
+	manualArtifacts, err := parseNameValuePairs("--manual-artifact", manualArtifactValues)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "setup apply:", err)
+		return 2
+	}
+	manualChecksums, err := parseNameValuePairs("--manual-checksum", manualChecksumValues)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "setup apply:", err)
 		return 2
 	}
 	planBytes, err := os.ReadFile(*planPath)
@@ -228,8 +230,8 @@ func runSetupApply(args []string) int {
 	result, err := setup.Apply(context.Background(), plan, manifestBytes, ledger, *dataRoot, setup.ApplyOptions{
 		HTTPClient:            &http.Client{Timeout: applyHTTPTimeout},
 		AllowedHosts:          allowedHosts,
-		ManualArtifactSources: manualArtifacts.values,
-		ManualChecksums:       manualChecksums.values,
+		ManualArtifactSources: manualArtifacts,
+		ManualChecksums:       manualChecksums,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "setup apply: %v\n", err)

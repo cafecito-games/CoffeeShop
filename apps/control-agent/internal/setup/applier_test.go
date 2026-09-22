@@ -233,8 +233,8 @@ func TestApplyRejectsStalePlan(t *testing.T) {
 	if err == nil {
 		t.Fatal("Apply() accepted a hand-edited plan, want rejection")
 	}
-	if !strings.Contains(err.Error(), "digest") {
-		t.Fatalf("Apply() error = %v, want it to name the plan digest", err)
+	if !strings.Contains(err.Error(), "does not match the manifest and current node state") {
+		t.Fatalf("Apply() error = %v, want it to name the plan/state mismatch", err)
 	}
 	if len(result.Applied) != 0 {
 		t.Fatalf("Apply() applied %d operations from a stale plan", len(result.Applied))
@@ -258,8 +258,8 @@ func TestApplyRejectsChangedManifestBytes(t *testing.T) {
 	if err == nil {
 		t.Fatal("Apply() accepted different manifest bytes than the plan was built from, want rejection")
 	}
-	if !strings.Contains(err.Error(), "manifest changed") {
-		t.Fatalf("Apply() error = %v, want it to name the manifest change", err)
+	if !strings.Contains(err.Error(), "does not match the manifest and current node state") {
+		t.Fatalf("Apply() error = %v, want it to name the plan/state mismatch", err)
 	}
 	if len(result.Applied) != 0 {
 		t.Fatalf("Apply() applied %d operations from a stale manifest", len(result.Applied))
@@ -447,6 +447,13 @@ func TestApplyManualPlacementCheck(t *testing.T) {
 	})
 }
 
+// TestApplyRejectsTargetOutsideDataRoot proves the fix-1 property against a plan whose Operations
+// were forged to escape the data root: hand-editing TargetPath and recomputing a self-consistent
+// Digest for the tampered content is not enough, because Apply never trusts plan.Operations at
+// all — it re-derives its own operations from the manifest and current state, and only checks the
+// supplied plan's digest against that derived one. AdapterTargetPath can never itself produce an
+// escaping path from a valid manifest, so the derived plan's digest will not match the forged
+// plan's, and the escape attempt is rejected before anything resembling installation runs.
 func TestApplyRejectsTargetOutsideDataRoot(t *testing.T) {
 	manifestBytes, manifest := manualManifestFixture(t)
 	dataRoot := t.TempDir()
@@ -463,11 +470,68 @@ func TestApplyRejectsTargetOutsideDataRoot(t *testing.T) {
 	if err == nil {
 		t.Fatal("Apply() accepted a target outside the data root, want rejection")
 	}
-	if !strings.Contains(err.Error(), "not safely installable") {
-		t.Fatalf("Apply() error = %v, want it to name the containment refusal", err)
+	if !strings.Contains(err.Error(), "does not match the manifest and current node state") {
+		t.Fatalf("Apply() error = %v, want it to name the plan/state mismatch", err)
 	}
 	if _, err := os.Stat(filepath.Join(filepath.Dir(dataRoot), "escaped-adapter")); !os.IsNotExist(err) {
 		t.Fatalf("escaping target was created: %v", err)
+	}
+}
+
+// TestApplyRejectsForgedPlanWithRecomputedDigest is the fix-1 regression the review asked for
+// directly: a plan whose Operations point at an attacker-controlled URL and checksum, with the
+// forger having correctly recomputed Digest for that tampered content (so a naive
+// ComputePlanDigest(plan) == plan.Digest self-check alone would have accepted it), must still be
+// rejected — and the attacker's server must never even receive a request, because Apply only ever
+// executes operations it derives itself from the real manifest.
+func TestApplyRejectsForgedPlanWithRecomputedDigest(t *testing.T) {
+	var attackerRequests int
+	attacker := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		attackerRequests++
+		writer.Write([]byte("malicious payload"))
+	}))
+	defer attacker.Close()
+
+	manifestBytes, manifest := manualManifestFixture(t)
+	dataRoot := t.TempDir()
+	plan, _, err := BuildPlan(manifestBytes, manifest, "darwin-arm64", dataRoot, OwnershipLedger{})
+	if err != nil {
+		t.Fatalf("BuildPlan() error = %v", err)
+	}
+
+	forged := plan
+	forged.Operations = append([]Operation{}, plan.Operations...)
+	forged.Operations[0].Kind = OperationInstallArchive
+	forged.Operations[0].Source = PlatformDistribution{
+		Kind:           DistributionKindArchive,
+		URL:            attacker.URL + "/malicious.tar.gz",
+		SHA256:         sha256Hex([]byte("malicious payload")),
+		SizeBytes:      int64(len("malicious payload")),
+		ExecutablePath: "bin/adapter",
+	}
+	forged.Operations[0].ExpectedChecksum = sha256Hex([]byte("malicious payload"))
+	// The forger recomputes a self-consistent digest for the tampered plan — this alone must not
+	// be enough to pass Apply's verification.
+	forged.Digest = ComputePlanDigest(forged)
+	if forged.Digest == plan.Digest {
+		t.Fatal("test fixture error: forging the plan did not change its digest")
+	}
+
+	result, err := Apply(context.Background(), forged, manifestBytes, OwnershipLedger{}, dataRoot, ApplyOptions{
+		HTTPClient:   attacker.Client(),
+		AllowedHosts: []string{"127.0.0.1"},
+	})
+	if err == nil {
+		t.Fatal("Apply() accepted a forged plan with a recomputed digest, want rejection")
+	}
+	if len(result.Applied) != 0 {
+		t.Fatalf("Apply() applied %d operations from a forged plan", len(result.Applied))
+	}
+	if attackerRequests != 0 {
+		t.Fatalf("Apply() contacted the attacker-controlled source %d times, want zero", attackerRequests)
+	}
+	if _, err := os.Stat(filepath.Join(dataRoot, "adapters")); !os.IsNotExist(err) {
+		t.Fatalf("forged apply mutated the data root: %v", err)
 	}
 }
 
@@ -543,5 +607,107 @@ func TestApplyPartialFailurePersistsCompletedOperations(t *testing.T) {
 	}
 	if strays := strayTemporaryArtifacts(t, dataRoot); len(strays) != 0 {
 		t.Fatalf("partial failure left temporary artifacts behind: %v", strays)
+	}
+}
+
+// TestApplyRejectsManualArtifactChangedAfterChecksumWasAsserted proves the fix-3 property: a
+// manual artifact is read exactly once, hashed while it is staged, and only then compared against
+// the operator-asserted checksum — there is no separate "verify, then reopen and copy" pair of
+// reads that a source mutated in between could straddle. Simulating that mutation (the operator
+// computed a checksum for content A; by the time apply actually reads the file, it holds content
+// B) must be caught by the single read's own hash mismatch, not silently accepted because an
+// earlier, now-stale verification pass approved a different version of the file.
+func TestApplyRejectsManualArtifactChangedAfterChecksumWasAsserted(t *testing.T) {
+	manifestBytes, manifest := manualManifestFixture(t)
+	dataRoot := t.TempDir()
+	sourceDirectory := t.TempDir()
+	originalContent := []byte("#!/bin/sh\necho original\n")
+	source := filepath.Join(sourceDirectory, "operator-placed-adapter")
+	if err := os.WriteFile(source, originalContent, 0o755); err != nil {
+		t.Fatalf("write manual source: %v", err)
+	}
+	// The operator computed this checksum against originalContent.
+	assertedChecksum := sha256Hex(originalContent)
+
+	// The file is swapped for different content before apply ever reads it — exactly the race a
+	// two-pass verify-then-copy implementation would miss if the swap happened between the two
+	// reads, and exactly what a single-pass implementation must still catch regardless of when the
+	// swap happened, since there is only one read.
+	swappedContent := []byte("#!/bin/sh\necho swapped-in-by-an-attacker\n")
+	if err := os.WriteFile(source, swappedContent, 0o755); err != nil {
+		t.Fatalf("swap manual source: %v", err)
+	}
+
+	plan, _, err := BuildPlan(manifestBytes, manifest, "darwin-arm64", dataRoot, OwnershipLedger{})
+	if err != nil {
+		t.Fatalf("BuildPlan() error = %v", err)
+	}
+	result, err := Apply(context.Background(), plan, manifestBytes, OwnershipLedger{}, dataRoot, ApplyOptions{
+		ManualArtifactSources: map[string]string{"manual-acp": source},
+		ManualChecksums:       map[string]string{"manual-acp": assertedChecksum},
+	})
+	if err == nil {
+		t.Fatal("Apply() accepted a manual artifact whose content no longer matches the asserted checksum, want rejection")
+	}
+	if len(result.Applied) != 0 {
+		t.Fatalf("Apply() applied %d operations despite the checksum mismatch", len(result.Applied))
+	}
+	if _, err := os.Stat(plan.Operations[0].TargetPath); !os.IsNotExist(err) {
+		t.Fatalf("swapped-content install reached the target: %v", err)
+	}
+	if strays := strayTemporaryArtifacts(t, dataRoot); len(strays) != 0 {
+		t.Fatalf("rejected install left temporary artifacts behind: %v", strays)
+	}
+}
+
+// TestApplyRejectsAncestorSymlinkReplacement proves the fix-4 property: ensureDirectoryWithinRoot
+// walks the install directory chain component by component and refuses a symlink at any level,
+// rather than a plain MkdirAll/Rename pair that would follow a pre-existing symlink ancestor
+// straight through to wherever it points. Replacing an intermediate ancestor of the target with a
+// symlink to a directory outside dataRoot must stop the install and must never create anything
+// inside the symlinked-to location.
+func TestApplyRejectsAncestorSymlinkReplacement(t *testing.T) {
+	manifestBytes, manifest := manualManifestFixture(t)
+	dataRoot := t.TempDir()
+	sourceDirectory := t.TempDir()
+	artifactContent := []byte("#!/bin/sh\necho manual\n")
+	source := filepath.Join(sourceDirectory, "operator-placed-adapter")
+	if err := os.WriteFile(source, artifactContent, 0o755); err != nil {
+		t.Fatalf("write manual source: %v", err)
+	}
+
+	plan, _, err := BuildPlan(manifestBytes, manifest, "darwin-arm64", dataRoot, OwnershipLedger{})
+	if err != nil {
+		t.Fatalf("BuildPlan() error = %v", err)
+	}
+	// TargetPath is <dataRoot>/adapters/manual-cli/manual-acp/0.4.0/bin/adapter; replace the
+	// "manual-cli" ancestor with a symlink pointing outside dataRoot entirely, before any of the
+	// chain exists on disk.
+	adaptersDirectory := filepath.Join(dataRoot, "adapters")
+	if err := os.MkdirAll(adaptersDirectory, 0o755); err != nil {
+		t.Fatalf("create adapters directory: %v", err)
+	}
+	outsideTarget := t.TempDir()
+	symlinkedAncestor := filepath.Join(adaptersDirectory, "manual-cli")
+	if err := os.Symlink(outsideTarget, symlinkedAncestor); err != nil {
+		t.Fatalf("create ancestor symlink: %v", err)
+	}
+
+	_, err = Apply(context.Background(), plan, manifestBytes, OwnershipLedger{}, dataRoot, ApplyOptions{
+		ManualArtifactSources: map[string]string{"manual-acp": source},
+		ManualChecksums:       map[string]string{"manual-acp": sha256Hex(artifactContent)},
+	})
+	if err == nil {
+		t.Fatal("Apply() accepted an install directory chain with a symlinked ancestor, want rejection")
+	}
+	if !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("Apply() error = %v, want it to name the symlinked ancestor", err)
+	}
+	entries, readErr := os.ReadDir(outsideTarget)
+	if readErr != nil {
+		t.Fatalf("read outside target: %v", readErr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("install wrote through the ancestor symlink into %s: %v", outsideTarget, entries)
 	}
 }

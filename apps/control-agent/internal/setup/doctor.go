@@ -2,8 +2,9 @@ package setup
 
 import (
 	"context"
+	"net/url"
+	"strings"
 
-	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/harness"
 	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/protocol"
 )
 
@@ -14,11 +15,15 @@ const hubDetailMaximumBytes = 256
 // URL can carry a query-string token, and net errors embed the dialed address verbatim.
 const hubConnectivityGenericDetail = "connection attempt failed"
 
+// hubEndpointInvalidDisplay is shown in place of a control endpoint this doctor could not parse
+// well enough to sanitize; an endpoint that cannot be sanitized is never echoed verbatim instead.
+const hubEndpointInvalidDisplay = "invalid control endpoint"
+
 // AdapterDoctorEntry reports one manifest adapter's status on this node.
 type AdapterDoctorEntry struct {
 	AdapterID        string        `json:"adapterId"`
 	HarnessID        string        `json:"harnessId"`
-	HarnessInstalled bool          `json:"harnessInstalled"` // from harness.Discover()'s Available flag, passed in
+	HarnessInstalled bool          `json:"harnessInstalled"` // from the discovered harness profile's Available flag, passed in
 	AdapterInstalled bool          `json:"adapterInstalled"` // ownership ledger has a matching-digest record at this platform's target path
 	AdapterPath      string        `json:"adapterPath,omitempty"`
 	AuthReadiness    AuthReadiness `json:"authReadiness"`
@@ -28,7 +33,8 @@ type AdapterDoctorEntry struct {
 
 // HubConnectivity reports whether the configured control endpoint accepted a bounded, read-only
 // TCP connection attempt. It never authenticates, never opens the real WebSocket, and never
-// creates a run.
+// creates a run. Endpoint is always the sanitized display form (see sanitizeEndpointForDisplay);
+// it never carries userinfo, a query string, or a fragment, in either JSON or human output.
 type HubConnectivity struct {
 	Endpoint  string `json:"endpoint"`
 	Reachable bool   `json:"reachable"`
@@ -56,6 +62,11 @@ const ProjectReadinessNotAvailable = "not available: no hub endpoint exists yet 
 // used to test hub connectivity (dependency-injected as func(ctx, endpoint) error so tests never
 // make a real network call). Doctor reports problems; it never mutates the filesystem and never
 // repairs anything.
+//
+// Every auth-readiness probe doctor runs comes from the compiled-in AuthProbeAllowlist, keyed by
+// harness ID, and its binary is always the exact absolute path harness discovery already resolved
+// and trusted as "this harness is installed" — never a command or path named by the adapter
+// manifest, which --manifest can point at an arbitrary local file.
 func RunDoctor(
 	ctx context.Context,
 	manifest Manifest,
@@ -74,10 +85,11 @@ func RunDoctor(
 	}
 	for index := range manifest.Adapters {
 		entry := manifest.Adapters[index]
+		harnessProfile, discovered := findHarnessProfile(harnesses, entry.HarnessID)
 		doctorEntry := AdapterDoctorEntry{
 			AdapterID:        entry.ID,
 			HarnessID:        entry.HarnessID,
-			HarnessInstalled: harness.Available(harnesses, entry.HarnessID),
+			HarnessInstalled: discovered && harnessProfile.Available,
 			AuthReadiness:    AuthReadinessUnknown,
 		}
 		distribution, supported := entry.Platforms[platform]
@@ -95,15 +107,15 @@ func RunDoctor(
 		// over a deleted or corrupted file must not report as installed. observeCurrentState makes
 		// exactly that distinction, and anything ambiguous classifies as not installed.
 		doctorEntry.AdapterInstalled = observeCurrentState(targetPath, ledger) == ExpectedOwnedMatch
-		if entry.AuthProbe != nil {
-			doctorEntry.AuthReadiness = RunAuthProbe(ctx, *entry.AuthProbe)
+		if spec, allowed := AuthProbeAllowlist[entry.HarnessID]; allowed && doctorEntry.HarnessInstalled {
+			doctorEntry.AuthReadiness = RunAuthProbe(ctx, harnessProfile.Binary, spec.Arguments, spec.SuccessExitCode)
 		}
 		doctorEntry.ACPLaunchReady = doctorEntry.HarnessInstalled &&
 			doctorEntry.AdapterInstalled &&
 			doctorEntry.AuthReadiness == AuthReadinessReady
 		report.Adapters = append(report.Adapters, doctorEntry)
 	}
-	report.HubConnectivity = HubConnectivity{Endpoint: controlEndpoint}
+	report.HubConnectivity = HubConnectivity{Endpoint: sanitizeEndpointForDisplay(controlEndpoint)}
 	if dial == nil {
 		report.HubConnectivity.Detail = hubConnectivityGenericDetail
 	} else if err := dial(ctx, controlEndpoint); err != nil {
@@ -114,6 +126,17 @@ func RunDoctor(
 	return report
 }
 
+// findHarnessProfile looks up harnessID's discovered profile, which carries the absolute resolved
+// binary path RunAuthProbe must use — doctor never re-resolves a binary name itself.
+func findHarnessProfile(harnesses []protocol.HarnessProfile, harnessID string) (protocol.HarnessProfile, bool) {
+	for _, profile := range harnesses {
+		if profile.ID == harnessID {
+			return profile, true
+		}
+	}
+	return protocol.HarnessProfile{}, false
+}
+
 // screenedHubDetail bounds a connectivity error message and replaces it wholesale when it looks
 // secret-like, so a token embedded in a dialed URL can never reach the report.
 func screenedHubDetail(detail string) string {
@@ -122,4 +145,35 @@ func screenedHubDetail(detail string) string {
 		return hubConnectivityGenericDetail
 	}
 	return bounded
+}
+
+// sanitizeEndpointForDisplay strips userinfo, query string, and fragment from a control endpoint
+// before it is ever stored in a report or printed, in both JSON and human output: an operator can
+// legitimately embed a credential in a URL's userinfo or query string, and doctor must never
+// become the thing that echoes it back. Dialing still uses the original, unsanitized endpoint
+// (only the host and port participate in a TCP dial, and neither is removed here); only display
+// is sanitized.
+func sanitizeEndpointForDisplay(raw string) string {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return value
+	}
+	addedScheme := !strings.Contains(value, "://")
+	parseable := value
+	if addedScheme {
+		parseable = "https://" + value
+	}
+	parsed, err := url.Parse(parseable)
+	if err != nil || parsed.Host == "" {
+		return hubEndpointInvalidDisplay
+	}
+	parsed.User = nil
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	parsed.RawFragment = ""
+	sanitized := parsed.String()
+	if addedScheme {
+		sanitized = strings.TrimPrefix(sanitized, "https://")
+	}
+	return sanitized
 }

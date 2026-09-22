@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os/exec"
+	"path/filepath"
 	"time"
 
 	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/protocol"
@@ -29,22 +30,44 @@ const (
 	AuthReadinessUnknown AuthReadiness = "unknown"
 )
 
-// RunAuthProbe executes probe.Binary via exec.LookPath (never a literal path, never a shell) with
-// probe.Arguments, under a bounded timeout, and returns AuthReadinessReady only when the process
-// exits with probe.SuccessExitCode. Any other exit code is AuthReadinessNotReady. A missing binary
-// or a timeout is AuthReadinessUnknown, never NotReady. Combined stdout+stderr is captured only to
-// check whether it looks secret-like; if it does, that fact alone downgrades the result to
-// AuthReadinessUnknown (never surfaced) rather than trusting an exit code that might have been
-// influenced by unexpectedly credential-bearing output. The raw output itself is never part of the
-// return value.
-func RunAuthProbe(ctx context.Context, probe AuthProbe) AuthReadiness {
-	path, err := exec.LookPath(probe.Binary)
-	if err != nil {
+// AuthProbeSpec is a fixed, compiled-in, read-only vendor command doctor may run against an
+// already-discovered harness binary to report coarse authentication presence. It never carries a
+// binary path — only the arguments and expected exit code — because the binary always comes from
+// harness discovery's own resolved, absolute path, never from this spec or from any external
+// input.
+type AuthProbeSpec struct {
+	Arguments       []string
+	SuccessExitCode int
+}
+
+// AuthProbeAllowlist maps a harness ID (matching the provider ids internal/harness/discovery.go
+// defines) to its fixed auth-readiness probe. This is the single, compiled-in source of what
+// doctor is ever allowed to execute for auth readiness: extending doctor to a new harness means
+// adding an entry here in source and rebuilding Barista, never accepting a command or argument
+// list from the adapter manifest (which, through --manifest, can point at an arbitrary local
+// file), the hub, or any other external input.
+var AuthProbeAllowlist = map[string]AuthProbeSpec{
+	"claude-cli": {Arguments: []string{"--version"}, SuccessExitCode: 0},
+	"codex-cli":  {Arguments: []string{"--version"}, SuccessExitCode: 0},
+}
+
+// RunAuthProbe executes binaryPath with arguments under a bounded timeout and returns
+// AuthReadinessReady only when the process exits with successExitCode. Any other exit code is
+// AuthReadinessNotReady. A probe that cannot start or times out is AuthReadinessUnknown, never
+// NotReady. binaryPath must be an absolute path already resolved by harness discovery —
+// RunAuthProbe performs no PATH lookup and no shell of its own, and every caller in this codebase
+// sources binaryPath from a discovered protocol.HarnessProfile.Binary, never from manifest text.
+// Combined stdout+stderr is captured only to check whether it looks secret-like; if it does, that
+// fact alone downgrades the result to AuthReadinessUnknown (never surfaced) rather than trusting
+// an exit code that might have been influenced by unexpectedly credential-bearing output. The raw
+// output itself is never part of the return value.
+func RunAuthProbe(ctx context.Context, binaryPath string, arguments []string, successExitCode int) AuthReadiness {
+	if !filepath.IsAbs(binaryPath) {
 		return AuthReadinessUnknown
 	}
 	timeoutContext, cancel := context.WithTimeout(ctx, authProbeTimeout)
 	defer cancel()
-	command := exec.CommandContext(timeoutContext, path, probe.Arguments...)
+	command := exec.CommandContext(timeoutContext, binaryPath, arguments...)
 	var captured authProbeOutput
 	command.Stdout = &captured
 	command.Stderr = &captured
@@ -63,7 +86,7 @@ func RunAuthProbe(ctx context.Context, probe AuthProbe) AuthReadiness {
 		}
 		exitCode = exitErr.ExitCode()
 	}
-	if exitCode == probe.SuccessExitCode {
+	if exitCode == successExitCode {
 		return AuthReadinessReady
 	}
 	return AuthReadinessNotReady

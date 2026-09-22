@@ -50,17 +50,12 @@ type LaunchTemplate struct {
 	Environment []string `json:"environment,omitempty"` // "NAME=value" pairs, no secret-like values
 }
 
-// AuthProbe is a fixed, non-interactive, read-only vendor command Barista may run to report
-// coarse authentication presence for the adapter's provider. It never accepts arguments from any
-// source other than this manifest, and its raw output is never surfaced — only a tri-state
-// readiness derived from exit status, screened for secret-like content before even that.
-type AuthProbe struct {
-	Binary          string   `json:"binary"`
-	Arguments       []string `json:"arguments,omitempty"`
-	SuccessExitCode int      `json:"successExitCode"`
-}
-
-// AdapterManifestEntry describes one supported ACP adapter at one pinned version.
+// AdapterManifestEntry describes one supported ACP adapter at one pinned version. The manifest
+// deliberately has no field that names a command, binary, or argument list to execute: doctor's
+// auth-readiness probes are a compiled-in allowlist keyed by HarnessID (see AuthProbeAllowlist in
+// authprobe.go), never anything this file — which an operator can point --manifest at freely —
+// could supply. ParseManifest's DisallowUnknownFields rejects a manifest that tries to add one
+// back, rather than silently ignoring it.
 type AdapterManifestEntry struct {
 	ID          string                          `json:"id"`        // kebab-case, globally unique within the manifest
 	HarnessID   string                          `json:"harnessId"` // matches a harness.Discover() profile id, e.g. "claude-cli"
@@ -69,7 +64,6 @@ type AdapterManifestEntry struct {
 	Version     string                          `json:"version"`   // must satisfy protocol.IsNormalizedVersion
 	Platforms   map[string]PlatformDistribution `json:"platforms"` // key is "GOOS-GOARCH", e.g. "darwin-arm64"
 	Launch      LaunchTemplate                  `json:"launch"`
-	AuthProbe   *AuthProbe                      `json:"authProbe,omitempty"`
 	AuthDocsURL string                          `json:"authDocsUrl,omitempty"` // documentation link only, never executed
 }
 
@@ -148,9 +142,6 @@ func (manifest Manifest) Validate() error {
 				return fmt.Errorf("adapter at index %d: platform distribution url looks secret-like", index)
 			}
 		}
-		if entry.AuthProbe != nil && slices.ContainsFunc(entry.AuthProbe.Arguments, protocol.LooksSecretLike) {
-			return fmt.Errorf("adapter at index %d: authProbe argument looks secret-like", index)
-		}
 	}
 	if manifest.ManifestVersion != ManifestVersion {
 		return fmt.Errorf("adapter manifest schema generation is unknown; only generation %q is supported", ManifestVersion)
@@ -189,11 +180,6 @@ func (manifest Manifest) Validate() error {
 			}
 			if err := validatePlatformDistribution(distribution); err != nil {
 				return fmt.Errorf("adapter at index %d: %w", index, err)
-			}
-		}
-		if entry.AuthProbe != nil {
-			if entry.AuthProbe.Binary == "" || strings.ContainsAny(entry.AuthProbe.Binary, `/\`) {
-				return fmt.Errorf("adapter at index %d: authProbe binary must be a bare command name", index)
 			}
 		}
 	}

@@ -3,6 +3,7 @@ package setup
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -53,7 +54,10 @@ func Uninstall(dataRoot string, ledger OwnershipLedger, adapterID string, adapte
 // symlink, must be a regular file, and must still hash to the digest recorded at install time.
 // Anything else is ambiguous and therefore not ours to delete.
 func recordIsSafelyRemovable(record OwnershipRecord, dataRoot string) bool {
-	if _, err := resolveTargetWithinRoot(record.Path, dataRoot); err != nil {
+	if !filepath.IsAbs(record.Path) {
+		return false
+	}
+	if _, err := verifyDirectoryWithinRoot(dataRoot, filepath.Dir(record.Path)); err != nil {
 		return false
 	}
 	information, err := os.Lstat(record.Path)

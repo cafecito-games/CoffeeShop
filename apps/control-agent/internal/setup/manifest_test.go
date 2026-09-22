@@ -28,8 +28,7 @@ func validManifestFixture() Manifest {
 						ExecutablePath: "bin/adapter",
 					},
 				},
-				Launch:    LaunchTemplate{},
-				AuthProbe: &AuthProbe{Binary: "claude", Arguments: []string{"--version"}, SuccessExitCode: 0},
+				Launch: LaunchTemplate{},
 			},
 		},
 	}
@@ -93,13 +92,6 @@ func TestParseManifest(t *testing.T) {
 				manifest.Adapters[0].AuthDocsURL = "https://docs.example.com/" + secretLikeFixture
 			},
 			wantErr: "authDocsUrl looks secret-like",
-		},
-		{
-			name: "secret-like auth probe argument",
-			mutate: func(manifest *Manifest) {
-				manifest.Adapters[0].AuthProbe.Arguments = []string{"--token", secretLikeFixture}
-			},
-			wantErr: "authProbe argument looks secret-like",
 		},
 		{
 			name: "bad manifest version",
@@ -291,20 +283,6 @@ func TestParseManifest(t *testing.T) {
 			},
 			wantErr: "executablePath must use forward slashes",
 		},
-		{
-			name: "auth probe binary with path separator",
-			mutate: func(manifest *Manifest) {
-				manifest.Adapters[0].AuthProbe.Binary = "bin/claude"
-			},
-			wantErr: "authProbe binary must be a bare command name",
-		},
-		{
-			name: "auth probe binary empty",
-			mutate: func(manifest *Manifest) {
-				manifest.Adapters[0].AuthProbe.Binary = ""
-			},
-			wantErr: "authProbe binary must be a bare command name",
-		},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -368,8 +346,30 @@ func TestLoadDefaultManifest(t *testing.T) {
 		if distribution.Kind != DistributionKindManual {
 			t.Fatalf("LoadDefaultManifest() entry for %s is %q, want manual", harnessID, distribution.Kind)
 		}
-		if entry.AuthProbe == nil {
-			t.Fatalf("LoadDefaultManifest() entry for %s has no auth probe", harnessID)
+		if _, hasCompiledProbe := AuthProbeAllowlist[harnessID]; !hasCompiledProbe {
+			t.Fatalf("LoadDefaultManifest() harness %s has no compiled-in AuthProbeAllowlist entry", harnessID)
 		}
+	}
+}
+
+// TestParseManifestRejectsUnknownAuthProbeField proves the fix's security property structurally:
+// the manifest schema has no field that can name a command to execute. A manifest — including one
+// an operator points --manifest at — that tries to add an "authProbe" object (mirroring the shape
+// this schema carried before doctor's auth probes became a compiled-in allowlist) is rejected by
+// strict decoding rather than silently ignored, so that field can never smuggle a binary or
+// argument list into anything doctor runs.
+func TestParseManifestRejectsUnknownAuthProbeField(t *testing.T) {
+	data := marshalManifestFixture(t, nil)
+	injected := strings.Replace(
+		string(data),
+		`"launch":{}`,
+		`"launch":{},"authProbe":{"binary":"rm","arguments":["-rf","/"],"successExitCode":0}`,
+		1,
+	)
+	if injected == string(data) {
+		t.Fatal("test fixture does not contain the expected \"launch\":{} anchor")
+	}
+	if _, err := ParseManifest([]byte(injected)); err == nil {
+		t.Fatal("ParseManifest() accepted a manifest-supplied authProbe field, want rejection")
 	}
 }

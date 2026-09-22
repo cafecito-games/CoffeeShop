@@ -13,33 +13,34 @@ import (
 	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/protocol"
 )
 
-// doctorManifestFixture covers every doctor classification: a fully ready adapter, one whose
-// on-disk digest drifted from its ledger record, one never installed, and one with no distribution
-// for the platform under test.
+// doctorManifestFixture covers every doctor classification: a fully ready adapter (harness
+// installed, adapter installed, auth ready), one whose auth probe reports not-ready, one whose
+// on-disk digest drifted from its ledger record, and one with no distribution for the platform
+// under test. "ready-acp" and "notready-acp" deliberately use the two harness IDs
+// (claude-cli/codex-cli) the compiled AuthProbeAllowlist actually covers — the manifest itself
+// carries no probe of its own; there is no such field any more.
 func doctorManifestFixture(t *testing.T) Manifest {
 	t.Helper()
 	manifestJSON := []byte(`{
 		"manifestVersion": "1",
 		"adapters": [
 			{
-				"id": "ready-acp", "harnessId": "ready-cli", "provider": "alpha-vendor",
+				"id": "ready-acp", "harnessId": "claude-cli", "provider": "anthropic",
 				"label": "Ready ACP adapter", "version": "1.0.0",
 				"platforms": {"darwin-arm64": {"kind": "manual", "executablePath": "bin/adapter"}},
-				"launch": {},
-				"authProbe": {"binary": "probe-clean", "arguments": [], "successExitCode": 0}
+				"launch": {}
+			},
+			{
+				"id": "notready-acp", "harnessId": "codex-cli", "provider": "openai",
+				"label": "Not-ready ACP adapter", "version": "1.0.0",
+				"platforms": {"darwin-arm64": {"kind": "manual", "executablePath": "bin/adapter"}},
+				"launch": {}
 			},
 			{
 				"id": "drifted-acp", "harnessId": "drifted-cli", "provider": "alpha-vendor",
 				"label": "Drifted ACP adapter", "version": "1.0.0",
 				"platforms": {"darwin-arm64": {"kind": "manual", "executablePath": "bin/adapter"}},
 				"launch": {}
-			},
-			{
-				"id": "missing-acp", "harnessId": "missing-cli", "provider": "beta-vendor",
-				"label": "Missing ACP adapter", "version": "2.0.0",
-				"platforms": {"darwin-arm64": {"kind": "manual", "executablePath": "bin/adapter"}},
-				"launch": {},
-				"authProbe": {"binary": "probe-failure", "arguments": [], "successExitCode": 0}
 			},
 			{
 				"id": "unsupported-acp", "harnessId": "unsupported-cli", "provider": "beta-vendor",
@@ -87,22 +88,25 @@ func TestRunDoctorReportsAdapterAndHubStatus(t *testing.T) {
 		t.Skip("test fixtures are shell scripts")
 	}
 	probeDirectory := t.TempDir()
-	writeProbeScript(t, probeDirectory, "probe-clean", "#!/bin/sh\nexit 0\n")
-	writeProbeScript(t, probeDirectory, "probe-failure", "#!/bin/sh\nexit 1\n")
-	t.Setenv("PATH", probeDirectory)
+	cleanProbePath := writeProbeScript(t, probeDirectory, "probe-clean", "#!/bin/sh\nexit 0\n")
+	failureProbePath := writeProbeScript(t, probeDirectory, "probe-failure", "#!/bin/sh\nexit 1\n")
 
 	manifest := doctorManifestFixture(t)
 	dataRoot := t.TempDir()
 	ledger := OwnershipLedger{}
+	// ready-acp is installed; notready-acp deliberately is not, so its auth probe still runs (the
+	// harness itself is installed) but the adapter is not.
 	ledger, _ = installOwnedAdapter(t, dataRoot, ledger, manifest.Adapters[0], []byte("ready adapter bytes"))
-	ledger, driftedPath := installOwnedAdapter(t, dataRoot, ledger, manifest.Adapters[1], []byte("original bytes"))
+	ledger, driftedPath := installOwnedAdapter(t, dataRoot, ledger, manifest.Adapters[2], []byte("original bytes"))
 	// Corrupt the drifted adapter after recording it: doctor must trust the file, not the ledger.
 	require.NoError(t, os.WriteFile(driftedPath, []byte("tampered bytes"), 0o755))
 
+	// harnessProfile.Binary is the absolute, already-resolved path doctor's auth probe must use —
+	// exactly what harness.Discover would have set after its own successful --version check.
 	harnesses := []protocol.HarnessProfile{
-		{ID: "ready-cli", Available: true},
+		{ID: "claude-cli", Available: true, Binary: cleanProbePath},
+		{ID: "codex-cli", Available: true, Binary: failureProbePath},
 		{ID: "drifted-cli", Available: true},
-		{ID: "missing-cli", Available: false},
 	}
 
 	report := RunDoctor(context.Background(), manifest, ledger, dataRoot, "darwin-arm64", harnesses, "http://hub.example:8787", func(context.Context, string) error {
@@ -121,16 +125,18 @@ func TestRunDoctorReportsAdapterAndHubStatus(t *testing.T) {
 	require.True(t, ready.ACPLaunchReady)
 	require.NotEmpty(t, ready.AdapterPath)
 
-	missingHarness := doctorEntryFor(report, "missing-acp")
-	require.False(t, missingHarness.HarnessInstalled)
-	require.False(t, missingHarness.AdapterInstalled)
-	require.Equal(t, AuthReadinessNotReady, missingHarness.AuthReadiness)
-	require.False(t, missingHarness.ACPLaunchReady)
+	notReady := doctorEntryFor(report, "notready-acp")
+	require.True(t, notReady.HarnessInstalled)
+	require.False(t, notReady.AdapterInstalled)
+	require.Equal(t, AuthReadinessNotReady, notReady.AuthReadiness)
+	require.False(t, notReady.ACPLaunchReady)
 
 	drifted := doctorEntryFor(report, "drifted-acp")
 	require.True(t, drifted.HarnessInstalled)
 	// The ledger says installed, the file no longer matches: doctor reports reality.
 	require.False(t, drifted.AdapterInstalled)
+	// drifted-cli has no compiled AuthProbeAllowlist entry, so it is always unknown regardless of
+	// installation state.
 	require.Equal(t, AuthReadinessUnknown, drifted.AuthReadiness)
 	require.False(t, drifted.ACPLaunchReady)
 
@@ -148,12 +154,37 @@ func TestRunDoctorReportsAdapterAndHubStatus(t *testing.T) {
 	require.Empty(t, report.HubConnectivity.Detail)
 }
 
+// TestRunDoctorNeverRunsAuthProbeForUninstalledHarness proves the core of fix 2's runtime
+// behavior: even though claude-cli has a compiled AuthProbeAllowlist entry, doctor must never run
+// it against a harness that discovery did not find installed — there is no resolved absolute
+// binary path to run in that case, and doctor must report Unknown rather than guessing at one.
+func TestRunDoctorNeverRunsAuthProbeForUninstalledHarness(t *testing.T) {
+	manifestJSON := []byte(`{
+		"manifestVersion": "1",
+		"adapters": [
+			{
+				"id": "claude-acp", "harnessId": "claude-cli", "provider": "anthropic",
+				"label": "Claude ACP adapter", "version": "1.0.0",
+				"platforms": {"darwin-arm64": {"kind": "manual", "executablePath": "bin/adapter"}},
+				"launch": {}
+			}
+		]
+	}`)
+	manifest, err := ParseManifest(manifestJSON)
+	require.NoError(t, err)
+
+	// No harness profile at all for claude-cli: discovery did not find it.
+	report := RunDoctor(context.Background(), manifest, OwnershipLedger{}, t.TempDir(), "darwin-arm64", nil, "https://hub.example", func(context.Context, string) error {
+		return nil
+	})
+	entry := doctorEntryFor(report, "claude-acp")
+	require.False(t, entry.HarnessInstalled)
+	require.Equal(t, AuthReadinessUnknown, entry.AuthReadiness)
+}
+
 func TestRunDoctorReportsUnreachableHubWithScreenedDetail(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("test fixtures are shell scripts")
-	}
 	manifest := doctorManifestFixture(t)
-	harnesses := []protocol.HarnessProfile{{ID: "ready-cli", Available: true}}
+	harnesses := []protocol.HarnessProfile{{ID: "claude-cli", Available: true}}
 
 	plain := RunDoctor(context.Background(), manifest, OwnershipLedger{}, t.TempDir(), "darwin-arm64", harnesses, "http://127.0.0.1:1", func(context.Context, string) error {
 		return errors.New("dial tcp 127.0.0.1:1: connection refused")
@@ -167,4 +198,27 @@ func TestRunDoctorReportsUnreachableHubWithScreenedDetail(t *testing.T) {
 	})
 	require.False(t, secret.HubConnectivity.Reachable)
 	require.Equal(t, "connection attempt failed", secret.HubConnectivity.Detail)
+}
+
+// TestRunDoctorSanitizesControlEndpointForDisplay proves the fix-5 property: userinfo, query
+// string, and fragment never reach the report — in either the reachable or unreachable case — even
+// though the unsanitized endpoint is still what dial actually receives (verified here by asserting
+// the dial callback still sees the raw value, so connectivity itself keeps working).
+func TestRunDoctorSanitizesControlEndpointForDisplay(t *testing.T) {
+	manifest := doctorManifestFixture(t)
+	const secretLikeUserinfo = "operator:ghp_abcdefghij1234"
+	rawEndpoint := "https://" + secretLikeUserinfo + "@hub.example:8787/control-agent?token=" + secretLikeUserinfo + "#fragment"
+
+	var dialedEndpoint string
+	report := RunDoctor(context.Background(), manifest, OwnershipLedger{}, t.TempDir(), "darwin-arm64", nil, rawEndpoint, func(_ context.Context, endpoint string) error {
+		dialedEndpoint = endpoint
+		return nil
+	})
+
+	require.Equal(t, rawEndpoint, dialedEndpoint, "dial must still receive the real endpoint")
+	require.NotContains(t, report.HubConnectivity.Endpoint, "ghp_abcdefghij1234")
+	require.NotContains(t, report.HubConnectivity.Endpoint, "operator:")
+	require.NotContains(t, report.HubConnectivity.Endpoint, "token=")
+	require.NotContains(t, report.HubConnectivity.Endpoint, "#fragment")
+	require.Equal(t, "https://hub.example:8787/control-agent", report.HubConnectivity.Endpoint)
 }

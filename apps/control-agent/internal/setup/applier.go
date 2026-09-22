@@ -46,36 +46,43 @@ type ApplyResult struct {
 	Skipped []Operation
 }
 
-// Apply executes exactly the operations in plan, after verifying plan.Digest against a fresh
-// ComputePlanDigest(plan) (a hand-edited or corrupted plan is rejected before anything else) and
-// verifying manifestBytes still hashes to plan.ManifestDigest (the manifest changed since
-// planning is rejected the same way). It then re-observes, for every operation, whether
-// ExpectedCurrentState still holds — a concurrent modification between plan and apply stops
-// before that operation's mutation, never recomputing a new expectation on the fly. Operations
-// are applied in the given order; on the first failure, Apply stops and returns the error together
-// with an ApplyResult describing every operation completed before the failure (partial success is
-// reported, never hidden), and the ownership ledger on disk reflects exactly the operations that
-// completed — never a discarded write.
+// Apply never executes the operations recorded in the supplied plan. Instead it re-derives the
+// plan from the verified manifest and the currently observed filesystem/ledger state — exactly
+// what BuildPlan would produce right now — and requires the supplied plan's digest to match that
+// freshly derived one exactly. Only the derived operations are ever executed; the supplied plan
+// file exists solely to confirm the operator's intent still matches reality; it is never a source
+// of what gets installed. A plan whose Operations, sources, checksums, or targets were hand-edited
+// (even if the editor also recomputed a self-consistent Digest for the tampered content) is
+// rejected here, because the derived plan's digest — computed independently from the manifest and
+// live state — will not match unless the tampered plan happens to already equal what re-deriving
+// would produce.
+//
+// plan.Platform selects which of the manifest's per-platform distributions to derive operations
+// from; it is the only field of the supplied plan Apply actually consults before deriving, and it
+// only ever selects among the manifest's own declared platforms, so it cannot smuggle in an
+// operation the manifest does not declare.
+//
+// On the first operation failure, Apply stops and returns the error together with an ApplyResult
+// describing every operation completed before the failure (partial success is reported, never
+// hidden), and the ownership ledger on disk reflects exactly the operations that completed — never
+// a discarded write.
 func Apply(ctx context.Context, plan Plan, manifestBytes []byte, ledger OwnershipLedger, dataRoot string, options ApplyOptions) (ApplyResult, error) {
 	result := ApplyResult{}
-	if ComputePlanDigest(plan) != plan.Digest {
-		return result, errors.New("plan digest does not match plan contents")
+	manifest, err := ParseManifest(manifestBytes)
+	if err != nil {
+		return result, fmt.Errorf("apply manifest: %w", err)
 	}
-	manifestSum := sha256.Sum256(manifestBytes)
-	if hex.EncodeToString(manifestSum[:]) != plan.ManifestDigest {
-		return result, errors.New("manifest changed since the plan was built")
+	if !platformKeyPattern.MatchString(plan.Platform) {
+		return result, errors.New("plan platform is malformed")
 	}
-	if plan.DataRoot != dataRoot {
-		return result, errors.New("plan data root does not match the apply data root")
+	derivedPlan, _, err := BuildPlan(manifestBytes, manifest, plan.Platform, dataRoot, ledger)
+	if err != nil {
+		return result, fmt.Errorf("derive plan from manifest and current state: %w", err)
 	}
-	for _, operation := range plan.Operations {
-		if _, err := resolveTargetWithinRoot(operation.TargetPath, dataRoot); err != nil {
-			return result, fmt.Errorf("adapter %s target path is not safely installable: %w", operation.AdapterID, err)
-		}
-		observed := observeCurrentState(operation.TargetPath, ledger)
-		if observed != operation.ExpectedCurrentState {
-			return result, fmt.Errorf("adapter %s target %s changed state since planning (expected %s, observed %s)", operation.AdapterID, operation.TargetPath, operation.ExpectedCurrentState, observed)
-		}
+	if derivedPlan.Digest != plan.Digest {
+		return result, errors.New("supplied plan does not match the manifest and current node state; run setup plan again")
+	}
+	for _, operation := range derivedPlan.Operations {
 		if operation.ExpectedCurrentState == ExpectedUnownedExists {
 			return result, fmt.Errorf("adapter %s target %s holds a file this tool did not create", operation.AdapterID, operation.TargetPath)
 		}
@@ -107,10 +114,10 @@ func installOperation(ctx context.Context, operation Operation, dataRoot string,
 	}
 }
 
-// installArchive downloads and verifies the pinned archive, extracts exactly the declared
-// executable entry into a staging directory under dataRoot, and renames it into place. Staging
-// stays under the owned data-root prefix (never the system temporary directory) so a failed run
-// leaves nothing to reason about anywhere else on the machine.
+// installArchive downloads and verifies the pinned archive, then streams exactly the declared
+// executable entry straight from the archive reader into the verified target directory through
+// stageAndInstall — the archive's own bytes are read once, hashed while being written, and never
+// separately re-opened for a second verification pass.
 func installArchive(ctx context.Context, operation Operation, dataRoot string, options ApplyOptions) (OwnershipRecord, error) {
 	parsedURL, err := url.Parse(operation.Source.URL)
 	if err != nil {
@@ -135,129 +142,307 @@ func installArchive(ctx context.Context, operation Operation, dataRoot string, o
 	if err != nil {
 		return OwnershipRecord{}, fmt.Errorf("adapter %s archive download failed: %w", operation.AdapterID, err)
 	}
-	stagedPath := filepath.Join(stagingDirectory, "extracted")
-	contentSHA256, sizeBytes, err := extractArchiveEntry(archivePath, operation.Source.ExecutablePath, stagedPath, isZip)
+	entryReader, closeEntry, err := openArchiveEntry(archivePath, operation.Source.ExecutablePath, isZip)
 	if err != nil {
 		return OwnershipRecord{}, fmt.Errorf("adapter %s archive extraction failed: %w", operation.AdapterID, err)
 	}
-	return placeInstalledFile(stagedPath, operation, contentSHA256, sizeBytes)
+	defer closeEntry()
+	// The archive itself was already checksum-verified in full by DownloadVerified; there is no
+	// separate manifest-declared checksum for the single extracted entry, so stageAndInstall simply
+	// records whatever digest the extracted bytes actually have rather than comparing one.
+	return stageAndInstall(dataRoot, operation, entryReader, "")
 }
 
-// installManualArtifact accepts the operator-placed artifact only after verifying the checksum
-// the operator asserted out-of-band, then installs it by copy exactly like an archive extract.
-// Failures here name only the adapter ID: the operator's source path is not this tool's to
-// publish into logs or errors.
+// installManualArtifact accepts the operator-placed artifact only after verifying, in the same
+// single pass that writes it into place, the checksum the operator asserted out-of-band. The
+// source file is opened exactly once and never reopened: stageAndInstall reads it straight through
+// while hashing and staging it, so a source that changes on disk between the operator computing
+// its checksum and apply running is caught by the checksum comparison on the one read that
+// happens, not by two reads that could observe different content. Failures here name only the
+// adapter ID: the operator's source path is not this tool's to publish into logs or errors.
 func installManualArtifact(operation Operation, dataRoot string, options ApplyOptions) (OwnershipRecord, error) {
 	source, hasSource := options.ManualArtifactSources[operation.AdapterID]
 	assertedChecksum, hasChecksum := options.ManualChecksums[operation.AdapterID]
 	if !hasSource || source == "" || !hasChecksum || assertedChecksum == "" {
 		return OwnershipRecord{}, fmt.Errorf("adapter %s requires both a manual artifact source and a manual checksum", operation.AdapterID)
 	}
-	if err := VerifyFileChecksum(source, assertedChecksum); err != nil {
-		return OwnershipRecord{}, fmt.Errorf("adapter %s manual artifact failed checksum verification", operation.AdapterID)
-	}
-	stagingDirectory, err := os.MkdirTemp(dataRoot, "setup-staging-*")
+	sourceFile, err := os.Open(source)
 	if err != nil {
-		return OwnershipRecord{}, fmt.Errorf("create staging directory under %s: %w", dataRoot, err)
+		return OwnershipRecord{}, fmt.Errorf("adapter %s manual artifact could not be opened", operation.AdapterID)
 	}
-	defer os.RemoveAll(stagingDirectory)
-	stagedPath := filepath.Join(stagingDirectory, "artifact")
-	contentSHA256, sizeBytes, err := copyFileHashed(source, stagedPath)
-	if err != nil {
-		return OwnershipRecord{}, fmt.Errorf("adapter %s manual artifact could not be staged", operation.AdapterID)
-	}
-	return placeInstalledFile(stagedPath, operation, contentSHA256, sizeBytes)
+	defer sourceFile.Close()
+	return stageAndInstall(dataRoot, operation, sourceFile, assertedChecksum)
 }
 
-// placeInstalledFile moves a staged, fully verified file onto its target with a same-filesystem
-// atomic rename (the staging directory already lives under dataRoot) and stamps the ownership
-// record. InstalledAt is written once here and never recomputed.
-func placeInstalledFile(stagedPath string, operation Operation, contentSHA256 string, sizeBytes int64) (OwnershipRecord, error) {
-	if err := os.MkdirAll(filepath.Dir(operation.TargetPath), 0o755); err != nil {
-		return OwnershipRecord{}, fmt.Errorf("create target directory under %s: %w", filepath.Dir(operation.TargetPath), err)
+// stageAndInstall reads reader exactly once, hashing while writing it into a temporary file
+// created directly inside operation's target directory, and only renames that temporary file onto
+// operation.TargetPath after every check below passes:
+//
+//  1. the target directory chain from dataRoot down to the target's parent is walked component by
+//     component with ensureDirectoryWithinRoot, which rejects a symlink at any level rather than
+//     following or replacing one, immediately before the temporary file is created;
+//  2. the copied content's digest matches expectedChecksum, when one is given;
+//  3. the directory chain is re-verified a second time, and the exact target path is re-confirmed
+//     absent, immediately before the rename — closing the window between the first verification
+//     and the mutation, not just checking once up front.
+//
+// An install operation only ever reaches this function when planning observed the target absent
+// (ExpectedOwnedMatch operations are skipped before installOperation is called), so any file found
+// at the target — owned by this tool or not — at rename time is refused rather than replaced.
+func stageAndInstall(dataRoot string, operation Operation, reader io.Reader, expectedChecksum string) (OwnershipRecord, error) {
+	targetDirectory := filepath.Dir(operation.TargetPath)
+	resolvedDirectory, err := ensureDirectoryWithinRoot(dataRoot, targetDirectory)
+	if err != nil {
+		return OwnershipRecord{}, fmt.Errorf("adapter %s install directory is not safely usable: %w", operation.AdapterID, err)
 	}
-	if err := os.Rename(stagedPath, operation.TargetPath); err != nil {
-		return OwnershipRecord{}, fmt.Errorf("move adapter %s artifact into place at %s: %w", operation.AdapterID, operation.TargetPath, err)
+	tempFile, err := os.CreateTemp(resolvedDirectory, "setup-tmp-*")
+	if err != nil {
+		return OwnershipRecord{}, fmt.Errorf("adapter %s could not stage a temporary file: %w", operation.AdapterID, err)
 	}
+	tempPath := tempFile.Name()
+	renamed := false
+	defer func() {
+		tempFile.Close()
+		if !renamed {
+			os.Remove(tempPath)
+		}
+	}()
+
+	digest := sha256.New()
+	written, err := io.Copy(io.MultiWriter(tempFile, digest), reader)
+	if err != nil {
+		return OwnershipRecord{}, fmt.Errorf("adapter %s artifact could not be staged: %w", operation.AdapterID, err)
+	}
+	contentSHA256 := hex.EncodeToString(digest.Sum(nil))
+	if expectedChecksum != "" && !strings.EqualFold(contentSHA256, expectedChecksum) {
+		return OwnershipRecord{}, fmt.Errorf("adapter %s artifact failed checksum verification", operation.AdapterID)
+	}
+	if runtime.GOOS != "windows" {
+		if err := tempFile.Chmod(0o755); err != nil {
+			return OwnershipRecord{}, fmt.Errorf("adapter %s artifact could not be marked executable: %w", operation.AdapterID, err)
+		}
+	}
+	if err := tempFile.Sync(); err != nil {
+		return OwnershipRecord{}, fmt.Errorf("adapter %s artifact could not be synced: %w", operation.AdapterID, err)
+	}
+	if err := tempFile.Close(); err != nil {
+		return OwnershipRecord{}, fmt.Errorf("adapter %s artifact could not be finalized: %w", operation.AdapterID, err)
+	}
+
+	// Re-verify immediately before the rename: a symlink or foreign file planted anywhere in the
+	// chain (or at the exact target) during staging is still caught here, not just at the check
+	// that ran before staging began.
+	if _, err := ensureDirectoryWithinRoot(dataRoot, targetDirectory); err != nil {
+		return OwnershipRecord{}, fmt.Errorf("adapter %s install directory changed unsafely during install: %w", operation.AdapterID, err)
+	}
+	if _, err := os.Lstat(operation.TargetPath); err == nil {
+		return OwnershipRecord{}, fmt.Errorf("adapter %s target %s appeared unexpectedly during install", operation.AdapterID, operation.TargetPath)
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return OwnershipRecord{}, fmt.Errorf("adapter %s target could not be inspected: %w", operation.AdapterID, err)
+	}
+	if err := os.Rename(tempPath, operation.TargetPath); err != nil {
+		return OwnershipRecord{}, fmt.Errorf("adapter %s artifact could not be installed: %w", operation.AdapterID, err)
+	}
+	renamed = true
 	return OwnershipRecord{
 		Path:           operation.TargetPath,
 		AdapterID:      operation.AdapterID,
 		AdapterVersion: operation.AdapterVersion,
 		ContentSHA256:  contentSHA256,
-		SizeBytes:      sizeBytes,
+		SizeBytes:      written,
 		InstalledAt:    time.Now().UTC().Format(time.RFC3339Nano),
 	}, nil
 }
 
-// extractArchiveEntry pulls only the single declared entry out of a .tar.gz or .zip archive,
-// writing it to destinationPath and returning its digest and size. Archive bytes are untrusted no
-// matter what the manifest promised about them, so the matched entry name is re-checked against
-// the same no-absolute/no-traversal grammar the manifest enforces before a single byte is
-// written. There is no separate "inner checksum" in the manifest to compare against; the digest
-// of what was actually extracted is computed and recorded so the ownership ledger always reflects
-// installed bytes, not promised ones.
-func extractArchiveEntry(archivePath string, executablePath string, destinationPath string, isZip bool) (string, int64, error) {
-	if err := validateArchiveEntryName(executablePath); err != nil {
-		return "", 0, err
+// ensureDirectoryWithinRoot walks from dataRoot down to directory one path component at a time,
+// using Lstat before ever trusting or creating a component: an existing symlink at any level is
+// refused, never followed and never replaced, and a missing component is created with a plain
+// Mkdir (which — unlike MkdirAll's Stat-based traversal — fails atomically against anything
+// already present, symlink or not, rather than silently walking through it) and then re-inspected
+// with Lstat immediately after creation to close the gap between the create call and trusting its
+// result. dataRoot itself is also confirmed to be a real, non-symlinked directory, so a symlinked
+// data root can never be used to pivot every containment check below it. The returned path is the
+// verified directory, safe to create a file inside via os.CreateTemp immediately afterward.
+func ensureDirectoryWithinRoot(dataRoot string, directory string) (string, error) {
+	if !filepath.IsAbs(dataRoot) || !filepath.IsAbs(directory) {
+		return "", errors.New("data root and target directory must be absolute paths")
 	}
-	if isZip {
-		return extractZipEntry(archivePath, executablePath, destinationPath)
+	cleanRoot := filepath.Clean(dataRoot)
+	cleanDirectory := filepath.Clean(directory)
+	if cleanDirectory != cleanRoot && !strings.HasPrefix(cleanDirectory, cleanRoot+string(filepath.Separator)) {
+		return "", errors.New("target directory escapes the data root")
 	}
-	return extractTarGzipEntry(archivePath, executablePath, destinationPath)
+	rootInfo, err := os.Lstat(cleanRoot)
+	if err != nil {
+		return "", fmt.Errorf("inspect data root: %w", err)
+	}
+	if err := rejectUnsafeAncestor(cleanRoot, rootInfo); err != nil {
+		return "", err
+	}
+	relative := strings.TrimPrefix(cleanDirectory, cleanRoot)
+	relative = strings.TrimPrefix(relative, string(filepath.Separator))
+	current := cleanRoot
+	if relative == "" {
+		return current, nil
+	}
+	for _, component := range strings.Split(relative, string(filepath.Separator)) {
+		if component == "" || component == "." || component == ".." {
+			return "", errors.New("target directory path is malformed")
+		}
+		current = filepath.Join(current, component)
+		if err := ensureDirectoryComponent(current); err != nil {
+			return "", err
+		}
+	}
+	return current, nil
 }
 
-func extractTarGzipEntry(archivePath string, executablePath string, destinationPath string) (string, int64, error) {
+// verifyDirectoryWithinRoot performs the same component-by-component, symlink-refusing walk as
+// ensureDirectoryWithinRoot but never creates a missing component: a missing ancestor is treated
+// as "not safely usable" rather than an invitation to create it. Callers that must not mutate the
+// filesystem merely to check containment — rollback, in particular, which only ever deletes — use
+// this instead of the mutating variant.
+func verifyDirectoryWithinRoot(dataRoot string, directory string) (string, error) {
+	if !filepath.IsAbs(dataRoot) || !filepath.IsAbs(directory) {
+		return "", errors.New("data root and target directory must be absolute paths")
+	}
+	cleanRoot := filepath.Clean(dataRoot)
+	cleanDirectory := filepath.Clean(directory)
+	if cleanDirectory != cleanRoot && !strings.HasPrefix(cleanDirectory, cleanRoot+string(filepath.Separator)) {
+		return "", errors.New("target directory escapes the data root")
+	}
+	rootInfo, err := os.Lstat(cleanRoot)
+	if err != nil {
+		return "", fmt.Errorf("inspect data root: %w", err)
+	}
+	if err := rejectUnsafeAncestor(cleanRoot, rootInfo); err != nil {
+		return "", err
+	}
+	relative := strings.TrimPrefix(cleanDirectory, cleanRoot)
+	relative = strings.TrimPrefix(relative, string(filepath.Separator))
+	current := cleanRoot
+	if relative == "" {
+		return current, nil
+	}
+	for _, component := range strings.Split(relative, string(filepath.Separator)) {
+		if component == "" || component == "." || component == ".." {
+			return "", errors.New("target directory path is malformed")
+		}
+		current = filepath.Join(current, component)
+		information, err := os.Lstat(current)
+		if err != nil {
+			return "", fmt.Errorf("inspect directory ancestor %s: %w", current, err)
+		}
+		if err := rejectUnsafeAncestor(current, information); err != nil {
+			return "", err
+		}
+	}
+	return current, nil
+}
+
+// ensureDirectoryComponent verifies (or creates, then re-verifies) exactly one path component
+// against symlink substitution, factored out of ensureDirectoryWithinRoot so both the initial and
+// the pre-rename re-check walk identical logic.
+func ensureDirectoryComponent(current string) error {
+	information, err := os.Lstat(current)
+	switch {
+	case err == nil:
+		return rejectUnsafeAncestor(current, information)
+	case errors.Is(err, fs.ErrNotExist):
+		if mkdirErr := os.Mkdir(current, 0o755); mkdirErr != nil && !errors.Is(mkdirErr, fs.ErrExist) {
+			return fmt.Errorf("create directory ancestor %s: %w", current, mkdirErr)
+		}
+		information, err := os.Lstat(current)
+		if err != nil {
+			return fmt.Errorf("inspect directory ancestor %s after creating it: %w", current, err)
+		}
+		return rejectUnsafeAncestor(current, information)
+	default:
+		return fmt.Errorf("inspect directory ancestor %s: %w", current, err)
+	}
+}
+
+func rejectUnsafeAncestor(current string, information fs.FileInfo) error {
+	if information.Mode()&fs.ModeSymlink != 0 {
+		return fmt.Errorf("directory ancestor %s is a symlink", current)
+	}
+	if !information.IsDir() {
+		return fmt.Errorf("directory ancestor %s is not a directory", current)
+	}
+	return nil
+}
+
+// openArchiveEntry locates the single declared executable entry in a downloaded, already
+// checksum-verified archive and returns a reader positioned at its content plus a cleanup
+// function. It performs no filesystem write of its own — every archive byte still passes through
+// stageAndInstall's single-pass hashing before anything is placed anywhere.
+func openArchiveEntry(archivePath string, executablePath string, isZip bool) (io.Reader, func(), error) {
+	if err := validateArchiveEntryName(executablePath); err != nil {
+		return nil, nil, err
+	}
+	if isZip {
+		return openZipEntry(archivePath, executablePath)
+	}
+	return openTarGzipEntry(archivePath, executablePath)
+}
+
+func openTarGzipEntry(archivePath string, executablePath string) (io.Reader, func(), error) {
 	archiveFile, err := os.Open(archivePath)
 	if err != nil {
-		return "", 0, fmt.Errorf("open downloaded archive: %w", err)
+		return nil, nil, fmt.Errorf("open downloaded archive: %w", err)
 	}
-	defer archiveFile.Close()
 	gzipReader, err := gzip.NewReader(archiveFile)
 	if err != nil {
-		return "", 0, fmt.Errorf("open gzip stream: %w", err)
+		archiveFile.Close()
+		return nil, nil, fmt.Errorf("open gzip stream: %w", err)
 	}
-	defer gzipReader.Close()
 	reader := tar.NewReader(gzipReader)
 	for {
 		header, err := reader.Next()
 		if errors.Is(err, io.EOF) {
-			return "", 0, errors.New("archive does not contain the declared executable entry")
+			gzipReader.Close()
+			archiveFile.Close()
+			return nil, nil, errors.New("archive does not contain the declared executable entry")
 		}
 		if err != nil {
-			return "", 0, fmt.Errorf("read archive entry: %w", err)
+			gzipReader.Close()
+			archiveFile.Close()
+			return nil, nil, fmt.Errorf("read archive entry: %w", err)
 		}
 		if header.Typeflag != tar.TypeReg || path.Clean(header.Name) != path.Clean(executablePath) {
 			continue
 		}
 		if err := validateArchiveEntryName(header.Name); err != nil {
-			return "", 0, err
+			gzipReader.Close()
+			archiveFile.Close()
+			return nil, nil, err
 		}
-		return writeExtractedEntry(reader, destinationPath)
+		return reader, func() { gzipReader.Close(); archiveFile.Close() }, nil
 	}
 }
 
-func extractZipEntry(archivePath string, executablePath string, destinationPath string) (string, int64, error) {
+func openZipEntry(archivePath string, executablePath string) (io.Reader, func(), error) {
 	zipReader, err := zip.OpenReader(archivePath)
 	if err != nil {
-		return "", 0, fmt.Errorf("open zip archive: %w", err)
+		return nil, nil, fmt.Errorf("open zip archive: %w", err)
 	}
-	defer zipReader.Close()
 	for _, file := range zipReader.File {
 		if file.FileInfo().IsDir() || path.Clean(file.Name) != path.Clean(executablePath) {
 			continue
 		}
 		if err := validateArchiveEntryName(file.Name); err != nil {
-			return "", 0, err
+			zipReader.Close()
+			return nil, nil, err
 		}
 		opened, err := file.Open()
 		if err != nil {
-			return "", 0, fmt.Errorf("open zip entry: %w", err)
+			zipReader.Close()
+			return nil, nil, fmt.Errorf("open zip entry: %w", err)
 		}
-		contentSHA256, sizeBytes, writeErr := writeExtractedEntry(opened, destinationPath)
-		opened.Close()
-		return contentSHA256, sizeBytes, writeErr
+		return opened, func() { opened.Close(); zipReader.Close() }, nil
 	}
-	return "", 0, errors.New("archive does not contain the declared executable entry")
+	zipReader.Close()
+	return nil, nil, errors.New("archive does not contain the declared executable entry")
 }
 
 // validateArchiveEntryName is the extraction-side twin of the manifest's executablePath grammar:
@@ -275,101 +460,4 @@ func validateArchiveEntryName(entryName string) error {
 		return errors.New("archive entry name must not traverse upward")
 	}
 	return nil
-}
-
-// writeExtractedEntry streams one archive entry into destinationPath, hashing while copying, and
-// marks the result executable (non-Windows only; Windows permissions carry over from the archive
-// entry's own attributes).
-func writeExtractedEntry(reader io.Reader, destinationPath string) (string, int64, error) {
-	destination, err := os.Create(destinationPath)
-	if err != nil {
-		return "", 0, fmt.Errorf("create extracted file: %w", err)
-	}
-	digest := sha256.New()
-	written, err := io.Copy(io.MultiWriter(destination, digest), reader)
-	if err != nil {
-		destination.Close()
-		os.Remove(destinationPath)
-		return "", 0, fmt.Errorf("write extracted file: %w", err)
-	}
-	if err := destination.Sync(); err != nil {
-		destination.Close()
-		os.Remove(destinationPath)
-		return "", 0, fmt.Errorf("sync extracted file: %w", err)
-	}
-	if err := destination.Close(); err != nil {
-		os.Remove(destinationPath)
-		return "", 0, fmt.Errorf("close extracted file: %w", err)
-	}
-	if runtime.GOOS != "windows" {
-		if err := os.Chmod(destinationPath, 0o755); err != nil {
-			os.Remove(destinationPath)
-			return "", 0, fmt.Errorf("mark extracted file executable: %w", err)
-		}
-	}
-	return hex.EncodeToString(digest.Sum(nil)), written, nil
-}
-
-func copyFileHashed(sourcePath string, destinationPath string) (string, int64, error) {
-	source, err := os.Open(sourcePath)
-	if err != nil {
-		return "", 0, err
-	}
-	defer source.Close()
-	return writeExtractedEntry(source, destinationPath)
-}
-
-// resolveTargetWithinRoot enforces the applier's core containment rule for a planned target path:
-// after resolving symlinks in every ancestor directory that already exists, the target must land
-// inside dataRoot, and a symlink sitting at the exact target path is always refused — never
-// followed, never overwritten. dataRoot itself is resolved the same way so a symlinked data root
-// cannot be used to pivot the comparison.
-func resolveTargetWithinRoot(targetPath string, dataRoot string) (string, error) {
-	if !filepath.IsAbs(targetPath) {
-		return "", errors.New("target path is not absolute")
-	}
-	if information, err := os.Lstat(targetPath); err == nil {
-		if information.Mode()&fs.ModeSymlink != 0 {
-			return "", errors.New("target path is a symlink")
-		}
-	} else if !errors.Is(err, fs.ErrNotExist) {
-		return "", fmt.Errorf("target path could not be inspected: %w", err)
-	}
-	resolvedRoot, err := resolveExistingAncestors(dataRoot)
-	if err != nil {
-		return "", err
-	}
-	resolvedTarget, err := resolveExistingAncestors(targetPath)
-	if err != nil {
-		return "", err
-	}
-	if resolvedTarget != resolvedRoot && !strings.HasPrefix(resolvedTarget, resolvedRoot+string(filepath.Separator)) {
-		return "", errors.New("target path escapes the data root")
-	}
-	return resolvedTarget, nil
-}
-
-// resolveExistingAncestors calls filepath.EvalSymlinks on the deepest ancestor of targetPath that
-// already exists and rejoins the not-yet-existing remainder, so containment can be judged on the
-// path as it will exist after apply creates the missing final directories. When no ancestor
-// exists at all the lexical path is returned unchanged; the prefix check still applies lexically.
-func resolveExistingAncestors(targetPath string) (string, error) {
-	cleaned := filepath.Clean(targetPath)
-	existing := cleaned
-	var remainder []string
-	for {
-		resolved, err := filepath.EvalSymlinks(existing)
-		if err == nil {
-			return filepath.Join(append([]string{resolved}, remainder...)...), nil
-		}
-		if !errors.Is(err, fs.ErrNotExist) {
-			return "", fmt.Errorf("resolve path under %s: %w", existing, err)
-		}
-		parent := filepath.Dir(existing)
-		if parent == existing {
-			return cleaned, nil
-		}
-		remainder = append([]string{filepath.Base(existing)}, remainder...)
-		existing = parent
-	}
 }

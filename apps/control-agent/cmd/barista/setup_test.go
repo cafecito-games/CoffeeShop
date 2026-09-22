@@ -188,3 +188,34 @@ func TestSetupApplyWithoutSubcommandNamesTheValidOnes(t *testing.T) {
 	require.Equal(t, 2, code)
 	require.Contains(t, stderr, "plan or apply")
 }
+
+// TestSetupApplyNeverEchoesRejectedFlagValueToStderr proves the fix-6 property directly: Go's flag
+// package wraps a flag.Value.Set error as `invalid value %q for flag -name: ...`, echoing the raw
+// argument regardless of what the wrapped error text says. --manual-artifact and --manual-checksum
+// are plain repeatedFlag values (Set never errors) validated only after flag.Parse returns, so a
+// malformed value that happens to look like a secret must never reach stderr in any form.
+func TestSetupApplyNeverEchoesRejectedFlagValueToStderr(t *testing.T) {
+	_, manifestPath := cliManualManifestFixture(t)
+	dataRoot := filepath.Join(t.TempDir(), "data-root")
+	planPath := filepath.Join(t.TempDir(), "plan.json")
+	_, _, code := captureOutput(t, func() int {
+		return runSetup([]string{"plan", "--manifest", manifestPath, "--data-root", dataRoot, "--out", planPath})
+	})
+	require.Equal(t, 0, code)
+
+	const secretLikeMalformedValue = "ghp_abcdefghij1234567890"
+	_, stderr, code := captureOutput(t, func() int {
+		return runSetup([]string{
+			"apply",
+			"--manifest", manifestPath,
+			"--data-root", dataRoot,
+			"--plan", planPath,
+			"--manual-artifact", secretLikeMalformedValue, // missing the "=" delimiter
+		})
+	})
+	require.Equal(t, 2, code)
+	require.NotContains(t, stderr, secretLikeMalformedValue)
+	require.Contains(t, stderr, "--manual-artifact must be NAME=VALUE")
+	_, err := os.Stat(dataRoot)
+	require.True(t, os.IsNotExist(err))
+}
