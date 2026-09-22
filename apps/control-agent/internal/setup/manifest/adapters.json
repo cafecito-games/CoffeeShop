@@ -5,16 +5,16 @@
       "id": "claude-acp",
       "harnessId": "claude-cli",
       "provider": "anthropic",
-      "label": "Claude Code ACP adapter",
-      "version": "0.1.0",
+      "label": "Claude ACP adapter (@agentclientprotocol/claude-agent-acp)",
+      "version": "0.79.0",
       "platforms": {
-        "darwin-amd64": { "kind": "manual", "executablePath": "bin/adapter" },
-        "darwin-arm64": { "kind": "manual", "executablePath": "bin/adapter" },
-        "linux-amd64": { "kind": "manual", "executablePath": "bin/adapter" },
-        "linux-arm64": { "kind": "manual", "executablePath": "bin/adapter" }
+        "darwin-amd64": { "kind": "manual", "executablePath": "bin/claude-agent-acp" },
+        "darwin-arm64": { "kind": "manual", "executablePath": "bin/claude-agent-acp" },
+        "linux-amd64": { "kind": "manual", "executablePath": "bin/claude-agent-acp" },
+        "linux-arm64": { "kind": "manual", "executablePath": "bin/claude-agent-acp" }
       },
       "launch": {},
-      "authDocsUrl": "https://code.claude.com/docs/setup"
+      "authDocsUrl": "https://github.com/agentclientprotocol/claude-agent-acp#authentication"
     },
     {
       "id": "codex-acp",

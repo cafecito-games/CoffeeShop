@@ -322,8 +322,9 @@ func TestACPPolicyGatesConfiguredAdapters(t *testing.T) {
 	require.ErrorIs(t, driver.Available("claude-cli"), ErrDriverUnavailable)
 
 	defaults := DefaultACPProviders()
-	require.Len(t, defaults, 1)
+	require.Len(t, defaults, 2)
 	require.Contains(t, defaults, "codex-cli")
+	require.Contains(t, defaults, "claude-cli")
 }
 
 func TestCodexSessionConfiguration(t *testing.T) {
