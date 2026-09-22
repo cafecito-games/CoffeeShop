@@ -117,7 +117,10 @@ const isRecord = (value: unknown): value is Record<string, unknown> => typeof va
 /**
  * How a hub tool failure is reported to a bridge. Every code the orchestration handlers raise is
  * either named here or is an argument the caller got wrong, so a code this hub does not know is
- * reported as a bad call rather than as a hub fault the bridge would retry.
+ * reported as a bad call rather than as a hub fault the bridge would retry. A refusal the caller
+ * cannot fix by changing its arguments — a thread already settled, or a capacity the hub itself
+ * bounds — is a conflict, so a model is not sent hunting through a well-formed call for a mistake
+ * it did not make.
  */
 const externalOrchestratorErrorCodes: Readonly<Record<string, OrchestratorClientErrorCode>> = {
   not_attached: "not_attached",
@@ -130,6 +133,8 @@ const externalOrchestratorErrorCodes: Readonly<Record<string, OrchestratorClient
   thread_archived: "conflict",
   task_not_ready: "conflict",
   invalid_transition: "conflict",
+  mailbox_full: "conflict",
+  update_limit: "conflict",
   persistence_failed: "hub_unavailable",
   inconsistent_state: "hub_unavailable",
   internal_error: "hub_unavailable"
