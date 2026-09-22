@@ -1,0 +1,1 @@
+{"type":"harness.event","event":{"type":"plan.updated","runId":"run-one","sequence":2,"at":"2026-09-21T12:00:01Z","entries":[{"content":"Write failing test","status":"completed","priority":"high"},{"content":"Implement parser","status":"in-progress","priority":"medium"}]}}

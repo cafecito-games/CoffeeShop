@@ -1,11 +1,11 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { agentAvatarColors, agentAvatarShapes, type ChatMessage, type Snapshot, type Thread, type TimelineEvent } from "@coffee-shop/protocol";
+import { agentAvatarColors, agentAvatarShapes, orchestrationCollections, withOrchestrationDefaults, type ChatMessage, type Snapshot, type Thread, type TimelineEvent } from "@coffee-shop/protocol";
 
 export type State = Omit<Snapshot, "generatedAt">;
 
-const emptyState = (): State => ({
+const emptyState = (): State => withOrchestrationDefaults({
   agents: [],
   nodes: [],
   runs: [],
@@ -15,6 +15,12 @@ const emptyState = (): State => ({
   delegations: [],
   artifacts: []
 });
+
+export function addOrchestrationDefaults(state: State) {
+  const changed = orchestrationCollections.some((collection) => state[collection] === undefined);
+  withOrchestrationDefaults(state);
+  return changed;
+}
 
 const legacyDemoAgents = new Map([
   ["cpp-steward", "Ada"],
@@ -169,7 +175,8 @@ export class Store {
       const addedAgentAvatars = addMissingAgentAvatars(this.state);
       const addedCoordination = addCoordinationDefaults(this.state);
       const addedThreads = addThreadDefaults(this.state);
-      if (removedDemoRecords || addedAgentAvatars || addedCoordination || addedThreads) await this.save();
+      const addedOrchestration = addOrchestrationDefaults(this.state);
+      if (removedDemoRecords || addedAgentAvatars || addedCoordination || addedThreads || addedOrchestration) await this.save();
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       await this.save();

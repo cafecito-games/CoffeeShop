@@ -109,3 +109,37 @@ test("migrates an active legacy run into an active durable thread", async () => 
   assert.equal(store.snapshot().threads?.[0].status, "active");
   assert.equal(store.snapshot().runs[0].threadId, store.snapshot().threads?.[0].id);
 });
+
+test("backfills missing orchestration collections and persists them", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "coffee-shop-store-"));
+  const path = join(directory, "state.json");
+  await writeFile(path, JSON.stringify({
+    agents: [], nodes: [], runs: [], events: [], messages: []
+  }));
+
+  const store = new Store(path);
+  await store.load();
+  const snapshot = store.snapshot();
+  for (const collection of ["tasks", "taskMessages", "taskMessageAcknowledgements", "sessionBindings", "approvals", "workspaceLeases"] as const) {
+    assert.deepEqual(snapshot[collection], [], `${collection} defaults to an empty array`);
+  }
+  const persisted = JSON.parse(await readFile(path, "utf8"));
+  for (const collection of ["tasks", "taskMessages", "taskMessageAcknowledgements", "sessionBindings", "approvals", "workspaceLeases"] as const) {
+    assert.deepEqual(persisted[collection], [], `${collection} is persisted as an empty array`);
+  }
+});
+
+test("keeps orchestration collections that already hold records", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "coffee-shop-store-"));
+  const path = join(directory, "state.json");
+  await writeFile(path, JSON.stringify({
+    agents: [], nodes: [], runs: [], events: [], messages: [],
+    tasks: [{ id: "task-one", threadId: "thread-one", status: "pending" }]
+  }));
+
+  const store = new Store(path);
+  await store.load();
+  assert.deepEqual(store.snapshot().tasks?.map((task) => task.id), ["task-one"]);
+  const persisted = JSON.parse(await readFile(path, "utf8"));
+  assert.deepEqual(persisted.tasks.map((task: { id: string }) => task.id), ["task-one"]);
+});
