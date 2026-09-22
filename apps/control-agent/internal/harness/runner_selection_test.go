@@ -193,7 +193,7 @@ func findProfile(profiles []protocol.HarnessProfile, id string) protocol.Harness
 }
 
 func TestAdvertiseACPMergesVerifiedAdapterTransports(t *testing.T) {
-	driver, record := advertisingDriver(t, "codex-probe")
+	driver, record := advertisingDriver(t, "codex-probe-models")
 	discovered := fakeNativeCodex(t)[0]
 	discovered.Transports = []string{TransportNative}
 	input := []protocol.HarnessProfile{discovered}
@@ -213,10 +213,12 @@ func TestAdvertiseACPMergesVerifiedAdapterTransports(t *testing.T) {
 	require.Nil(t, original.ACP)
 
 	require.Equal(t, fakeCodexNativeBinary, acptest.RecordedEnvironment(t, record)["CODEX_PATH"])
+	require.Equal(t, []string{"default", acptest.CodexModel, acptest.CodexAlternateModel}, profile.Models)
+	require.Empty(t, original.Models)
 }
 
 func TestAdvertiseACPAdvertisesACPWithoutTheNativeCLI(t *testing.T) {
-	driver, _ := advertisingDriver(t, "codex-probe")
+	driver, _ := advertisingDriver(t, "codex-probe-models")
 	input := []protocol.HarnessProfile{{
 		ID: "codex-cli", Label: "Codex", Description: "Not installed",
 		Available: false, Transports: []string{TransportNative},
@@ -229,6 +231,55 @@ func TestAdvertiseACPAdvertisesACPWithoutTheNativeCLI(t *testing.T) {
 	require.True(t, profile.Available)
 	require.Equal(t, "ACP adapter "+acptest.CodexAdapterVersion, profile.Description)
 	require.NotNil(t, profile.ACP)
+	require.Equal(t, []string{"default", acptest.CodexModel, acptest.CodexAlternateModel}, profile.Models)
+}
+
+func TestAdvertiseACPReadsModelsFromAThrowawaySessionItCloses(t *testing.T) {
+	driver, record := advertisingDriver(t, "codex-probe-models")
+	input := []protocol.HarnessProfile{{ID: "codex-cli", Label: "Codex", Description: "Not installed", Models: []string{}, Transports: []string{TransportNative}}}
+	advertised, failures := AdvertiseACP(context.Background(), input, driver)
+	require.Empty(t, failures)
+	require.Equal(t, []string{"default", acptest.CodexModel, acptest.CodexAlternateModel}, advertised[0].Models)
+
+	sessionNew := acptest.ReceivedMethod(t, record, "session/new")
+	require.NotNil(t, sessionNew)
+	params := sessionNew["params"].(map[string]any)
+	require.Equal(t, []any{}, params["mcpServers"], "the probe session never receives the Coffee Shop MCP server")
+	require.True(t, filepath.IsAbs(params["cwd"].(string)))
+	_, statErr := os.Stat(params["cwd"].(string))
+	require.True(t, os.IsNotExist(statErr), "the probe's temporary directory is removed")
+	require.NotNil(t, acptest.ReceivedMethod(t, record, "session/close"))
+	require.Nil(t, acptest.ReceivedMethod(t, record, "session/prompt"))
+}
+
+func TestAdvertiseACPScreensAdapterModels(t *testing.T) {
+	driver, _ := advertisingDriver(t, "codex-probe-unsafe-models")
+	input := []protocol.HarnessProfile{{ID: "codex-cli", Label: "Codex", Transports: []string{TransportNative}}}
+	advertised, failures := AdvertiseACP(context.Background(), input, driver)
+	require.Empty(t, failures)
+	require.Equal(t, []string{"default", "gpt-5.5", "o4-mini"}, advertised[0].Models)
+}
+
+func TestAdvertiseACPKeepsDefaultOnlyModelsWhenTheProbeCannotOpenASession(t *testing.T) {
+	driver, _ := advertisingDriver(t, "codex-probe-authentication-required")
+	input := []protocol.HarnessProfile{{ID: "codex-cli", Label: "Codex", Models: []string{}, Transports: []string{TransportNative}}}
+	advertised, failures := AdvertiseACP(context.Background(), input, driver)
+	require.Empty(t, failures, "an unauthenticated adapter is still advertised; its runs report auth-required")
+	require.Equal(t, []string{TransportACP}, advertised[0].Transports)
+	require.Empty(t, advertised[0].Models)
+}
+
+func TestAdvertisedModelsMergeRules(t *testing.T) {
+	require.Equal(t, []string{"native-a"}, advertisedModels([]string{"native-a"}, true, nil))
+	require.Equal(t, []string{"native-a", "gpt-5.5"}, advertisedModels([]string{"native-a"}, true, []string{"native-a", "gpt-5.5"}))
+	require.Equal(t, []string{"default", "gpt-5.5"}, advertisedModels([]string{}, true, []string{"gpt-5.5"}))
+	require.Equal(t, []string{"default", "gpt-5.5"}, advertisedModels([]string{"stale"}, false, []string{"gpt-5.5"}))
+	many := make([]string, 0, 2*MaximumAdvertisedModels)
+	for index := range 2 * MaximumAdvertisedModels {
+		many = append(many, fmt.Sprintf("model-%d", index))
+	}
+	require.Len(t, advertisedModels(nil, false, screenedModels(many)), MaximumAdvertisedModels)
+	require.Len(t, screenedModels(many), MaximumAdvertisedModels)
 }
 
 func TestAdvertiseACPDisablesAdaptersThatFailTheirProbe(t *testing.T) {

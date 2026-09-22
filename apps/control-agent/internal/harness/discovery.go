@@ -104,8 +104,9 @@ func AdvertiseACP(ctx context.Context, profiles []protocol.HarnessProfile, drive
 			continue
 		}
 		probeContext, cancel := context.WithTimeout(ctx, acpProbeTimeout)
-		capabilities, err := driver.Probe(probeContext, harnessID)
+		probe, err := driver.Probe(probeContext, harnessID)
 		cancel()
+		capabilities := probe.Capabilities
 		if err != nil {
 			driver.Disable(harnessID, err)
 			failures[harnessID] = err
@@ -123,9 +124,65 @@ func AdvertiseACP(ctx context.Context, profiles []protocol.HarnessProfile, drive
 				profile.Description += " " + capabilities.AdapterVersion
 			}
 		}
+		profile.Models = advertisedModels(profile.Models, profile.Available, probe.Models)
 		profile.Available = true
 		profile.ACP = &capabilities
 		advertised[index] = profile
 	}
 	return advertised, failures
+}
+
+// Bounds on the model identifiers an adapter may contribute to a harness's advertised models.
+const (
+	MaximumAdvertisedModels     = 32
+	MaximumAdvertisedModelBytes = 128
+)
+
+// modelIdentifierPattern admits the model identifier shapes providers use (such as "gpt-5.5" or
+// "anthropic/claude-sonnet@2026") and nothing with whitespace or control characters.
+var modelIdentifierPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/@+-]*$`)
+
+// screenedModels keeps the adapter-offered model identifiers that are bounded, well formed, and
+// not secret-like, deduplicated in offered order and capped at MaximumAdvertisedModels.
+func screenedModels(offered []string) []string {
+	models := []string{}
+	seen := map[string]bool{}
+	for _, model := range offered {
+		if len(models) >= MaximumAdvertisedModels {
+			break
+		}
+		if seen[model] || len(model) > MaximumAdvertisedModelBytes || !modelIdentifierPattern.MatchString(model) || protocol.LooksSecretLike(model) {
+			continue
+		}
+		seen[model] = true
+		models = append(models, model)
+	}
+	return models
+}
+
+// advertisedModels merges the adapter's models into a harness's advertised list. The hub reads an
+// empty list as "default only", so when the list was empty and the adapter offers models, "default"
+// is kept explicitly: a "default" run keeps the provider's configured model on either transport.
+// The native list, when the native CLI is available, keeps its entries and order. Without adapter
+// models the list is unchanged.
+func advertisedModels(existing []string, nativeAvailable bool, adapterModels []string) []string {
+	if len(adapterModels) == 0 {
+		return existing
+	}
+	base := []string{}
+	if nativeAvailable {
+		base = append(base, existing...)
+	}
+	if len(base) == 0 {
+		base = append(base, "default")
+	}
+	merged := make([]string, 0, len(base)+len(adapterModels))
+	seen := map[string]bool{}
+	for _, model := range append(base, adapterModels...) {
+		if !seen[model] && len(merged) < MaximumAdvertisedModels {
+			seen[model] = true
+			merged = append(merged, model)
+		}
+	}
+	return merged
 }

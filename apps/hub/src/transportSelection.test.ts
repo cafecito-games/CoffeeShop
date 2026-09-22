@@ -290,3 +290,23 @@ test("task attempts project their transport and, once started, their selection",
   assert.equal(projection.attempts[1].transport, "acp-v1");
   assert.deepEqual(projection.attempts[1].transportSelection, acpReportedSelection);
 });
+
+test("an ACP-only harness advertising adapter models accepts an agent with a concrete model", () => {
+  const acpOnly = harnessProfile("codex-cli", { transports: ["acp-v1"], models: ["default", "gpt-5.5", "gpt-5.4"] });
+  for (const model of ["gpt-5.5", "default"]) {
+    const { state, context } = schedulingFixture(["acp-v1"], {});
+    state.agents = [agent("alpha", { model })];
+    state.nodes = [node("node-alpha", { harnesses: [acpOnly] })];
+    runSchedulingPass(state, context, at);
+    const placed = state.runs.find((item) => item.taskId === "one");
+    assert.ok(placed, `an agent using ${model} is placed`);
+    assert.equal(placed.model, model);
+    assert.equal(placed.transport, "acp-v1");
+  }
+
+  const { state, context } = schedulingFixture(["acp-v1"], {});
+  state.agents = [agent("alpha", { model: "gpt-9" })];
+  state.nodes = [node("node-alpha", { harnesses: [acpOnly] })];
+  runSchedulingPass(state, context, at);
+  assert.equal(state.runs.length, 0, "a model the adapter does not offer is not placed");
+});

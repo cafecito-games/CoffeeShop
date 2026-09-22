@@ -212,17 +212,34 @@ func (driver *ACPDriver) stop(process *adapterProcess, client *acp.Client, grace
 	return driver.shutdown(graceful, exited, process.killProcessTree, func() { _ = process.stdin.Close() }, func() { _ = process.stdout.Close() })
 }
 
-// Probe starts the harness's adapter, performs only the initialize handshake, and returns the
-// capabilities it negotiated. An adapter that cannot host the Coffee Shop MCP server over HTTP is
-// reported as lacking a required capability.
-func (driver *ACPDriver) Probe(ctx context.Context, harnessID string) (protocol.AcpAgentCapabilities, error) {
+// ACPProbe is what a startup probe learned about an adapter.
+type ACPProbe struct {
+	Capabilities protocol.AcpAgentCapabilities
+	// Models are the screened model identifiers the adapter offers through its provider's model
+	// option, in offered order; empty when it offers none or could not create a session.
+	Models []string
+}
+
+// Probe starts the harness's adapter, performs the initialize handshake, and returns the
+// capabilities it negotiated. When the provider names a model option, it also opens a throwaway
+// session in an empty temporary directory to read the offered models. An adapter that cannot host
+// the Coffee Shop MCP server over HTTP is reported as lacking a required capability.
+func (driver *ACPDriver) Probe(ctx context.Context, harnessID string) (ACPProbe, error) {
 	adapter, provider, err := driver.adapter(harnessID)
 	if err != nil {
-		return protocol.AcpAgentCapabilities{}, err
+		return ACPProbe{}, err
 	}
-	process, err := driver.start(harnessID, adapter, provider, "", nil)
+	directory := ""
+	if provider.ModelOption != "" {
+		temporary, err := os.MkdirTemp("", "barista-acp-probe-")
+		if err == nil {
+			defer os.RemoveAll(temporary)
+			directory, _ = canonicalDirectory(temporary)
+		}
+	}
+	process, err := driver.start(harnessID, adapter, provider, directory, nil)
 	if err != nil {
-		return protocol.AcpAgentCapabilities{}, err
+		return ACPProbe{}, err
 	}
 	client := acp.NewClient(process.stdout, process.stdin, acp.Options{
 		ClientVersion:        driver.options.ClientVersion,
@@ -230,17 +247,21 @@ func (driver *ACPDriver) Probe(ctx context.Context, harnessID string) (protocol.
 		RequestTimeout:       driver.options.RequestTimeout,
 	})
 	capabilities, probeErr := client.Probe(ctx)
+	if probeErr == nil && !capabilities.Mcp.HTTP {
+		probeErr = fmt.Errorf("%w: HTTP MCP servers are required for the Coffee Shop MCP server", acp.ErrMissingCapability)
+	}
+	var offered []string
+	if probeErr == nil && directory != "" {
+		offered = client.ProbeOption(ctx, directory, provider.ModelOption)
+	}
 	driver.stop(process, client, probeErr == nil)
 	if probeErr != nil {
 		if diagnostic := process.stderr.String(); diagnostic != "" {
-			return protocol.AcpAgentCapabilities{}, fmt.Errorf("%w%s%s", probeErr, adapterStderrSeparator, diagnostic)
+			return ACPProbe{}, fmt.Errorf("%w%s%s", probeErr, adapterStderrSeparator, diagnostic)
 		}
-		return protocol.AcpAgentCapabilities{}, probeErr
+		return ACPProbe{}, probeErr
 	}
-	if !capabilities.Mcp.HTTP {
-		return protocol.AcpAgentCapabilities{}, fmt.Errorf("%w: HTTP MCP servers are required for the Coffee Shop MCP server", acp.ErrMissingCapability)
-	}
-	return capabilities, nil
+	return ACPProbe{Capabilities: capabilities, Models: screenedModels(offered)}, nil
 }
 
 func (driver *ACPDriver) Execute(ctx context.Context, invocation Invocation) (string, error) {

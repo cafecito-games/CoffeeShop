@@ -65,6 +65,35 @@ func init() {
 			DrainUntilEOF(),
 		},
 
+		"codex-probe-models": {
+			CaptureEnvironment(CodexEnvironment...),
+			Expect("initialize"),
+			Respond("initialize", `{"protocolVersion":1,"agentCapabilities":`+codexCapabilities+`,"authMethods":[],"agentInfo":`+codexAgentInfo+`}`),
+			Expect("session/new"),
+			Respond("session/new", `{"sessionId":"{{session}}","configOptions":`+CodexConfigOptions("agent", CodexModel)+`}`),
+			Expect("session/close"),
+			Respond("session/close", `{}`),
+			DrainUntilEOF(),
+		},
+
+		"codex-probe-unsafe-models": {
+			Expect("initialize"),
+			Respond("initialize", `{"protocolVersion":1,"agentCapabilities":`+codexCapabilities+`,"authMethods":[],"agentInfo":`+codexAgentInfo+`}`),
+			Expect("session/new"),
+			Respond("session/new", `{"sessionId":"{{session}}","configOptions":[{"id":"model","type":"select","currentValue":"gpt-5.5","options":[{"value":"gpt-5.5"},{"value":"gpt-5.5"},{"value":"has space"},{"value":"sk-abcdefghijklmnop123456"},{"value":""},{"value":"`+repeat("m", 129)+`"},{"value":"o4-mini"}]}]}`),
+			Expect("session/close"),
+			Respond("session/close", `{}`),
+			DrainUntilEOF(),
+		},
+
+		"codex-probe-authentication-required": {
+			Expect("initialize"),
+			Respond("initialize", `{"protocolVersion":1,"agentCapabilities":`+codexCapabilities+`,"authMethods":[{"id":"chatgpt","name":"Login with ChatGPT"}],"agentInfo":`+codexAgentInfo+`}`),
+			Expect("session/new"),
+			RespondError("session/new", -32000, "Authentication required"),
+			DrainUntilEOF(),
+		},
+
 		"codex-success": join(codexConfigured(), []Step{
 			Expect("session/prompt"),
 			Update(`{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"codex done"}}`),

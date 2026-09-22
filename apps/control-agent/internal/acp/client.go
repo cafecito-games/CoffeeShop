@@ -113,15 +113,17 @@ type Client struct {
 	emitMu   sync.Mutex
 	sequence int64
 
-	stateMu       sync.Mutex
-	sessionID     string
-	negotiated    *protocol.AcpAgentCapabilities
-	completed     bool
-	lateReported  bool
-	cancelling    chan struct{}
-	cancelOnce    sync.Once
-	approvalCount atomic.Int64
-	promptSent    atomic.Bool
+	stateMu    sync.Mutex
+	sessionID  string
+	negotiated *protocol.AcpAgentCapabilities
+	// closeSupported records whether initialize advertised session/close.
+	closeSupported bool
+	completed      bool
+	lateReported   bool
+	cancelling     chan struct{}
+	cancelOnce     sync.Once
+	approvalCount  atomic.Int64
+	promptSent     atomic.Bool
 }
 
 // NewClient prepares a client reading adapter stdout and writing adapter stdin.
@@ -168,16 +170,46 @@ func (client *Client) Run(ctx context.Context, request SessionRequest) (Result, 
 }
 
 // Probe negotiates the connection and returns the adapter's capabilities without creating a
-// session. The client cannot be used for a run afterwards.
+// session. Afterwards the client can only answer ProbeOption, never run a prompt.
 func (client *Client) Probe(ctx context.Context) (protocol.AcpAgentCapabilities, error) {
 	client.peer.start()
-	_, err := client.initialize(ctx)
 	client.markCompleted()
-	if err != nil {
+	if _, err := client.initialize(ctx); err != nil {
 		return protocol.AcpAgentCapabilities{}, client.redactError(err)
 	}
 	capabilities, _ := client.Negotiated()
 	return capabilities, nil
+}
+
+// ProbeOption, after a successful Probe, creates a throwaway session in cwd without MCP servers
+// or a prompt, reads the values the adapter offers for the session configuration option optionID,
+// and closes the session when the adapter supports that. The values are untrusted adapter output
+// in offered order. Failing to read them, for example because the adapter requires authentication
+// before creating a session, is not an error: the option is then reported as offering nothing.
+func (client *Client) ProbeOption(ctx context.Context, cwd, optionID string) []string {
+	client.stateMu.Lock()
+	negotiated := client.negotiated != nil
+	client.stateMu.Unlock()
+	if !negotiated || optionID == "" || !filepath.IsAbs(cwd) {
+		return nil
+	}
+	requestContext, cancel := context.WithTimeout(ctx, client.options.RequestTimeout)
+	defer cancel()
+	var response newSessionResponse
+	if client.peer.call(requestContext, methodSessionNew, newSessionRequest{Cwd: cwd, McpServers: []mcpServerHTTP{}}, &response) != nil || response.SessionID == "" {
+		return nil
+	}
+	values := []string{}
+	for _, option := range response.ConfigOptions {
+		if option.ID == optionID {
+			values = orderedOfferedValues(option.Options)
+			break
+		}
+	}
+	if client.closeSupported {
+		_ = client.peer.call(requestContext, methodSessionClose, sessionReference{SessionID: response.SessionID}, nil)
+	}
+	return values
 }
 
 // Negotiated returns the capabilities the adapter reported in initialize, once it has answered.
@@ -282,8 +314,10 @@ func (client *Client) initialize(ctx context.Context) (initializeResponse, error
 		return response, fmt.Errorf("%w %s", ErrAdapterVersionMismatch, expected)
 	}
 	negotiated := negotiatedCapabilities(response)
+	closeCapability := response.AgentCapabilities.SessionCapabilities.Close
 	client.stateMu.Lock()
 	client.negotiated = &negotiated
+	client.closeSupported = closeCapability != nil && !isNull(closeCapability)
 	client.stateMu.Unlock()
 	return response, nil
 }

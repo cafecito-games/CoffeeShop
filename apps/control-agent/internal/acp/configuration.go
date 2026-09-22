@@ -69,16 +69,30 @@ func newConfigState(options []sessionConfigOption) configState {
 // offeredValues flattens a select option's values, accepting both the flat and the grouped shape.
 func offeredValues(raw json.RawMessage) map[string]bool {
 	offered := map[string]bool{}
+	for _, value := range orderedOfferedValues(raw) {
+		offered[value] = true
+	}
+	return offered
+}
+
+// orderedOfferedValues lists a select option's distinct values in the order the adapter offered
+// them, at most maximumConfigValues of them.
+func orderedOfferedValues(raw json.RawMessage) []string {
+	values := []string{}
+	seen := map[string]bool{}
+	add := func(value *string) {
+		if value != nil && !seen[*value] && len(values) < maximumConfigValues {
+			seen[*value] = true
+			values = append(values, *value)
+		}
+	}
 	var entries []sessionConfigValue
 	if json.Unmarshal(raw, &entries) != nil {
-		return offered
+		return values
 	}
 	for _, entry := range entries {
-		if len(offered) >= maximumConfigValues {
-			break
-		}
 		if entry.Value != nil {
-			offered[*entry.Value] = true
+			add(entry.Value)
 			continue
 		}
 		if entry.Group == nil {
@@ -89,12 +103,10 @@ func offeredValues(raw json.RawMessage) map[string]bool {
 			continue
 		}
 		for _, value := range grouped {
-			if value.Value != nil && len(offered) < maximumConfigValues {
-				offered[*value.Value] = true
-			}
+			add(value.Value)
 		}
 	}
-	return offered
+	return values
 }
 
 // configure applies every selection and then confirms that all of them hold together, since

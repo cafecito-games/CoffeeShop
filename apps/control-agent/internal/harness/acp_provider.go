@@ -21,6 +21,9 @@ type ACPProvider struct {
 	// absolute path of the harness's discovered, version-checked native CLI, so an adapter that
 	// drives that CLI never resolves it through PATH itself.
 	NativeBinaryVariable string
+	// ModelOption names the session configuration option through which the adapter offers models.
+	// The startup probe reads its values so a harness reachable only over ACP can advertise them.
+	ModelOption string
 }
 
 // DefaultACPProviders returns the provider policy for every harness Barista can drive over ACP.

@@ -29,6 +29,7 @@ func codexACPProvider() ACPProvider {
 		Configuration:        codexSessionConfiguration,
 		RequireMCPConnection: true,
 		NativeBinaryVariable: "CODEX_PATH",
+		ModelOption:          codexModelOption,
 	}
 }
 
