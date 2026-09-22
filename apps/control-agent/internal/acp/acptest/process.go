@@ -81,6 +81,22 @@ func DescendantPIDs(t testing.TB, recordPath string) []int {
 	return pids
 }
 
+// RecordedEnvironment returns the variables recorded by CaptureEnvironment steps, merged in order.
+func RecordedEnvironment(t testing.TB, recordPath string) map[string]string {
+	t.Helper()
+	environment := map[string]string{}
+	for _, frame := range Received(t, recordPath) {
+		recorded, isEnvironment := frame["environment"].(map[string]any)
+		if !isEnvironment {
+			continue
+		}
+		for name, value := range recorded {
+			environment[name], _ = value.(string)
+		}
+	}
+	return environment
+}
+
 // Stderr returns everything the fake agent wrote to stderr so far.
 func (process *Process) Stderr() string {
 	return process.stderr.String()

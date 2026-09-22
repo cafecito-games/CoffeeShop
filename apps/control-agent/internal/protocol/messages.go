@@ -2,10 +2,9 @@ package protocol
 
 import "encoding/json"
 
-// Version is the control protocol version Barista registers. Barista sends the version-4
-// capability.report message added by project-readiness (issue #25), but does not yet consume
-// version-4 dispatch execution, session-binding, or workspace-lease fields — the hub does not
-// populate those on a plain dispatch today, so registering as 4 is safe ahead of that work.
+// Version is the control protocol version Barista registers. Barista honors version-4 dispatch
+// execution for the native-cli and acp-v1 transports and rejects the session-binding and
+// workspace-lease fields it does not implement yet, so registering as 4 never degrades them.
 const Version = "4"
 
 type HarnessProfile struct {
@@ -95,6 +94,8 @@ type Outbound struct {
 	Binding      *SessionBindingUpdate `json:"binding,omitempty"`
 	Lease        *WorkspaceLeaseUpdate `json:"lease,omitempty"`
 	Report       *NodeCapabilityReport `json:"report,omitempty"`
+	// Transport is the version-4 transport selection reported once on run.started.
+	Transport *RunTransportSelection `json:"transport,omitempty"`
 }
 
 func DecodeInbound(data []byte) (Inbound, error) {

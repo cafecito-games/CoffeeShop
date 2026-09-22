@@ -9,6 +9,7 @@ const (
 	methodSessionPrompt     = "session/prompt"
 	methodSessionCancel     = "session/cancel"
 	methodSessionClose      = "session/close"
+	methodSetConfigOption   = "session/set_config_option"
 	methodSessionUpdate     = "session/update"
 	methodRequestPermission = "session/request_permission"
 )
@@ -90,7 +91,33 @@ type newSessionRequest struct {
 }
 
 type newSessionResponse struct {
+	SessionID     string                `json:"sessionId"`
+	ConfigOptions []sessionConfigOption `json:"configOptions"`
+}
+
+// sessionConfigOption is one ACP session configuration option. Options holds either a flat list
+// of values or a list of named groups of values; both shapes are accepted.
+type sessionConfigOption struct {
+	ID           string          `json:"id"`
+	Type         string          `json:"type"`
+	CurrentValue json.RawMessage `json:"currentValue"`
+	Options      json.RawMessage `json:"options"`
+}
+
+type sessionConfigValue struct {
+	Value   *string         `json:"value"`
+	Group   *string         `json:"group"`
+	Options json.RawMessage `json:"options"`
+}
+
+type setConfigOptionRequest struct {
 	SessionID string `json:"sessionId"`
+	ConfigID  string `json:"configId"`
+	Value     string `json:"value"`
+}
+
+type setConfigOptionResponse struct {
+	ConfigOptions []sessionConfigOption `json:"configOptions"`
 }
 
 type contentBlock struct {

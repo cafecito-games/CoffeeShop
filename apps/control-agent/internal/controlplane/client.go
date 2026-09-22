@@ -246,42 +246,70 @@ func (client *Client) handle(ctx context.Context, message protocol.Inbound) {
 	}
 }
 
+// admitTransport is the capability check the dispatch guard uses for a harness transport. It must
+// not start anything; see harness.Runner.Admit.
+type admitTransport func(harnessID, transport, fallbackTransport string) error
+
 // unsupportedExecutionReason reports why a version-4 dispatch cannot be honored by this Barista,
-// or "" when it is fully supported. Barista only implements native CLI execution today: an ACP
-// transport, a session binding to resume, or a workspace lease to provision would each silently
-// fall back to plain native execution if not rejected explicitly, which is exactly what
+// or "" when it is fully supported. Anything Barista cannot honor exactly is rejected here, before
+// any process starts, rather than silently degraded to plain native execution, which is what
 // registering control protocol version 4 must never allow (see docs/architecture.md's
 // compatibility policy). The version-4 run itself, not only the optional execution object, can
 // carry these fields (protocol.Run.Transport/SessionBindingID/WorkspaceLeaseID), so both are
-// checked: a hub could send run.transport="acp-v1" with no execution object at all, and that must
-// be rejected exactly like an execution object naming the same transport. Rejecting here, before
-// any process starts, keeps that promise regardless of what a hub scheduler eventually sends.
-func unsupportedExecutionReason(run protocol.Run, execution *protocol.DispatchExecution) string {
-	if run.Transport != "" && run.Transport != "native-cli" {
-		return fmt.Sprintf("unsupported execution: %s transport not available on this Barista", run.Transport)
+// checked and must agree: a hub could send run.transport="acp-v1" with no execution object at all.
+//
+// acp-v1 is accepted only when admit confirms that a verified adapter is available for the
+// harness, or that the dispatch and the operator both permit native fallback and the native CLI is
+// installed; a nil admit accepts no ACP run. A session binding to resume and a workspace lease to
+// provision remain unsupported.
+func unsupportedExecutionReason(run protocol.Run, execution *protocol.DispatchExecution, admit admitTransport) string {
+	transport := run.Transport
+	fallbackTransport := ""
+	if execution != nil {
+		if transport != "" && execution.Transport != "" && transport != execution.Transport {
+			return "unsupported execution: the run and its execution name different transports"
+		}
+		if transport == "" {
+			transport = execution.Transport
+		}
+		fallbackTransport = execution.FallbackTransport
 	}
-	if run.SessionBindingID != "" {
+	switch transport {
+	case "", protocol.TransportNativeCLI:
+		if fallbackTransport != "" {
+			return "unsupported execution: a fallback transport is only meaningful for an acp-v1 run"
+		}
+	case protocol.TransportACP:
+		if fallbackTransport != "" && fallbackTransport != protocol.TransportNativeCLI {
+			return "unsupported execution: acp-v1 may only fall back to native-cli"
+		}
+		if admit == nil || admit(run.HarnessID, transport, fallbackTransport) != nil {
+			return "unsupported execution: acp-v1 transport not available on this Barista"
+		}
+	default:
+		return "unsupported execution: unknown transport not available on this Barista"
+	}
+	if run.SessionBindingID != "" || (execution != nil && execution.SessionBinding != nil) {
 		return "unsupported execution: session binding resume not available on this Barista"
 	}
-	if run.WorkspaceLeaseID != "" {
-		return "unsupported execution: workspace lease provisioning not available on this Barista"
-	}
-	if execution == nil {
-		return ""
-	}
-	if execution.Transport != "" && execution.Transport != "native-cli" {
-		return fmt.Sprintf("unsupported execution: %s transport not available on this Barista", execution.Transport)
-	}
-	if execution.SessionBinding != nil {
-		return "unsupported execution: session binding resume not available on this Barista"
-	}
-	if execution.WorkspaceLease != nil {
+	if run.WorkspaceLeaseID != "" || (execution != nil && execution.WorkspaceLease != nil) {
 		return "unsupported execution: workspace lease provisioning not available on this Barista"
 	}
 	return ""
 }
 
+func (client *Client) admitTransport() admitTransport {
+	if client.runner == nil {
+		return nil
+	}
+	return client.runner.Admit
+}
+
 func (client *Client) dispatch(ctx context.Context, run protocol.Run, agent protocol.Agent, execution *protocol.DispatchExecution) {
+	// The guard may re-verify an adapter executable's digest, so it runs before taking the run
+	// lock; its verdict is applied in the same place as before, after the tombstone and duplicate
+	// checks.
+	rejection := unsupportedExecutionReason(run, execution, client.admitTransport())
 	client.runsMu.Lock()
 	if _, cancelled := client.cancelled[run.ID]; cancelled {
 		client.runsMu.Unlock()
@@ -291,9 +319,9 @@ func (client *Client) dispatch(ctx context.Context, run protocol.Run, agent prot
 		client.runsMu.Unlock()
 		return
 	}
-	if reason := unsupportedExecutionReason(run, execution); reason != "" {
+	if rejection != "" {
 		client.runsMu.Unlock()
-		client.send(protocol.Outbound{Type: "run.failed", RunID: run.ID, Error: reason, At: now()})
+		client.send(protocol.Outbound{Type: "run.failed", RunID: run.ID, Error: rejection, At: now()})
 		return
 	}
 	if len(client.runs) >= client.config.Concurrency {
@@ -304,6 +332,14 @@ func (client *Client) dispatch(ctx context.Context, run protocol.Run, agent prot
 	runContext, cancel := context.WithCancel(ctx)
 	client.runs[run.ID] = cancel
 	client.runsMu.Unlock()
+
+	fallbackTransport := ""
+	if execution != nil {
+		if run.Transport == "" {
+			run.Transport = execution.Transport
+		}
+		fallbackTransport = execution.FallbackTransport
+	}
 
 	go func() {
 		defer func() {
@@ -332,12 +368,16 @@ func (client *Client) dispatch(ctx context.Context, run protocol.Run, agent prot
 		defer client.bridge.Revoke(capability.Token)
 		session := client.openSession(run.ID)
 		defer client.closeSession(session)
-		client.send(protocol.Outbound{Type: "run.started", RunID: run.ID, At: now()})
-		invocation := harness.Invocation{Run: run, Agent: agent, Workspace: workspace, MCP: capability, Output: func(chunk string) {
+		// run.started is sent only when the driver is about to hand the harness its prompt, after
+		// transport selection and, for ACP, after the adapter connected to the Coffee Shop MCP
+		// server; it carries that selection. Events produced before then are held by the session.
+		invocation := harness.Invocation{Run: run, Agent: agent, Workspace: workspace, MCP: capability, FallbackTransport: fallbackTransport, Output: func(chunk string) {
 			if runContext.Err() != nil {
 				return
 			}
 			client.send(protocol.Outbound{Type: "run.output", RunID: run.ID, Chunk: chunk, At: now()})
+		}, Started: func(selection protocol.RunTransportSelection) {
+			session.start(selection)
 		}}
 		if protocol.SupportsCapability(protocol.Version, protocol.CapabilityOrchestration) {
 			invocation.Events = func(event protocol.HarnessEvent) {

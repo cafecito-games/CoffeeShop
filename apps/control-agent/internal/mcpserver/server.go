@@ -45,12 +45,26 @@ type Config struct {
 	URL         string
 	Token       string
 	CanDelegate bool
+	// Connected is closed once a client holding Token has listed the run's tools, which is the
+	// point at which a harness can call them. It is nil for a Config not issued by Grant.
+	Connected <-chan struct{}
 }
 
 type grant struct {
 	runID       string
 	workspace   string
 	canDelegate bool
+	connection  *connectionSignal
+}
+
+// connectionSignal closes its channel exactly once, on the grant's first successful tools/list.
+type connectionSignal struct {
+	once      sync.Once
+	connected chan struct{}
+}
+
+func (signal *connectionSignal) mark() {
+	signal.once.Do(func() { close(signal.connected) })
 }
 
 type Server struct {
@@ -94,8 +108,9 @@ func (server *Server) Grant(runID, workspace string, canDelegate bool) (Config, 
 	token := base64.RawURLEncoding.EncodeToString(tokenBytes)
 	server.mu.Lock()
 	defer server.mu.Unlock()
-	server.grants[token] = grant{runID: runID, workspace: workspace, canDelegate: canDelegate}
-	return Config{URL: server.url, Token: token, CanDelegate: canDelegate}, nil
+	connection := &connectionSignal{connected: make(chan struct{})}
+	server.grants[token] = grant{runID: runID, workspace: workspace, canDelegate: canDelegate, connection: connection}
+	return Config{URL: server.url, Token: token, CanDelegate: canDelegate, Connected: connection.connected}, nil
 }
 
 func (server *Server) Revoke(token string) {
@@ -174,6 +189,7 @@ func (server *Server) serveHTTP(writer http.ResponseWriter, request *http.Reques
 		}})
 	case "tools/list":
 		writeRPC(writer, rpcResponse{JSONRPC: "2.0", ID: message.ID, Result: map[string]any{"tools": tools(activeGrant.canDelegate)}})
+		activeGrant.connection.mark()
 	case "tools/call":
 		server.callTool(writer, request, message, activeGrant)
 	default:

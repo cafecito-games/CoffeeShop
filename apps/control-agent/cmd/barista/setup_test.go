@@ -122,7 +122,7 @@ func TestSetupApplyInstallsManualArtifactEndToEnd(t *testing.T) {
 	})
 	require.Equal(t, 0, code, "stderr: %s", stderr)
 	require.Contains(t, stdout, "installed: manual-acp@0.4.0")
-	require.Contains(t, stdout, "ACP_ADAPTER_MANUAL_CLI=")
+	require.Contains(t, stdout, "Barista loads it at startup from the same --data-root")
 
 	targetPath := filepath.Join(dataRoot, "adapters", "manual-cli", "manual-acp", "0.4.0", "bin", "adapter")
 	installed, err := os.ReadFile(targetPath)

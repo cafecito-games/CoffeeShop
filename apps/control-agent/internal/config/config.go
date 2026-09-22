@@ -9,10 +9,12 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 
 	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/protocol"
+	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/setup"
 )
 
 const DefaultEndpoint = "http://localhost:8787"
@@ -39,6 +41,15 @@ type Toolchain struct {
 	Version string
 }
 
+// ACPAdapterOverride is an administrator-named ACP adapter executable, pinned by its SHA-256. It
+// replaces the setup-installed adapter for its harness; Barista refuses to start if the file does
+// not match.
+type ACPAdapterOverride struct {
+	HarnessID string
+	SHA256    string
+	Path      string
+}
+
 type Config struct {
 	ControlEndpoint  string
 	Name             string
@@ -53,6 +64,13 @@ type Config struct {
 	Accelerators     []string
 	Toolchains       []Toolchain
 	MemoryMegabytes  int // 0 means "not configured"; never reported as evidence when 0
+	// DataRoot is the Barista-owned data root whose setup-installed adapters are loaded.
+	DataRoot string
+	// AdapterManifestPath names an adapter manifest file; empty means the embedded manifest.
+	AdapterManifestPath string
+	ACPAdapters         []ACPAdapterOverride
+	// ACPNativeFallback lists harnesses whose acp-v1 runs may fall back to the native CLI.
+	ACPNativeFallback []string
 }
 
 type stringList []string
@@ -101,6 +119,8 @@ func Parse(args []string) (Config, error) {
 	labels := strictStringList(splitStrictEnv("BARISTA_LABELS"))
 	accelerators := strictStringList(splitStrictEnv("BARISTA_ACCELERATORS"))
 	toolchains := strictStringList(splitStrictEnv("BARISTA_TOOLCHAINS"))
+	acpAdapters := strictStringList(splitStrictEnv("BARISTA_ACP_ADAPTERS"))
+	nativeFallback := strictStringList(splitStrictEnv("BARISTA_ACP_NATIVE_FALLBACK"))
 	set := flag.NewFlagSet("barista", flag.ContinueOnError)
 	set.SetOutput(os.Stderr)
 	endpoint := set.String("control-endpoint", env("CONTROL_ENDPOINT", DefaultEndpoint), "Coffee Shop URL or WebSocket endpoint")
@@ -116,6 +136,10 @@ func Parse(args []string) (Config, error) {
 	memory := set.Int("memory-megabytes", memoryMegabytes, "configured system memory in megabytes (0 means not configured)")
 	token := set.String("token", os.Getenv("COFFEE_SHOP_TOKEN"), "control-plane token (prefer COFFEE_SHOP_TOKEN)")
 	versionOnly := set.Bool("version", false, "print the Barista version")
+	dataRoot := set.String("data-root", env("BARISTA_DATA_ROOT", setup.DefaultDataRoot()), "Barista-owned data root holding setup-installed ACP adapters")
+	adapterManifest := set.String("adapter-manifest", env("BARISTA_ADAPTER_MANIFEST", ""), "adapter manifest JSON file used by setup (default: the manifest embedded in this binary)")
+	set.Var(&acpAdapters, "acp-adapter", "ACP adapter override as <harness-id>=sha256:<64 lowercase hex>:<absolute path>; repeat the flag for multiple harnesses")
+	set.Var(&nativeFallback, "acp-native-fallback", "harness ID whose acp-v1 runs may fall back to the native CLI before the prompt when the dispatch permits it; repeat the flag for multiple harnesses")
 	if err := set.Parse(args); err != nil {
 		return Config{}, err
 	}
@@ -170,6 +194,20 @@ func Parse(args []string) (Config, error) {
 	if *memory < 0 {
 		return Config{}, errors.New("memory megabytes must not be negative")
 	}
+	if !filepath.IsAbs(*dataRoot) {
+		return Config{}, errors.New("data root must be an absolute path")
+	}
+	if *adapterManifest != "" && !filepath.IsAbs(*adapterManifest) {
+		return Config{}, errors.New("adapter manifest must be an absolute path")
+	}
+	validatedOverrides, err := validatedACPAdapterOverrides(acpAdapters)
+	if err != nil {
+		return Config{}, err
+	}
+	validatedFallback, err := validatedHarnessIDs("acp native fallback", nativeFallback)
+	if err != nil {
+		return Config{}, err
+	}
 
 	return Config{
 		ControlEndpoint:  wsEndpoint,
@@ -185,7 +223,54 @@ func Parse(args []string) (Config, error) {
 		Accelerators:     validatedAccelerators,
 		Toolchains:       validatedToolchains,
 		MemoryMegabytes:  *memory,
+
+		DataRoot:            filepath.Clean(*dataRoot),
+		AdapterManifestPath: *adapterManifest,
+		ACPAdapters:         validatedOverrides,
+		ACPNativeFallback:   validatedFallback,
 	}, nil
+}
+
+// validatedACPAdapterOverrides parses <harness-id>=sha256:<digest>:<absolute path> entries. Like
+// the inventory lists, every rejection names only the position, and the secret screen runs first.
+func validatedACPAdapterOverrides(values []string) ([]ACPAdapterOverride, error) {
+	overrides := make([]ACPAdapterOverride, 0, len(values))
+	seen := map[string]bool{}
+	for index, value := range values {
+		if value == "" {
+			return nil, fmt.Errorf("acp adapter at index %d is empty", index)
+		}
+		if protocol.LooksSecretLike(value) {
+			return nil, fmt.Errorf("acp adapter at index %d looks like it contains a secret and was rejected", index)
+		}
+		harnessID, pinned, hasPin := strings.Cut(value, "=")
+		if !hasPin || !slices.Contains(protocol.HarnessIDs, harnessID) {
+			return nil, fmt.Errorf("acp adapter at index %d must start with a known harness id followed by \"=\"", index)
+		}
+		digest, path, hasPath := strings.Cut(strings.TrimPrefix(pinned, "sha256:"), ":")
+		if !strings.HasPrefix(pinned, "sha256:") || !hasPath || !setup.ChecksumPattern.MatchString(digest) {
+			return nil, fmt.Errorf("acp adapter at index %d must pin the executable as sha256:<64 lowercase hex>:<path>", index)
+		}
+		if !filepath.IsAbs(path) {
+			return nil, fmt.Errorf("acp adapter at index %d must name an absolute executable path", index)
+		}
+		if seen[harnessID] {
+			return nil, fmt.Errorf("acp adapter at index %d repeats a harness that already has an override", index)
+		}
+		seen[harnessID] = true
+		overrides = append(overrides, ACPAdapterOverride{HarnessID: harnessID, SHA256: digest, Path: filepath.Clean(path)})
+	}
+	return overrides, nil
+}
+
+// validatedHarnessIDs checks and deduplicates a list of harness IDs.
+func validatedHarnessIDs(field string, values []string) ([]string, error) {
+	for index, value := range values {
+		if !slices.Contains(protocol.HarnessIDs, value) {
+			return nil, fmt.Errorf("%s at index %d is not a known harness id", field, index)
+		}
+	}
+	return deduplicate(values), nil
 }
 
 // validatedCapabilitySegments checks and deduplicates one plain-segment inventory list (labels,
@@ -412,14 +497,11 @@ func splitStrictEnv(key string) []string {
 
 func Platform() string { return runtime.GOOS + " · " + runtime.GOARCH }
 
-// AdapterConfigSnippet renders the exact environment variable an operator would add to a Barista
-// invocation to register a verified, locally installed ACP adapter once a later release wires
-// setup-installed adapters into the ACP driver. It performs no file write and no runtime
-// registration itself — it is documentation output only, matching the requirement that no
-// permanent Coffee Shop server entry or harness reconfiguration happens implicitly. The harness
-// ID's kebab-case segments become an uppercase, underscore-separated environment variable name
-// segment.
+// AdapterConfigSnippet renders operator guidance for an adapter that setup installed. Barista
+// loads setup-installed adapters from its data root at startup after re-verifying them against the
+// ownership ledger, so no configuration change is needed; the snippet only says so and names the
+// data-root setting that must match the one setup used. It performs no file write and no runtime
+// registration itself.
 func AdapterConfigSnippet(harnessID string, adapterBinaryPath string) string {
-	environmentName := strings.ToUpper(strings.ReplaceAll(harnessID, "-", "_"))
-	return fmt.Sprintf("# %s ACP adapter (installed by `barista setup apply`)\n# ACP_ADAPTER_%s=%s\n", harnessID, environmentName, adapterBinaryPath)
+	return fmt.Sprintf("# %s ACP adapter (installed by `barista setup apply`) at %s\n# Barista loads it at startup from the same --data-root (BARISTA_DATA_ROOT); no other configuration is required.\n", harnessID, adapterBinaryPath)
 }

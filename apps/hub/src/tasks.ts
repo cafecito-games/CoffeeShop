@@ -13,6 +13,7 @@ import {
   type HarnessTransport,
   type PlacementOverride,
   type Run,
+  type RunTransportSelection,
   type Task,
   type TaskDependencyPolicy,
   type TaskStatus
@@ -625,6 +626,10 @@ export interface TaskAttemptProjection {
   startedAt?: string;
   finishedAt?: string;
   error?: string;
+  /** The transport the hub dispatched the attempt with. */
+  transport: HarnessTransport;
+  /** The transport Barista selected and its provenance, once the attempt started. */
+  transportSelection?: RunTransportSelection;
 }
 
 export interface TaskProjection {
@@ -679,7 +684,9 @@ function projectTask(state: Readonly<State>, task: Task): TaskProjection {
       const run = runs.get(runId);
       return run ? [{
         runId: run.id, attempt: run.attempt, status: run.status, agentId: run.agentId, nodeId: run.nodeId,
-        createdAt: run.createdAt, startedAt: run.startedAt, finishedAt: run.finishedAt, error: run.error
+        createdAt: run.createdAt, startedAt: run.startedAt, finishedAt: run.finishedAt, error: run.error,
+        transport: run.transport ?? "native-cli",
+        ...(run.transportSelection ? { transportSelection: structuredClone(run.transportSelection) } : {})
       }] : [];
     }),
     result: task.result,

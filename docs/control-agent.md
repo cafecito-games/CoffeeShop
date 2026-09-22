@@ -9,11 +9,12 @@ At startup Barista:
 1. parses flags and environment configuration;
 2. canonicalizes every workspace root and refuses missing roots;
 3. locates `claude` and `codex` on `PATH` and runs each binary's `--version` check;
-4. exits if no supported harness passes discovery;
-5. starts an authenticated MCP endpoint on an ephemeral loopback-only port;
-6. opens an authenticated WebSocket to `/control-agent`;
-7. registers the node, its platform, capacity, workspace roots, Barista version, and discovered harnesses;
-8. maintains heartbeats and reconnects with bounded exponential backoff.
+4. loads ACP adapters (see [ACP adapters](#acp-adapters)) and probes each with an ACP `initialize` handshake;
+5. exits if no supported harness passes discovery through either transport;
+6. starts an authenticated MCP endpoint on an ephemeral loopback-only port;
+7. opens an authenticated WebSocket to `/control-agent`;
+8. registers the node, its platform, capacity, workspace roots, Barista version, and discovered harnesses with their transports;
+9. maintains heartbeats and reconnects with bounded exponential backoff.
 
 The minimal invocation is:
 
@@ -52,6 +53,10 @@ The web app’s **Compute → Add compute** flow generates a shell-quoted equiva
 | `BARISTA_ACCELERATORS` | Comma-separated hardware accelerators available on this node (lowercase letters, numbers, and hyphens) |
 | `BARISTA_TOOLCHAINS` | Comma-separated toolchains available on this node, each `<id>` or `<id>@<version>` |
 | `BARISTA_MEMORY_MEGABYTES` | Configured system memory in megabytes; absent or `0` means not configured |
+| `BARISTA_DATA_ROOT` | Absolute Barista-owned data root holding setup-installed ACP adapters (`--data-root`; defaults to the same root `barista setup` uses) |
+| `BARISTA_ADAPTER_MANIFEST` | Absolute path of the adapter manifest `barista setup` was run with (`--adapter-manifest`; defaults to the embedded manifest) |
+| `BARISTA_ACP_ADAPTERS` | Comma-separated administrator adapter overrides, each `<harness-id>=sha256:<digest>:<absolute path>` (`--acp-adapter`) |
+| `BARISTA_ACP_NATIVE_FALLBACK` | Comma-separated harness IDs whose ACP runs may fall back to the native CLI (`--acp-native-fallback`) |
 
 The UI deliberately emits `COFFEE_SHOP_TOKEN='replace-with-hub-token'`; it never reads the browser’s stored hub token into setup guidance. Replace the placeholder locally on the compute machine, or use a protected environment file when installing Barista as a service.
 
@@ -64,14 +69,14 @@ The control plane sends these JSON messages:
 - `ping`: request an immediate heartbeat;
 - `approval.decision` (version 4): the operator or policy resolution of a pending harness permission request.
 
-Version 4 also adds an optional `execution` object to `dispatch` carrying the harness transport, task attempt, a provider session to resume, and the granted workspace lease.
+Version 4 also adds an optional `execution` object to `dispatch` carrying the harness transport, the permitted fallback transport, task attempt, a provider session to resume, and the granted workspace lease.
 
 Barista sends:
 
 - `register`: protocol version and compute-node inventory;
 - `sync.complete`: version 2 reconnect barrier sent after queued lifecycle messages;
 - `heartbeat`: node ID, active run count, and timestamp;
-- `run.started`, `run.output`, `run.completed`, and `run.failed`: run lifecycle;
+- `run.started`, `run.output`, `run.completed`, and `run.failed`: run lifecycle. `run.started` is sent when the harness is about to receive its prompt and carries the run's transport selection (version 4);
 - `run.cancelled`: acknowledgement that Barista recorded a cancellation tombstone and, for active work, terminated the harness process tree.
 - `hub.rpc.request`: a correlated, active-run-bound request made through Barista's MCP bridge;
 - `harness.event` (version 4): one normalized, bounded harness event;
@@ -110,7 +115,7 @@ On reconnect, protocol versions 2 and 3 send `register`, flush the lifecycle out
 
 ## Protocol versions
 
-Barista registers exactly one control protocol version per connection. The Go package defines every version the hub accepts and the capability each introduced: `replay-barrier` in 2, `hub-rpc` in 3, and `orchestration` in 4. Barista registers version 4 to report capability evidence, and it rejects version-4 dispatch execution it cannot honor rather than falling back: a dispatch `execution` naming a transport other than `native-cli`, or carrying a `sessionBinding` or `workspaceLease`, is failed with an explicit `run.failed` error before any process starts. Approval decisions, ACP dispatch, session-binding resume, and workspace-lease provisioning remain separate work. The hub rejects unknown versions before dispatch and never sends a message whose capability the registered version lacks.
+Barista registers exactly one control protocol version per connection. The Go package defines every version the hub accepts and the capability each introduced: `replay-barrier` in 2, `hub-rpc` in 3, and `orchestration` in 4. Barista registers version 4 and rejects version-4 dispatch execution it cannot honor rather than degrading it. Before any process starts, the dispatch guard fails with an explicit `run.failed` error a dispatch whose run and execution name different transports, an unknown transport, an `acp-v1` run for which no verified adapter is available (unless native fallback is permitted, below), a fallback transport other than `native-cli` on an `acp-v1` run, or one carrying a `sessionBinding` or `workspaceLease`. Session-binding resume and workspace-lease provisioning remain separate work. The hub rejects unknown versions before dispatch and never sends a message whose capability the registered version lacks.
 
 Barista sends each normalized harness event in an exact `{ type: "harness.event", event }` envelope and assigns its own per-run sequence starting at 1. While disconnected it queues at most 2,048 events or 8 MiB of them; further ordinary events are dropped and reported by one `barista-events-dropped` warning once forwarding resumes, while permission events and lifecycle messages are always queued. A permission callback waits only for a decision on a request that was actually forwarded to the hub, and only for the run and approval that raised it. Structured events and permission forwarding are enabled because Barista registers version 4; a build registering an older version refuses every permission request. Both are wired only after the dispatch guard accepts the execution, so a rejected dispatch never starts a harness.
 
@@ -122,19 +127,58 @@ The TypeScript source of truth is `packages/protocol/src/index.ts`; Go wire stru
 
 ## Harness drivers
 
-`internal/harness` selects a driver from the run's transport. `native-cli` (the default, and the only transport this release dispatches) runs the Claude or Codex CLI directly. `acp-v1` runs the generic ACP driver, which is available only for a harness with an explicitly configured adapter: an absolute path to an executable file, started without a shell or `PATH` lookup. A missing or non-executable adapter reports the driver as unavailable; Barista never silently substitutes the native CLI.
+`internal/harness` selects a driver from the run's transport. `native-cli` (the default) runs the Claude or Codex CLI directly. `acp-v1` runs the generic ACP driver, which is available only for a harness with both a verified adapter (see [ACP adapters](#acp-adapters)) and a compiled-in provider policy: an absolute path to an executable file, re-verified before every launch and started without a shell or `PATH` lookup. A missing, changed, or non-executable adapter reports the driver as unavailable; Barista substitutes the native CLI only as the explicit, recorded fallback described below.
 
 The ACP driver starts one adapter process and one session per run, in its own process group, with `COFFEE_SHOP_TOKEN` and `COFFEE_SHOP_MCP_TOKEN` removed from the inherited environment. The client in `internal/acp` implements the ACP v1 subset Barista needs using only the standard library:
 
 - newline-delimited UTF-8 JSON-RPC 2.0 on stdio; any stdout line that is not one JSON-RPC object, a frame larger than 4 MiB, or output ending mid-frame fails the run and terminates the adapter;
 - connection-scoped integer request IDs that are never reused, at most 32 pending client requests, 16 concurrent agent requests, and a 64-frame outbound queue; an unknown or duplicated response ID fails the session rather than guessing a correlation;
-- `initialize` offering protocol version 1 with no file-system or terminal capabilities; any other selected version is an incompatibility, and an adapter that requires authentication is reported rather than authenticated;
+- `initialize` offering protocol version 1 with no file-system or terminal capabilities; any other selected version is an incompatibility, as is an adapter reporting a version other than its manifest pin, and an adapter that requires authentication is reported rather than authenticated;
 - `session/new` with the canonical workspace path and, only when the adapter advertises HTTP MCP support, the run-scoped `coffee_shop_hub` server. The bearer header crosses local stdin only; it is never placed in arguments or the environment and is redacted from every event, result, and error;
+- the provider policy's session configuration, applied with `session/set_config_option` only to values the adapter offers in `configOptions` and confirmed before the prompt. An unavailable policy option (such as the sandbox preset) is a missing capability; an unavailable requested value (such as a model) is a rejected request. When the provider policy requires it, the prompt also waits, for at most 30 seconds, until the adapter has listed the run's Coffee Shop MCP tools through the loopback bridge;
 - `session/prompt` with streamed `session/update` notifications normalized into `harness.event` values. Unknown update variants and notifications become bounded `unknown` diagnostics; a malformed known variant fails the run; updates after the prompt response are ignored with a single warning;
 - `session/request_permission` resolved through a supplied callback. Absent, failed, timed-out, or invalid decisions never allow: Barista answers with the adapter's `reject_once` option when offered and `cancelled` otherwise. Malformed option lists are cancelled;
 - cancellation sends `session/cancel`, waits a bounded grace period for the prompt to end, and then kills the process tree with the same platform helpers as the native driver. `session/close` is sent after a successful turn when advertised.
 
-Adapter stderr is retained only as a bounded, redacted tail attached to failures. Tests exercise the client against a deterministic fake adapter (`internal/acp/acptest`) that the test binary re-executes over real pipes.
+Adapter stderr is retained only as a bounded, redacted tail attached to failures. Tests exercise the client against a deterministic fake adapter (`internal/acp/acptest`) that the test binary re-executes over real pipes; its `codex-*` scenarios reproduce codex-acp's configuration options and agent identity and connect to the real MCP bridge.
+
+### ACP adapters
+
+Barista launches only adapters it has verified, and never runs `npx`, downloads, or installs anything at runtime:
+
+- **Setup-installed.** An adapter installed by `barista setup apply` is loaded from `--data-root` when the ownership ledger records it for exactly the manifest adapter ID and version at the manifest's target path, every directory from the data root to it is a real directory, and its SHA-256 still matches the ledger. A drifted or ambiguous install is skipped with a logged reason and the harness keeps its native transport.
+- **Administrator override.** `--acp-adapter codex-cli=sha256:<digest>:/opt/codex-acp/bin/codex-acp` names an executable pinned by digest. It replaces the setup-installed adapter for that harness, must be a regular executable file (not a symlink), and must match its digest, or Barista refuses to start.
+
+Either kind is re-verified before every launch. At startup Barista runs each loaded adapter's `initialize` handshake, requiring protocol version 1, the manifest's pinned version, and HTTP MCP support. A harness whose adapter passes advertises `acp-v1` in its `transports` together with the capabilities that handshake negotiated (`acp`), so the hub sees what the installed build actually supports rather than what a manifest claims. It advertises `native-cli` only when its native CLI passed discovery. An adapter that fails the probe is disabled until restart and its reason is logged, withheld when it looks secret-like.
+
+### Transport selection and native fallback
+
+The hub prefers `acp-v1` for a task attempt whose harness advertises it and whose requirements allow it; otherwise it dispatches `native-cli`. When the attempt's requirements also allow `native-cli` and the harness advertises it, the dispatch carries `execution.fallbackTransport: "native-cli"`.
+
+Barista falls back from ACP to the native CLI only when the dispatch carries that permission, the operator listed the harness in `--acp-native-fallback`, the native CLI passed discovery, and ACP failed before the prompt was sent for one of these reasons:
+
+| Reason | Condition |
+|---|---|
+| `acp-adapter-unavailable` | No verified adapter at dispatch time, or it could not be started |
+| `acp-protocol-incompatible` | Protocol or pinned-version mismatch, protocol violation, or adapter exit before the prompt |
+| `acp-capability-missing` | No HTTP MCP support, or a required policy option is not offered or not applied |
+| `acp-mcp-unavailable` | The adapter did not list the run's Coffee Shop MCP tools before the prompt |
+
+Missing provider authentication, a rejected model or configuration request, cancellation, and every failure after the prompt was sent fail the run instead: the attempt is never replayed through another transport, and a task retry is a new attempt that selects its transport anew. A fallback emits a `transport-native-fallback` warning event and is reported in `run.started`'s transport selection with its reason; the hub records it on the run and adds a timeline event. The native fallback keeps the native CLI's `workspace-write` sandbox and required Coffee Shop MCP server.
+
+### Codex over ACP
+
+The manifest pins `codex-acp` (`@agentclientprotocol/codex-acp`) 1.12.0. The project publishes no standalone release artifact, so install a single-file executable built from the tagged source with `npm run bundle:all` using `barista setup plan` and `barista setup apply --manual-artifact codex-acp=<file> --manual-checksum codex-acp=<digest>`, or pin one with `--acp-adapter`. A global npm install is a script that loads unpinned `node_modules` and is not supported. `barista doctor` reports whether the adapter is installed and ready.
+
+Barista's compiled-in Codex policy, not the manifest, controls how a run maps onto the adapter:
+
+- the canonical workspace is the session `cwd`, and the run's composed prompt is sent as one text block;
+- the session `mode` is set to codex-acp's `read-only` preset ("Ask for approval"), which runs Codex with the same `workspace-write` sandbox without network access as the native `--sandbox workspace-write`, and routes every escalation to Barista as an ACP permission request, which becomes a Coffee Shop approval. The adapter's default "Approve for me" preset, which lets Codex's own reviewer approve escalations, is never used. The mode is also requested through `INITIAL_AGENT_MODE`, but it is always confirmed through session configuration before the prompt;
+- the `default` model keeps Codex's own configured model, exactly like the native CLI without `--model`; any other model must be offered and applied by the adapter or the run fails;
+- the Coffee Shop MCP server is offered as an HTTP server with the run-scoped bearer header on stdin, and the prompt waits until codex-acp has listed its tools. Unlike the native CLI, Coffee Shop tool calls are not pre-approved; Codex may ask for approval, which goes through the hub;
+- the adapter is given the discovered native Codex CLI as `CODEX_PATH`, so it never resolves Codex through `PATH`.
+
+Codex keeps its own authentication: ChatGPT login state in Codex's storage or an API key the operator already exports to Barista's environment. Barista never sets, reads, or forwards a provider credential, and the hub never receives one. An adapter that reports that authentication is required fails the run with that reason; sign in to Codex on the compute node and retry.
 
 ## Credentials and enrollment
 

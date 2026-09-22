@@ -30,6 +30,9 @@ var (
 	ErrCancelGraceExpired = errors.New("acp adapter did not acknowledge cancellation within its grace period")
 	// ErrIncompleteTurn reports a prompt turn that stopped for a reason other than end_turn.
 	ErrIncompleteTurn = errors.New("acp prompt turn did not complete")
+	// ErrAdapterVersionMismatch reports that the adapter identified itself with a version other
+	// than the one Barista verified and pinned for it.
+	ErrAdapterVersionMismatch = errors.New("acp adapter reported a version other than its pinned version")
 )
 
 var stopReasons = map[string]bool{"end_turn": true, "max_tokens": true, "max_turn_requests": true, "refusal": true, "cancelled": true}
@@ -71,6 +74,9 @@ type Options struct {
 	Events     func(protocol.HarnessEvent)
 	Permission PermissionHandler
 
+	// ExpectedAgentVersion, when set, must equal the version the adapter reports in initialize.
+	ExpectedAgentVersion string
+
 	RequestTimeout    time.Duration
 	PermissionTimeout time.Duration
 	CancelGracePeriod time.Duration
@@ -82,6 +88,11 @@ type SessionRequest struct {
 	Cwd       string
 	Prompt    string
 	MCPServer *MCPServer
+	// Configuration is applied and confirmed after session/new and before the prompt.
+	Configuration []ConfigSelection
+	// BeforePrompt runs after the session is configured. An error ends the run before any prompt
+	// reaches the adapter.
+	BeforePrompt func(ctx context.Context) error
 }
 
 // Result is the terminal outcome of a successful prompt turn.
@@ -104,11 +115,13 @@ type Client struct {
 
 	stateMu       sync.Mutex
 	sessionID     string
+	negotiated    *protocol.AcpAgentCapabilities
 	completed     bool
 	lateReported  bool
 	cancelling    chan struct{}
 	cancelOnce    sync.Once
 	approvalCount atomic.Int64
+	promptSent    atomic.Bool
 }
 
 // NewClient prepares a client reading adapter stdout and writing adapter stdin.
@@ -154,6 +167,35 @@ func (client *Client) Run(ctx context.Context, request SessionRequest) (Result, 
 	return result, nil
 }
 
+// Probe negotiates the connection and returns the adapter's capabilities without creating a
+// session. The client cannot be used for a run afterwards.
+func (client *Client) Probe(ctx context.Context) (protocol.AcpAgentCapabilities, error) {
+	client.peer.start()
+	_, err := client.initialize(ctx)
+	client.markCompleted()
+	if err != nil {
+		return protocol.AcpAgentCapabilities{}, client.redactError(err)
+	}
+	capabilities, _ := client.Negotiated()
+	return capabilities, nil
+}
+
+// Negotiated returns the capabilities the adapter reported in initialize, once it has answered.
+func (client *Client) Negotiated() (protocol.AcpAgentCapabilities, bool) {
+	client.stateMu.Lock()
+	defer client.stateMu.Unlock()
+	if client.negotiated == nil {
+		return protocol.AcpAgentCapabilities{}, false
+	}
+	return *client.negotiated, true
+}
+
+// PromptSent reports whether session/prompt was handed to the adapter. From that point on the
+// adapter may have acted on the run, so the attempt can only succeed or fail, never be replayed.
+func (client *Client) PromptSent() bool {
+	return client.promptSent.Load()
+}
+
 // Close flushes queued frames and closes adapter stdin.
 func (client *Client) Close() {
 	client.peer.closeInput()
@@ -183,9 +225,20 @@ func (client *Client) run(ctx context.Context, request SessionRequest) (Result, 
 			Headers: []httpHeader{{Name: "Authorization", Value: "Bearer " + request.MCPServer.BearerToken}},
 		})
 	}
-	sessionID, err := client.newSession(ctx, request.Cwd, servers, initialized.AuthMethods)
+	sessionID, configuration, err := client.newSession(ctx, request.Cwd, servers, initialized.AuthMethods)
 	if err != nil {
 		return Result{}, err
+	}
+	if err := client.configure(ctx, sessionID, configuration, request.Configuration); err != nil {
+		return Result{}, err
+	}
+	if request.BeforePrompt != nil {
+		if err := request.BeforePrompt(ctx); err != nil {
+			return Result{}, err
+		}
+	}
+	if ctx.Err() != nil {
+		return Result{}, fmt.Errorf("%w before %s was sent", ErrCancelled, methodSessionPrompt)
 	}
 	response, err := client.prompt(ctx, sessionID, request.Prompt)
 	if err != nil {
@@ -225,10 +278,43 @@ func (client *Client) initialize(ctx context.Context) (initializeResponse, error
 	if *response.ProtocolVersion != ProtocolVersion {
 		return response, fmt.Errorf("%w: adapter selected %d, Barista supports %d", ErrUnsupportedVersion, *response.ProtocolVersion, ProtocolVersion)
 	}
+	if expected := client.options.ExpectedAgentVersion; expected != "" && (response.AgentInfo == nil || response.AgentInfo.Version != expected) {
+		return response, fmt.Errorf("%w %s", ErrAdapterVersionMismatch, expected)
+	}
+	negotiated := negotiatedCapabilities(response)
+	client.stateMu.Lock()
+	client.negotiated = &negotiated
+	client.stateMu.Unlock()
 	return response, nil
 }
 
-func (client *Client) newSession(ctx context.Context, cwd string, servers []mcpServerHTTP, methods []authMethod) (string, error) {
+// negotiatedCapabilities projects an initialize response onto the Coffee Shop capability summary.
+// The adapter name and version are untrusted adapter output: a name is bounded and dropped when it
+// looks secret-like, and a version is kept only in normalized form.
+func negotiatedCapabilities(response initializeResponse) protocol.AcpAgentCapabilities {
+	capabilities := response.AgentCapabilities
+	resume := capabilities.SessionCapabilities.Resume
+	negotiated := protocol.AcpAgentCapabilities{
+		ProtocolVersion: ProtocolVersion,
+		LoadSession:     capabilities.LoadSession,
+		ResumeSession:   resume != nil && !isNull(resume),
+		Prompt: protocol.AcpPromptCapabilities{
+			Image: capabilities.PromptCapabilities.Image, Audio: capabilities.PromptCapabilities.Audio, EmbeddedContext: capabilities.PromptCapabilities.EmbeddedContext,
+		},
+		Mcp: protocol.AcpMcpCapabilities{HTTP: capabilities.McpCapabilities.HTTP, SSE: capabilities.McpCapabilities.SSE},
+	}
+	if response.AgentInfo != nil {
+		if name := truncateBytes(response.AgentInfo.Name, protocol.ACPAdapterNameMaximumBytes); !protocol.LooksSecretLike(name) {
+			negotiated.AdapterName = name
+		}
+		if protocol.IsNormalizedVersion(response.AgentInfo.Version) {
+			negotiated.AdapterVersion = response.AgentInfo.Version
+		}
+	}
+	return negotiated
+}
+
+func (client *Client) newSession(ctx context.Context, cwd string, servers []mcpServerHTTP, methods []authMethod) (string, configState, error) {
 	requestContext, cancel := context.WithTimeout(ctx, client.options.RequestTimeout)
 	defer cancel()
 	var response newSessionResponse
@@ -239,18 +325,18 @@ func (client *Client) newSession(ctx context.Context, cwd string, servers []mcpS
 		for _, method := range methods {
 			names = append(names, truncateBytes(method.ID, eventIdentifierBytes))
 		}
-		return "", fmt.Errorf("%w (advertised methods: %s)", ErrAuthenticationRequired, truncateBytes(strings.Join(names, ", "), MaximumDiagnosticBytes))
+		return "", nil, fmt.Errorf("%w (advertised methods: %s)", ErrAuthenticationRequired, truncateBytes(strings.Join(names, ", "), MaximumDiagnosticBytes))
 	}
 	if err != nil {
-		return "", client.setupError(ctx, methodSessionNew, err)
+		return "", nil, client.setupError(ctx, methodSessionNew, err)
 	}
 	if response.SessionID == "" || len(response.SessionID) > eventIdentifierBytes {
-		return "", fmt.Errorf("%w: session/new returned an invalid sessionId", ErrProtocolViolation)
+		return "", nil, fmt.Errorf("%w: session/new returned an invalid sessionId", ErrProtocolViolation)
 	}
 	client.stateMu.Lock()
 	client.sessionID = response.SessionID
 	client.stateMu.Unlock()
-	return response.SessionID, nil
+	return response.SessionID, newConfigState(response.ConfigOptions), nil
 }
 
 func (client *Client) setupError(ctx context.Context, method string, err error) error {
@@ -270,6 +356,7 @@ type promptOutcome struct {
 
 func (client *Client) prompt(ctx context.Context, sessionID string, text string) (promptResponse, error) {
 	outcome := make(chan promptOutcome, 1)
+	client.promptSent.Store(true)
 	go func() {
 		var response promptResponse
 		request := promptRequest{SessionID: sessionID, Prompt: []contentBlock{{Type: "text", Text: text}}}

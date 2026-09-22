@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -59,6 +60,7 @@ type Agent struct {
 	params    map[string]json.RawMessage
 	responses map[string]json.RawMessage
 	token     string
+	mcpURL    string
 }
 
 func newAgent() *Agent {
@@ -112,6 +114,7 @@ func (agent *Agent) expand(text string) string {
 func (agent *Agent) captureToken(params json.RawMessage) {
 	var request struct {
 		McpServers []struct {
+			URL     string `json:"url"`
 			Headers []struct {
 				Name  string `json:"name"`
 				Value string `json:"value"`
@@ -122,6 +125,7 @@ func (agent *Agent) captureToken(params json.RawMessage) {
 		return
 	}
 	for _, server := range request.McpServers {
+		agent.mcpURL = server.URL
 		for _, header := range server.Headers {
 			if header.Name == "Authorization" {
 				agent.token = strings.TrimPrefix(header.Value, "Bearer ")
@@ -316,3 +320,60 @@ func (agent *Agent) write(text string) error {
 	_, err := io.WriteString(agent.output, text)
 	return err
 }
+
+// ConnectMCP connects to the MCP server offered in session/new as an HTTP MCP client would: it
+// sends initialize and then tools/list with the offered bearer header, and fails unless both are
+// answered with HTTP 200.
+func ConnectMCP() Step {
+	return func(agent *Agent) error {
+		if agent.mcpURL == "" {
+			return fmt.Errorf("session/new offered no MCP server")
+		}
+		for index, method := range []string{"initialize", "tools/list"} {
+			body := fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":%q,"params":{}}`, index+1, method)
+			request, err := http.NewRequest(http.MethodPost, agent.mcpURL, strings.NewReader(body))
+			if err != nil {
+				return err
+			}
+			request.Header.Set("Authorization", "Bearer "+agent.token)
+			request.Header.Set("Content-Type", "application/json")
+			response, err := http.DefaultClient.Do(request)
+			if err != nil {
+				return fmt.Errorf("MCP %s: %w", method, err)
+			}
+			_, _ = io.Copy(io.Discard, response.Body)
+			_ = response.Body.Close()
+			if response.StatusCode != http.StatusOK {
+				return fmt.Errorf("MCP %s returned HTTP %d", method, response.StatusCode)
+			}
+		}
+		return nil
+	}
+}
+
+// CaptureEnvironment appends {"environment":{NAME:value}} to the record file for each named
+// variable, with "<unset>" for a variable the fake agent did not inherit.
+func CaptureEnvironment(names ...string) Step {
+	return func(agent *Agent) error {
+		if agent.record == nil {
+			return nil
+		}
+		values := map[string]string{}
+		for _, name := range names {
+			value, set := os.LookupEnv(name)
+			if !set {
+				value = UnsetEnvironmentValue
+			}
+			values[name] = value
+		}
+		encoded, err := json.Marshal(map[string]any{"environment": values})
+		if err != nil {
+			return err
+		}
+		_, err = agent.record.Write(append(encoded, '\n'))
+		return err
+	}
+}
+
+// UnsetEnvironmentValue is what CaptureEnvironment records for a variable that was not set.
+const UnsetEnvironmentValue = "<unset>"

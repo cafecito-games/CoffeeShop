@@ -3,6 +3,8 @@ package harness
 import (
 	"context"
 	"os/exec"
+	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -33,10 +35,10 @@ func Discover(ctx context.Context) []protocol.HarnessProfile {
 			Available:   false,
 			AuthMode:    item.authMode,
 			Models:      item.models,
-			// Set explicitly even when unavailable: native CLI is the only transport this Barista
-			// can drive (ACP requires a separately configured adapter), and the hub reads the
-			// transports list to decide how it may dispatch to each harness.
-			Transports: []string{"native-cli"},
+			// Set explicitly even when unavailable: the hub reads the transports list to decide how
+			// it may dispatch to each harness, and AdvertiseACP adds acp-v1 only for a harness whose
+			// verified adapter passes its startup probe.
+			Transports: []string{TransportNative},
 		}
 		path, err := exec.LookPath(item.binary)
 		if err == nil {
@@ -64,4 +66,66 @@ func Available(profiles []protocol.HarnessProfile, id string) bool {
 		}
 	}
 	return false
+}
+
+// harnessVersionPattern finds the first dotted version number in a harness's --version output.
+var harnessVersionPattern = regexp.MustCompile(`\d+(\.\d+)+`)
+
+// normalizedHarnessVersion extracts a normalized version from a discovered description, or "" when
+// the description carries none.
+func normalizedHarnessVersion(description string) string {
+	version := harnessVersionPattern.FindString(description)
+	if !protocol.IsNormalizedVersion(version) {
+		return ""
+	}
+	return version
+}
+
+// acpProbeTimeout bounds each adapter's startup initialize handshake.
+const acpProbeTimeout = 15 * time.Second
+
+// AdvertiseACP probes every adapter configured in driver and returns a copy of profiles in which
+// each harness whose adapter completed the initialize handshake advertises acp-v1 with the
+// capabilities it negotiated. The capabilities come from the live handshake, not from the adapter
+// manifest, so the hub sees what this adapter build actually supports. An adapter that fails its
+// probe is disabled in driver, so it can neither be advertised nor dispatched to, and its error is
+// returned keyed by harness ID. A harness advertises native-cli only when its native CLI passed
+// discovery; it is available when at least one transport is.
+func AdvertiseACP(ctx context.Context, profiles []protocol.HarnessProfile, driver *ACPDriver) ([]protocol.HarnessProfile, map[string]error) {
+	advertised := make([]protocol.HarnessProfile, len(profiles))
+	copy(advertised, profiles)
+	failures := map[string]error{}
+	if driver == nil {
+		return advertised, failures
+	}
+	for _, harnessID := range driver.HarnessIDs() {
+		index := slices.IndexFunc(advertised, func(profile protocol.HarnessProfile) bool { return profile.ID == harnessID })
+		if index < 0 {
+			continue
+		}
+		probeContext, cancel := context.WithTimeout(ctx, acpProbeTimeout)
+		capabilities, err := driver.Probe(probeContext, harnessID)
+		cancel()
+		if err != nil {
+			driver.Disable(harnessID, err)
+			failures[harnessID] = err
+			continue
+		}
+		profile := advertised[index]
+		transports := []string{}
+		if profile.Available {
+			transports = append(transports, TransportNative)
+		}
+		profile.Transports = append(transports, TransportACP)
+		if !profile.Available {
+			profile.Description = "ACP adapter"
+			if capabilities.AdapterVersion != "" {
+				profile.Description += " " + capabilities.AdapterVersion
+			}
+		}
+		profile.Available = true
+		profile.ACP = &capabilities
+		advertised[index] = profile
+	}
+	return advertised, failures
 }

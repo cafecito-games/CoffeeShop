@@ -20,16 +20,16 @@
       "id": "codex-acp",
       "harnessId": "codex-cli",
       "provider": "openai",
-      "label": "Codex CLI ACP adapter",
-      "version": "0.1.0",
+      "label": "Codex ACP adapter (@agentclientprotocol/codex-acp)",
+      "version": "1.12.0",
       "platforms": {
-        "darwin-amd64": { "kind": "manual", "executablePath": "bin/adapter" },
-        "darwin-arm64": { "kind": "manual", "executablePath": "bin/adapter" },
-        "linux-amd64": { "kind": "manual", "executablePath": "bin/adapter" },
-        "linux-arm64": { "kind": "manual", "executablePath": "bin/adapter" }
+        "darwin-amd64": { "kind": "manual", "executablePath": "bin/codex-acp" },
+        "darwin-arm64": { "kind": "manual", "executablePath": "bin/codex-acp" },
+        "linux-amd64": { "kind": "manual", "executablePath": "bin/codex-acp" },
+        "linux-arm64": { "kind": "manual", "executablePath": "bin/codex-acp" }
       },
       "launch": {},
-      "authDocsUrl": "https://developers.openai.com/codex/"
+      "authDocsUrl": "https://github.com/agentclientprotocol/codex-acp#authentication"
     }
   ]
 }
