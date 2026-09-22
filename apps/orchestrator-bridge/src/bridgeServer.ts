@@ -117,16 +117,21 @@ const nonEmptyString = (value: unknown): string | undefined =>
 /**
  * The thread a `create_thread` result refers to. The hub owns the result shape, so every spelling
  * it plausibly uses is accepted and an unrecognised shape yields no attachment rather than a wrong
- * one. The caller tells the model when nothing was recognised, because a silently unremembered
- * attachment would stop being re-attached after a reconnect.
+ * one. A nested `thread.threadId`/`thread.id` outranks the top-level `id`, because `id` can be a
+ * generic envelope identifier rather than the thread; `threadId` at the top level is unambiguous
+ * and wins outright. The caller tells the model when nothing was recognised, because a silently
+ * unremembered attachment would stop being re-attached after a reconnect.
  */
 export function threadIdFromCreateResult(result: unknown): string | undefined {
   if (!isPlainObject(result)) return undefined;
-  const direct = nonEmptyString(result.threadId) ?? nonEmptyString(result.id);
+  const direct = nonEmptyString(result.threadId);
   if (direct !== undefined) return direct;
   const thread = result.thread;
-  if (!isPlainObject(thread)) return undefined;
-  return nonEmptyString(thread.id) ?? nonEmptyString(thread.threadId);
+  if (isPlainObject(thread)) {
+    const nested = nonEmptyString(thread.threadId) ?? nonEmptyString(thread.id);
+    if (nested !== undefined) return nested;
+  }
+  return nonEmptyString(result.id);
 }
 
 const threadIdArgument = (toolArguments: Record<string, unknown>): string | undefined => {

@@ -473,6 +473,16 @@ for (const shape of [
   });
 }
 
+test("prefers a nested thread id over a generic envelope id in a create_thread result", async (t) => {
+  const harness = await startHarness({
+    scopes: ["orchestrate"],
+    handle: () => ({ id: "req-9f2", thread: { id: "thread-42" } })
+  });
+  t.after(() => harness.close());
+  await harness.client.callTool({ name: "create_thread", arguments: { title: "Auth refactor", objective: "Ship it" } });
+  assert.deepEqual(harness.connection.attachedThreads(), ["thread-42"]);
+});
+
 test("tells the model when a create_thread result names no thread it can re-attach", async (t) => {
   const harness = await startHarness({ scopes: ["orchestrate"], handle: () => ({ created: true }) });
   t.after(() => harness.close());
