@@ -34,6 +34,7 @@ export function newThread(ownerAgentId: string, objective: string, createdBy: Th
     summary: "",
     status: "active",
     ownerAgentId,
+    orchestrator: { kind: "agent", agentId: ownerAgentId },
     createdBy,
     createdAt: at,
     updatedAt: at

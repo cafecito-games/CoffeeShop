@@ -163,6 +163,20 @@ type orchestratorInbox struct {
 	Wakes            []orchestratorWake `json:"wakes"`
 }
 
+type approvalResolver struct {
+	Kind         string `json:"kind"`
+	ClientID     string `json:"clientId"`
+	AttachmentID string `json:"attachmentId"`
+}
+
+// kind reports the resolver kind, or the empty string when the approval is unresolved.
+func (resolver *approvalResolver) kind() string {
+	if resolver == nil {
+		return ""
+	}
+	return resolver.Kind
+}
+
 type approvalDelivery struct {
 	Status   string `json:"status"`
 	Attempts int    `json:"attempts"`
@@ -177,7 +191,7 @@ type approval struct {
 	RunID             string            `json:"runId"`
 	NodeID            string            `json:"nodeId"`
 	Status            string            `json:"status"`
-	ResolvedBy        string            `json:"resolvedBy"`
+	ResolvedBy        *approvalResolver `json:"resolvedBy"`
 	SelectedOptionID  string            `json:"selectedOptionId"`
 	ExpiresAt         string            `json:"expiresAt"`
 	Delivery          *approvalDelivery `json:"delivery"`

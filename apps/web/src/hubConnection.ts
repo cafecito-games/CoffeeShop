@@ -4,7 +4,7 @@ import {
   harnessTransports, placementRequirementKinds, planEntryPriorities, planEntryStatuses, runStatuses,
   sessionBindingStatuses, taskDependencyPolicies, taskMessageKinds, taskStatuses, toolCallKinds,
   toolCallStatuses, workspaceCleanupPolicies, workspaceIsolationPolicies, workspaceLeaseStatuses,
-  workspaceRetentionReasons, type Snapshot
+  workspaceRetentionReasons, orchestratorAttachmentStatuses, orchestratorClientScopes, type Snapshot
 } from "@coffee-shop/protocol";
 
 export type ConnectionStatus = "connecting" | "connected" | "reconnecting" | "disconnected" | "authentication-required";
@@ -327,6 +327,12 @@ function isApprovalDelivery(value: unknown): boolean {
     && isOptionalString(value.reason);
 }
 
+function isApprovalResolvedBy(value: unknown): boolean {
+  if (!isObject(value)) return false;
+  if (value.kind === "orchestrator") return isString(value.clientId) && isString(value.attachmentId);
+  return isOneOf(value.kind, ["operator", "policy", "system"]);
+}
+
 function isApprovalRequest(value: unknown): boolean {
   return isObject(value)
     && isString(value.id)
@@ -344,7 +350,7 @@ function isApprovalRequest(value: unknown): boolean {
     && isString(value.requestedAt)
     && isOptionalString(value.expiresAt)
     && isOptionalString(value.resolvedAt)
-    && (value.resolvedBy === undefined || isOneOf(value.resolvedBy, ["operator", "policy", "system"]))
+    && (value.resolvedBy === undefined || isApprovalResolvedBy(value.resolvedBy))
     && isOptionalString(value.selectedOptionId)
     && isOptionalString(value.resolutionIdempotencyKey)
     && (value.delivery === undefined || isApprovalDelivery(value.delivery));
@@ -474,6 +480,36 @@ function isMessage(value: unknown): boolean {
     && isString(value.createdAt);
 }
 
+function isThreadOrchestrator(value: unknown): boolean {
+  if (!isObject(value)) return false;
+  if (value.kind === "agent") return isString(value.agentId);
+  return value.kind === "external" && isString(value.clientId);
+}
+
+function isOrchestratorClient(value: unknown): boolean {
+  return isObject(value)
+    && isString(value.id)
+    && isString(value.name)
+    && Array.isArray(value.scopes)
+    && value.scopes.every((scope) => isOneOf(scope, orchestratorClientScopes))
+    && isString(value.createdAt)
+    && isOptionalString(value.lastSeenAt)
+    && isOptionalString(value.revokedAt)
+    && (value as { secretHash?: unknown }).secretHash === undefined;
+}
+
+function isOrchestratorAttachment(value: unknown): boolean {
+  return isObject(value)
+    && isString(value.id)
+    && isString(value.threadId)
+    && isString(value.clientId)
+    && isString(value.connectionId)
+    && isString(value.attachedAt)
+    && isString(value.lastHeartbeatAt)
+    && isOptionalString(value.detachedAt)
+    && isOneOf(value.status, orchestratorAttachmentStatuses);
+}
+
 function isThread(value: unknown): boolean {
   return isObject(value)
     && isString(value.id)
@@ -481,7 +517,8 @@ function isThread(value: unknown): boolean {
     && isString(value.objective)
     && isString(value.summary)
     && isOneOf(value.status, ["active", "completed", "archived"])
-    && isString(value.ownerAgentId)
+    && isOptionalString(value.ownerAgentId)
+    && (value.orchestrator === undefined || isThreadOrchestrator(value.orchestrator))
     && isOneOf(value.createdBy, ["user", "agent"])
     && isString(value.createdAt)
     && isString(value.updatedAt)
@@ -503,6 +540,8 @@ export function isSnapshot(value: unknown): value is Snapshot {
     && (value.taskMessages === undefined || isArrayOf(value.taskMessages, isTaskMessage))
     && (value.taskMessageAcknowledgements === undefined || isArrayOf(value.taskMessageAcknowledgements, isTaskMessageAcknowledgement))
     && (value.sessionBindings === undefined || isArrayOf(value.sessionBindings, isHarnessSessionBinding))
+    && (value.orchestratorClients === undefined || isArrayOf(value.orchestratorClients, isOrchestratorClient))
+    && (value.orchestratorAttachments === undefined || isArrayOf(value.orchestratorAttachments, isOrchestratorAttachment))
     && (value.approvals === undefined || isArrayOf(value.approvals, isApprovalRequest))
     && (value.workspaceLeases === undefined || isArrayOf(value.workspaceLeases, isWorkspaceLease))
     && (value.runActivity === undefined || isArrayOf(value.runActivity, isRunActivity))

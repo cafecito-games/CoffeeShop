@@ -12,9 +12,12 @@ import {
   isWorkspaceCleanupPolicy,
   isWorkspaceIsolationPolicy,
   isWorkspaceLeaseStatus,
+  isOrchestratorAttachmentStatus,
+  isOrchestratorClientScope,
   orchestrationCollections,
   withOrchestrationDefaults,
   type ChatMessage,
+  type OrchestratorClient,
   type Snapshot,
   type Thread,
   type TimelineEvent
@@ -49,6 +52,14 @@ export interface TaskUpdateRecord {
   createdAt: string;
 }
 
+/**
+ * The hub's own record of a minted orchestrator credential. It adds the secret hash, which is
+ * stripped by `Store.snapshot()` and therefore never reaches a client.
+ */
+export interface StoredOrchestratorClient extends OrchestratorClient {
+  secretHash: string;
+}
+
 /** Hub-internal collections that are persisted but never published in snapshots. */
 interface HubOnlyState {
   taskSubmissions?: TaskSubmission[];
@@ -59,7 +70,10 @@ interface HubOnlyState {
   harnessEvents?: StoredHarnessEvent[];
 }
 
-export type State = Omit<Snapshot, "generatedAt"> & HubOnlyState;
+/** The persisted state. `orchestratorClients` holds the stored records, secret hash included. */
+export type State = Omit<Snapshot, "generatedAt" | "orchestratorClients"> & HubOnlyState & {
+  orchestratorClients?: StoredOrchestratorClient[];
+};
 
 const emptyState = (): State => withOrchestrationDefaults({
   agents: [],
@@ -77,13 +91,16 @@ const emptyState = (): State => withOrchestrationDefaults({
   runActivity: [],
   harnessEventStreams: [],
   harnessEvents: [],
-  orchestratorInboxes: []
+  orchestratorInboxes: [],
+  orchestratorClients: [],
+  orchestratorAttachments: []
 });
 
 export function addOrchestrationDefaults(state: State) {
   const changed = orchestrationCollections.some((collection) => state[collection] == null) || state.taskSubmissions == null
     || state.taskUpdates == null || state.taskEventJournal == null || state.taskEventStreams == null
-    || state.runActivity == null || state.harnessEventStreams == null || state.harnessEvents == null || state.orchestratorInboxes == null;
+    || state.runActivity == null || state.harnessEventStreams == null || state.harnessEvents == null || state.orchestratorInboxes == null
+    || state.orchestratorClients == null || state.orchestratorAttachments == null;
   withOrchestrationDefaults(state);
   state.taskSubmissions ??= [];
   state.taskUpdates ??= [];
@@ -93,7 +110,79 @@ export function addOrchestrationDefaults(state: State) {
   state.harnessEventStreams ??= [];
   state.harnessEvents ??= [];
   state.orchestratorInboxes ??= [];
+  state.orchestratorClients ??= [];
+  state.orchestratorAttachments ??= [];
   return changed;
+}
+
+/**
+ * Derives `Thread.orchestrator` for threads persisted before external orchestrators existed. A
+ * thread with neither an orchestrator nor an owner agent is left unchanged and is simply not
+ * agent-orchestrated; inventing an owner would hand the thread to an arbitrary agent.
+ */
+export function addThreadOrchestratorDefaults(state: State) {
+  let changed = false;
+  for (const thread of state.threads ?? []) {
+    if (thread.orchestrator !== undefined || thread.ownerAgentId === undefined) continue;
+    thread.orchestrator = { kind: "agent", agentId: thread.ownerAgentId };
+    changed = true;
+  }
+  return changed;
+}
+
+/**
+ * Rewrites the pre-union `resolvedBy` string of a persisted approval into `ApprovalResolvedBy`.
+ * Only the three values the hub ever wrote are accepted; anything else fails the load.
+ */
+export function addApprovalResolverDefaults(state: State) {
+  let changed = false;
+  for (const [index, approval] of (state.approvals ?? []).entries()) {
+    const resolvedBy: unknown = (approval as { resolvedBy?: unknown }).resolvedBy;
+    if (typeof resolvedBy !== "string") continue;
+    if (resolvedBy !== "operator" && resolvedBy !== "policy" && resolvedBy !== "system") {
+      throw new Error(`Persisted approval ${index} has an unknown resolver`);
+    }
+    approval.resolvedBy = { kind: resolvedBy };
+    changed = true;
+  }
+  return changed;
+}
+
+/**
+ * Rejects persisted orchestrator credentials, attachments, and thread orchestrators the hub cannot
+ * interpret. An unknown scope or status is never defaulted: a guessed scope could grant authority.
+ */
+export function assertPersistedOrchestratorClientState(state: State) {
+  const clientIds = new Set<string>();
+  for (const [index, client] of (state.orchestratorClients ?? []).entries()) {
+    const context = `Persisted orchestrator client ${index}`;
+    if (!isRecord(client) || !isNonEmptyString(client.id) || !isNonEmptyString(client.name) || !isNonEmptyString(client.secretHash) || !isNonEmptyString(client.createdAt)) {
+      throw new Error(`${context} is missing its identity`);
+    }
+    if (clientIds.has(client.id)) throw new Error(`${context} repeats client id ${client.id}`);
+    clientIds.add(client.id);
+    if (!Array.isArray(client.scopes) || !client.scopes.every(isOrchestratorClientScope)) throw new Error(`${context} has an unknown scope`);
+  }
+  const attachmentIds = new Set<string>();
+  for (const [index, attachment] of (state.orchestratorAttachments ?? []).entries()) {
+    const context = `Persisted orchestrator attachment ${index}`;
+    if (!isRecord(attachment) || !isNonEmptyString(attachment.id) || !isNonEmptyString(attachment.threadId)
+      || !isNonEmptyString(attachment.clientId) || !isNonEmptyString(attachment.connectionId)) {
+      throw new Error(`${context} is missing its identity`);
+    }
+    if (attachmentIds.has(attachment.id)) throw new Error(`${context} repeats attachment id ${attachment.id}`);
+    attachmentIds.add(attachment.id);
+    if (!isOrchestratorAttachmentStatus(attachment.status)) throw new Error(`${context} has an unknown status`);
+  }
+  for (const [index, thread] of (state.threads ?? []).entries()) {
+    const orchestrator: unknown = thread.orchestrator;
+    if (orchestrator === undefined) continue;
+    const context = `Persisted thread ${index}`;
+    if (!isRecord(orchestrator)) throw new Error(`${context} has a malformed orchestrator`);
+    if (orchestrator.kind === "agent" ? !isNonEmptyString(orchestrator.agentId) : orchestrator.kind === "external" ? !isNonEmptyString(orchestrator.clientId) : true) {
+      throw new Error(`${context} has an unknown orchestrator`);
+    }
+  }
 }
 
 /** Rejects persisted approvals and event streams whose status the hub cannot interpret. */
@@ -105,6 +194,7 @@ export function assertPersistedHarnessState(state: State) {
     }
     if (!isApprovalStatus(approval.status)) throw new Error(`${context} has an unknown status`);
     if (approval.delivery !== undefined && (!isRecord(approval.delivery) || !isApprovalDeliveryStatus(approval.delivery.status))) throw new Error(`${context} has an unknown delivery status`);
+    if (approval.resolvedBy !== undefined && (!isRecord(approval.resolvedBy) || !isApprovalResolvedBy(approval.resolvedBy))) throw new Error(`${context} has an unknown resolver`);
   }
   for (const [index, stream] of (state.harnessEventStreams ?? []).entries()) {
     if (!isRecord(stream) || !isNonEmptyString(stream.runId) || !(harnessEventStreamStatuses as readonly unknown[]).includes(stream.status)
@@ -116,6 +206,11 @@ export function assertPersistedHarnessState(state: State) {
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 const isNonEmptyString = (value: unknown): value is string => typeof value === "string" && value.length > 0;
+
+const isApprovalResolvedBy = (value: Record<string, unknown>) =>
+  value.kind === "orchestrator"
+    ? isNonEmptyString(value.clientId) && isNonEmptyString(value.attachmentId)
+    : value.kind === "operator" || value.kind === "policy" || value.kind === "system";
 
 /**
  * Rejects persisted orchestration records the hub cannot interpret. Loading fails rather than
@@ -286,7 +381,7 @@ function addThreadDefaults(state: State) {
       const createdAt = typeof root.createdAt === "string" ? root.createdAt : new Date().toISOString();
       const thread: Thread = {
         id: newId("thread"), title: firstLine.length <= 120 ? firstLine : `${firstLine.slice(0, 119).trimEnd()}…`,
-        objective, summary: "", status: "completed", ownerAgentId: root.agentId, createdBy: "user",
+        objective, summary: "", status: "completed", ownerAgentId: root.agentId, orchestrator: { kind: "agent", agentId: root.agentId }, createdBy: "user",
         createdAt, updatedAt: root.finishedAt ?? createdAt, completedAt: root.finishedAt ?? createdAt
       };
       state.threads.push(thread);
@@ -323,6 +418,19 @@ function addThreadDefaults(state: State) {
   return changed;
 }
 
+/**
+ * Projects a stored credential to its public view by naming every published field, so a field added
+ * to the stored record is never published by accident.
+ */
+const publicOrchestratorClient = (client: StoredOrchestratorClient): OrchestratorClient => ({
+  id: client.id,
+  name: client.name,
+  scopes: client.scopes,
+  createdAt: client.createdAt,
+  ...(client.lastSeenAt === undefined ? {} : { lastSeenAt: client.lastSeenAt }),
+  ...(client.revokedAt === undefined ? {} : { revokedAt: client.revokedAt })
+});
+
 export class Store {
   private state: State = emptyState();
   private readonly path: string;
@@ -347,20 +455,29 @@ export class Store {
     const addedCoordination = addCoordinationDefaults(loaded);
     const addedThreads = addThreadDefaults(loaded);
     const addedOrchestration = addOrchestrationDefaults(loaded);
+    const addedThreadOrchestrators = addThreadOrchestratorDefaults(loaded);
+    const addedApprovalResolvers = addApprovalResolverDefaults(loaded);
     assertPersistedTaskState(loaded);
     assertPersistedHarnessState(loaded);
     assertPersistedWorkspaceLeaseState(loaded);
     assertPersistedSessionState(loaded);
-    if (removedDemoRecords || addedAgentAvatars || addedCoordination || addedThreads || addedOrchestration) await this.save(loaded);
+    assertPersistedOrchestratorClientState(loaded);
+    if (removedDemoRecords || addedAgentAvatars || addedCoordination || addedThreads || addedOrchestration
+      || addedThreadOrchestrators || addedApprovalResolvers) await this.save(loaded);
     this.state = loaded;
   }
 
   snapshot(): Snapshot {
     const {
       taskSubmissions: _taskSubmissions, taskUpdates: _taskUpdates, taskEventJournal: _taskEventJournal, taskEventStreams: _taskEventStreams,
-      harnessEventStreams: _harnessEventStreams, harnessEvents: _harnessEvents, ...published
+      harnessEventStreams: _harnessEventStreams, harnessEvents: _harnessEvents,
+      orchestratorClients, ...published
     } = this.state;
-    return structuredClone({ ...published, generatedAt: new Date().toISOString() });
+    return structuredClone({
+      ...published,
+      ...(orchestratorClients === undefined ? {} : { orchestratorClients: orchestratorClients.map(publicOrchestratorClient) }),
+      generatedAt: new Date().toISOString()
+    });
   }
 
   /** Synchronous read of committed state; the view must not retain or mutate what it receives. */

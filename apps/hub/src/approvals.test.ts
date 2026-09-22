@@ -64,7 +64,7 @@ const delivered = (status: ApprovalDelivery["status"], attempts: number): Approv
 
 const approvedByOperator = (delivery: ApprovalDelivery, overrides: Partial<ApprovalRequest> = {}): ApprovalRequest =>
   approval({
-    status: "approved", selectedOptionId: "allow", resolvedBy: "operator", resolvedAt: at,
+    status: "approved", selectedOptionId: "allow", resolvedBy: { kind: "operator" }, resolvedAt: at,
     resolutionIdempotencyKey: "operator-1", delivery, ...overrides
   });
 
@@ -118,7 +118,7 @@ test("operator resolutions approve, reject, and cancel with delivery pending", (
     const result = resolveApprovalInState(current, "approval-one", operatorInput(optionId), at);
     if (result.kind !== "resolved") assert.fail(`${optionId}: ${result.kind}`);
     assert.equal(result.approval.status, expectedStatus, optionId);
-    assert.equal(result.approval.resolvedBy, "operator", optionId);
+    assert.deepEqual(result.approval.resolvedBy, { kind: "operator" }, optionId);
     assert.equal(result.approval.resolvedAt, at, optionId);
     assert.equal(result.approval.resolutionIdempotencyKey, "operator-1", optionId);
     assert.equal(result.approval.selectedOptionId, optionId, optionId);
@@ -131,7 +131,7 @@ test("operator resolutions approve, reject, and cancel with delivery pending", (
   if (cancelResult.kind !== "resolved") assert.fail(cancelResult.kind);
   assert.equal(cancelResult.approval.status, "cancelled");
   assert.equal(cancelResult.approval.selectedOptionId, undefined);
-  assert.equal(cancelResult.approval.resolvedBy, "operator");
+  assert.deepEqual(cancelResult.approval.resolvedBy, { kind: "operator" });
   assert.deepEqual(cancelResult.approval.delivery, { status: "pending", attempts: 0, updatedAt: at });
 });
 
@@ -187,7 +187,7 @@ test("resolveApprovalInState expires an overdue approval instead of resolving it
   assert.match(result.reason, /expired/);
   assert.equal(result.changed, true);
   assert.equal(result.approval.status, "expired");
-  assert.equal(result.approval.resolvedBy, "system");
+  assert.deepEqual(result.approval.resolvedBy, { kind: "system" });
   assert.equal(result.approval.delivery?.status, "pending");
 });
 
@@ -252,7 +252,7 @@ test("a harness resolution settles a still-pending approval only as cancelled or
     const current = state([approval()]);
     assert.equal(applyHarnessResolution(current, run(), permissionResolved(status), later(10)), undefined, status);
     assert.equal(current.approvals![0].status, status, status);
-    assert.equal(current.approvals![0].resolvedBy, "system", status);
+    assert.deepEqual(current.approvals![0].resolvedBy, { kind: "system" }, status);
     assert.equal(current.approvals![0].delivery, undefined, status);
   }
   assert.ok(typeof applyHarnessResolution(state([approval()]), run(), permissionResolved("approved", "acp-approval-1", "allow"), later(10)) === "string");
@@ -260,7 +260,7 @@ test("a harness resolution settles a still-pending approval only as cancelled or
   assert.ok(typeof applyHarnessResolution(state([approval()]), run(), permissionResolved("cancelled", "acp-unknown"), later(10)) === "string");
 
   for (const status of ["cancelled", "expired"] as const) {
-    const operatorCancelled = state([approval({ status: "cancelled", resolvedBy: "operator", resolvedAt: at, delivery: delivered("sent", 1) })]);
+    const operatorCancelled = state([approval({ status: "cancelled", resolvedBy: { kind: "operator" }, resolvedAt: at, delivery: delivered("sent", 1) })]);
     assert.equal(applyHarnessResolution(operatorCancelled, run(), permissionResolved(status), later(10)), undefined, status);
     assert.equal(operatorCancelled.approvals![0].delivery?.status, "applied", status);
   }
@@ -297,7 +297,7 @@ test("expireApprovals expires due pending approvals and returns them for deliver
   assert.deepEqual(result.deliverable.map((item) => item.id), ["approval-one"]);
   assert.equal(result.changed, true);
   assert.equal(current.approvals![0].status, "expired");
-  assert.equal(current.approvals![0].resolvedBy, "system");
+  assert.deepEqual(current.approvals![0].resolvedBy, { kind: "system" });
   assert.equal(current.approvals![0].delivery?.status, "pending");
   assert.equal(current.approvals![1].status, "pending");
 
@@ -321,7 +321,7 @@ test("reconcileApprovalsForNode cancels inactive runs and redelivers active deci
   assert.deepEqual(result.deliverable.map((item) => item.id), ["approval-active"]);
   assert.equal(result.changed, true);
   assert.equal(current.approvals![0].status, "cancelled");
-  assert.equal(current.approvals![0].resolvedBy, "system");
+  assert.deepEqual(current.approvals![0].resolvedBy, { kind: "system" });
   assert.equal(current.approvals![1].delivery?.status, "not-applied");
   assert.equal(current.approvals![2].delivery?.status, "pending");
   assert.equal(current.approvals![3].status, "pending");
@@ -366,20 +366,20 @@ test("terminal runs settle every approval and stream failures cancel pending one
   ]);
   settleApprovalsForTerminalRun(current, "run-one", later(30));
   assert.equal(current.approvals![0].status, "cancelled");
-  assert.equal(current.approvals![0].resolvedBy, "system");
+  assert.deepEqual(current.approvals![0].resolvedBy, { kind: "system" });
   assert.equal(current.approvals![0].delivery, undefined);
   assert.equal(current.approvals![1].delivery?.status, "not-applied");
   assert.equal(current.approvals![2].delivery?.status, "applied");
 
   const stream = state([
     approval(),
-    approval({ id: "approval-resolved", harnessApprovalId: "acp-2", status: "rejected", selectedOptionId: "reject", resolvedBy: "operator", delivery: delivered("pending", 0) }),
+    approval({ id: "approval-resolved", harnessApprovalId: "acp-2", status: "rejected", selectedOptionId: "reject", resolvedBy: { kind: "operator" }, delivery: delivered("pending", 0) }),
     approval({ id: "approval-other-run", harnessApprovalId: "acp-3", runId: "run-two" })
   ], [run(), run({ id: "run-two" })]);
   const cancelled = cancelPendingApprovals(stream, "run-one", later(30));
   assert.deepEqual(cancelled.map((item) => item.id), ["approval-one"]);
   assert.equal(stream.approvals![0].status, "cancelled");
-  assert.equal(stream.approvals![0].resolvedBy, "system");
+  assert.deepEqual(stream.approvals![0].resolvedBy, { kind: "system" });
   assert.equal(stream.approvals![0].delivery?.status, "pending");
   assert.equal(stream.approvals![1].status, "rejected");
   assert.equal(stream.approvals![2].status, "pending");

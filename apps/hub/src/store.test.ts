@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { threadOrchestrator, threadOwnerAgentId } from "@coffee-shop/protocol";
 import { assertPersistedHarnessState, newEvent, Store, type State } from "./store.js";
 
 test("starts empty, persists state atomically, and loads it again", async () => {
@@ -274,4 +276,153 @@ test("snapshots publish run activity but never retained harness events", async (
   assert.deepEqual(snapshot.runActivity?.map((activity) => activity.runId), ["run-one"]);
   assert.ok(!("harnessEventStreams" in snapshot), "snapshots never publish event streams");
   assert.ok(!("harnessEvents" in snapshot), "snapshots never publish retained events");
+});
+
+/*
+ * External orchestrator migration.
+ *
+ * `state-before-external-orchestrators.json` was written byte-for-byte by the store at
+ * 733409151e28741f14769829d557c0a52d968a56 (`apps/hub/src/store.ts:416`, `private async save`),
+ * from records built by that revision's `apps/hub/src/threads.ts:29` (`newThread`),
+ * `apps/hub/src/approvals.ts:94` (`openApproval`), and `apps/hub/src/approvals.ts:312`
+ * (`resolveApprovalInState`). It is the real shape on an operator's disk before this change.
+ */
+const fixturePath = fileURLToPath(new URL("../test-fixtures/state-before-external-orchestrators.json", import.meta.url));
+
+async function loadFixture(mutate: (state: Record<string, any>) => void = () => undefined) {
+  const directory = await mkdtemp(join(tmpdir(), "coffee-shop-store-"));
+  const path = join(directory, "state.json");
+  const persisted = JSON.parse(await readFile(fixturePath, "utf8"));
+  mutate(persisted);
+  await writeFile(path, JSON.stringify(persisted, null, 2));
+  const store = new Store(path);
+  return { store, path };
+}
+
+test("loads a pre-external-orchestrator snapshot with empty orchestrator collections", async () => {
+  const { store, path } = await loadFixture();
+  await store.load();
+
+  store.read((state) => {
+    assert.deepEqual(state.orchestratorClients, [], "clients are never invented");
+    assert.deepEqual(state.orchestratorAttachments, [], "attachments are never invented");
+  });
+  const persisted = JSON.parse(await readFile(path, "utf8"));
+  assert.deepEqual(persisted.orchestratorClients, []);
+  assert.deepEqual(persisted.orchestratorAttachments, []);
+});
+
+test("derives a thread orchestrator from the persisted owner agent", async () => {
+  const { store } = await loadFixture();
+  await store.load();
+
+  const thread = store.snapshot().threads![0];
+  assert.deepEqual(thread.orchestrator, { kind: "agent", agentId: "orchestrator" });
+  assert.equal(thread.ownerAgentId, "orchestrator", "the owner agent stays readable");
+  assert.deepEqual(threadOrchestrator(thread), { kind: "agent", agentId: "orchestrator" });
+  assert.equal(threadOwnerAgentId(thread), "orchestrator");
+});
+
+test("keeps a thread with neither orchestrator nor owner agent, and treats it as not agent-orchestrated", async () => {
+  const { store } = await loadFixture((state) => {
+    delete state.threads[0].ownerAgentId;
+  });
+  await store.load();
+
+  const thread = store.snapshot().threads![0];
+  assert.equal(thread.orchestrator, undefined, "no orchestrator is invented");
+  assert.equal(thread.ownerAgentId, undefined);
+  assert.equal(threadOrchestrator(thread), undefined);
+  assert.equal(threadOwnerAgentId(thread), undefined);
+});
+
+test("migrates a persisted approval resolver string into its resolver union", async () => {
+  for (const kind of ["operator", "policy", "system"] as const) {
+    const { store } = await loadFixture((state) => {
+      state.approvals[0].resolvedBy = kind;
+    });
+    await store.load();
+    assert.deepEqual(store.snapshot().approvals![0].resolvedBy, { kind }, kind);
+  }
+});
+
+test("rejects a persisted approval whose resolver the hub cannot interpret", async () => {
+  for (const resolvedBy of ["orchestrator", "robot", 7, { kind: "robot" }, { kind: "orchestrator" }]) {
+    const { store } = await loadFixture((state) => {
+      state.approvals[0].resolvedBy = resolvedBy;
+    });
+    await assert.rejects(() => store.load(), /unknown resolver/, JSON.stringify(resolvedBy));
+  }
+});
+
+test("keeps an already-migrated orchestrator resolution unchanged", async () => {
+  const resolvedBy = { kind: "orchestrator", clientId: "client-one", attachmentId: "attachment-one" };
+  const { store } = await loadFixture((state) => {
+    state.approvals[0].resolvedBy = resolvedBy;
+  });
+  await store.load();
+  assert.deepEqual(store.snapshot().approvals![0].resolvedBy, resolvedBy);
+});
+
+test("snapshots publish orchestrator clients without their secret hash", async () => {
+  const at = "2026-09-22T12:00:00.000Z";
+  const { store } = await loadFixture();
+  await store.load();
+  await store.transact((state) => {
+    state.orchestratorClients!.push(
+      { id: "client-one", name: "Christian's laptop", scopes: ["orchestrate"], secretHash: "sha256:deadbeef", createdAt: at },
+      { id: "client-two", name: "Reviewer", scopes: ["orchestrate", "resolve-approvals"], secretHash: "sha256:feedface", createdAt: at, lastSeenAt: at, revokedAt: at }
+    );
+    state.orchestratorAttachments!.push({
+      id: "attachment-one", threadId: "thread-one", clientId: "client-one", connectionId: "connection-one",
+      attachedAt: at, lastHeartbeatAt: at, status: "attached"
+    });
+  });
+
+  const snapshot = store.snapshot();
+  assert.deepEqual(snapshot.orchestratorClients, [
+    { id: "client-one", name: "Christian's laptop", scopes: ["orchestrate"], createdAt: at },
+    { id: "client-two", name: "Reviewer", scopes: ["orchestrate", "resolve-approvals"], createdAt: at, lastSeenAt: at, revokedAt: at }
+  ]);
+  assert.ok(!JSON.stringify(snapshot).includes("secretHash"), "snapshots never carry a secret hash");
+  assert.ok(!JSON.stringify(snapshot).includes("deadbeef"), "snapshots never carry a secret");
+  assert.deepEqual(snapshot.orchestratorAttachments?.map((attachment) => attachment.id), ["attachment-one"]);
+  store.read((state) => {
+    assert.equal(state.orchestratorClients![0].secretHash, "sha256:deadbeef", "the hub keeps the hash");
+  });
+});
+
+test("rejects persisted orchestrator records the hub cannot interpret", async () => {
+  const client = { id: "client-one", name: "Laptop", scopes: ["orchestrate"], secretHash: "sha256:deadbeef", createdAt: "2026-09-22T12:00:00.000Z" };
+  const attachment = {
+    id: "attachment-one", threadId: "thread-one", clientId: "client-one", connectionId: "connection-one",
+    attachedAt: "2026-09-22T12:00:00.000Z", lastHeartbeatAt: "2026-09-22T12:00:00.000Z", status: "attached"
+  };
+  const cases: Array<[string, (state: Record<string, any>) => void]> = [
+    ["missing its identity", (state) => { state.orchestratorClients = [{ ...client, secretHash: "" }]; }],
+    ["has an unknown scope", (state) => { state.orchestratorClients = [{ ...client, scopes: ["orchestrate", "administer"] }]; }],
+    ["repeats client id", (state) => { state.orchestratorClients = [client, { ...client }]; }],
+    ["missing its identity", (state) => { state.orchestratorAttachments = [{ ...attachment, connectionId: "" }]; }],
+    ["has an unknown status", (state) => { state.orchestratorAttachments = [{ ...attachment, status: "paused" }]; }],
+    ["repeats attachment id", (state) => { state.orchestratorAttachments = [attachment, { ...attachment }]; }],
+    ["has an unknown orchestrator", (state) => { state.threads[0].orchestrator = { kind: "robot", agentId: "orchestrator" }; }],
+    ["has an unknown orchestrator", (state) => { state.threads[0].orchestrator = { kind: "external" }; }],
+    ["has a malformed orchestrator", (state) => { state.threads[0].orchestrator = "agent"; }]
+  ];
+  for (const [reason, mutate] of cases) {
+    const { store } = await loadFixture(mutate);
+    await assert.rejects(() => store.load(), new RegExp(reason), reason);
+  }
+});
+
+test("loads an externally orchestrated thread without an owner agent", async () => {
+  const { store } = await loadFixture((state) => {
+    delete state.threads[0].ownerAgentId;
+    state.threads[0].orchestrator = { kind: "external", clientId: "client-one" };
+  });
+  await store.load();
+
+  const thread = store.snapshot().threads![0];
+  assert.deepEqual(thread.orchestrator, { kind: "external", clientId: "client-one" });
+  assert.equal(threadOwnerAgentId(thread), undefined, "an external thread has no owner agent");
 });

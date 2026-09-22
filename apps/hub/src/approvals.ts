@@ -3,6 +3,7 @@ import {
   isTerminalRunStatus,
   type ApprovalDecision,
   type ApprovalRequest,
+  type ApprovalResolvedBy,
   type ApprovalStatus,
   type HarnessEvent,
   type Run,
@@ -56,7 +57,7 @@ function recordApprovalEvent(state: State, approval: ApprovalRequest, title: str
   state.events.unshift(newEvent({ type: "status", title, detail: approval.title, threadId: approval.threadId || undefined, agentId: run?.agentId, runId: approval.runId }));
 }
 
-function resolve(approval: ApprovalRequest, status: Exclude<ApprovalStatus, "pending">, resolvedBy: ApprovalRequest["resolvedBy"], at: string, needsDelivery: boolean) {
+function resolve(approval: ApprovalRequest, status: Exclude<ApprovalStatus, "pending">, resolvedBy: ApprovalResolvedBy, at: string, needsDelivery: boolean) {
   approval.status = status;
   approval.resolvedAt = at;
   approval.resolvedBy = resolvedBy;
@@ -131,7 +132,7 @@ export function applyHarnessResolution(state: State, run: Run, event: Permission
   if (!approval) return `permission.resolved names unknown approval ${event.approvalId}`;
   if (approval.status === "pending") {
     if (selectsOption(event.status)) return `harness reported ${event.status} for ${event.approvalId} without a hub decision`;
-    resolve(approval, event.status as "cancelled" | "expired", "system", at, false);
+    resolve(approval, event.status as "cancelled" | "expired", { kind: "system" }, at, false);
     recordApprovalEvent(state, approval, event.status === "expired" ? "Approval expired" : "Approval cancelled");
     return undefined;
   }
@@ -152,7 +153,7 @@ export function cancelPendingApprovals(state: State, runId: string, at: string) 
   const cancelled: ApprovalRequest[] = [];
   for (const approval of approvalsForRun(state, runId)) {
     if (approval.status !== "pending") continue;
-    resolve(approval, "cancelled", "system", at, true);
+    resolve(approval, "cancelled", { kind: "system" }, at, true);
     recordApprovalEvent(state, approval, "Approval cancelled");
     cancelled.push(approval);
   }
@@ -163,7 +164,7 @@ export function cancelPendingApprovals(state: State, runId: string, at: string) 
 export function settleApprovalsForTerminalRun(state: State, runId: string, at: string) {
   for (const approval of approvalsForRun(state, runId)) {
     if (approval.status === "pending") {
-      resolve(approval, "cancelled", "system", at, false);
+      resolve(approval, "cancelled", { kind: "system" }, at, false);
       recordApprovalEvent(state, approval, "Approval cancelled");
     } else {
       markNotApplied(approval, "the run ended before the harness confirmed the decision", at);
@@ -207,7 +208,7 @@ export function expireApprovals(state: State, at: string) {
   const now = Date.parse(at);
   for (const approval of state.approvals ?? []) {
     if (approval.status === "pending" && approval.expiresAt && Date.parse(approval.expiresAt) <= now) {
-      resolve(approval, "expired", "system", at, true);
+      resolve(approval, "expired", { kind: "system" }, at, true);
       recordApprovalEvent(state, approval, "Approval expired");
       expired.push(approval);
     } else if (approval.delivery?.status === "pending") {
@@ -234,7 +235,7 @@ export function reconcileApprovalsForNode(state: State, nodeId: string, activeRu
     if (!run || isTerminalRunStatus(run.status)) continue;
     if (!active.has(approval.runId)) {
       if (approval.status === "pending") {
-        resolve(approval, "cancelled", "system", at, false);
+        resolve(approval, "cancelled", { kind: "system" }, at, false);
         recordApprovalEvent(state, approval, "Approval cancelled");
         changed = true;
       } else {
@@ -323,16 +324,16 @@ export function resolveApprovalInState(state: State, approvalId: string, input: 
   if (!run || run.status !== "running") return { kind: "conflict", reason: "The approval's run is no longer active", approval, changed: false };
   if (run.nodeId !== approval.nodeId || run.sessionBindingId !== approval.sessionBindingId) return { kind: "conflict", reason: "The approval's session was replaced", approval, changed: false };
   if (approval.expiresAt && Date.parse(approval.expiresAt) <= Date.parse(at)) {
-    resolve(approval, "expired", "system", at, true);
+    resolve(approval, "expired", { kind: "system" }, at, true);
     recordApprovalEvent(state, approval, "Approval expired");
     return { kind: "conflict", reason: "The approval expired", approval, changed: true };
   }
   if (input.cancel) {
-    resolve(approval, "cancelled", "operator", at, true);
+    resolve(approval, "cancelled", { kind: "operator" }, at, true);
   } else {
     const option = approval.options.find((item) => item.id === input.optionId);
     if (!option) return { kind: "option-not-offered", approval };
-    resolve(approval, decisionStatus(option.kind), "operator", at, true);
+    resolve(approval, decisionStatus(option.kind), { kind: "operator" }, at, true);
     approval.selectedOptionId = option.id;
   }
   approval.resolutionIdempotencyKey = input.idempotencyKey;

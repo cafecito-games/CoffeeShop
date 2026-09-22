@@ -102,7 +102,7 @@ test("an operator approval is persisted, delivered to the owning Barista, and co
   assert.deepEqual(sender.sent, [{ nodeId: "node-one", message: { type: "approval.decision", decision: { approvalId: "acp-permission-1", runId: "run-one", status: "approved", selectedOptionId: "allow" } } }]);
   let current = approvalOf(store);
   assert.equal(current.status, "approved");
-  assert.equal(current.resolvedBy, "operator");
+  assert.deepEqual(current.resolvedBy, { kind: "operator" });
   assert.equal(current.delivery?.status, "sent");
   assert.equal(current.delivery?.attempts, 1);
 
@@ -183,7 +183,7 @@ test("expiry resolves a pending approval as expired and releases the Barista cal
   assert.equal(await expireDueApprovals(store, sender.send, later(60)), false);
   assert.equal(await expireDueApprovals(store, sender.send, later(9 * 60)), true);
   assert.equal(approvalOf(store).status, "expired");
-  assert.equal(approvalOf(store).resolvedBy, "system");
+  assert.deepEqual(approvalOf(store).resolvedBy, { kind: "system" });
   assert.deepEqual(sender.sent.map((entry) => entry.message), [{ type: "approval.decision", decision: { approvalId: "acp-permission-1", runId: "run-one", status: "expired" } }]);
   const late = await resolveApproval(store, approval.id, { idempotencyKey: "operator-1", expectedStatus: "pending", optionId: "allow" }, sender.send, later(9 * 60 + 1));
   assert.equal(late.status, 409);
@@ -195,7 +195,7 @@ test("run cancellation cancels pending approvals and late events cannot touch th
   const approval = await pendingApproval(store, sender);
   await cancelPersistedRun(store, "run-one", sender.send, later(1));
   assert.equal(approvalOf(store).status, "cancelled");
-  assert.equal(approvalOf(store).resolvedBy, "system");
+  assert.deepEqual(approvalOf(store).resolvedBy, { kind: "system" });
 
   const before = store.read((state) => JSON.stringify(state));
   const late = await receiveHarnessEvent(store, "node-one", messageDelta(2, "late"), redactor, sender.send, later(2));

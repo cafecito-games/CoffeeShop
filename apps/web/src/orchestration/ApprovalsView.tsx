@@ -113,7 +113,7 @@ export function ApprovalDialog({ approval, agents, nodes, runs, tasks, canMutate
         {latest.toolCallId && <div><dt>Tool call</dt><dd><code>{latest.toolCallId}</code></dd></div>}
         <div><dt>Requested</dt><dd><time>{timeAgo(latest.requestedAt)}</time></dd></div>
         <div><dt>Expires</dt><dd>{latest.expiresAt ? (expired ? "Expired" : <>in <time>{timeUntil(latest.expiresAt)}</time></>) : "No expiry reported"}</dd></div>
-        {latest.resolvedBy && <div><dt>Resolved by</dt><dd>{latest.resolvedBy}</dd></div>}
+        {latest.resolvedBy && <div><dt>Resolved by</dt><dd>{latest.resolvedBy.kind}</dd></div>}
       </dl>
       {!isPending && (
         <p className="approval-resolved-notice" role="status">

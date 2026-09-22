@@ -1,0 +1,121 @@
+{
+  "agents": [
+    {
+      "id": "orchestrator",
+      "name": "Lin",
+      "title": "Product engineer",
+      "summary": "Drives the thread",
+      "glyph": "L",
+      "avatarShape": "cup",
+      "avatarColor": "amber",
+      "state": "working",
+      "currentAction": "Planning",
+      "harnessId": "claude-code",
+      "model": "claude-opus-4",
+      "computeNodeId": "local-macbook",
+      "workspace": "/Users/you/Projects/brew-kit",
+      "systemPrompt": "",
+      "canDelegate": true,
+      "unread": 0,
+      "updatedAt": "2026-09-20T12:00:00.000Z"
+    }
+  ],
+  "nodes": [],
+  "runs": [
+    {
+      "id": "run-orchestrator",
+      "threadId": "thread_mu9rkw00_01anm6",
+      "agentId": "orchestrator",
+      "nodeId": "local-macbook",
+      "harnessId": "claude-code",
+      "model": "claude-opus-4",
+      "workspace": "/Users/you/Projects/brew-kit",
+      "prompt": "Ship the auth refactor",
+      "status": "running",
+      "output": "",
+      "depth": 0,
+      "createdAt": "2026-09-20T12:00:00.000Z",
+      "startedAt": "2026-09-20T12:00:00.000Z"
+    }
+  ],
+  "events": [
+    {
+      "type": "status",
+      "title": "Approval approved",
+      "detail": "Write to config.json",
+      "threadId": "thread_mu9rkw00_01anm6",
+      "agentId": "orchestrator",
+      "runId": "run-orchestrator",
+      "id": "evt_mu9rkw00_056mgp",
+      "createdAt": "2026-09-20T12:00:00.000Z"
+    },
+    {
+      "type": "status",
+      "title": "Approval requested",
+      "detail": "Write to config.json",
+      "threadId": "thread_mu9rkw00_01anm6",
+      "agentId": "orchestrator",
+      "runId": "run-orchestrator",
+      "id": "evt_mu9rkw00_03vyuj",
+      "createdAt": "2026-09-20T12:00:00.000Z"
+    }
+  ],
+  "messages": [],
+  "threads": [
+    {
+      "id": "thread_mu9rkw00_01anm6",
+      "title": "Ship the auth refactor",
+      "objective": "Ship the auth refactor",
+      "summary": "",
+      "status": "active",
+      "ownerAgentId": "orchestrator",
+      "createdBy": "user",
+      "createdAt": "2026-09-20T12:00:00.000Z",
+      "updatedAt": "2026-09-20T12:00:00.000Z"
+    }
+  ],
+  "delegations": [],
+  "artifacts": [],
+  "taskSubmissions": [],
+  "taskUpdates": [],
+  "taskEventJournal": [],
+  "taskEventStreams": [],
+  "runActivity": [],
+  "harnessEventStreams": [],
+  "harnessEvents": [],
+  "orchestratorInboxes": [],
+  "tasks": [],
+  "taskMessages": [],
+  "taskMessageAcknowledgements": [],
+  "sessionBindings": [],
+  "approvals": [
+    {
+      "id": "approval_mu9rkw00_02lb8c",
+      "harnessApprovalId": "acp-1",
+      "threadId": "thread_mu9rkw00_01anm6",
+      "runId": "run-orchestrator",
+      "nodeId": "local-macbook",
+      "title": "Write to config.json",
+      "options": [
+        {
+          "id": "allow-once",
+          "label": "Allow once",
+          "kind": "allow-once"
+        }
+      ],
+      "status": "approved",
+      "requestedAt": "2026-09-20T12:00:00.000Z",
+      "expiresAt": "2026-09-20T12:09:00.000Z",
+      "resolvedAt": "2026-09-20T12:00:00.000Z",
+      "resolvedBy": "operator",
+      "delivery": {
+        "status": "pending",
+        "attempts": 0,
+        "updatedAt": "2026-09-20T12:00:00.000Z"
+      },
+      "selectedOptionId": "allow-once",
+      "resolutionIdempotencyKey": "operator-1"
+    }
+  ],
+  "workspaceLeases": []
+}

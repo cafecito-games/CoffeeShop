@@ -185,13 +185,31 @@ export interface ChatMessage {
 export const threadStatuses = ["active", "completed", "archived"] as const;
 export type ThreadStatus = typeof threadStatuses[number];
 
+/**
+ * Who drives a thread. An `agent` thread is orchestrated by a hub-hosted agent run, the behaviour
+ * `ownerAgentId` has always described. An `external` thread is orchestrated by an operator's own
+ * Claude Code session through an orchestrator client, and has no owner agent.
+ */
+export const threadOrchestratorKinds = ["agent", "external"] as const;
+export type ThreadOrchestratorKind = typeof threadOrchestratorKinds[number];
+
+export type ThreadOrchestrator =
+  | { kind: "agent"; agentId: string }
+  | { kind: "external"; clientId: string };
+
 export interface Thread {
   id: string;
   title: string;
   objective: string;
   summary: string;
   status: ThreadStatus;
-  ownerAgentId: string;
+  /**
+   * The orchestrating agent, absent for an externally orchestrated thread. Threads persisted before
+   * `orchestrator` existed carry only this field; the hub derives `orchestrator` from it on load.
+   */
+  ownerAgentId?: string;
+  /** Absent only in a snapshot persisted before external orchestrators existed. */
+  orchestrator?: ThreadOrchestrator;
   createdBy: "user" | "agent";
   createdAt: string;
   updatedAt: string;
@@ -214,6 +232,9 @@ export interface Snapshot {
   sessionBindings?: HarnessSessionBinding[];
   /** Per-thread orchestrator inbox delivery state; see `OrchestratorInbox`. */
   orchestratorInboxes?: OrchestratorInbox[];
+  /** Public view of the minted orchestrator credentials; never carries a secret or its hash. */
+  orchestratorClients?: OrchestratorClient[];
+  orchestratorAttachments?: OrchestratorAttachment[];
   approvals?: ApprovalRequest[];
   workspaceLeases?: WorkspaceLease[];
   /** Version-4: bounded projections of accepted structured harness events, one per run. */
@@ -944,6 +965,21 @@ export interface ApprovalDelivery {
   reason?: string;
 }
 
+/**
+ * Who resolved an approval. `policy` records a resolution made by a configured approval policy and
+ * `system` one caused by expiry, run termination, or the harness itself. `orchestrator` names the
+ * external orchestrator client and the attachment that carried the decision, so a decision can be
+ * attributed after the attachment ends.
+ */
+export const approvalResolverKinds = ["operator", "policy", "system", "orchestrator"] as const;
+export type ApprovalResolverKind = typeof approvalResolverKinds[number];
+
+export type ApprovalResolvedBy =
+  | { kind: "operator" }
+  | { kind: "policy" }
+  | { kind: "system" }
+  | { kind: "orchestrator"; clientId: string; attachmentId: string };
+
 export interface ApprovalRequest {
   /** Hub-generated identity used by REST clients. */
   id: string;
@@ -962,8 +998,7 @@ export interface ApprovalRequest {
   requestedAt: string;
   expiresAt?: string;
   resolvedAt?: string;
-  /** `system` records a resolution caused by expiry, run termination, or the harness itself. */
-  resolvedBy?: "operator" | "policy" | "system";
+  resolvedBy?: ApprovalResolvedBy;
   selectedOptionId?: string;
   /** The operator idempotency key that produced the resolution; an exact replay returns it unchanged. */
   resolutionIdempotencyKey?: string;
@@ -2196,4 +2231,252 @@ export function evaluateProjectReadiness(
     unmetPreferences,
     evaluatedAt: nowIso
   };
+}
+
+/*
+ * External orchestrators.
+ *
+ * An operator's own Claude Code session drives a thread through a local bridge that holds one
+ * outbound WebSocket to the hub. The bridge authenticates as an `OrchestratorClient` credential and
+ * attaches to the threads it orchestrates; the hub owns every identity and decision below.
+ */
+export const orchestratorClientScopes = ["orchestrate", "resolve-approvals"] as const;
+export type OrchestratorClientScope = typeof orchestratorClientScopes[number];
+export const isOrchestratorClientScope = isOneOf(orchestratorClientScopes);
+
+export const isThreadOrchestratorKind = isOneOf(threadOrchestratorKinds);
+
+/**
+ * The public view of a minted credential. The secret is shown once at creation and kept only as a
+ * hash in the hub's own stored record, which is never part of a `Snapshot`.
+ */
+export interface OrchestratorClient {
+  id: string;
+  name: string;
+  scopes: OrchestratorClientScope[];
+  createdAt: string;
+  lastSeenAt?: string;
+  revokedAt?: string;
+}
+
+/**
+ * One bridge connection's claim on one thread. At most one attachment per thread is `attached`; a
+ * newer attach marks the previous one `replaced`, and losing the socket marks it `detached`. The
+ * acknowledged event cursor lives on the thread's orchestrator inbox, so it outlives attachments.
+ */
+export const orchestratorAttachmentStatuses = ["attached", "detached", "replaced"] as const;
+export type OrchestratorAttachmentStatus = typeof orchestratorAttachmentStatuses[number];
+export const isOrchestratorAttachmentStatus = isOneOf(orchestratorAttachmentStatuses);
+
+export interface OrchestratorAttachment {
+  id: string;
+  threadId: string;
+  clientId: string;
+  /** The hub-assigned identity of the bridge connection that holds this attachment. */
+  connectionId: string;
+  attachedAt: string;
+  lastHeartbeatAt: string;
+  detachedAt?: string;
+  status: OrchestratorAttachmentStatus;
+}
+
+/** Resolves a thread's orchestrator, deriving it from `ownerAgentId` for a pre-migration thread. */
+export function threadOrchestrator(thread: Pick<Thread, "orchestrator" | "ownerAgentId">): ThreadOrchestrator | undefined {
+  if (thread.orchestrator !== undefined) return thread.orchestrator;
+  return thread.ownerAgentId === undefined ? undefined : { kind: "agent", agentId: thread.ownerAgentId };
+}
+
+/** The orchestrating agent, or `undefined` when the thread is not agent-orchestrated. */
+export function threadOwnerAgentId(thread: Pick<Thread, "orchestrator" | "ownerAgentId">): string | undefined {
+  const orchestrator = threadOrchestrator(thread);
+  return orchestrator?.kind === "agent" ? orchestrator.agentId : undefined;
+}
+
+/*
+ * Orchestrator-client wire protocol, version 1, spoken on the hub's `/orchestrator-client`
+ * WebSocket. Every frame is a JSON object discriminated by `type`. The credential travels in the
+ * first frame, never in the URL.
+ */
+export const orchestratorClientProtocolVersion = 1;
+
+/** The bridge sends a heartbeat this often; the hub detaches a connection silent for the expiry. */
+export const orchestratorClientHeartbeatSeconds = 15;
+export const orchestratorClientHeartbeatExpirySeconds = 45;
+
+/** Why the hub closed an orchestrator-client socket. The bridge never retries `revoked`. */
+export const orchestratorClientCloseReasons = ["unauthorized", "revoked", "unsupported_version"] as const;
+export type OrchestratorClientCloseReason = typeof orchestratorClientCloseReasons[number];
+export const isOrchestratorClientCloseReason = isOneOf(orchestratorClientCloseReasons);
+
+/**
+ * The MCP tools the bridge offers a session. `list_approvals` and `resolve_approval` are offered
+ * only to a client holding the `resolve-approvals` scope.
+ */
+export const externalOrchestratorToolNames = [
+  "create_thread",
+  "list_threads",
+  "attach_thread",
+  "detach_thread",
+  "get_thread_context",
+  "get_thread_events",
+  "submit_tasks",
+  "update_task",
+  "send_task_message",
+  "update_thread",
+  "get_execution_inventory",
+  "list_approvals",
+  "resolve_approval"
+] as const;
+export type ExternalOrchestratorToolName = typeof externalOrchestratorToolNames[number];
+export const isExternalOrchestratorToolName = isOneOf(externalOrchestratorToolNames);
+
+/** Tools reachable only with the `resolve-approvals` scope; every other tool needs `orchestrate`. */
+export const approvalScopedExternalOrchestratorToolNames: readonly ExternalOrchestratorToolName[] = ["list_approvals", "resolve_approval"];
+
+export const requiredScopeForExternalOrchestratorTool = (tool: ExternalOrchestratorToolName): OrchestratorClientScope =>
+  approvalScopedExternalOrchestratorToolNames.includes(tool) ? "resolve-approvals" : "orchestrate";
+
+/**
+ * Failure codes an `rpc.response` may carry. `not_attached` means this connection holds no
+ * attachment on the named thread, `forbidden` that the thread belongs to another orchestrator,
+ * `revoked` that the credential no longer exists, and `hub_unavailable` that the hub could not
+ * serve the call at all.
+ */
+export const orchestratorClientErrorCodes = [
+  "not_attached",
+  "forbidden",
+  "revoked",
+  "hub_unavailable",
+  "conflict",
+  "invalid_arguments",
+  "not_found"
+] as const;
+export type OrchestratorClientErrorCode = typeof orchestratorClientErrorCodes[number];
+export const isOrchestratorClientErrorCode = isOneOf(orchestratorClientErrorCodes);
+
+export interface OrchestratorClientError {
+  code: OrchestratorClientErrorCode;
+  message: string;
+}
+
+/** Bounds every orchestrator-client frame is validated against, in bytes unless named otherwise. */
+export const orchestratorClientLimits = {
+  clientNameBytes: 200,
+  secretBytes: 512,
+  argumentsBytes: 256 * 1024,
+  resultBytes: 1024 * 1024,
+  errorMessageBytes: 2 * 1024,
+  doorbellSummaryBytes: 2 * 1024,
+  maximumHeartbeatSeconds: 3_600
+} as const;
+
+export type OrchestratorClientToHub =
+  | { type: "client.hello"; protocolVersion: number; clientId: string; secret: string }
+  | { type: "client.heartbeat" }
+  | { type: "rpc.request"; requestId: string; tool: ExternalOrchestratorToolName; arguments: Record<string, unknown> };
+
+export type OrchestratorHubToClient =
+  | { type: "client.welcome"; connectionId: string; heartbeatSeconds: number; scopes: OrchestratorClientScope[] }
+  | { type: "rpc.response"; requestId: string; result: unknown }
+  | { type: "rpc.response"; requestId: string; error: OrchestratorClientError }
+  | { type: "doorbell"; threadId: string; pending: number; approvals: number; urgent: boolean; summary: string }
+  | { type: "attachment.replaced"; threadId: string; attachmentId: string }
+  | { type: "client.revoked" };
+
+export type OrchestratorClientMessageType = OrchestratorClientToHub["type"];
+export type OrchestratorHubMessageType = OrchestratorHubToClient["type"];
+export const orchestratorClientMessageTypes = ["client.hello", "client.heartbeat", "rpc.request"] as const;
+export const orchestratorHubMessageTypes = ["client.welcome", "rpc.response", "doorbell", "attachment.replaced", "client.revoked"] as const;
+const isOrchestratorClientMessageType = isOneOf(orchestratorClientMessageTypes);
+const isOrchestratorHubMessageType = isOneOf(orchestratorHubMessageTypes);
+
+/** A tool result or argument payload must round-trip as JSON and stay within its bound. */
+const isBoundedJson = (value: unknown, limit: number) => {
+  if (value === undefined) return false;
+  let encoded: string;
+  try {
+    encoded = JSON.stringify(value) ?? "";
+  } catch {
+    return false;
+  }
+  return encoded !== "" && byteLength(encoded) <= limit;
+};
+
+const isScopeList = (value: unknown): value is OrchestratorClientScope[] =>
+  Array.isArray(value)
+  && value.length > 0
+  && value.length <= orchestratorClientScopes.length
+  && value.every(isOrchestratorClientScope)
+  && new Set(value as string[]).size === value.length;
+
+const isOrchestratorClientErrorPayload = (value: unknown): value is OrchestratorClientError =>
+  isRecord(value) && hasOnlyKeys(value, ["code", "message"])
+  && isOrchestratorClientErrorCode(value.code) && isBoundedString(value.message, orchestratorClientLimits.errorMessageBytes);
+
+const orchestratorClientPayloadKeys: Readonly<Record<OrchestratorClientMessageType, readonly string[]>> = {
+  "client.hello": ["protocolVersion", "clientId", "secret"],
+  "client.heartbeat": [],
+  "rpc.request": ["requestId", "tool", "arguments"]
+};
+
+const orchestratorClientPayloadValidators: Readonly<Record<OrchestratorClientMessageType, (message: Record<string, unknown>) => boolean>> = {
+  "client.hello": (message) => message.protocolVersion === orchestratorClientProtocolVersion
+    && isIdentifier(message.clientId)
+    && isBoundedString(message.secret, orchestratorClientLimits.secretBytes) && message.secret.length > 0,
+  "client.heartbeat": () => true,
+  "rpc.request": (message) => isIdentifier(message.requestId)
+    && isExternalOrchestratorToolName(message.tool)
+    && isRecord(message.arguments)
+    && isBoundedJson(message.arguments, orchestratorClientLimits.argumentsBytes)
+};
+
+/**
+ * Validates one bridge→hub frame. An unknown `type`, an undeclared field, a wrong field type, or an
+ * oversize string is rejected with a reason; a partial message is never returned.
+ */
+export function validateOrchestratorClientMessage(value: unknown): Validation<OrchestratorClientToHub> {
+  if (!isRecord(value)) return reject("orchestrator client message must be an object");
+  if (!isOrchestratorClientMessageType(value.type)) return reject("orchestrator client message type is missing or unknown");
+  if (!hasOnlyKeys(value, ["type", ...orchestratorClientPayloadKeys[value.type]])) return reject(`${value.type} contains undeclared fields`);
+  if (!orchestratorClientPayloadValidators[value.type](value)) return reject(`${value.type} payload is malformed or exceeds its bounds`);
+  return accept(value as unknown as OrchestratorClientToHub);
+}
+
+const orchestratorHubPayloadKeys: Readonly<Record<OrchestratorHubMessageType, readonly string[]>> = {
+  "client.welcome": ["connectionId", "heartbeatSeconds", "scopes"],
+  "rpc.response": ["requestId", "result", "error"],
+  doorbell: ["threadId", "pending", "approvals", "urgent", "summary"],
+  "attachment.replaced": ["threadId", "attachmentId"],
+  "client.revoked": []
+};
+
+const orchestratorHubPayloadValidators: Readonly<Record<OrchestratorHubMessageType, (message: Record<string, unknown>) => boolean>> = {
+  "client.welcome": (message) => isIdentifier(message.connectionId)
+    && typeof message.heartbeatSeconds === "number" && Number.isSafeInteger(message.heartbeatSeconds)
+    && message.heartbeatSeconds > 0 && message.heartbeatSeconds <= orchestratorClientLimits.maximumHeartbeatSeconds
+    && isScopeList(message.scopes),
+  "rpc.response": (message) => {
+    if (!isIdentifier(message.requestId)) return false;
+    const carriesResult = Object.hasOwn(message, "result");
+    const carriesError = Object.hasOwn(message, "error");
+    if (carriesResult === carriesError) return false;
+    return carriesError
+      ? isOrchestratorClientErrorPayload(message.error)
+      : isBoundedJson(message.result, orchestratorClientLimits.resultBytes);
+  },
+  doorbell: (message) => isIdentifier(message.threadId)
+    && isNonNegativeInteger(message.pending) && isNonNegativeInteger(message.approvals)
+    && typeof message.urgent === "boolean"
+    && isBoundedString(message.summary, orchestratorClientLimits.doorbellSummaryBytes),
+  "attachment.replaced": (message) => isIdentifier(message.threadId) && isIdentifier(message.attachmentId),
+  "client.revoked": () => true
+};
+
+/** Validates one hub→bridge frame under the same fail-closed rules as the bridge→hub direction. */
+export function validateOrchestratorHubMessage(value: unknown): Validation<OrchestratorHubToClient> {
+  if (!isRecord(value)) return reject("orchestrator hub message must be an object");
+  if (!isOrchestratorHubMessageType(value.type)) return reject("orchestrator hub message type is missing or unknown");
+  if (!hasOnlyKeys(value, ["type", ...orchestratorHubPayloadKeys[value.type]])) return reject(`${value.type} contains undeclared fields`);
+  if (!orchestratorHubPayloadValidators[value.type](value)) return reject(`${value.type} payload is malformed or exceeds its bounds`);
+  return accept(value as unknown as OrchestratorHubToClient);
 }
