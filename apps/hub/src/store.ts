@@ -9,6 +9,9 @@ import {
   isApprovalStatus,
   isTaskDependencyPolicy,
   isTaskStatus,
+  isWorkspaceCleanupPolicy,
+  isWorkspaceIsolationPolicy,
+  isWorkspaceLeaseStatus,
   orchestrationCollections,
   withOrchestrationDefaults,
   type ChatMessage,
@@ -160,6 +163,25 @@ export function assertPersistedTaskState(state: State) {
 }
 
 const isSequence = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+
+/** Rejects persisted leases the hub cannot interpret instead of guessing a status or policy. */
+export function assertPersistedWorkspaceLeaseState(state: State) {
+  const ids = new Set<string>();
+  for (const [index, lease] of (state.workspaceLeases ?? []).entries()) {
+    const context = `Persisted workspace lease ${index}`;
+    if (!isRecord(lease) || !isNonEmptyString(lease.id) || !isNonEmptyString(lease.runId) || !isNonEmptyString(lease.nodeId)
+      || !isNonEmptyString(lease.root) || !isNonEmptyString(lease.sourcePath) || !isNonEmptyString(lease.worktreePath)) {
+      throw new Error(`${context} is missing its identity`);
+    }
+    if (ids.has(lease.id)) throw new Error(`${context} repeats its lease id`);
+    ids.add(lease.id);
+    if (!isWorkspaceLeaseStatus(lease.status)) throw new Error(`${context} has an unknown status`);
+    if (!isWorkspaceIsolationPolicy(lease.policy) || !isWorkspaceCleanupPolicy(lease.cleanup)) throw new Error(`${context} has an unknown policy`);
+    if (lease.policy === "git-worktree" && (!isNonEmptyString(lease.branch) || !isNonEmptyString(lease.baseRevision) || !isNonEmptyString(lease.repository))) {
+      throw new Error(`${context} is missing its worktree identity`);
+    }
+  }
+}
 
 const legacyDemoAgents = new Map([
   ["cpp-steward", "Ada"],
@@ -324,6 +346,7 @@ export class Store {
     const addedOrchestration = addOrchestrationDefaults(loaded);
     assertPersistedTaskState(loaded);
     assertPersistedHarnessState(loaded);
+    assertPersistedWorkspaceLeaseState(loaded);
     if (removedDemoRecords || addedAgentAvatars || addedCoordination || addedThreads || addedOrchestration) await this.save(loaded);
     this.state = loaded;
   }

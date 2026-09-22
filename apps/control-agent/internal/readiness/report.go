@@ -11,6 +11,7 @@ import (
 
 	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/config"
 	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/protocol"
+	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/workspace"
 )
 
 // BuildCapabilityReport assembles one full node capability report: runtime observations,
@@ -28,6 +29,7 @@ func BuildCapabilityReport(ctx context.Context, cfg config.Config, harnesses []p
 		runtimeEvidence("logical-cpu-count", strconv.Itoa(runtime.NumCPU()), observedAt),
 		workspaceWritableEvidence(cfg.WorkspaceRoots, observedAt),
 	)
+	evidence = append(evidence, workspaceLeaseEvidence(len(cfg.WorkspaceRoots) > 0, observedAt)...)
 	// Barista config validation already rejects a secret-like label or accelerator at startup
 	// (see config.Parse), so this should never trigger in practice. It is kept as defense in
 	// depth, using the same detector probe output is screened with, so a value that somehow
@@ -145,5 +147,33 @@ func workspaceWritableEvidence(roots []string, observedAt string) protocol.NodeC
 		return evidence
 	}
 	evidence.Diagnostic = fmt.Sprintf("%d of %d workspace roots are writable", writable, len(roots))
+	return evidence
+}
+
+// workspaceLeaseEvidence advertises which workspace lease policies this Barista can provision, so
+// the hub never places a leased task on a Barista that would have to reject it. Lease paths are
+// POSIX paths, and the git-worktree policy also needs a resolvable git executable.
+func workspaceLeaseEvidence(hasRoots bool, observedAt string) []protocol.NodeCapabilityEvidence {
+	_, gitErr := workspace.FindGit()
+	posixPaths := runtime.GOOS != "windows"
+	supported := map[string]bool{
+		protocol.WorkspaceIsolationGitWorktree:       posixPaths && hasRoots && gitErr == nil,
+		protocol.WorkspaceIsolationExclusiveExisting: posixPaths && hasRoots,
+	}
+	evidence := make([]protocol.NodeCapabilityEvidence, 0, len(protocol.WorkspaceIsolationPolicies))
+	for _, policy := range protocol.WorkspaceIsolationPolicies {
+		entry := protocol.NodeCapabilityEvidence{
+			CapabilityID: "workspace-lease:" + policy,
+			Source:       protocol.CapabilityEvidenceSourceRuntime,
+			ObservedAt:   observedAt,
+		}
+		if supported[policy] {
+			entry.Success = true
+			entry.NormalizedValue = "true"
+		} else {
+			entry.Diagnostic = "this workspace lease policy is not available on this Barista"
+		}
+		evidence = append(evidence, entry)
+	}
 	return evidence
 }

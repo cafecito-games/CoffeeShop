@@ -54,7 +54,7 @@ var (
 	ApprovalOptionKinds       = []string{"allow-once", "allow-always", "reject-once", "reject-always"}
 	SessionBindingStatuses    = []string{"active", "idle", "closed", "replaced", "failed"}
 	WorkspaceLeaseStatuses    = []string{"requested", "provisioning", "active", "released", "cleaning", "retained", "cleaned", "failed"}
-	WorkspaceRetentionReasons = []string{"dirty", "identity-mismatch", "ambiguous", "operator-hold"}
+	WorkspaceRetentionReasons = []string{"dirty", "untracked", "diverged", "locked", "unregistered", "identity-mismatch", "ambiguous", "operator-hold", "policy"}
 	PlanEntryStatuses         = []string{"pending", "in-progress", "completed"}
 	PlanEntryPriorities       = []string{"high", "medium", "low"}
 	ToolCallStatuses          = []string{"pending", "in-progress", "completed", "failed"}
@@ -99,12 +99,17 @@ type DispatchSessionBinding struct {
 }
 
 type WorkspaceLeaseGrant struct {
-	ID           string `json:"id"`
-	Repository   string `json:"repository"`
-	Root         string `json:"root"`
-	BaseRevision string `json:"baseRevision"`
-	Branch       string `json:"branch"`
-	WorktreePath string `json:"worktreePath"`
+	ID                   string `json:"id"`
+	Status               string `json:"status"`
+	Policy               string `json:"policy"`
+	Cleanup              string `json:"cleanup"`
+	Repository           string `json:"repository,omitempty"`
+	Root                 string `json:"root"`
+	SourcePath           string `json:"sourcePath"`
+	BaseRevision         string `json:"baseRevision,omitempty"`
+	ResolvedBaseRevision string `json:"resolvedBaseRevision,omitempty"`
+	Branch               string `json:"branch,omitempty"`
+	WorktreePath         string `json:"worktreePath"`
 }
 
 type DispatchExecution struct {
@@ -135,10 +140,11 @@ type SessionBindingUpdate struct {
 }
 
 type WorkspaceLeaseUpdate struct {
-	LeaseID         string `json:"leaseId"`
-	Status          string `json:"status"`
-	RetentionReason string `json:"retentionReason,omitempty"`
-	Detail          string `json:"detail,omitempty"`
+	LeaseID              string `json:"leaseId"`
+	Status               string `json:"status"`
+	RetentionReason      string `json:"retentionReason,omitempty"`
+	ResolvedBaseRevision string `json:"resolvedBaseRevision,omitempty"`
+	Detail               string `json:"detail,omitempty"`
 }
 
 type PlanEntry struct {
@@ -324,6 +330,9 @@ func (update WorkspaceLeaseUpdate) Validate() error {
 		}
 	} else if update.RetentionReason != "" {
 		return fmt.Errorf("workspace lease retention reason does not match its status")
+	}
+	if update.ResolvedBaseRevision != "" && !IsResolvedRevision(update.ResolvedBaseRevision) {
+		return fmt.Errorf("workspace lease resolved base revision is malformed")
 	}
 	if !isBounded(update.Detail, diagnosticBytes) {
 		return fmt.Errorf("workspace lease detail exceeds its bound")

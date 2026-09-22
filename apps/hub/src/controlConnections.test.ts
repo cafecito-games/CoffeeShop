@@ -93,3 +93,37 @@ test("a failed write does not record the run as delivered", () => {
   assert.equal(registry.deliver(connection, dispatch()), true);
   assert.equal(socket.sent.length, 1);
 });
+
+test("a node admits a second socket only after its live connection is gone", () => {
+  const registry = new ControlConnectionRegistry<FakeSocket>(open);
+  const running = new FakeSocket();
+  const replacement = new FakeSocket();
+  assert.equal(registry.admits("node-one", running), true);
+  registry.register("node-one", running, "4");
+
+  assert.equal(registry.admits("node-one", replacement), false, "a live connection is never superseded by another process");
+  assert.equal(registry.admits("node-one", running), true, "the same socket may re-register");
+  assert.equal(registry.admits("node-two", replacement), true, "other nodes are unaffected");
+  assert.equal(registry.current("node-one")?.socket, running);
+
+  running.readyState = closed;
+  assert.equal(registry.admits("node-one", replacement), true, "a closed connection no longer holds the node");
+  const admitted = registry.register("node-one", replacement, "4");
+  assert.equal(registry.current("node-one"), admitted);
+});
+
+test("a refused socket never becomes current, so reconciliation never reads its active runs", () => {
+  const registry = new ControlConnectionRegistry<FakeSocket>(open);
+  const running = new FakeSocket();
+  const runningConnection = registry.register("node-one", running, "4");
+  registry.markSynced(runningConnection);
+  const replacement = new FakeSocket();
+  if (registry.admits("node-one", replacement)) registry.register("node-one", replacement, "4");
+
+  assert.equal(registry.connectionFor(replacement), undefined);
+  assert.equal(registry.current("node-one"), runningConnection);
+  assert.equal(registry.barrierPassed(runningConnection), true);
+  assert.equal(registry.send("node-one", { type: "ping" }), true);
+  assert.equal(running.sent.length, 1);
+  assert.equal(replacement.sent.length, 0);
+});

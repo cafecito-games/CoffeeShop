@@ -111,7 +111,7 @@ test("orchestration vocabularies keep their exact contents and order", () => {
   assert.deepEqual(approvalOptionKinds, ["allow-once", "allow-always", "reject-once", "reject-always"]);
   assert.deepEqual(workspaceLeaseStatuses, ["requested", "provisioning", "active", "released", "cleaning", "retained", "cleaned", "failed"]);
   assert.deepEqual(terminalWorkspaceLeaseStatuses, ["cleaned", "failed"]);
-  assert.deepEqual(workspaceRetentionReasons, ["dirty", "identity-mismatch", "ambiguous", "operator-hold"]);
+  assert.deepEqual(workspaceRetentionReasons, ["dirty", "untracked", "diverged", "locked", "unregistered", "identity-mismatch", "ambiguous", "operator-hold", "policy"]);
   assert.deepEqual(orchestrationCollections, [
     "tasks",
     "taskMessages",
@@ -200,7 +200,7 @@ test("approval transitions only leave pending toward a terminal status", () => {
 test("workspace lease transitions match the canonical table and always admit an exit", () => {
   const expectedTransitions = {
     requested: ["provisioning", "failed"],
-    provisioning: ["active", "retained", "failed"],
+    provisioning: ["active", "released", "retained", "failed"],
     active: ["released", "retained"],
     released: ["cleaning", "retained"],
     cleaning: ["cleaned", "retained", "failed"],

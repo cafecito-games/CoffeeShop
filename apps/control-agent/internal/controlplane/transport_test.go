@@ -109,18 +109,25 @@ func TestUnsupportedExecutionReasonAcrossAdmitBehaviorsAndDispatches(t *testing.
 			run:       protocol.Run{ID: "run-one", HarnessID: "codex-cli"},
 			execution: &protocol.DispatchExecution{Transport: "acp-v1", WorkspaceLease: &protocol.WorkspaceLeaseGrant{ID: "lease-one"}},
 			admit:     admitNothing,
-			want:      "unsupported execution: workspace lease provisioning not available on this Barista",
+			want:      "unsupported execution: the workspace lease grant does not belong to the run",
+		},
+		{
+			name:      "acp run with a matching lease grant this Barista cannot provision",
+			run:       protocol.Run{ID: "run-one", HarnessID: "codex-cli", WorkspaceLeaseID: "lease-one", Workspace: "/srv/.coffee-shop/worktrees/lease-one", TaskID: "task-one"},
+			execution: &protocol.DispatchExecution{Transport: "acp-v1", TaskID: "task-one", WorkspaceLease: &protocol.WorkspaceLeaseGrant{ID: "lease-one", Status: "requested", Policy: "git-worktree", Cleanup: "retain", Repository: "https://example.com/org/repo", Root: "/srv", SourcePath: "/srv/repo", BaseRevision: "refs/heads/main", Branch: "coffee-shop/task-one/run-one", WorktreePath: "/srv/.coffee-shop/worktrees/lease-one"}},
+			admit:     admitNothing,
+			want:      "unsupported execution: git-worktree workspace leases are not available on this Barista",
 		},
 		{
 			name:  "acp run with a run-level workspace lease",
 			run:   protocol.Run{ID: "run-one", HarnessID: "codex-cli", Transport: "acp-v1", WorkspaceLeaseID: "lease-one"},
 			admit: admitNothing,
-			want:  "unsupported execution: workspace lease provisioning not available on this Barista",
+			want:  "unsupported execution: the run's workspace lease grant is missing or names a different lease",
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			require.Equal(t, test.want, unsupportedExecutionReason(test.run, test.execution, test.admit))
+			require.Equal(t, test.want, unsupportedExecutionReason(test.run, test.execution, test.admit, nil))
 		})
 	}
 }
@@ -139,11 +146,11 @@ func TestUnsupportedExecutionReasonPassesExactArgumentsToAdmitAndSkipsNativeRuns
 
 	run := protocol.Run{ID: "run-one", HarnessID: "codex-cli", Transport: "acp-v1"}
 	execution := &protocol.DispatchExecution{Transport: "acp-v1", FallbackTransport: "native-cli"}
-	require.Equal(t, "", unsupportedExecutionReason(run, execution, admit))
+	require.Equal(t, "", unsupportedExecutionReason(run, execution, admit, nil))
 	require.Equal(t, []admitCall{{harnessID: "codex-cli", transport: "acp-v1", fallbackTransport: "native-cli"}}, calls)
 
-	require.Equal(t, "", unsupportedExecutionReason(protocol.Run{ID: "run-two", HarnessID: "codex-cli", Transport: "native-cli"}, &protocol.DispatchExecution{Transport: "native-cli"}, admit))
-	require.Equal(t, "", unsupportedExecutionReason(protocol.Run{ID: "run-three", HarnessID: "codex-cli"}, nil, admit))
+	require.Equal(t, "", unsupportedExecutionReason(protocol.Run{ID: "run-two", HarnessID: "codex-cli", Transport: "native-cli"}, &protocol.DispatchExecution{Transport: "native-cli"}, admit, nil))
+	require.Equal(t, "", unsupportedExecutionReason(protocol.Run{ID: "run-three", HarnessID: "codex-cli"}, nil, admit, nil))
 	require.Len(t, calls, 1, "admit is a pre-execution guard and must never run for native dispatches")
 }
 

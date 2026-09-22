@@ -20,6 +20,7 @@ import (
 	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/harness"
 	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/mcpserver"
 	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/protocol"
+	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/workspace"
 	"nhooyr.io/websocket"
 )
 
@@ -29,6 +30,12 @@ type Client struct {
 	runner                *harness.Runner
 	bridge                *mcpserver.Server
 	buildCapabilityReport func(context.Context) protocol.NodeCapabilityReport
+	workspaces            *workspace.Manager
+	// leaseConfirmationTimeout bounds how long a leased run waits for the hub to confirm its
+	// active lease; zero means defaultLeaseConfirmationTimeout.
+	leaseConfirmationTimeout time.Duration
+	confirmationsMu          sync.Mutex
+	confirmations            map[string]*leaseConfirmation
 
 	connectionMu     sync.Mutex
 	connection       *websocket.Conn
@@ -51,9 +58,14 @@ type rpcResult struct {
 }
 
 func NewClient(cfg config.Config, node protocol.ComputeNode, runner *harness.Runner, buildCapabilityReport func(context.Context) protocol.NodeCapabilityReport) *Client {
+	git, err := workspace.FindGit()
+	if err != nil {
+		git = nil
+	}
 	client := &Client{
 		config: cfg, node: node, runner: runner, buildCapabilityReport: buildCapabilityReport,
-		runs: map[string]context.CancelFunc{}, cancelled: map[string]struct{}{}, pending: map[string]chan rpcResult{},
+		workspaces: workspace.NewManager(cfg.WorkspaceRoots, git),
+		runs:       map[string]context.CancelFunc{}, cancelled: map[string]struct{}{}, pending: map[string]chan rpcResult{},
 		sessions: map[string]*runSession{},
 	}
 	client.bridge = mcpserver.New(client.callHub, client.uploadArtifact)
@@ -155,6 +167,10 @@ func (client *Client) attach(ctx context.Context, connection *websocket.Conn) er
 		client.connection = nil
 		return err
 	}
+	if err := awaitRegistrationAcknowledgement(ctx, connection); err != nil {
+		client.connection = nil
+		return err
+	}
 	for len(client.outbox) > 0 {
 		if err := writeBytes(ctx, connection, client.outbox[0]); err != nil {
 			client.connection = nil
@@ -165,6 +181,22 @@ func (client *Client) attach(ctx context.Context, connection *websocket.Conn) er
 	client.outboxEvents, client.outboxEventBytes = 0, 0
 	activeRunIDs := client.activeRunIDs()
 	return write(ctx, connection, protocol.Outbound{Type: "sync.complete", NodeID: client.node.ID, ActiveRunIDs: &activeRunIDs, At: now()})
+}
+
+// awaitRegistrationAcknowledgement waits for the hub's first message, a ping, which it sends only
+// after admitting the registration. The hub refuses a registration while another connection for
+// the same node is live, so waiting keeps the lifecycle outbox from being written to, and lost on,
+// a refused socket; the outbox is replayed on the next accepted connection instead.
+func awaitRegistrationAcknowledgement(ctx context.Context, connection *websocket.Conn) error {
+	_, data, err := connection.Read(ctx)
+	if err != nil {
+		return fmt.Errorf("registration was not acknowledged: %w", err)
+	}
+	message, err := protocol.DecodeInbound(data)
+	if err != nil || message.Type != "ping" {
+		return errors.New("registration was not acknowledged")
+	}
+	return nil
 }
 
 func (client *Client) detach(connection *websocket.Conn) {
@@ -241,6 +273,10 @@ func (client *Client) handle(ctx context.Context, message protocol.Inbound) {
 		client.dispatch(ctx, message.Run, message.Agent, message.Execution)
 	case "approval.decision":
 		client.applyApprovalDecision(message.Decision)
+	case "workspace.lease.confirmed":
+		client.confirmLease(message.RunID, message.LeaseID, message.Status)
+	case "workspace.cleanup":
+		go client.cleanupLease(ctx, message.RunID, message.Lease, message.Mode)
 	default:
 		log.Printf("ignore unknown control-plane message type %q", message.Type)
 	}
@@ -260,9 +296,12 @@ type admitTransport func(harnessID, transport, fallbackTransport string) error
 //
 // acp-v1 is accepted only when admit confirms that a verified adapter is available for the
 // harness, or that the dispatch and the operator both permit native fallback and the native CLI is
-// installed; a nil admit accepts no ACP run. A session binding to resume and a workspace lease to
-// provision remain unsupported.
-func unsupportedExecutionReason(run protocol.Run, execution *protocol.DispatchExecution, admit admitTransport) string {
+// installed; a nil admit accepts no ACP run. A session binding to resume remains unsupported.
+//
+// The final check is lease acceptance: a run naming a lease must arrive with exactly that lease's
+// grant, the grant must be well formed, name the run's own cwd (and, for a worktree, its task),
+// and use a policy this Barista's workspace manager can provision; a nil manager accepts no lease.
+func unsupportedExecutionReason(run protocol.Run, execution *protocol.DispatchExecution, admit admitTransport, workspaces *workspace.Manager) string {
 	transport := run.Transport
 	fallbackTransport := ""
 	if execution != nil {
@@ -292,8 +331,30 @@ func unsupportedExecutionReason(run protocol.Run, execution *protocol.DispatchEx
 	if run.SessionBindingID != "" || (execution != nil && execution.SessionBinding != nil) {
 		return "unsupported execution: session binding resume not available on this Barista"
 	}
-	if run.WorkspaceLeaseID != "" || (execution != nil && execution.WorkspaceLease != nil) {
-		return "unsupported execution: workspace lease provisioning not available on this Barista"
+	var lease *protocol.WorkspaceLeaseGrant
+	if execution != nil {
+		lease = execution.WorkspaceLease
+	}
+	if run.WorkspaceLeaseID != "" && (lease == nil || lease.ID != run.WorkspaceLeaseID) {
+		return "unsupported execution: the run's workspace lease grant is missing or names a different lease"
+	}
+	if lease == nil {
+		return ""
+	}
+	if lease.ID != run.WorkspaceLeaseID {
+		return "unsupported execution: the workspace lease grant does not belong to the run"
+	}
+	if err := lease.Validate(); err != nil {
+		return "unsupported execution: the workspace lease grant is malformed"
+	}
+	if workspaces == nil || !workspaces.Supports(lease.Policy) {
+		return fmt.Sprintf("unsupported execution: %s workspace leases are not available on this Barista", lease.Policy)
+	}
+	if run.Workspace != lease.WorktreePath {
+		return "unsupported execution: the run workspace is not its lease's isolated cwd"
+	}
+	if lease.Policy == protocol.WorkspaceIsolationGitWorktree && (execution.TaskID == "" || execution.TaskID != run.TaskID) {
+		return "unsupported execution: a worktree lease requires the run's task identity"
 	}
 	return ""
 }
@@ -309,7 +370,7 @@ func (client *Client) dispatch(ctx context.Context, run protocol.Run, agent prot
 	// The guard may re-verify an adapter executable's digest, so it runs before taking the run
 	// lock; its verdict is applied in the same place as before, after the tombstone and duplicate
 	// checks.
-	rejection := unsupportedExecutionReason(run, execution, client.admitTransport())
+	rejection := unsupportedExecutionReason(run, execution, client.admitTransport(), client.workspaces)
 	client.runsMu.Lock()
 	if _, cancelled := client.cancelled[run.ID]; cancelled {
 		client.runsMu.Unlock()
@@ -352,15 +413,26 @@ func (client *Client) dispatch(ctx context.Context, run protocol.Run, agent prot
 				client.send(protocol.Outbound{Type: "run.cancelled", RunID: run.ID, At: now()})
 			}
 		}()
-		workspace, err := harness.AuthorizeWorkspace(run.Workspace, client.config.WorkspaceRoots)
-		if err != nil {
-			client.send(protocol.Outbound{Type: "run.failed", RunID: run.ID, Error: err.Error(), At: now()})
-			return
+		var workspacePath string
+		if execution != nil && execution.WorkspaceLease != nil {
+			path, finish, ok := client.provisionLease(runContext, run, *execution)
+			if !ok {
+				return
+			}
+			defer finish()
+			workspacePath = path
+		} else {
+			authorized, err := harness.AuthorizeWorkspace(run.Workspace, client.config.WorkspaceRoots)
+			if err != nil {
+				client.send(protocol.Outbound{Type: "run.failed", RunID: run.ID, Error: err.Error(), At: now()})
+				return
+			}
+			workspacePath = authorized
 		}
 		if runContext.Err() != nil {
 			return
 		}
-		capability, err := client.bridge.Grant(run.ID, workspace, agent.CanDelegate)
+		capability, err := client.bridge.Grant(run.ID, workspacePath, agent.CanDelegate)
 		if err != nil {
 			client.send(protocol.Outbound{Type: "run.failed", RunID: run.ID, Error: err.Error(), At: now()})
 			return
@@ -371,7 +443,7 @@ func (client *Client) dispatch(ctx context.Context, run protocol.Run, agent prot
 		// run.started is sent only when the driver is about to hand the harness its prompt, after
 		// transport selection and, for ACP, after the adapter connected to the Coffee Shop MCP
 		// server; it carries that selection. Events produced before then are held by the session.
-		invocation := harness.Invocation{Run: run, Agent: agent, Workspace: workspace, MCP: capability, FallbackTransport: fallbackTransport, Output: func(chunk string) {
+		invocation := harness.Invocation{Run: run, Agent: agent, Workspace: workspacePath, MCP: capability, FallbackTransport: fallbackTransport, Output: func(chunk string) {
 			if runContext.Err() != nil {
 				return
 			}

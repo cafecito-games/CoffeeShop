@@ -21,6 +21,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/safepath"
 )
 
 // ApplyOptions configures one apply run. HTTPClient defaults to http.DefaultClient's transport
@@ -289,122 +291,12 @@ func stageAndInstall(dataRoot string, operation Operation, reader io.Reader, exp
 	}, nil
 }
 
-// ensureDirectoryWithinRoot walks from dataRoot down to directory one path component at a time,
-// using Lstat before ever trusting or creating a component: an existing symlink at any level is
-// refused, never followed and never replaced, and a missing component is created with a plain
-// Mkdir (which — unlike MkdirAll's Stat-based traversal — fails atomically against anything
-// already present, symlink or not, rather than silently walking through it) and then re-inspected
-// with Lstat immediately after creation to close the gap between the create call and trusting its
-// result. dataRoot itself is also confirmed to be a real, non-symlinked directory, so a symlinked
-// data root can never be used to pivot every containment check below it. The returned path is the
-// verified directory, safe to create a file inside via os.CreateTemp immediately afterward.
 func ensureDirectoryWithinRoot(dataRoot string, directory string) (string, error) {
-	if !filepath.IsAbs(dataRoot) || !filepath.IsAbs(directory) {
-		return "", errors.New("data root and target directory must be absolute paths")
-	}
-	cleanRoot := filepath.Clean(dataRoot)
-	cleanDirectory := filepath.Clean(directory)
-	if cleanDirectory != cleanRoot && !strings.HasPrefix(cleanDirectory, cleanRoot+string(filepath.Separator)) {
-		return "", errors.New("target directory escapes the data root")
-	}
-	rootInfo, err := os.Lstat(cleanRoot)
-	if err != nil {
-		return "", fmt.Errorf("inspect data root: %w", err)
-	}
-	if err := rejectUnsafeAncestor(cleanRoot, rootInfo); err != nil {
-		return "", err
-	}
-	relative := strings.TrimPrefix(cleanDirectory, cleanRoot)
-	relative = strings.TrimPrefix(relative, string(filepath.Separator))
-	current := cleanRoot
-	if relative == "" {
-		return current, nil
-	}
-	for _, component := range strings.Split(relative, string(filepath.Separator)) {
-		if component == "" || component == "." || component == ".." {
-			return "", errors.New("target directory path is malformed")
-		}
-		current = filepath.Join(current, component)
-		if err := ensureDirectoryComponent(current); err != nil {
-			return "", err
-		}
-	}
-	return current, nil
+	return safepath.EnsureDirectoryWithinRoot(dataRoot, directory, 0o755)
 }
 
-// verifyDirectoryWithinRoot performs the same component-by-component, symlink-refusing walk as
-// ensureDirectoryWithinRoot but never creates a missing component: a missing ancestor is treated
-// as "not safely usable" rather than an invitation to create it. Callers that must not mutate the
-// filesystem merely to check containment — rollback, in particular, which only ever deletes — use
-// this instead of the mutating variant.
 func verifyDirectoryWithinRoot(dataRoot string, directory string) (string, error) {
-	if !filepath.IsAbs(dataRoot) || !filepath.IsAbs(directory) {
-		return "", errors.New("data root and target directory must be absolute paths")
-	}
-	cleanRoot := filepath.Clean(dataRoot)
-	cleanDirectory := filepath.Clean(directory)
-	if cleanDirectory != cleanRoot && !strings.HasPrefix(cleanDirectory, cleanRoot+string(filepath.Separator)) {
-		return "", errors.New("target directory escapes the data root")
-	}
-	rootInfo, err := os.Lstat(cleanRoot)
-	if err != nil {
-		return "", fmt.Errorf("inspect data root: %w", err)
-	}
-	if err := rejectUnsafeAncestor(cleanRoot, rootInfo); err != nil {
-		return "", err
-	}
-	relative := strings.TrimPrefix(cleanDirectory, cleanRoot)
-	relative = strings.TrimPrefix(relative, string(filepath.Separator))
-	current := cleanRoot
-	if relative == "" {
-		return current, nil
-	}
-	for _, component := range strings.Split(relative, string(filepath.Separator)) {
-		if component == "" || component == "." || component == ".." {
-			return "", errors.New("target directory path is malformed")
-		}
-		current = filepath.Join(current, component)
-		information, err := os.Lstat(current)
-		if err != nil {
-			return "", fmt.Errorf("inspect directory ancestor %s: %w", current, err)
-		}
-		if err := rejectUnsafeAncestor(current, information); err != nil {
-			return "", err
-		}
-	}
-	return current, nil
-}
-
-// ensureDirectoryComponent verifies (or creates, then re-verifies) exactly one path component
-// against symlink substitution, factored out of ensureDirectoryWithinRoot so both the initial and
-// the pre-rename re-check walk identical logic.
-func ensureDirectoryComponent(current string) error {
-	information, err := os.Lstat(current)
-	switch {
-	case err == nil:
-		return rejectUnsafeAncestor(current, information)
-	case errors.Is(err, fs.ErrNotExist):
-		if mkdirErr := os.Mkdir(current, 0o755); mkdirErr != nil && !errors.Is(mkdirErr, fs.ErrExist) {
-			return fmt.Errorf("create directory ancestor %s: %w", current, mkdirErr)
-		}
-		information, err := os.Lstat(current)
-		if err != nil {
-			return fmt.Errorf("inspect directory ancestor %s after creating it: %w", current, err)
-		}
-		return rejectUnsafeAncestor(current, information)
-	default:
-		return fmt.Errorf("inspect directory ancestor %s: %w", current, err)
-	}
-}
-
-func rejectUnsafeAncestor(current string, information fs.FileInfo) error {
-	if information.Mode()&fs.ModeSymlink != 0 {
-		return fmt.Errorf("directory ancestor %s is a symlink", current)
-	}
-	if !information.IsDir() {
-		return fmt.Errorf("directory ancestor %s is not a directory", current)
-	}
-	return nil
+	return safepath.VerifyDirectoryWithinRoot(dataRoot, directory)
 }
 
 // openArchiveEntry locates the single declared executable entry in a downloaded, already

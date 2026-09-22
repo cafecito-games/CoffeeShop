@@ -31,6 +31,19 @@ export class ControlConnectionRegistry<Socket extends ControlSocket> {
 
   constructor(private readonly openReadyState: number) {}
 
+  /**
+   * Whether `socket` may register as `nodeId`. A node has at most one live connection: while the
+   * node's current socket is still open, another socket is refused rather than allowed to supersede
+   * it, because a second Barista process registered under the same node would otherwise report only
+   * its own active runs, and lost-attempt reconciliation and workspace cleanup computed from that
+   * list would act on work the first process is still running. Keepalive closes a half-open socket,
+   * after which a reconnecting Barista is admitted.
+   */
+  admits(nodeId: string, socket: Socket) {
+    const current = this.current(nodeId);
+    return current === undefined || current.socket === socket;
+  }
+
   register(nodeId: string, socket: Socket, protocolVersion: ControlProtocolVersion) {
     const previous = this.bySocket.get(socket);
     if (previous && this.byNode.get(previous.nodeId) === previous) this.byNode.delete(previous.nodeId);
