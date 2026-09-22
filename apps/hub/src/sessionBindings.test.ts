@@ -4,7 +4,7 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AcpAgentCapabilities, HarnessSessionBinding, HarnessSessionBindingUpdate, OrchestratorInbox, OrchestratorWake, OrchestratorWakeStatus, Run } from "@coffee-shop/protocol";
-import { fixtureAgent, fixtureRun, fixtureTime, orchestrationStore, rootRunId } from "./hubToolsTestSupport.js";
+import { fixtureAgent, fixtureNode, fixtureRun, fixtureTime, orchestrationStore, rootRunId } from "./hubToolsTestSupport.js";
 import { applyRunLifecycle, cancelRunInState } from "./lifecycle.js";
 import { dispatchMessageFor } from "./scheduler.js";
 import { acceptSessionBinding, retainedTerminalSessionBindings, sessionDispatchFor, settleSessionBindingsForTerminalRun, type SessionBindingOutcome } from "./sessionBindings.js";
@@ -18,6 +18,11 @@ const resumable: AcpAgentCapabilities = {
 };
 
 const runId = "run-binding";
+
+/** The orchestrator's node as it registers when its adapter negotiated resume. */
+const advertisingNodes = [fixtureNode("node-orchestrator", {
+  harnesses: [{ ...fixtureNode("node-orchestrator").harnesses[0], transports: ["native-cli", "acp-v1"], acp: resumable }]
+})];
 
 function acpRun(overrides: Partial<Run> = {}): Run {
   return fixtureRun(runId, "thread-one", "orchestrator", {
@@ -210,7 +215,7 @@ test("a terminal run settles its bindings: idle with capabilities only after a c
     name: string;
     lifecycle: Array<Parameters<typeof applyRunLifecycle>[1]>;
     cancel?: boolean;
-    expected: "idle" | "failed" | "unchanged";
+    expected: "idle" | "failed" | "closed";
   }> = [
     {
       name: "completed ACP turn",
@@ -226,7 +231,7 @@ test("a terminal run settles its bindings: idle with capabilities only after a c
         { type: "run.started", runId, at: later(1) },
         { type: "run.completed", runId, output: "Done", at: later(2) }
       ],
-      expected: "failed"
+      expected: "closed"
     },
     {
       name: "failed ACP turn",
@@ -247,7 +252,7 @@ test("a terminal run settles its bindings: idle with capabilities only after a c
         assert.equal(settled.status, "idle", scenario.name);
         assert.deepEqual(settled.capabilities, resumable, scenario.name);
       } else {
-        assert.equal(settled.status, "failed", scenario.name);
+        assert.equal(settled.status, scenario.expected, scenario.name);
       }
       return true;
     });
@@ -306,7 +311,7 @@ test("terminal bindings are pruned oldest first beyond the retained count and ac
 test("a dispatch carries the session binding only while the named binding is resumable", () => {
   const agent = fixtureAgent("orchestrator");
   const plainRun = acpRun();
-  const withoutBinding = sessionDispatchFor(plainRun, { sessionBindings: [binding()], orchestratorInboxes: [] });
+  const withoutBinding = sessionDispatchFor(plainRun, { sessionBindings: [binding()], orchestratorInboxes: [], nodes: advertisingNodes });
   assert.equal(withoutBinding.run, plainRun);
   assert.equal(withoutBinding.sessionBinding, undefined);
 
@@ -326,10 +331,10 @@ test("a dispatch carries the session binding only while the named binding is res
   ];
   for (const overrides of nonResumable) {
     const run = acpRun({ sessionBindingId: "session-one" });
-    const result = sessionDispatchFor(run, { sessionBindings: [binding(overrides)], orchestratorInboxes: [] });
+    const result = sessionDispatchFor(run, { sessionBindings: [binding(overrides)], orchestratorInboxes: [], nodes: advertisingNodes });
     assert.equal("sessionBindingId" in result.run, false, JSON.stringify(overrides));
     assert.equal(result.sessionBinding, undefined, JSON.stringify(overrides));
-    const message = dispatchMessageFor(run, agent, [agent], [], { sessionBindings: [binding(overrides)], orchestratorInboxes: [] });
+    const message = dispatchMessageFor(run, agent, [agent], [], { sessionBindings: [binding(overrides)], orchestratorInboxes: [], nodes: advertisingNodes });
     assert.equal(message.execution?.sessionBinding, undefined, JSON.stringify(overrides));
     assert.equal("sessionBindingId" in message.run, false, JSON.stringify(overrides));
   }
@@ -343,15 +348,15 @@ test("a dispatch carries the session binding only while the named binding is res
       status, createdAt: fixtureTime, updatedAt: fixtureTime
     }]
   });
-  const scheduled = sessionDispatchFor(run, { sessionBindings: [binding()], orchestratorInboxes: [wake("scheduled")] });
+  const scheduled = sessionDispatchFor(run, { sessionBindings: [binding()], orchestratorInboxes: [wake("scheduled")], nodes: advertisingNodes });
   assert.deepEqual(scheduled.sessionBinding, { id: "session-one", providerSessionId: "provider-one", resumePrompt: "resume prompt" });
-  const delivered = sessionDispatchFor(run, { sessionBindings: [binding()], orchestratorInboxes: [wake("delivered")] });
+  const delivered = sessionDispatchFor(run, { sessionBindings: [binding()], orchestratorInboxes: [wake("delivered")], nodes: advertisingNodes });
   assert.deepEqual(delivered.sessionBinding, { id: "session-one", providerSessionId: "provider-one" });
   assert.equal("sessionBindingId" in delivered.run, true);
-  assert.equal(dispatchMessageFor(run, agent, [agent], [], { sessionBindings: [binding()], orchestratorInboxes: [wake("scheduled")] }).execution?.sessionBinding?.resumePrompt, "resume prompt");
+  assert.equal(dispatchMessageFor(run, agent, [agent], [], { sessionBindings: [binding()], orchestratorInboxes: [wake("scheduled")], nodes: advertisingNodes }).execution?.sessionBinding?.resumePrompt, "resume prompt");
 
   const redispatched = sessionDispatchFor(acpRun({ sessionBindingId: "session-one" }), {
-    sessionBindings: [binding({ status: "active", lastRunId: runId })], orchestratorInboxes: []
+    sessionBindings: [binding({ status: "active", lastRunId: runId })], orchestratorInboxes: [], nodes: advertisingNodes
   });
   assert.equal(redispatched.sessionBinding?.id, "session-one");
 

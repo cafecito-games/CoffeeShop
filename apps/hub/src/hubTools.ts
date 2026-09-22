@@ -101,10 +101,12 @@ export function createHubToolHandler(environment: HubToolEnvironment) {
       }
       case "wait_for_task_events": {
         const cursor = typeof values === "object" && values !== null ? (values as { cursor?: unknown }).cursor : undefined;
-        // Checked synchronously first so a wait that proves nothing registers without yielding.
-        if (store.read((state) => orchestratorCursorAdvances(state, sourceRunId, cursor, "processed"))
-          && await persistOrchestratorCursor(store, sourceRunId, cursor, "processed")) environment.broadcast();
-        const result = await environment.waiters.wait(sourceRunId, values, signal);
+        // The cursor acknowledges processing only once the whole call is valid; checking first keeps a
+        // wait that proves nothing from yielding before it registers.
+        const acknowledgeCursor = () => store.read((state) => orchestratorCursorAdvances(state, sourceRunId, cursor, "processed"))
+          ? persistOrchestratorCursor(store, sourceRunId, cursor, "processed").then((changed) => { if (changed) environment.broadcast(); })
+          : undefined;
+        const result = await environment.waiters.wait(sourceRunId, values, signal, acknowledgeCursor);
         if (result.events.length && await persistOrchestratorCursor(store, sourceRunId, result.cursor, "delivered")) environment.broadcast();
         return result;
       }

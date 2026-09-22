@@ -352,7 +352,7 @@ func unsupportedExecutionReason(run protocol.Run, execution *protocol.DispatchEx
 			return "unsupported execution: the session binding is malformed"
 		}
 		if resume == nil || resume(run.HarnessID) != nil {
-			return "unsupported execution: session resume not available for this harness on this Barista"
+			return protocol.SessionResumeUnavailableReason
 		}
 	}
 	var lease *protocol.WorkspaceLeaseGrant

@@ -765,6 +765,11 @@ export interface OrchestratorWake {
   status: OrchestratorWakeStatus;
   /** For a failed wake: whether its prompt may have reached the orchestrator. */
   failedAfterDelivery?: boolean;
+  /**
+   * Barista refused the dispatch only because its adapter cannot resume sessions; the binding stays
+   * idle, is never requested again, and the range is retried at once with a new session.
+   */
+  resumeRefused?: boolean;
   createdAt: string;
   updatedAt: string;
 }

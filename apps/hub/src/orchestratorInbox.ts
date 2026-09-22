@@ -5,7 +5,6 @@ import {
   isTerminalTaskStatus,
   orchestratorContinuationLimits as limits,
   type Agent,
-  type ComputeNode,
   type HarnessSessionBinding,
   type OrchestratorInbox,
   type OrchestratorSessionOutcome,
@@ -18,7 +17,7 @@ import { cancelRunInState } from "./lifecycle.js";
 import { decodeTaskEventCursor, resolveCaller } from "./mailbox.js";
 import { continuationPrompts } from "./orchestratorContext.js";
 import { dispatchMessageFor, placeTask, type SchedulingContext } from "./scheduler.js";
-import { hasResumeCapability } from "./sessionBindings.js";
+import { hasResumeCapability, nodeAdvertisesResume, sessionResumeUnavailableReason } from "./sessionBindings.js";
 import { newEvent, type State, type Store } from "./store.js";
 import { taskEventsAfter, taskEventStream, type TaskEventEntry } from "./taskEvents.js";
 
@@ -152,6 +151,11 @@ export function reconcileOrchestratorInboxes(state: State, at: string) {
         wake.status = "completed";
         inbox.consecutiveFailures = 0;
         delete inbox.retryAfter;
+      } else if (run.status === "failed" && run.startedAt === undefined && wake.requestedSessionBindingId !== undefined
+        && run.error === sessionResumeUnavailableReason) {
+        wake.status = "failed";
+        wake.failedAfterDelivery = false;
+        wake.resumeRefused = true;
       } else {
         wake.status = "failed";
         wake.failedAfterDelivery = run.startedAt !== undefined;
@@ -185,8 +189,6 @@ function continuationTask(thread: Thread, at: string): Task {
   };
 }
 
-const nodeAdvertisesResume = (node: ComputeNode | undefined, harnessId: string) =>
-  hasResumeCapability(node?.harnesses.find((harness) => harness.id === harnessId && harness.available)?.acp);
 
 /**
  * The newest idle binding a continuation may resume: same thread, agent, node, harness, ACP
@@ -197,11 +199,12 @@ export function resumableOrchestratorBinding(state: Readonly<State>, thread: Thr
   if (run.transport !== "acp-v1") return undefined;
   const node = state.nodes.find((item) => item.id === run.nodeId);
   if (!nodeAdvertisesResume(node, run.harnessId)) return undefined;
+  const refused = new Set((inboxFor(state, thread.id)?.wakes ?? []).filter((wake) => wake.resumeRefused).map((wake) => wake.requestedSessionBindingId));
   const inUse = new Set(state.runs.filter((item) => isActiveRunStatus(item.status) && item.sessionBindingId !== undefined).map((item) => item.sessionBindingId!));
   return (state.sessionBindings ?? [])
     .filter((binding: HarnessSessionBinding) => binding.threadId === thread.id && binding.agentId === run.agentId && binding.nodeId === run.nodeId
       && binding.harnessId === run.harnessId && binding.transport === "acp-v1" && binding.workspace === run.workspace
-      && binding.workspaceLeaseId === undefined && binding.status === "idle" && hasResumeCapability(binding.capabilities) && !inUse.has(binding.id))
+      && binding.workspaceLeaseId === undefined && binding.status === "idle" && hasResumeCapability(binding.capabilities) && !inUse.has(binding.id) && !refused.has(binding.id))
     .sort((left, right) => (left.updatedAt < right.updatedAt ? 1 : left.updatedAt > right.updatedAt ? -1 : left.id < right.id ? 1 : -1))[0];
 }
 

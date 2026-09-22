@@ -471,7 +471,12 @@ export class TaskEventWaiters {
     return total;
   }
 
-  async wait(sourceRunId: string, argumentsValue: unknown, signal?: AbortSignal): Promise<TaskEventWaitResult> {
+  /**
+   * `accepted`, when given, runs once every argument, the cursor, and any acknowledgements have
+   * been validated and applied, before the wait blocks; a call that fails validation never reaches
+   * it. It may return a promise to await, or undefined to continue without yielding.
+   */
+  async wait(sourceRunId: string, argumentsValue: unknown, signal?: AbortSignal, accepted?: () => Promise<unknown> | undefined): Promise<TaskEventWaitResult> {
     const request = normalizeWait(argumentsValue);
     const evaluate = (state: Readonly<State>) => {
       const caller = resolveCaller(state, sourceRunId);
@@ -486,7 +491,12 @@ export class TaskEventWaiters {
         return acknowledgeMessages(state, caller, request.acknowledgeMessageIds, new Date().toISOString()) > 0;
       });
     }
-    const first = this.store.read(evaluate);
+    let first = this.store.read(evaluate);
+    const acceptance = accepted?.();
+    if (acceptance) {
+      await acceptance;
+      first = this.store.read(evaluate);
+    }
     if (first.page.events.length || request.timeoutMilliseconds === 0 || signal?.aborted) {
       return { ...first.page, timedOut: first.page.events.length === 0 };
     }

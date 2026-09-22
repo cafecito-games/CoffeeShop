@@ -3,6 +3,7 @@ import {
   containsSecretLikeValue,
   isTerminalSessionBindingStatus,
   type AcpAgentCapabilities,
+  type ComputeNode,
   type DispatchExecution,
   type HarnessSessionBinding,
   type HarnessSessionBindingUpdate,
@@ -33,6 +34,24 @@ export type SessionBindingOutcome =
 export const hasResumeCapability = (capabilities: AcpAgentCapabilities | undefined) =>
   capabilities !== undefined && (capabilities.resumeSession || capabilities.loadSession);
 
+/** Whether the node's current registered inventory advertises resume or load for the harness. */
+export const nodeAdvertisesResume = (node: ComputeNode | undefined, harnessId: string) =>
+  hasResumeCapability(node?.harnesses.find((harness) => harness.id === harnessId && harness.available)?.acp);
+
+/**
+ * The exact dispatch rejection Barista sends when its adapter did not negotiate resume or load;
+ * mirrored by Barista's `protocol.SessionResumeUnavailableReason`.
+ */
+export const sessionResumeUnavailableReason = "unsupported execution: session resume not available for this harness on this Barista";
+
+/** Only a thread owner's non-task run can be continued later; every other session ends with its run. */
+const isContinuable = (state: Readonly<State>, run: Run) =>
+  run.taskId === undefined && state.threads?.some((thread) => thread.id === run.threadId && thread.ownerAgentId === run.agentId) === true;
+
+const sameContext = (left: HarnessSessionBinding, right: HarnessSessionBinding) =>
+  left.threadId === right.threadId && left.agentId === right.agentId && left.nodeId === right.nodeId && left.harnessId === right.harnessId
+  && left.transport === right.transport && left.workspace === right.workspace && left.workspaceLeaseId === right.workspaceLeaseId;
+
 /** Whether a binding belongs to exactly the execution context of `run`. */
 export function bindingMatchesRun(binding: HarnessSessionBinding, run: Run) {
   return binding.threadId === run.threadId
@@ -57,6 +76,8 @@ export function isResumableFor(binding: HarnessSessionBinding, run: Run) {
 }
 
 export interface SessionDispatchSource {
+  /** The nodes' current registered inventory; a binding is resumed only while its node advertises resume or load. */
+  nodes?: readonly ComputeNode[];
   sessionBindings?: readonly HarnessSessionBinding[];
   orchestratorInboxes?: readonly OrchestratorInbox[];
 }
@@ -70,7 +91,8 @@ export interface SessionDispatchSource {
 export function sessionDispatchFor(run: Run, source: SessionDispatchSource): { run: Run; sessionBinding?: DispatchExecution["sessionBinding"] } {
   if (run.sessionBindingId === undefined) return { run };
   const binding = source.sessionBindings?.find((item) => item.id === run.sessionBindingId);
-  if (!binding || !isResumableFor(binding, run)) {
+  const node = source.nodes?.find((item) => item.id === run.nodeId);
+  if (!binding || !isResumableFor(binding, run) || !nodeAdvertisesResume(node, run.harnessId)) {
     const { sessionBindingId: _omitted, ...withoutBinding } = run;
     return { run: withoutBinding };
   }
@@ -192,10 +214,13 @@ export async function receiveSessionBinding(store: Store, nodeId: string, runId:
 
 /**
  * Settles session bindings when a run becomes terminal, in the same transaction. A session whose
- * run completed its ACP turn becomes `idle` with the capabilities that run negotiated, so a later
- * continuation may resume it; any other ending fails it. A binding a run asked to resume but that
- * failed before its prompt is failed too, so the next continuation replaces it instead of asking
- * again.
+ * thread-owner, non-task run completed its ACP turn becomes `idle` with the capabilities that run
+ * negotiated, so a later continuation may resume it, and any older idle binding in the same context
+ * is closed, keeping at most one resumable session per context. A session of any other run, such as
+ * a task attempt, can never be continued and is `closed`; any other ending fails it. A binding a
+ * run asked to resume but that failed before its prompt is failed too, so the next continuation
+ * replaces it, except when Barista refused only because its adapter cannot resume: the session
+ * itself is intact and stays idle.
  */
 export function settleSessionBindingsForTerminalRun(state: State, runId: string, at: string) {
   const run = state.runs.find((item) => item.id === runId);
@@ -203,17 +228,26 @@ export function settleSessionBindingsForTerminalRun(state: State, runId: string,
   for (const binding of state.sessionBindings ?? []) {
     if (binding.lastRunId === runId && binding.status === "active") {
       const capabilities = run.transportSelection?.selectedTransport === "acp-v1" ? run.transportSelection.acp : undefined;
-      if (run.status === "completed" && capabilities) {
+      if (run.status === "completed" && capabilities && isContinuable(state, run)) {
         binding.status = "idle";
         binding.capabilities = structuredClone(capabilities);
+        for (const older of state.sessionBindings ?? []) {
+          if (older !== binding && older.status === "idle" && sameContext(older, binding)) {
+            older.status = "closed";
+            older.updatedAt = at;
+          }
+        }
+      } else if (run.status === "completed") {
+        binding.status = "closed";
       } else {
         binding.status = "failed";
       }
       binding.updatedAt = at;
     } else if (binding.id === run.sessionBindingId && binding.status === "idle" && binding.lastRunId !== runId
-      && run.status === "failed" && run.startedAt === undefined) {
+      && run.status === "failed" && run.startedAt === undefined && run.error !== sessionResumeUnavailableReason) {
       binding.status = "failed";
       binding.updatedAt = at;
     }
   }
+  pruneSettledSessionBindings(state);
 }

@@ -97,6 +97,12 @@ type AcpAgentCapabilities struct {
 // of truth: the bound on the delivery-only prompt sent to a resumed session.
 const SessionResumePromptMaximumBytes = 64 * 1024
 
+// SessionResumeUnavailableReason is the exact run.failed error for a dispatch refused only because
+// the harness's adapter did not negotiate session resume or load; the hub recognizes it and retries
+// with a new session instead of failing the binding. It mirrors sessionResumeUnavailableReason in
+// the hub.
+const SessionResumeUnavailableReason = "unsupported execution: session resume not available for this harness on this Barista"
+
 // DispatchSessionBinding asks Barista to resume an existing provider session. ResumePrompt, when
 // set, replaces the run prompt for a session that actually resumed; a session that could not be
 // resumed is replaced by a new one that receives the run prompt.

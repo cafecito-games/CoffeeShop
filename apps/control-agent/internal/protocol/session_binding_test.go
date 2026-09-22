@@ -119,3 +119,13 @@ func TestSessionResumePromptMaximumBytesMatchesTypeScriptSourceOfTruth(t *testin
 	}
 	require.Equal(t, SessionResumePromptMaximumBytes, product)
 }
+
+var resumeUnavailablePattern = regexp.MustCompile(`(?m)^export const sessionResumeUnavailableReason = "([^"]+)";`)
+
+func TestSessionResumeUnavailableReasonMatchesTheHub(t *testing.T) {
+	source, err := os.ReadFile(filepath.Join("..", "..", "..", "hub", "src", "sessionBindings.ts"))
+	require.NoError(t, err)
+	match := resumeUnavailablePattern.FindSubmatch(source)
+	require.NotNil(t, match, "sessionResumeUnavailableReason must be declared in the hub")
+	require.Equal(t, string(match[1]), SessionResumeUnavailableReason)
+}
