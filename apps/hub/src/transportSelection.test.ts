@@ -242,7 +242,10 @@ test("run.started records the approval policy the run executed under", () => {
   const unrecognized = lifecycleState({ transport: "acp-v1" });
   const malformed = { ...acpReportedSelection, approvalPolicy: "yolo" } as unknown as RunTransportSelection;
   assert.equal(applyRunLifecycle(unrecognized, { type: "run.started", runId: "run-one", at, transport: malformed }), true);
-  assert.equal(unrecognized.runs[0].transportSelection, undefined);
+  const recorded = unrecognized.runs[0].transportSelection;
+  assert.equal(recorded?.selectedTransport, acpReportedSelection.selectedTransport, "the rest of the selection is kept");
+  assert.equal(recorded?.approvalPolicy, undefined);
+  assert.equal(recorded?.approvalPolicyUnrecognized, true);
 });
 
 test("run.started announces a permitted fallback to the native CLI", () => {

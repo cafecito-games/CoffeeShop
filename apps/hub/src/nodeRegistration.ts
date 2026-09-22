@@ -3,7 +3,8 @@ import { isApprovalPolicy, type ComputeNode, type HarnessProfile } from "@coffee
 /**
  * The node record the hub persists when a Barista registers. A harness approval policy is the node
  * administrator's declaration and is recorded exactly as reported; a value this hub does not
- * recognize is dropped so it can never be displayed as anything other than the `manual` default.
+ * recognize is replaced by the `approvalPolicyUnrecognized` marker so it is never displayed as the
+ * `manual` default.
  */
 export function registeredComputeNode(reported: ComputeNode, at: string): ComputeNode {
   const harnesses = Array.isArray(reported.harnesses) ? reported.harnesses.map(registeredHarness) : [];
@@ -11,7 +12,8 @@ export function registeredComputeNode(reported: ComputeNode, at: string): Comput
 }
 
 function registeredHarness(harness: HarnessProfile): HarnessProfile {
-  if (typeof harness !== "object" || harness === null || harness.approvalPolicy === undefined || isApprovalPolicy(harness.approvalPolicy)) return harness;
-  const { approvalPolicy: _unrecognized, ...rest } = harness;
-  return rest;
+  if (typeof harness !== "object" || harness === null) return harness;
+  const { approvalPolicyUnrecognized: _hubOnly, approvalPolicy, ...rest } = harness;
+  if (approvalPolicy === undefined) return rest;
+  return isApprovalPolicy(approvalPolicy) ? { ...rest, approvalPolicy } : { ...rest, approvalPolicyUnrecognized: true };
 }

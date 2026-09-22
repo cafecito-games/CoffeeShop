@@ -3,6 +3,7 @@ import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { RunActivityPanel } from "../orchestration/RunActivityPanel.js";
 import { ApprovalPolicyBadge } from "./ApprovalPolicyBadge.js";
+import { HarnessFacts } from "./ComputeFacts.js";
 import { ComputeView } from "./ComputeView.js";
 
 function harness(id: HarnessProfile["id"], label: string, approvalPolicy?: HarnessProfile["approvalPolicy"]): HarnessProfile {
@@ -26,6 +27,8 @@ describe("approval policy badge", () => {
       rerender(<ApprovalPolicyBadge policy={policy} />);
       expect(container).toBeEmptyDOMElement();
     }
+    rerender(<ApprovalPolicyBadge policy={undefined} unrecognized />);
+    expect(screen.getByText("Unrecognized approval policy")).toHaveClass("approval-policy-unrecognized");
   });
 
   it("marks relaxed harnesses in the compute view and leaves manual ones unmarked", () => {
@@ -49,10 +52,25 @@ describe("approval policy badge", () => {
     rerender(<RunActivityPanel transportSelection={{ ...selection, approvalPolicy: "auto" }} approvals={[]} />);
     expect(screen.getByText("Auto approvals")).toBeInTheDocument();
 
+    rerender(<RunActivityPanel transportSelection={{ requestedTransport: "acp-v1", selectedTransport: "acp-v1", approvalPolicyUnrecognized: true }} approvals={[]} />);
+    expect(screen.getByText("Unrecognized approval policy")).toBeInTheDocument();
+
     for (const approvalPolicy of ["manual", undefined] as const) {
       rerender(<RunActivityPanel transportSelection={{ requestedTransport: "acp-v1", selectedTransport: "acp-v1", ...(approvalPolicy ? { approvalPolicy } : {}) }} approvals={[]} />);
       expect(screen.queryByText("Approval policy")).not.toBeInTheDocument();
       expect(screen.queryByText(/Approvals bypassed|Auto approvals/)).not.toBeInTheDocument();
     }
+  });
+
+  it("shows the approval policy row only for harnesses the policy governs", () => {
+    const { rerender } = render(<HarnessFacts harness={harness("claude-cli", "Claude")} />);
+    expect(screen.getByText("Approval policy")).toBeInTheDocument();
+    expect(screen.getByText("Manual")).toBeInTheDocument();
+
+    rerender(<HarnessFacts harness={{ ...harness("codex-cli", "Codex"), approvalPolicyUnrecognized: true }} />);
+    expect(screen.getByText("Unrecognized approval policy")).toBeInTheDocument();
+
+    rerender(<HarnessFacts harness={harness("shell", "Shell")} />);
+    expect(screen.queryByText("Approval policy")).not.toBeInTheDocument();
   });
 });

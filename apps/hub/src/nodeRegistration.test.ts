@@ -32,11 +32,17 @@ test("registration records each harness's reported approval policy and marks the
   assert.equal(Object.hasOwn(node.harnesses[2], "approvalPolicy"), false, "an older Barista's profile stays unchanged");
 });
 
-test("registration drops an approval policy this hub does not recognize", () => {
+test("registration marks an approval policy this hub does not recognize instead of showing manual", () => {
   const unrecognized = { ...harness("codex-cli"), approvalPolicy: "yolo" } as unknown as HarnessProfile;
   const node = registeredComputeNode(reportedNode([unrecognized]), at);
   assert.equal(Object.hasOwn(node.harnesses[0], "approvalPolicy"), false);
+  assert.equal(node.harnesses[0].approvalPolicyUnrecognized, true);
   assert.equal(node.harnesses[0].id, "codex-cli");
+});
+
+test("registration ignores an unrecognized-policy marker reported by Barista", () => {
+  const node = registeredComputeNode(reportedNode([harness("claude-cli", { approvalPolicyUnrecognized: true })]), at);
+  assert.equal(Object.hasOwn(node.harnesses[0], "approvalPolicyUnrecognized"), false);
 });
 
 test("a registered approval policy persists and loads again", async () => {

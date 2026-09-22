@@ -186,3 +186,86 @@ func TestClaudeACPBypassFailsClosedWhenTheAdapterDoesNotOfferIt(t *testing.T) {
 	require.Empty(t, run.selections, "the prompt was never sent")
 	require.Nil(t, acptest.ReceivedMethod(t, run.record, "session/set_config_option"), "no weaker or different mode was selected instead")
 }
+
+func TestACPCapabilityFallbackKeepsTheApprovalPolicyOnTheNativeCLI(t *testing.T) {
+	claudeOutput := `{"type":"result","result":"native done"}`
+	codexOutput := `{"type":"item.completed","item":{"type":"agent_message","text":"native done"}}`
+	tests := []struct {
+		name      string
+		harnessID string
+		policy    string
+		scenario  string
+		required  []string
+		forbidden []string
+	}{
+		{
+			name: "claude bypass not offered", harnessID: "claude-cli", policy: protocol.ApprovalPolicyBypass, scenario: "claude-no-bypass",
+			required: []string{"--permission-mode\nbypassPermissions\n", "--permission-prompts\nnone\n"},
+		},
+		{
+			name: "claude bypass without config options", harnessID: "claude-cli", policy: protocol.ApprovalPolicyBypass, scenario: "claude-no-config-options",
+			required: []string{"--permission-mode\nbypassPermissions\n", "--permission-prompts\nnone\n"},
+		},
+		{
+			name: "claude auto without config options", harnessID: "claude-cli", policy: protocol.ApprovalPolicyAuto, scenario: "claude-no-config-options",
+			required:  []string{"--permission-mode\nauto\n", "--permission-prompts\nnone\n"},
+			forbidden: []string{"bypassPermissions"},
+		},
+		{
+			name: "codex bypass without config options", harnessID: "codex-cli", policy: protocol.ApprovalPolicyBypass, scenario: "codex-no-config-options",
+			required:  []string{"exec\n--json\n--dangerously-bypass-approvals-and-sandbox\n"},
+			forbidden: []string{"--sandbox\n"},
+		},
+		{
+			name: "codex auto without config options", harnessID: "codex-cli", policy: protocol.ApprovalPolicyAuto, scenario: "codex-no-config-options",
+			required:  []string{"exec\n--json\n--sandbox\nworkspace-write\n"},
+			forbidden: []string{"--dangerously-bypass-approvals-and-sandbox"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			policies := ApprovalPolicies{test.harnessID: test.policy}
+			var result string
+			var err error
+			var selections []protocol.RunTransportSelection
+			var record string
+			if test.harnessID == "claude-cli" {
+				native, arguments := argumentRecordingNative(t, "claude-cli", claudeOutput)
+				record = arguments
+				run := executeClaude(t, claudeRunOptions{
+					scenario: test.scenario, model: "default", approvalPolicies: policies,
+					native: []protocol.HarnessProfile{native}, fallbackTransport: TransportNative, operatorFallback: true,
+				})
+				result, err, selections = run.result, run.err, run.selections
+				require.Nil(t, acptest.ReceivedMethod(t, run.record, "session/prompt"))
+			} else {
+				native, arguments := argumentRecordingNative(t, "codex-cli", codexOutput)
+				record = arguments
+				run := executeCodex(t, codexRunOptions{
+					scenario: test.scenario, model: "default", approvalPolicies: policies,
+					native: []protocol.HarnessProfile{native}, fallbackTransport: TransportNative, operatorFallback: true,
+				})
+				result, err, selections = run.result, run.err, run.selections
+				require.Nil(t, acptest.ReceivedMethod(t, run.record, "session/prompt"))
+			}
+
+			require.NoError(t, err)
+			require.Equal(t, "native done", result)
+			require.Len(t, selections, 1)
+			require.Equal(t, TransportACP, selections[0].RequestedTransport)
+			require.Equal(t, TransportNative, selections[0].SelectedTransport)
+			require.Equal(t, protocol.FallbackACPCapabilityMissing, selections[0].FallbackReason)
+			require.Equal(t, test.policy, selections[0].ApprovalPolicy)
+			require.NoError(t, selections[0].Validate())
+
+			recorded, readError := os.ReadFile(record)
+			require.NoError(t, readError)
+			for _, required := range test.required {
+				require.Contains(t, string(recorded), required)
+			}
+			for _, forbidden := range test.forbidden {
+				require.NotContains(t, string(recorded), forbidden)
+			}
+		})
+	}
+}

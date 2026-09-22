@@ -1,5 +1,5 @@
 import type { ComputeNode, HarnessProfile } from "@coffee-shop/protocol";
-import { ApprovalPolicyBadge } from "./ApprovalPolicyBadge.js";
+import { ApprovalPolicyBadge, approvalPolicyHarnessIds, isRelaxedOrUnrecognizedPolicy } from "./ApprovalPolicyBadge.js";
 
 function text(value: unknown, fallback = "Unavailable"): string {
   return typeof value === "string" && value.trim() ? value : fallback;
@@ -44,7 +44,7 @@ export function HarnessFacts({ harness, children }: { harness: HarnessProfile; c
         <div><dt>Binary</dt><dd><code>{text(harness.binary, "Not reported")}</code></dd></div>
         <div><dt>Authentication</dt><dd>{text(harness.authMode, "Unrecognized")}</dd></div>
         <div><dt>Models</dt><dd>{list(harness.models, "No models reported").join(" · ")}</dd></div>
-        <div><dt>Approval policy</dt><dd>{harness.approvalPolicy === "auto" || harness.approvalPolicy === "bypass" ? <ApprovalPolicyBadge policy={harness.approvalPolicy} /> : "Manual"}</dd></div>
+        {approvalPolicyHarnessIds.includes(harness.id) && <div><dt>Approval policy</dt><dd>{isRelaxedOrUnrecognizedPolicy(harness.approvalPolicy, harness.approvalPolicyUnrecognized) ? <ApprovalPolicyBadge policy={harness.approvalPolicy} unrecognized={harness.approvalPolicyUnrecognized} /> : "Manual"}</dd></div>}
       </dl>
       {children}
     </article>

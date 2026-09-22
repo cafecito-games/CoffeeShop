@@ -38,6 +38,11 @@ export interface HarnessProfile {
   acp?: AcpAgentCapabilities;
   /** The node administrator's approval policy for this harness; absent means `manual`. Read-only to the hub. */
   approvalPolicy?: ApprovalPolicy;
+  /**
+   * Set by the hub, never by Barista, when the reported approval policy is one this hub does not
+   * recognize; the harness may be running with relaxed approvals and must not be shown as `manual`.
+   */
+  approvalPolicyUnrecognized?: boolean;
 }
 
 export interface ComputeNode {
@@ -447,6 +452,8 @@ export interface RunTransportSelection {
   acp?: AcpAgentCapabilities;
   /** The node approval policy the run executed under; absent means `manual`. */
   approvalPolicy?: ApprovalPolicy;
+  /** Set by the hub, never by Barista, when the run reported an approval policy this hub does not recognize. */
+  approvalPolicyUnrecognized?: boolean;
 }
 
 /*

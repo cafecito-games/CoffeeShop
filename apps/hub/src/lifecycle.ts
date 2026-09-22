@@ -1,6 +1,7 @@
 import {
   canTransitionRun,
   isActiveRunStatus,
+  isApprovalPolicy,
   isTerminalTaskStatus,
   supportsControlCapability,
   validateRunTransportSelection,
@@ -245,9 +246,18 @@ export async function cancelPersistedTask(
  * run permitted that fallback.
  */
 export function acceptedTransportSelection(run: Run, reported: unknown): RunTransportSelection | undefined {
+  // An approval policy from a newer Barista must not discard the rest of the selection, nor be shown
+  // as the manual default: it is recorded as unrecognized instead.
+  let unrecognizedPolicy = false;
+  const reportedPolicy = typeof reported === "object" && reported !== null ? (reported as { approvalPolicy?: unknown }).approvalPolicy : undefined;
+  if (reportedPolicy !== undefined && !isApprovalPolicy(reportedPolicy)) {
+    const { approvalPolicy: _unrecognized, ...rest } = reported as Record<string, unknown>;
+    reported = rest;
+    unrecognizedPolicy = true;
+  }
   const validated = validateRunTransportSelection(reported);
   if (!validated.ok) return undefined;
-  const selection = validated.value;
+  const selection: RunTransportSelection = unrecognizedPolicy ? { ...validated.value, approvalPolicyUnrecognized: true } : validated.value;
   if (selection.requestedTransport !== (run.transport ?? "native-cli")) return undefined;
   if (selection.selectedTransport !== selection.requestedTransport && run.fallbackTransport !== selection.selectedTransport) return undefined;
   return selection;
