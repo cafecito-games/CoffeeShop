@@ -28,7 +28,14 @@ func BuildCapabilityReport(ctx context.Context, cfg config.Config, harnesses []p
 		runtimeEvidence("logical-cpu-count", strconv.Itoa(runtime.NumCPU()), observedAt),
 		workspaceWritableEvidence(cfg.WorkspaceRoots, observedAt),
 	)
+	// Barista config validation already rejects a secret-like label or accelerator at startup
+	// (see config.Parse), so this should never trigger in practice. It is kept as defense in
+	// depth, using the same detector probe output is screened with, so a value that somehow
+	// bypassed config validation is still never forwarded to the hub.
 	for _, label := range cfg.Labels {
+		if looksSecretLike(label) {
+			continue
+		}
 		evidence = append(evidence, protocol.NodeCapabilityEvidence{
 			CapabilityID:    "label:" + label,
 			Source:          protocol.CapabilityEvidenceSourceConfigured,
@@ -38,6 +45,9 @@ func BuildCapabilityReport(ctx context.Context, cfg config.Config, harnesses []p
 		})
 	}
 	for _, accelerator := range cfg.Accelerators {
+		if looksSecretLike(accelerator) {
+			continue
+		}
 		evidence = append(evidence, protocol.NodeCapabilityEvidence{
 			CapabilityID:    "accelerator:" + accelerator,
 			Source:          protocol.CapabilityEvidenceSourceConfigured,

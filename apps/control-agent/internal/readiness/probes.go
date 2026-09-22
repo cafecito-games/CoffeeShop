@@ -19,20 +19,11 @@ const (
 	probeMaxOutputBytes = 4096
 )
 
-/*
- * Secret-like value detection, mirroring the narrow denylist in packages/protocol/src/index.ts
- * (vendor token prefixes, a bearer header, a PEM private key marker). Probe stdout/stderr is
- * free-form process output, not a discrete field, so a token can appear embedded in a longer
- * line; the patterns are unanchored (with word boundaries) for that reason, matching the shared
- * TypeScript implementation exactly.
- */
-var secretLikeTokenPattern = regexp.MustCompile(`(?i)\b(sk|pk|ghp|gho|ghu|ghs|ghr|xox[abp]|AKIA|glpat)-?[A-Za-z0-9_-]{10,}\b`)
-var bearerHeaderPattern = regexp.MustCompile(`(?i)\bBearer\s+\S{10,}`)
-
+// looksSecretLike delegates to the single Go-side secret-detection definition in
+// internal/protocol, so probe redaction and every other Go caller (config validation, evidence
+// screening) can never drift apart on what counts as secret-like.
 func looksSecretLike(text string) bool {
-	return secretLikeTokenPattern.MatchString(text) ||
-		bearerHeaderPattern.MatchString(text) ||
-		(strings.Contains(text, "-----BEGIN") && strings.Contains(text, "PRIVATE KEY"))
+	return protocol.LooksSecretLike(text)
 }
 
 // probeDefinitionVersion identifies the current compile-time definition of every probe below.

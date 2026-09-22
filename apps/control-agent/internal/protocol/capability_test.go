@@ -258,3 +258,36 @@ func TestCapabilityVocabulariesMatchTheTypeScriptSourceOfTruth(t *testing.T) {
 	require.Regexp(t, `^[a-z0-9]+(-[a-z0-9]+)*(:[a-z0-9]+(-[a-z0-9]+)*)?$`, "toolchain:xcode")
 	require.Regexp(t, `^[a-z0-9]+(-[a-z0-9]+)*$`, "cafecito-ios")
 }
+
+func TestLooksSecretLikeMatchesTheNarrowDenylist(t *testing.T) {
+	for _, flagged := range []string{
+		"sk-abcdefghij1234567890",
+		"pk_test_1234567890abcdef",
+		"ghp_abcdefghij1234",
+		"xoxb-1234567890abcdef",
+		"AKIAIOSFODNN7EXAMPLE",
+		"glpat-abcdefghij1234",
+		"Bearer abcdefghijklmnop",
+		"-----BEGIN RSA PRIVATE KEY-----",
+		"build failed: token sk-abcdefghij1234567890 was rejected",
+	} {
+		require.True(t, LooksSecretLike(flagged), "%q must be flagged", flagged)
+	}
+	for _, clean := range []string{
+		"go version go1.24.0 darwin/arm64",
+		"git version 2.43.0",
+		"gpu",
+		"cafecito-ios",
+	} {
+		require.False(t, LooksSecretLike(clean), "%q must not be flagged", clean)
+	}
+}
+
+func TestLabelOrAcceleratorGrammarAndBoundMirrorTheEvidenceValueLimit(t *testing.T) {
+	require.Equal(t, normalizedValueBytes, LabelOrAcceleratorMaximumBytes)
+	require.True(t, LabelOrAcceleratorPattern.MatchString("gpu"))
+	require.True(t, LabelOrAcceleratorPattern.MatchString("apple-m3-max"))
+	require.False(t, LabelOrAcceleratorPattern.MatchString("GPU"))
+	require.False(t, LabelOrAcceleratorPattern.MatchString("gpu runner"))
+	require.False(t, LabelOrAcceleratorPattern.MatchString("label:ci"), "a label value must not itself contain the capability id's colon suffix")
+}

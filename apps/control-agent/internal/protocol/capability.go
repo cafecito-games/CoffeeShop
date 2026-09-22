@@ -30,6 +30,36 @@ const (
 var capabilityIDPattern = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*(:[a-z0-9]+(-[a-z0-9]+)*)?$`)
 var projectIDPattern = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
 
+// LabelOrAcceleratorMaximumBytes bounds a node-admin configured label or accelerator. It mirrors
+// capabilityEvidenceLimits.normalizedValueBytes (and this file's own normalizedValueBytes) in the
+// TypeScript source of truth, because readiness.BuildCapabilityReport embeds every label and
+// accelerator verbatim into a NodeCapabilityEvidence.NormalizedValue, which that limit bounds.
+// This is the single Go-side definition Barista's config validation and any other Go caller must
+// reference rather than mirror separately.
+const LabelOrAcceleratorMaximumBytes = normalizedValueBytes
+
+// LabelOrAcceleratorPattern is the kebab-case grammar a configured label or accelerator must
+// satisfy. It is also embedded as the suffix segment of a capability id
+// ("label:<value>"/"accelerator:<value>"), so it must match the same shape capabilityIDPattern
+// requires for that segment; this is the single Go-side definition of that grammar.
+var LabelOrAcceleratorPattern = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
+
+/*
+ * Secret-like value detection, mirroring the narrow denylist in packages/protocol/src/index.ts
+ * (vendor token prefixes, a bearer header, a PEM private key marker). This is unanchored (with
+ * word boundaries) rather than a whole-string match, because it also scans free-form text such as
+ * probe stdout/stderr, where a token can appear embedded in a longer line rather than as the
+ * entire string.
+ */
+var secretLikeTokenPattern = regexp.MustCompile(`(?i)\b(sk|pk|ghp|gho|ghu|ghs|ghr|xox[abp]|AKIA|glpat)-?[A-Za-z0-9_-]{10,}\b`)
+var bearerHeaderPattern = regexp.MustCompile(`(?i)\bBearer\s+\S{10,}`)
+
+func LooksSecretLike(text string) bool {
+	return secretLikeTokenPattern.MatchString(text) ||
+		bearerHeaderPattern.MatchString(text) ||
+		(strings.Contains(text, "-----BEGIN") && strings.Contains(text, "PRIVATE KEY"))
+}
+
 type NodeCapabilityEvidence struct {
 	CapabilityID           string `json:"capabilityId"`
 	Source                 string `json:"source"`

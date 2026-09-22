@@ -176,13 +176,28 @@ func TestParseDeduplicatesCapabilityValuesPreservingOrder(t *testing.T) {
 }
 
 func TestParseRejectsOversizedLabelAndAccelerator(t *testing.T) {
+	// The bound matches protocol.LabelOrAcceleratorMaximumBytes (64), not an independently chosen
+	// number: a label/accelerator becomes a NodeCapabilityEvidence.NormalizedValue, and the hub's
+	// wire validator rejects the whole report if any entry exceeds that limit.
 	t.Setenv("WORKSPACE_ROOTS", absoluteExistingRoot(t))
-	oversized := strings.Repeat("x", 129)
+	oversized := strings.Repeat("x", 65)
 
 	_, err := Parse([]string{"--name", "Worker 1", "--id", "worker-1", "--label", oversized})
-	require.EqualError(t, err, fmt.Sprintf("label %q exceeds 128 bytes", oversized))
+	require.EqualError(t, err, fmt.Sprintf("label %q exceeds 64 bytes", oversized))
 	_, err = Parse([]string{"--name", "Worker 1", "--id", "worker-1", "--accelerator", oversized})
-	require.EqualError(t, err, fmt.Sprintf("accelerator %q exceeds 128 bytes", oversized))
+	require.EqualError(t, err, fmt.Sprintf("accelerator %q exceeds 64 bytes", oversized))
+}
+
+func TestParseRejectsSecretLikeLabelsAndAccelerators(t *testing.T) {
+	// A kebab-case grammar alone does not exclude a lowercase, hyphenated secret shape, so this is
+	// a distinct rejection from TestParseRejectsLabelsAndAcceleratorsThatWouldNotFormAValidCapabilityID.
+	t.Setenv("WORKSPACE_ROOTS", absoluteExistingRoot(t))
+
+	_, err := Parse([]string{"--name", "Worker 1", "--id", "worker-1", "--label", "sk-abcdefghij1234567890"})
+	require.EqualError(t, err, `label "sk-abcdefghij1234567890" looks like it contains a secret and was rejected`)
+
+	_, err = Parse([]string{"--name", "Worker 1", "--id", "worker-1", "--accelerator", "sk-abcdefghij1234567890"})
+	require.EqualError(t, err, `accelerator "sk-abcdefghij1234567890" looks like it contains a secret and was rejected`)
 }
 
 func TestParseRejectsLabelsAndAcceleratorsThatWouldNotFormAValidCapabilityID(t *testing.T) {

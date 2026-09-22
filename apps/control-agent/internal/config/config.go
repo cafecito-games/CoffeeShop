@@ -11,27 +11,25 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+
+	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/protocol"
 )
 
 const DefaultEndpoint = "http://localhost:8787"
 
-// Byte bounds for operator-supplied capability values.
-const (
-	labelMaximumBytes       = 128
-	acceleratorMaximumBytes = 128
-)
-
 var projectIDPattern = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
 
-// capabilitySegmentPattern matches the kebab-case grammar every reported capability id segment
-// must satisfy (see capabilityIDPattern in internal/protocol/capability.go and the TypeScript
-// source of truth's capabilityIdPattern). readiness.BuildCapabilityReport embeds every label and
-// accelerator verbatim into a capability id ("label:<label>", "accelerator:<accelerator>"), so a
-// value that does not match this grammar would make the hub reject the whole capability report,
-// not just that one entry. Rejecting it here at config load, rather than accepting free-form text
-// and discovering the failure later on the wire, keeps that fail-closed rather than silently
-// dropping every reported capability.
-var capabilitySegmentPattern = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
+// labelMaximumBytes and capabilitySegmentPattern are not defined locally: a label or accelerator
+// is embedded verbatim into a capability id ("label:<label>", "accelerator:<accelerator>") and
+// then into that evidence entry's NormalizedValue, so config validation must enforce exactly the
+// grammar and byte bound protocol.LabelOrAcceleratorPattern/protocol.LabelOrAcceleratorMaximumBytes
+// already define as the single source of truth — a locally duplicated, looser bound (as this file
+// once had at 128 bytes against the protocol's 64) would make the hub reject the whole capability
+// report, not just the oversized entry.
+const labelMaximumBytes = protocol.LabelOrAcceleratorMaximumBytes
+const acceleratorMaximumBytes = protocol.LabelOrAcceleratorMaximumBytes
+
+var capabilitySegmentPattern = protocol.LabelOrAcceleratorPattern
 
 type Config struct {
 	ControlEndpoint  string
@@ -137,6 +135,12 @@ func Parse(args []string) (Config, error) {
 		if !capabilitySegmentPattern.MatchString(label) {
 			return Config{}, fmt.Errorf("label %q must contain only lowercase letters, numbers, and hyphens", label)
 		}
+		// A kebab-case grammar alone does not rule out a lowercase, hyphenated secret (for
+		// example "sk-abcdefghij1234567890"), and a label becomes a capability id and evidence
+		// value that Barista reports to the hub, so it is screened exactly like probe output.
+		if protocol.LooksSecretLike(label) {
+			return Config{}, fmt.Errorf("label %q looks like it contains a secret and was rejected", label)
+		}
 	}
 	for _, accelerator := range accelerators {
 		if len(accelerator) > acceleratorMaximumBytes {
@@ -144,6 +148,9 @@ func Parse(args []string) (Config, error) {
 		}
 		if !capabilitySegmentPattern.MatchString(accelerator) {
 			return Config{}, fmt.Errorf("accelerator %q must contain only lowercase letters, numbers, and hyphens", accelerator)
+		}
+		if protocol.LooksSecretLike(accelerator) {
+			return Config{}, fmt.Errorf("accelerator %q looks like it contains a secret and was rejected", accelerator)
 		}
 	}
 	if *memory < 0 {

@@ -985,6 +985,19 @@ export function satisfiesMinimumQuantity(reportedValue: string, minimum: number)
 const projectIdPattern = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 const capabilityIdPattern = /^[a-z0-9]+(-[a-z0-9]+)*(:[a-z0-9]+(-[a-z0-9]+)*)?$/;
 
+/**
+ * Grammar and byte bound shared by a node-admin configured label or accelerator value and its
+ * embedding into a capability id (`label:<value>`/`accelerator:<value>`). This is the single
+ * TypeScript-side definition: `capabilityEvidenceLimits.normalizedValueBytes` below mirrors this
+ * exact bound (rather than choosing its own), Barista's Go config validation mirrors both this
+ * pattern and this bound as `protocol.LabelOrAcceleratorPattern`/
+ * `protocol.LabelOrAcceleratorMaximumBytes`, and `validateRequirementSet` reuses this pattern for
+ * a profile's `labels`/`accelerators` requirements so a profile can never demand a value that
+ * could never actually satisfy readiness once embedded in a capability id.
+ */
+export const labelOrAcceleratorPattern = /^[a-z0-9]+(-[a-z0-9]+)*$/;
+export const labelOrAcceleratorMaximumBytes = 64;
+
 export interface ToolchainRequirement {
   capabilityId: string;
   label: string;
@@ -1036,12 +1049,26 @@ const isUniqueBoundedStringArray = (value: unknown, limit: number): value is str
   && value.every((entry) => isBoundedNonEmptyString(entry, limit))
   && new Set(value as string[]).size === value.length;
 
+/**
+ * `labels`/`accelerators` requirements are matched by embedding each value into a capability id
+ * (`label:<value>`/`accelerator:<value>`) and looking up evidence for it, so a requirement value
+ * that does not satisfy `labelOrAcceleratorPattern` and `labelOrAcceleratorMaximumBytes` could
+ * never be satisfied by any evidence Barista is able to report — such a profile is rejected here
+ * rather than silently loaded as permanently unreadiable.
+ */
+const isUniqueLabelOrAcceleratorArray = (value: unknown): value is string[] =>
+  Array.isArray(value)
+  && value.length > 0
+  && value.every((entry) => isBoundedNonEmptyString(entry, labelOrAcceleratorMaximumBytes) && labelOrAcceleratorPattern.test(entry as string))
+  && new Set(value as string[]).size === value.length;
+
 const requirementSetKeys = [
   "operatingSystems", "architectures", "minimumLogicalCpuCount", "minimumConfiguredMemoryMegabytes",
   "accelerators", "labels", "toolchains", "harnessIds", "transports"
 ] as const;
 
-const requirementStringArrayFields = ["operatingSystems", "architectures", "accelerators", "labels"] as const;
+const requirementStringArrayFields = ["operatingSystems", "architectures"] as const;
+const requirementLabelOrAcceleratorFields = ["accelerators", "labels"] as const;
 const requirementPositiveIntegerFields = ["minimumLogicalCpuCount", "minimumConfiguredMemoryMegabytes"] as const;
 
 function validateRequirementSet(value: unknown, path: string): Validation<RequirementSet> {
@@ -1051,6 +1078,11 @@ function validateRequirementSet(value: unknown, path: string): Validation<Requir
   for (const field of requirementStringArrayFields) {
     if (value[field] !== undefined && !isUniqueBoundedStringArray(value[field], 128)) {
       return reject(`${path} ${field} must be a non-empty array of unique non-empty strings`);
+    }
+  }
+  for (const field of requirementLabelOrAcceleratorFields) {
+    if (value[field] !== undefined && !isUniqueLabelOrAcceleratorArray(value[field])) {
+      return reject(`${path} ${field} must be a non-empty array of unique kebab-case values of at most ${labelOrAcceleratorMaximumBytes} bytes`);
     }
   }
   for (const field of requirementPositiveIntegerFields) {
@@ -1227,7 +1259,9 @@ const isCapabilityEvidenceSource = isOneOf(capabilityEvidenceSources);
 export const capabilityEvidenceLimits = {
   capabilityIdBytes: 128,
   rawValueBytes: 256,
-  normalizedValueBytes: 64,
+  // Mirrors labelOrAcceleratorMaximumBytes exactly: a configured label/accelerator becomes a
+  // NodeCapabilityEvidence.normalizedValue, so the two bounds must never drift apart.
+  normalizedValueBytes: labelOrAcceleratorMaximumBytes,
   diagnosticBytes: 512,
   maxEvidenceEntries: 256
 } as const;
@@ -1322,7 +1356,7 @@ export function validateNodeCapabilityReport(value: unknown): Validation<NodeCap
 
 export const readinessRequirementKinds = [
   "operating-system", "architecture", "cpu", "memory", "accelerator", "label",
-  "toolchain", "harness", "transport", "workspace", "project-allowlist"
+  "toolchain", "harness", "transport", "harness-transport", "workspace", "project-allowlist"
 ] as const;
 export type ReadinessRequirementKind = typeof readinessRequirementKinds[number];
 
@@ -1502,20 +1536,41 @@ export function evaluateProjectReadiness(
         unmet.push({ kind: "toolchain", requirement, detail: "version is unparseable or unreported" });
       }
     }
-    if (requirementSet.harnessIds !== undefined) {
-      const matched = context.harnesses.some((harness) => harness.available && requirementSet.harnessIds!.includes(harness.id));
+    const harnessMatches = (harness: HarnessProfile, harnessIds: HarnessId[]) => harnessIds.includes(harness.id);
+    const transportMatches = (harness: HarnessProfile, transports: HarnessTransport[]) =>
+      (harness.transports ?? ["native-cli"]).some((transport) => transports.includes(transport));
+
+    if (requirementSet.harnessIds !== undefined && requirementSet.transports !== undefined) {
+      // harnessIds and transports must be evaluated together, per harness, rather than as two
+      // independent existence checks: independent checks can each be satisfied by a *different*
+      // harness (one that matches the id but not the transport, and another that matches the
+      // transport but not the id), reporting the node ready when no single available harness
+      // actually offers the required id-and-transport combination.
+      const requiredHarnessIds = requirementSet.harnessIds;
+      const requiredTransports = requirementSet.transports;
+      const matched = context.harnesses.some((harness) =>
+        harness.available && harnessMatches(harness, requiredHarnessIds) && transportMatches(harness, requiredTransports));
       if (!matched) {
-        unmet.push({ kind: "harness", requirement: requirementSet.harnessIds.join(", "), detail: "no available harness matches" });
+        unmet.push({
+          kind: "harness-transport",
+          requirement: `harness in [${requiredHarnessIds.join(", ")}] with transport in [${requiredTransports.join(", ")}]`,
+          detail: "no single available harness satisfies both the harness and transport requirement together"
+        });
       }
-    }
-    if (requirementSet.transports !== undefined) {
-      const matched = context.harnesses.some((harness) => {
-        if (!harness.available) return false;
-        const transports = harness.transports ?? ["native-cli"];
-        return transports.some((transport) => requirementSet.transports!.includes(transport));
-      });
-      if (!matched) {
-        unmet.push({ kind: "transport", requirement: requirementSet.transports.join(", "), detail: "no available harness supports a matching transport" });
+    } else {
+      if (requirementSet.harnessIds !== undefined) {
+        const requiredHarnessIds = requirementSet.harnessIds;
+        const matched = context.harnesses.some((harness) => harness.available && harnessMatches(harness, requiredHarnessIds));
+        if (!matched) {
+          unmet.push({ kind: "harness", requirement: requiredHarnessIds.join(", "), detail: "no available harness matches" });
+        }
+      }
+      if (requirementSet.transports !== undefined) {
+        const requiredTransports = requirementSet.transports;
+        const matched = context.harnesses.some((harness) => harness.available && transportMatches(harness, requiredTransports));
+        if (!matched) {
+          unmet.push({ kind: "transport", requirement: requiredTransports.join(", "), detail: "no available harness supports a matching transport" });
+        }
       }
     }
   };

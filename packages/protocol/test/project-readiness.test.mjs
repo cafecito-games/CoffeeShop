@@ -13,6 +13,8 @@ import {
   evidenceClockSkewAllowanceMilliseconds,
   isNonNegativeIntegerQuantity,
   isNormalizedVersion,
+  labelOrAcceleratorMaximumBytes,
+  labelOrAcceleratorPattern,
   parseVersionConstraint,
   projectProfileSchemaVersion,
   readinessRequirementKinds,
@@ -30,6 +32,17 @@ const readFixture = (name) => JSON.parse(readFileSync(new URL(name, fixtureDirec
 const nowIso = "2026-09-21T12:00:00Z";
 const observedAt = "2026-09-21T11:59:00Z";
 const evidenceTTL = 10 * 60 * 1000;
+
+test("labelOrAcceleratorPattern/labelOrAcceleratorMaximumBytes are the single definition capabilityEvidenceLimits mirrors", () => {
+  assert.equal(capabilityEvidenceLimits.normalizedValueBytes, labelOrAcceleratorMaximumBytes);
+  assert.equal(labelOrAcceleratorMaximumBytes, 64);
+  for (const accepted of ["gpu", "apple-m3-max", "ci"]) {
+    assert.equal(labelOrAcceleratorPattern.test(accepted), true, `${accepted} must match`);
+  }
+  for (const rejected of ["GPU", "gpu runner", "gpu_runner", "label:ci", ""]) {
+    assert.equal(labelOrAcceleratorPattern.test(rejected), false, `${rejected} must not match`);
+  }
+});
 
 test("version grammar accepts normalized dotted integers and rejects malformed input", () => {
   for (const accepted of ["0", "1", "0.2", "1.24.0", "16.4", "2026.9.21", "1.0.0.0"]) {
@@ -175,6 +188,18 @@ test("project profiles are rejected for every structural failure", () => {
         ...valid.workspacePolicy,
         allowedRepositories: [...valid.workspacePolicy.allowedRepositories, valid.workspacePolicy.allowedRepositories[0]]
       }
+    }],
+    ["label requirement not matching the capability-id grammar", {
+      ...valid,
+      requirements: { ...valid.requirements, hard: { ...valid.requirements.hard, labels: ["GPU Runner"] } }
+    }],
+    ["accelerator requirement not matching the capability-id grammar", {
+      ...valid,
+      requirements: { ...valid.requirements, hard: { ...valid.requirements.hard, accelerators: ["Apple_M3_Max"] } }
+    }],
+    ["oversized label requirement beyond labelOrAcceleratorMaximumBytes", {
+      ...valid,
+      requirements: { ...valid.requirements, hard: { ...valid.requirements.hard, labels: ["x".repeat(labelOrAcceleratorMaximumBytes + 1)] } }
     }],
     ["secret-like token in name", { ...valid, name: "sk-abcdef1234567890" }],
     ["secret-like token nested in requirements", {
@@ -350,7 +375,7 @@ test("node capability reports reject duplicate evidence and malformed allowlists
   assert.deepEqual(capabilityEvidenceSources, ["runtime", "configured", "probe"]);
   assert.deepEqual(readinessRequirementKinds, [
     "operating-system", "architecture", "cpu", "memory", "accelerator", "label",
-    "toolchain", "harness", "transport", "workspace", "project-allowlist"
+    "toolchain", "harness", "transport", "harness-transport", "workspace", "project-allowlist"
   ]);
 });
 
@@ -564,6 +589,8 @@ test("the project allowlist and workspace authorization gate readiness independe
 });
 
 test("readiness fails closed for missing harness and transport support", () => {
+  // readinessProfile() requires both harnessIds and transports, so these exercise the combined
+  // per-harness evaluation (a single "harness-transport" unmet entry), not two independent checks.
   const noHarness = evaluateProjectReadiness(
     readinessProfile(),
     readinessContext({ harnesses: [harness({ available: false, transports: ["native-cli", "acp-v1"] })] }),
@@ -571,7 +598,7 @@ test("readiness fails closed for missing harness and transport support", () => {
     nowIso
   );
   assert.equal(noHarness.ready, false);
-  assert.deepEqual(noHarness.unmetHardRequirements.map((unmet) => unmet.kind), ["harness", "transport"]);
+  assert.deepEqual(noHarness.unmetHardRequirements.map((unmet) => unmet.kind), ["harness-transport"]);
 
   const noTransport = evaluateProjectReadiness(
     readinessProfile(),
@@ -580,7 +607,8 @@ test("readiness fails closed for missing harness and transport support", () => {
     nowIso
   );
   assert.equal(noTransport.ready, false);
-  assert.deepEqual(noTransport.unmetHardRequirements.map((unmet) => unmet.kind), ["transport"]);
+  assert.deepEqual(noTransport.unmetHardRequirements.map((unmet) => unmet.kind), ["harness-transport"]);
+  assert.match(noTransport.unmetHardRequirements[0].requirement, /harness in \[claude-cli\] with transport in \[acp-v1\]/);
 
   const defaultTransports = evaluateProjectReadiness(
     readinessProfile({ ...readinessProfile(), requirements: { ...readinessProfile().requirements, hard: {
@@ -591,6 +619,46 @@ test("readiness fails closed for missing harness and transport support", () => {
     nowIso
   );
   assert.equal(defaultTransports.ready, true, "an absent transports field means native-cli only");
+});
+
+test("readiness requires one single harness to satisfy both harnessIds and transports together", () => {
+  // A harness that matches the required id but not the transport, plus a different harness that
+  // matches the transport but not the id, must never combine into a false "ready": no single
+  // available harness actually offers the required id-and-transport pair.
+  const mismatchedPair = evaluateProjectReadiness(
+    readinessProfile(),
+    readinessContext({
+      harnesses: [
+        harness({ id: "claude-cli", available: true, transports: ["native-cli"] }),
+        harness({ id: "codex-cli", available: true, transports: ["acp-v1"] })
+      ]
+    }),
+    evidenceTTL,
+    nowIso
+  );
+  assert.equal(mismatchedPair.ready, false);
+  assert.deepEqual(mismatchedPair.unmetHardRequirements.map((unmet) => unmet.kind), ["harness-transport"]);
+
+  const matchingPair = evaluateProjectReadiness(
+    readinessProfile(),
+    readinessContext({
+      harnesses: [
+        harness({ id: "claude-cli", available: true, transports: ["native-cli"] }),
+        harness({ id: "claude-cli", available: true, transports: ["acp-v1"] })
+      ]
+    }),
+    evidenceTTL,
+    nowIso
+  );
+  assert.equal(matchingPair.ready, true, "one harness entry does offer both the required id and transport together");
+
+  const unavailableMatch = evaluateProjectReadiness(
+    readinessProfile(),
+    readinessContext({ harnesses: [harness({ id: "claude-cli", available: false, transports: ["acp-v1"] })] }),
+    evidenceTTL,
+    nowIso
+  );
+  assert.equal(unavailableMatch.ready, false, "an unavailable harness can never satisfy the combination even if it matches on paper");
 });
 
 test("readiness is deterministic regardless of evidence order", () => {
