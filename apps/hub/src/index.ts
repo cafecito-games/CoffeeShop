@@ -28,6 +28,7 @@ import { createHubToolHandler, hubToolError } from "./hubTools.js";
 import { TaskEventWaiters } from "./mailbox.js";
 import { forgetNodeCapabilityReport, getNodeCapabilityReport, recordNodeCapabilityReport } from "./nodeCapabilities.js";
 import { registeredComputeNode } from "./nodeRegistration.js";
+import { createOrchestratorClientRevocations, operatorCredentialGuard, registerOrchestratorClientRoutes } from "./orchestratorClients.js";
 import { loadProjectProfilesFromFile, ProjectProfileRegistry } from "./projectProfiles.js";
 import { computeNodeProjectReadiness } from "./projectReadiness.js";
 import { retainedHarnessEvents } from "./harnessEvents.js";
@@ -50,6 +51,7 @@ const store = new Store();
 const token = process.env.COFFEE_SHOP_TOKEN;
 const port = Number(process.env.PORT ?? 8787);
 const redactor = createRedactor([token]);
+const orchestratorClientRevocations = createOrchestratorClientRevocations();
 
 if (process.env.NODE_ENV === "production" && !token) {
   throw new Error("COFFEE_SHOP_TOKEN is required in production");
@@ -57,12 +59,7 @@ if (process.env.NODE_ENV === "production" && !token) {
 
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
-app.use((req, res, next) => {
-  if (!req.path.startsWith("/api/") || req.path === "/api/health" || process.env.NODE_ENV !== "production") return next();
-  const supplied = req.header("authorization")?.replace(/^Bearer\s+/i, "") ?? req.query.token;
-  if (!token || supplied !== token) return res.status(401).json({ error: "Unauthorized" });
-  next();
-});
+app.use(operatorCredentialGuard(token));
 
 const broadcast = () => {
   const payload = JSON.stringify({ type: "snapshot", data: store.snapshot() });
@@ -334,6 +331,8 @@ app.post("/api/approvals/:id/resolution", async (req, res) => {
     if (!res.headersSent) res.status(500).json({ error: "The approval resolution failed" });
   }
 });
+
+registerOrchestratorClientRoutes(app, { store, broadcast, revocations: orchestratorClientRevocations });
 
 app.get("/api/runs/:id/events", (req, res) => {
   if (!store.getRun(req.params.id)) return res.status(404).json({ error: "Run not found" });

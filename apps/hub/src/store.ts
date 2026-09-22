@@ -435,7 +435,7 @@ function addThreadDefaults(state: State) {
  * Projects a stored credential to its public view by naming every published field, so a field added
  * to the stored record is never published by accident.
  */
-const publicOrchestratorClient = (client: StoredOrchestratorClient): OrchestratorClient => ({
+export const publicOrchestratorClient = (client: StoredOrchestratorClient): OrchestratorClient => ({
   id: client.id,
   name: client.name,
   scopes: client.scopes,
