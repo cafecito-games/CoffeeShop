@@ -1,9 +1,38 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { agentAvatarColors, agentAvatarShapes, orchestrationCollections, withOrchestrationDefaults, type ChatMessage, type Snapshot, type Thread, type TimelineEvent } from "@coffee-shop/protocol";
+import {
+  agentAvatarColors,
+  agentAvatarShapes,
+  isTaskDependencyPolicy,
+  isTaskStatus,
+  orchestrationCollections,
+  withOrchestrationDefaults,
+  type ChatMessage,
+  type Snapshot,
+  type Thread,
+  type TimelineEvent
+} from "@coffee-shop/protocol";
 
-export type State = Omit<Snapshot, "generatedAt">;
+/** The hub's durable record of one accepted task batch, used to answer idempotent replays. */
+export interface TaskSubmission {
+  id: string;
+  threadId: string;
+  sourceRunId: string;
+  creatorAgentId: string;
+  idempotencyKey: string;
+  /** SHA-256 of the normalized batch; see `taskBatchDigest`. */
+  digest: string;
+  tasks: Array<{ key: string; taskId: string }>;
+  createdAt: string;
+}
+
+/** Hub-internal collections that are persisted but never published in snapshots. */
+interface HubOnlyState {
+  taskSubmissions?: TaskSubmission[];
+}
+
+export type State = Omit<Snapshot, "generatedAt"> & HubOnlyState;
 
 const emptyState = (): State => withOrchestrationDefaults({
   agents: [],
@@ -13,13 +42,45 @@ const emptyState = (): State => withOrchestrationDefaults({
   messages: [],
   threads: [],
   delegations: [],
-  artifacts: []
+  artifacts: [],
+  taskSubmissions: []
 });
 
 export function addOrchestrationDefaults(state: State) {
-  const changed = orchestrationCollections.some((collection) => state[collection] == null);
+  const changed = orchestrationCollections.some((collection) => state[collection] == null) || state.taskSubmissions == null;
   withOrchestrationDefaults(state);
+  state.taskSubmissions ??= [];
   return changed;
+}
+
+const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
+const isNonEmptyString = (value: unknown): value is string => typeof value === "string" && value.length > 0;
+
+/**
+ * Rejects persisted orchestration records the hub cannot interpret. Loading fails rather than
+ * defaulting an unknown status, because a guessed `pending` or `ready` could release work.
+ */
+export function assertPersistedTaskState(state: State) {
+  const taskIds = new Set<string>();
+  for (const [index, task] of (state.tasks ?? []).entries()) {
+    const context = `Persisted task ${index}`;
+    if (!isRecord(task) || !isNonEmptyString(task.id) || !isNonEmptyString(task.threadId)) throw new Error(`${context} is missing its identity`);
+    if (taskIds.has(task.id)) throw new Error(`${context} repeats task id ${task.id}`);
+    taskIds.add(task.id);
+    if (!isTaskStatus(task.status)) throw new Error(`${context} has an unknown status`);
+    if (!Array.isArray(task.dependencies) || !task.dependencies.every((dependency) => isRecord(dependency) && isNonEmptyString(dependency.taskId) && isTaskDependencyPolicy(dependency.policy))) {
+      throw new Error(`${context} has malformed dependencies`);
+    }
+    if (!Array.isArray(task.attemptRunIds) || !task.attemptRunIds.every(isNonEmptyString)) throw new Error(`${context} has malformed attempts`);
+    if (!isRecord(task.requirements) || typeof task.idempotencyKey !== "string") throw new Error(`${context} is missing requirements or its idempotency key`);
+  }
+  for (const [index, submission] of (state.taskSubmissions ?? []).entries()) {
+    if (!isRecord(submission) || !isNonEmptyString(submission.id) || !isNonEmptyString(submission.threadId) || !isNonEmptyString(submission.idempotencyKey)
+      || !isNonEmptyString(submission.digest) || !Array.isArray(submission.tasks)
+      || !submission.tasks.every((entry) => isRecord(entry) && isNonEmptyString(entry.key) && isNonEmptyString(entry.taskId))) {
+      throw new Error(`Persisted task submission ${index} is malformed`);
+    }
+  }
 }
 
 const legacyDemoAgents = new Map([
@@ -169,22 +230,32 @@ export class Store {
   }
 
   async load() {
+    let loaded: State;
     try {
-      this.state = JSON.parse(await readFile(this.path, "utf8")) as State;
-      const removedDemoRecords = removeLegacyDemoRecords(this.state);
-      const addedAgentAvatars = addMissingAgentAvatars(this.state);
-      const addedCoordination = addCoordinationDefaults(this.state);
-      const addedThreads = addThreadDefaults(this.state);
-      const addedOrchestration = addOrchestrationDefaults(this.state);
-      if (removedDemoRecords || addedAgentAvatars || addedCoordination || addedThreads || addedOrchestration) await this.save();
+      loaded = JSON.parse(await readFile(this.path, "utf8")) as State;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       await this.save();
+      return;
     }
+    const removedDemoRecords = removeLegacyDemoRecords(loaded);
+    const addedAgentAvatars = addMissingAgentAvatars(loaded);
+    const addedCoordination = addCoordinationDefaults(loaded);
+    const addedThreads = addThreadDefaults(loaded);
+    const addedOrchestration = addOrchestrationDefaults(loaded);
+    assertPersistedTaskState(loaded);
+    if (removedDemoRecords || addedAgentAvatars || addedCoordination || addedThreads || addedOrchestration) await this.save(loaded);
+    this.state = loaded;
   }
 
   snapshot(): Snapshot {
-    return structuredClone({ ...this.state, generatedAt: new Date().toISOString() });
+    const { taskSubmissions: _taskSubmissions, ...published } = this.state;
+    return structuredClone({ ...published, generatedAt: new Date().toISOString() });
+  }
+
+  /** Synchronous read of committed state; the view must not retain or mutate what it receives. */
+  read<T>(view: (state: Readonly<State>) => T): T {
+    return view(this.state);
   }
 
   getAgent(id: string) { return this.state.agents.find((agent) => agent.id === id); }

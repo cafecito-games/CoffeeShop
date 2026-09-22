@@ -134,7 +134,10 @@ test("keeps orchestration collections that already hold records", async () => {
   const path = join(directory, "state.json");
   await writeFile(path, JSON.stringify({
     agents: [], nodes: [], runs: [], events: [], messages: [],
-    tasks: [{ id: "task-one", threadId: "thread-one", status: "pending" }]
+    tasks: [{
+      id: "task-one", threadId: "thread-one", title: "Task", instructions: "Do it", status: "pending", requirements: {},
+      dependencies: [], idempotencyKey: "batch-one", attemptRunIds: [], createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z"
+    }]
   }));
 
   const store = new Store(path);
@@ -142,4 +145,65 @@ test("keeps orchestration collections that already hold records", async () => {
   assert.deepEqual(store.snapshot().tasks?.map((task) => task.id), ["task-one"]);
   const persisted = JSON.parse(await readFile(path, "utf8"));
   assert.deepEqual(persisted.tasks.map((task: { id: string }) => task.id), ["task-one"]);
+});
+
+test("omits task submissions from snapshots while persisting them on disk", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "coffee-shop-store-"));
+  const path = join(directory, "state.json");
+  await writeFile(path, JSON.stringify({
+    agents: [], nodes: [], runs: [], events: [], messages: []
+  }));
+
+  const store = new Store(path);
+  await store.load();
+  assert.deepEqual(store.snapshot().tasks, []);
+  assert.ok(!("taskSubmissions" in store.snapshot()), "snapshots never publish task submissions");
+  const persisted = JSON.parse(await readFile(path, "utf8"));
+  assert.deepEqual(persisted.taskSubmissions, []);
+});
+
+test("loads legacy runs with parentRunId without synthesizing tasks", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "coffee-shop-store-"));
+  const path = join(directory, "state.json");
+  await writeFile(path, JSON.stringify({
+    agents: [], nodes: [], events: [], messages: [],
+    runs: [
+      { id: "run-parent", agentId: "agent-one", prompt: "Parent work", status: "completed", createdAt: "2026-01-01T00:00:00Z" },
+      { id: "run-child", agentId: "agent-one", prompt: "Child work", status: "completed", parentRunId: "run-parent", createdAt: "2026-01-01T00:01:00Z" }
+    ]
+  }));
+
+  const store = new Store(path);
+  await store.load();
+  assert.deepEqual(store.snapshot().tasks, []);
+  assert.equal(store.snapshot().runs.length, 2);
+});
+
+test("rejects uninterpretable persisted task state without rewriting the file", async () => {
+  const validTask = {
+    id: "task-one", threadId: "thread-one", title: "Task", instructions: "Do it", status: "pending", requirements: {},
+    dependencies: [], idempotencyKey: "batch-one", attemptRunIds: [], createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z"
+  };
+  const validTaskWithoutStatus: Record<string, unknown> = { ...validTask };
+  delete validTaskWithoutStatus.status;
+  const cases: Array<{ label: string; state: Record<string, unknown> }> = [
+    { label: "unknown task status", state: { tasks: [{ ...validTask, status: "queued" }] } },
+    { label: "missing task status", state: { tasks: [validTaskWithoutStatus] } },
+    { label: "unknown dependency policy", state: { tasks: [{ ...validTask, dependencies: [{ taskId: "task-missing", policy: "maybe" }] }] } },
+    { label: "duplicated task id", state: { tasks: [validTask, { ...validTask, title: "Second task" }] } },
+    { label: "malformed task submission", state: { tasks: [validTask], taskSubmissions: [{ id: "tasksub-one" }] } }
+  ];
+
+  for (const [index, item] of cases.entries()) {
+    const directory = await mkdtemp(join(tmpdir(), "coffee-shop-store-"));
+    const path = join(directory, "state.json");
+    const contents = JSON.stringify({
+      agents: [], nodes: [], runs: [], events: [], messages: [],
+      ...item.state
+    });
+    await writeFile(path, contents);
+    const store = new Store(path);
+    await assert.rejects(store.load(), Error, `case ${index}: ${item.label}`);
+    assert.equal(await readFile(path, "utf8"), contents, item.label);
+  }
 });

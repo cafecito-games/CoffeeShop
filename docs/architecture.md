@@ -104,6 +104,14 @@ Every status vocabulary has an explicit transition table in which terminal state
 - Snapshots persisted before version 4 load with empty orchestration collections. Migration never invents tasks, messages, bindings, approvals, or leases.
 - Barista advertises version 4 only once it consumes the version-4 dispatch fields, so a hub cannot request ACP execution from a Barista that would silently fall back to native behavior.
 
+### Task graph persistence
+
+`apps/hub/src/tasks.ts` owns the hub's task DAG. A running source run whose agent may delegate submits one batch with a batch-level idempotency key; tasks name each other with client-local keys and may also depend on existing tasks in the same thread. The whole batch is normalized (trimmed strings, requirement sets deduplicated and sorted, ranked preferences deduplicated in order, dependencies sorted), validated for malformed fields, duplicate keys, missing or cross-thread dependencies, self-edges, and cycles, and rejected as a unit on any failure. Validation runs once as a preflight and again inside `Store.transact`, where it is authoritative, so concurrent duplicates converge.
+
+The hub records each accepted batch as a hub-internal submission holding a SHA-256 digest of the normalized batch plus the source thread and run. Replaying the key in that thread with the same digest returns the original task IDs and writes nothing; any other input under the key is an `idempotency_conflict`. Submissions are persisted but not published in snapshots.
+
+Task status only changes through the protocol's transition table. A pending task becomes `ready` only when every dependency is satisfied; a failed, cancelled, or blocked `require-success` dependency blocks it, and blocking cascades. Cancelling a task never cancels its dependents implicitly. Runs are immutable attempts: each attempt is appended with the next one-based `attempt` number, a retryable failure returns the task to `ready` without touching earlier attempts, and results from a non-current attempt or for a terminal task are ignored. Loading fails on an unknown persisted task status or malformed task record rather than defaulting it, and migration never infers tasks from legacy `parentRunId` lineage.
+
 ## What to build next
 
 The MVP deliberately proves the seams before adding infrastructure. Recommended order:

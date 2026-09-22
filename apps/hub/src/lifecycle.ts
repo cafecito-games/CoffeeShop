@@ -9,6 +9,7 @@ import {
   type Snapshot
 } from "@coffee-shop/protocol";
 import { newEvent, newMessage, type State, type Store } from "./store.js";
+import { applyAttemptOutcome, cancelTaskInState, type TaskCancellationResult } from "./tasks.js";
 
 type RunLifecycleMessage = Extract<ControlAgentToHub, { type: `run.${string}` }>;
 const runLifecycleMessageTypes = new Set<string>([
@@ -99,6 +100,7 @@ export function cancelRunInState(state: State, runId: string, at: string): Cance
   const thread = run.threadId ? state.threads?.find((item) => item.id === run.threadId) : undefined;
   if (thread) thread.updatedAt = at;
   updateAgentAfterCancellation(state, run, at);
+  applyAttemptOutcome(state, run.id, at);
   return { kind: "cancelled", run };
 }
 
@@ -127,6 +129,33 @@ export async function cancelPersistedRun(
         const childResult = cancelRunInState(state, child.id, at);
         if (childResult.kind === "cancelled" && childResult.run) cancelledRuns.push(childResult.run);
       }
+    }
+    return true;
+  });
+  for (const cancelled of cancelledRuns) {
+    send(cancelled.nodeId, { type: "cancel", runId: cancelled.id });
+  }
+  return result;
+}
+
+/**
+ * Cancels a task and, in the same transaction, its active attempt run. Cancel delivery to Barista
+ * happens only after the terminal state is persisted.
+ */
+export async function cancelPersistedTask(
+  store: Store,
+  taskId: string,
+  send: (nodeId: string, message: HubToControlAgent) => boolean,
+  at = new Date().toISOString()
+) {
+  let result: TaskCancellationResult = { kind: "not-found" };
+  const cancelledRuns: Run[] = [];
+  await store.transact((state) => {
+    result = cancelTaskInState(state, taskId, at);
+    if (result.kind !== "cancelled") return false;
+    if (result.activeAttemptRunId) {
+      const attempt = cancelRunInState(state, result.activeAttemptRunId, at);
+      if (attempt.kind === "cancelled" && attempt.run) cancelledRuns.push(attempt.run);
     }
     return true;
   });
@@ -180,5 +209,6 @@ export function applyRunLifecycle(state: State, message: RunLifecycleMessage) {
   }
   agent.updatedAt = message.at;
   if (thread) thread.updatedAt = message.at;
+  if (message.type !== "run.output") applyAttemptOutcome(state, run.id, message.at);
   return true;
 }
