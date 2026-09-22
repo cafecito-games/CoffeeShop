@@ -11,6 +11,7 @@ import {
   type RunTransportSelection,
   type Snapshot
 } from "@coffee-shop/protocol";
+import { isContinuationRun } from "./continuationRuns.js";
 import { settleHarnessStateForTerminalRun } from "./harnessEvents.js";
 import { newEvent, newMessage, type State, type Store } from "./store.js";
 import { applyAttemptOutcome, cancelTaskInState, type TaskCancellationResult } from "./tasks.js";
@@ -102,14 +103,16 @@ export const lostComputeError = "Compute lost: Barista no longer reports this at
 /**
  * Runs after a version-4 reconnect barrier, once Barista has replayed every queued lifecycle
  * message. A running task attempt that Barista no longer supervises can never report again, so it
- * fails and, within the attempt budget, its task returns to `ready` for a new attempt. Queued
- * attempts are left for redispatch; they never started, so resending the same run is safe.
+ * fails and, within the attempt budget, its task returns to `ready` for a new attempt. A lost
+ * orchestrator continuation fails the same way, and its unacknowledged inbox range is offered to
+ * the next continuation. Queued runs are left for redispatch; they never started, so resending the
+ * same run is safe.
  */
 export function failLostTaskAttempts(state: State, nodeId: string, activeRunIds: readonly string[], at: string) {
   const active = new Set(activeRunIds);
   const lost: Run[] = [];
   for (const run of state.runs) {
-    if (run.nodeId !== nodeId || run.taskId === undefined || run.status !== "running" || active.has(run.id)) continue;
+    if (run.nodeId !== nodeId || (run.taskId === undefined && !isContinuationRun(state, run.id)) || run.status !== "running" || active.has(run.id)) continue;
     run.status = "failed";
     run.error = lostComputeError;
     run.finishedAt = at;

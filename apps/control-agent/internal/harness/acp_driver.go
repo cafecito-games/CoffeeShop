@@ -84,6 +84,8 @@ type ACPDriver struct {
 
 	mu       sync.Mutex
 	disabled map[string]error
+	// probed holds the capabilities each adapter negotiated in its successful startup probe.
+	probed map[string]protocol.AcpAgentCapabilities
 }
 
 func NewACPDriver(options ACPDriverOptions) *ACPDriver {
@@ -96,7 +98,7 @@ func NewACPDriver(options ACPDriverOptions) *ACPDriver {
 	if options.Providers == nil {
 		options.Providers = DefaultACPProviders()
 	}
-	return &ACPDriver{options: options, disabled: map[string]error{}}
+	return &ACPDriver{options: options, disabled: map[string]error{}, probed: map[string]protocol.AcpAgentCapabilities{}}
 }
 
 // HarnessIDs lists the harnesses with a configured adapter, in a stable order.
@@ -115,6 +117,22 @@ func (driver *ACPDriver) HarnessIDs() []string {
 func (driver *ACPDriver) Available(harnessID string) error {
 	_, _, err := driver.adapter(harnessID)
 	return err
+}
+
+// ErrResumeUnsupported reports that a harness's adapter did not negotiate session resume or load in
+// its startup probe, so Barista cannot honor a dispatch that asks to resume a session.
+var ErrResumeUnsupported = errors.New("ACP adapter did not negotiate session resume or load")
+
+// SupportsResume reports whether the harness's adapter negotiated session resume or load in its
+// most recent successful startup probe.
+func (driver *ACPDriver) SupportsResume(harnessID string) error {
+	driver.mu.Lock()
+	capabilities, probed := driver.probed[harnessID]
+	driver.mu.Unlock()
+	if !probed || !(capabilities.ResumeSession || capabilities.LoadSession) {
+		return fmt.Errorf("%w for harness %s", ErrResumeUnsupported, harnessID)
+	}
+	return nil
 }
 
 // Disable makes the harness's adapter unavailable for the lifetime of the driver.
@@ -261,6 +279,9 @@ func (driver *ACPDriver) Probe(ctx context.Context, harnessID string) (ACPProbe,
 		}
 		return ACPProbe{}, probeErr
 	}
+	driver.mu.Lock()
+	driver.probed[harnessID] = capabilities
+	driver.mu.Unlock()
 	return ACPProbe{Capabilities: capabilities, Models: screenedModels(offered)}, nil
 }
 
@@ -299,6 +320,14 @@ func (driver *ACPDriver) Execute(ctx context.Context, invocation Invocation) (st
 		CancelGracePeriod: driver.options.CancelGracePeriod,
 	})
 	request := acp.SessionRequest{Cwd: cwd, Prompt: composePrompt(invocation.Run, invocation.Agent)}
+	if resume := invocation.Resume; resume != nil {
+		request.Resume = &acp.ResumeRequest{SessionID: resume.ProviderSessionID}
+		if resume.Prompt != "" {
+			resumedRun := invocation.Run
+			resumedRun.Prompt = resume.Prompt
+			request.Resume.Prompt = composePrompt(resumedRun, invocation.Agent)
+		}
+	}
 	if provider.Configuration != nil {
 		request.Configuration = provider.Configuration(invocation.Run)
 	}
@@ -310,6 +339,9 @@ func (driver *ACPDriver) Execute(ctx context.Context, invocation Invocation) (st
 			if err := driver.awaitMCPConnection(ctx, invocation.MCP.Connected); err != nil {
 				return err
 			}
+		}
+		if sessionID, resumed := client.Session(); invocation.Session != nil && sessionID != "" {
+			invocation.Session(EstablishedSession{ProviderSessionID: sessionID, Resumed: resumed})
 		}
 		details := transportDetails{}
 		if capabilities, negotiated := client.Negotiated(); negotiated {

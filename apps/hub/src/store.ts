@@ -20,6 +20,7 @@ import {
   type TimelineEvent
 } from "@coffee-shop/protocol";
 import type { HarnessEventStream, StoredHarnessEvent } from "./harnessEvents.js";
+import { assertPersistedSessionState } from "./persistedSessionState.js";
 import { recordTaskEvents, type TaskEventEntry, type TaskEventStream } from "./taskEvents.js";
 
 /** The hub's durable record of one accepted task batch, used to answer idempotent replays. */
@@ -75,13 +76,14 @@ const emptyState = (): State => withOrchestrationDefaults({
   taskEventStreams: [],
   runActivity: [],
   harnessEventStreams: [],
-  harnessEvents: []
+  harnessEvents: [],
+  orchestratorInboxes: []
 });
 
 export function addOrchestrationDefaults(state: State) {
   const changed = orchestrationCollections.some((collection) => state[collection] == null) || state.taskSubmissions == null
     || state.taskUpdates == null || state.taskEventJournal == null || state.taskEventStreams == null
-    || state.runActivity == null || state.harnessEventStreams == null || state.harnessEvents == null;
+    || state.runActivity == null || state.harnessEventStreams == null || state.harnessEvents == null || state.orchestratorInboxes == null;
   withOrchestrationDefaults(state);
   state.taskSubmissions ??= [];
   state.taskUpdates ??= [];
@@ -90,6 +92,7 @@ export function addOrchestrationDefaults(state: State) {
   state.runActivity ??= [];
   state.harnessEventStreams ??= [];
   state.harnessEvents ??= [];
+  state.orchestratorInboxes ??= [];
   return changed;
 }
 
@@ -347,6 +350,7 @@ export class Store {
     assertPersistedTaskState(loaded);
     assertPersistedHarnessState(loaded);
     assertPersistedWorkspaceLeaseState(loaded);
+    assertPersistedSessionState(loaded);
     if (removedDemoRecords || addedAgentAvatars || addedCoordination || addedThreads || addedOrchestration) await this.save(loaded);
     this.state = loaded;
   }

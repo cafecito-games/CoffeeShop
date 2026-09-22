@@ -96,13 +96,13 @@ func TestUnsupportedExecutionReasonAcrossAdmitBehaviorsAndDispatches(t *testing.
 			run:       protocol.Run{ID: "run-one", HarnessID: "codex-cli"},
 			execution: &protocol.DispatchExecution{Transport: "acp-v1", SessionBinding: &protocol.DispatchSessionBinding{ID: "binding-one", ProviderSessionID: "provider-session-one"}},
 			admit:     admitNothing,
-			want:      "unsupported execution: session binding resume not available on this Barista",
+			want:      "unsupported execution: the run's session binding is missing or names a different binding",
 		},
 		{
 			name:  "acp run with a run-level session binding",
 			run:   protocol.Run{ID: "run-one", HarnessID: "codex-cli", Transport: "acp-v1", SessionBindingID: "binding-one"},
 			admit: admitNothing,
-			want:  "unsupported execution: session binding resume not available on this Barista",
+			want:  "unsupported execution: the run's session binding is missing or names a different binding",
 		},
 		{
 			name:      "acp run with an execution workspace lease",
@@ -127,7 +127,7 @@ func TestUnsupportedExecutionReasonAcrossAdmitBehaviorsAndDispatches(t *testing.
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			require.Equal(t, test.want, unsupportedExecutionReason(test.run, test.execution, test.admit, nil))
+			require.Equal(t, test.want, unsupportedExecutionReason(test.run, test.execution, test.admit, nil, nil))
 		})
 	}
 }
@@ -146,11 +146,11 @@ func TestUnsupportedExecutionReasonPassesExactArgumentsToAdmitAndSkipsNativeRuns
 
 	run := protocol.Run{ID: "run-one", HarnessID: "codex-cli", Transport: "acp-v1"}
 	execution := &protocol.DispatchExecution{Transport: "acp-v1", FallbackTransport: "native-cli"}
-	require.Equal(t, "", unsupportedExecutionReason(run, execution, admit, nil))
+	require.Equal(t, "", unsupportedExecutionReason(run, execution, admit, nil, nil))
 	require.Equal(t, []admitCall{{harnessID: "codex-cli", transport: "acp-v1", fallbackTransport: "native-cli"}}, calls)
 
-	require.Equal(t, "", unsupportedExecutionReason(protocol.Run{ID: "run-two", HarnessID: "codex-cli", Transport: "native-cli"}, &protocol.DispatchExecution{Transport: "native-cli"}, admit, nil))
-	require.Equal(t, "", unsupportedExecutionReason(protocol.Run{ID: "run-three", HarnessID: "codex-cli"}, nil, admit, nil))
+	require.Equal(t, "", unsupportedExecutionReason(protocol.Run{ID: "run-two", HarnessID: "codex-cli", Transport: "native-cli"}, &protocol.DispatchExecution{Transport: "native-cli"}, admit, nil, nil))
+	require.Equal(t, "", unsupportedExecutionReason(protocol.Run{ID: "run-three", HarnessID: "codex-cli"}, nil, admit, nil, nil))
 	require.Len(t, calls, 1, "admit is a pre-execution guard and must never run for native dispatches")
 }
 

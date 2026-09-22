@@ -93,9 +93,31 @@ type AcpAgentCapabilities struct {
 	AdapterVersion  string                `json:"adapterVersion,omitempty"`
 }
 
+// SessionResumePromptMaximumBytes mirrors sessionResumePromptMaximumBytes in the TypeScript source
+// of truth: the bound on the delivery-only prompt sent to a resumed session.
+const SessionResumePromptMaximumBytes = 64 * 1024
+
+// DispatchSessionBinding asks Barista to resume an existing provider session. ResumePrompt, when
+// set, replaces the run prompt for a session that actually resumed; a session that could not be
+// resumed is replaced by a new one that receives the run prompt.
 type DispatchSessionBinding struct {
 	ID                string `json:"id"`
 	ProviderSessionID string `json:"providerSessionId"`
+	ResumePrompt      string `json:"resumePrompt,omitempty"`
+}
+
+// Validate checks the binding's identity and bounds without echoing any of its values.
+func (binding DispatchSessionBinding) Validate() error {
+	if !isIdentifier(binding.ID) || !isIdentifier(binding.ProviderSessionID) {
+		return fmt.Errorf("session binding is missing identity")
+	}
+	if LooksSecretLike(binding.ID) || LooksSecretLike(binding.ProviderSessionID) {
+		return fmt.Errorf("session binding identity looks like a credential")
+	}
+	if len(binding.ResumePrompt) > SessionResumePromptMaximumBytes || !utf8.ValidString(binding.ResumePrompt) {
+		return fmt.Errorf("session binding resume prompt exceeds its bound")
+	}
+	return nil
 }
 
 type WorkspaceLeaseGrant struct {
@@ -401,6 +423,26 @@ func (event HarnessEvent) MarshalJSON() ([]byte, error) {
 		}
 	}
 	return json.Marshal(encoded)
+}
+
+// SessionBindingMessage is the exact session.binding envelope. It is sent instead of Outbound
+// because the hub rejects orchestration envelopes that carry undeclared fields such as activeRuns.
+type SessionBindingMessage struct {
+	Type    string               `json:"type"`
+	RunID   string               `json:"runId"`
+	Binding SessionBindingUpdate `json:"binding"`
+	At      string               `json:"at"`
+}
+
+func NewSessionBindingMessage(runID string, binding SessionBindingUpdate, at string) SessionBindingMessage {
+	return SessionBindingMessage{Type: "session.binding", RunID: runID, Binding: binding, At: at}
+}
+
+func (message SessionBindingMessage) Validate() error {
+	if !isIdentifier(message.RunID) || !isTimestamp(message.At) {
+		return fmt.Errorf("session.binding is missing run identity or timestamp")
+	}
+	return message.Binding.Validate()
 }
 
 // HarnessEventMessage is the exact harness.event envelope. It is sent instead of Outbound because

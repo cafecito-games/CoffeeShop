@@ -9,6 +9,7 @@ import type {
 } from "@coffee-shop/protocol";
 import { applyHarnessResolution, cancelPendingApprovals, openApproval, settleApprovalsForTerminalRun } from "./approvals.js";
 import type { Redactor } from "./redaction.js";
+import { settleSessionBindingsForTerminalRun } from "./sessionBindings.js";
 import { newEvent, type State } from "./store.js";
 
 /*
@@ -408,7 +409,7 @@ export function acceptHarnessEvent(state: State, source: HarnessEventSource, eve
   return { kind: "accepted", deliveries: [] };
 }
 
-/** Closes a run's stream and settles its approvals once the run reaches a terminal state. */
+/** Closes a run's stream and settles its approvals and session bindings once the run reaches a terminal state. */
 export function settleHarnessStateForTerminalRun(state: State, runId: string, at: string) {
   const stream = streamFor(state, runId);
   if (stream) {
@@ -422,6 +423,7 @@ export function settleHarnessStateForTerminalRun(state: State, runId: string, at
     activity.updatedAt = at;
   }
   settleApprovalsForTerminalRun(state, runId, at);
+  settleSessionBindingsForTerminalRun(state, runId, at);
 }
 
 /** Retained, redacted events for a run after `afterSequence`, in sequence order. */

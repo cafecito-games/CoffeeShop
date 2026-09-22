@@ -286,6 +286,10 @@ func (client *Client) handle(ctx context.Context, message protocol.Inbound) {
 // not start anything; see harness.Runner.Admit.
 type admitTransport func(harnessID, transport, fallbackTransport string) error
 
+// admitResume is the capability check the dispatch guard uses for a session resume. It must not
+// start anything; see harness.Runner.AdmitResume.
+type admitResume func(harnessID string) error
+
 // unsupportedExecutionReason reports why a version-4 dispatch cannot be honored by this Barista,
 // or "" when it is fully supported. Anything Barista cannot honor exactly is rejected here, before
 // any process starts, rather than silently degraded to plain native execution, which is what
@@ -296,12 +300,17 @@ type admitTransport func(harnessID, transport, fallbackTransport string) error
 //
 // acp-v1 is accepted only when admit confirms that a verified adapter is available for the
 // harness, or that the dispatch and the operator both permit native fallback and the native CLI is
-// installed; a nil admit accepts no ACP run. A session binding to resume remains unsupported.
+// installed; a nil admit accepts no ACP run.
+//
+// A session binding to resume is accepted only for an acp-v1 run whose run-level binding identity
+// equals the execution's, whose binding is well formed, and whose adapter negotiated session
+// resume or load in its startup probe (resume confirms this); a nil resume accepts none. Anything
+// else is rejected rather than silently started as a new session.
 //
 // The final check is lease acceptance: a run naming a lease must arrive with exactly that lease's
 // grant, the grant must be well formed, name the run's own cwd (and, for a worktree, its task),
 // and use a policy this Barista's workspace manager can provision; a nil manager accepts no lease.
-func unsupportedExecutionReason(run protocol.Run, execution *protocol.DispatchExecution, admit admitTransport, workspaces *workspace.Manager) string {
+func unsupportedExecutionReason(run protocol.Run, execution *protocol.DispatchExecution, admit admitTransport, resume admitResume, workspaces *workspace.Manager) string {
 	transport := run.Transport
 	fallbackTransport := ""
 	if execution != nil {
@@ -328,8 +337,23 @@ func unsupportedExecutionReason(run protocol.Run, execution *protocol.DispatchEx
 	default:
 		return "unsupported execution: unknown transport not available on this Barista"
 	}
-	if run.SessionBindingID != "" || (execution != nil && execution.SessionBinding != nil) {
-		return "unsupported execution: session binding resume not available on this Barista"
+	var binding *protocol.DispatchSessionBinding
+	if execution != nil {
+		binding = execution.SessionBinding
+	}
+	if run.SessionBindingID != "" || binding != nil {
+		if binding == nil || binding.ID != run.SessionBindingID {
+			return "unsupported execution: the run's session binding is missing or names a different binding"
+		}
+		if transport != protocol.TransportACP {
+			return "unsupported execution: only an acp-v1 run can resume a session"
+		}
+		if err := binding.Validate(); err != nil {
+			return "unsupported execution: the session binding is malformed"
+		}
+		if resume == nil || resume(run.HarnessID) != nil {
+			return "unsupported execution: session resume not available for this harness on this Barista"
+		}
 	}
 	var lease *protocol.WorkspaceLeaseGrant
 	if execution != nil {
@@ -366,11 +390,18 @@ func (client *Client) admitTransport() admitTransport {
 	return client.runner.Admit
 }
 
+func (client *Client) admitResume() admitResume {
+	if client.runner == nil {
+		return nil
+	}
+	return client.runner.AdmitResume
+}
+
 func (client *Client) dispatch(ctx context.Context, run protocol.Run, agent protocol.Agent, execution *protocol.DispatchExecution) {
 	// The guard may re-verify an adapter executable's digest, so it runs before taking the run
 	// lock; its verdict is applied in the same place as before, after the tombstone and duplicate
 	// checks.
-	rejection := unsupportedExecutionReason(run, execution, client.admitTransport(), client.workspaces)
+	rejection := unsupportedExecutionReason(run, execution, client.admitTransport(), client.admitResume(), client.workspaces)
 	client.runsMu.Lock()
 	if _, cancelled := client.cancelled[run.ID]; cancelled {
 		client.runsMu.Unlock()
@@ -458,6 +489,14 @@ func (client *Client) dispatch(ctx context.Context, run protocol.Run, agent prot
 				}
 			}
 			invocation.Permission = session.permission
+			var bindingID string
+			if execution != nil && execution.SessionBinding != nil {
+				bindingID = execution.SessionBinding.ID
+				invocation.Resume = &harness.SessionResume{ProviderSessionID: execution.SessionBinding.ProviderSessionID, Prompt: execution.SessionBinding.ResumePrompt}
+			}
+			invocation.Session = func(established harness.EstablishedSession) {
+				client.reportSession(run, bindingID, established)
+			}
 		}
 		result, err := client.runner.Execute(runContext, invocation)
 		if err != nil {
@@ -471,6 +510,22 @@ func (client *Client) dispatch(ctx context.Context, run protocol.Run, agent prot
 			client.send(protocol.Outbound{Type: "run.completed", RunID: run.ID, Output: result, At: now()})
 		}
 	}()
+}
+
+// reportSession tells the hub which provider session the run's prompt is about to reach. It names
+// the dispatch's binding only when that session actually resumed; a new session carries no binding
+// identity, so the hub records it as a replacement.
+func (client *Client) reportSession(run protocol.Run, bindingID string, established harness.EstablishedSession) {
+	update := protocol.SessionBindingUpdate{ProviderSessionID: established.ProviderSessionID, HarnessID: run.HarnessID, Transport: protocol.TransportACP, Status: "active"}
+	if established.Resumed {
+		update.BindingID = bindingID
+	}
+	message := protocol.NewSessionBindingMessage(run.ID, update, now())
+	if err := message.Validate(); err != nil {
+		log.Printf("omit invalid session.binding for run %s: %v", run.ID, err)
+		return
+	}
+	client.send(message)
 }
 
 func (client *Client) callHub(ctx context.Context, runID, operation string, arguments json.RawMessage) (json.RawMessage, error) {

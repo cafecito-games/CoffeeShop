@@ -83,10 +83,22 @@ type Options struct {
 	Now               func() time.Time
 }
 
+// ResumeRequest asks the client to continue an existing provider session instead of creating one.
+type ResumeRequest struct {
+	SessionID string
+	// Prompt, when set, is sent instead of SessionRequest.Prompt if the session resumed.
+	Prompt string
+}
+
 // SessionRequest describes the single prompt turn of a run.
 type SessionRequest struct {
-	Cwd       string
-	Prompt    string
+	Cwd    string
+	Prompt string
+	// Resume, when set, continues SessionID through session/resume, or session/load when only that
+	// was negotiated. When the adapter negotiated neither, or refuses with a JSON-RPC error, a new
+	// session is created and receives Prompt; a transport failure or an authentication refusal
+	// fails the run before any prompt.
+	Resume    *ResumeRequest
 	MCPServer *MCPServer
 	// Configuration is applied and confirmed after session/new and before the prompt.
 	Configuration []ConfigSelection
@@ -113,8 +125,11 @@ type Client struct {
 	emitMu   sync.Mutex
 	sequence int64
 
-	stateMu    sync.Mutex
-	sessionID  string
+	stateMu   sync.Mutex
+	sessionID string
+	resumed   bool
+	// loading discards the history an adapter replays during session/load.
+	loading    bool
 	negotiated *protocol.AcpAgentCapabilities
 	// closeSupported records whether initialize advertised session/close.
 	closeSupported bool
@@ -257,7 +272,7 @@ func (client *Client) run(ctx context.Context, request SessionRequest) (Result, 
 			Headers: []httpHeader{{Name: "Authorization", Value: "Bearer " + request.MCPServer.BearerToken}},
 		})
 	}
-	sessionID, configuration, err := client.newSession(ctx, request.Cwd, servers, initialized.AuthMethods)
+	sessionID, configuration, resumed, err := client.establishSession(ctx, request, servers, initialized)
 	if err != nil {
 		return Result{}, err
 	}
@@ -272,7 +287,11 @@ func (client *Client) run(ctx context.Context, request SessionRequest) (Result, 
 	if ctx.Err() != nil {
 		return Result{}, fmt.Errorf("%w before %s was sent", ErrCancelled, methodSessionPrompt)
 	}
-	response, err := client.prompt(ctx, sessionID, request.Prompt)
+	prompt := request.Prompt
+	if resumed && request.Resume.Prompt != "" {
+		prompt = request.Resume.Prompt
+	}
+	response, err := client.prompt(ctx, sessionID, prompt)
 	if err != nil {
 		return Result{}, err
 	}
@@ -348,6 +367,87 @@ func negotiatedCapabilities(response initializeResponse) protocol.AcpAgentCapabi
 	return negotiated
 }
 
+// Session returns the session the client established and whether it resumed an existing one.
+func (client *Client) Session() (string, bool) {
+	client.stateMu.Lock()
+	defer client.stateMu.Unlock()
+	return client.sessionID, client.resumed
+}
+
+// establishSession resumes the requested session when the adapter negotiated a way to, and
+// otherwise creates a new one. Only an explicit JSON-RPC refusal of the resume, before any prompt,
+// makes the client replace the session; the refusal is reported as a warning.
+func (client *Client) establishSession(ctx context.Context, request SessionRequest, servers []mcpServerHTTP, initialized initializeResponse) (string, configState, bool, error) {
+	if resume := request.Resume; resume != nil {
+		if resume.SessionID == "" || len(resume.SessionID) > eventIdentifierBytes {
+			return "", nil, false, fmt.Errorf("acp resume session identity is invalid")
+		}
+		capabilities := initialized.AgentCapabilities
+		method := ""
+		switch {
+		case capabilities.SessionCapabilities.Resume != nil && !isNull(capabilities.SessionCapabilities.Resume):
+			method = methodSessionResume
+		case capabilities.LoadSession:
+			method = methodSessionLoad
+		}
+		if method == "" {
+			client.emit(warningEvent(WarningSessionNotResumed, "adapter negotiated neither session resume nor load; a new session received the durable context"))
+		} else {
+			configuration, err := client.resumeSession(ctx, method, resume.SessionID, request.Cwd, servers, initialized.AuthMethods)
+			if err == nil {
+				return resume.SessionID, configuration, true, nil
+			}
+			var responseError *ResponseError
+			if !errors.As(err, &responseError) {
+				return "", nil, false, err
+			}
+			client.emit(warningEvent(WarningSessionNotResumed, method+" was refused; a new session received the durable context"))
+		}
+	}
+	sessionID, configuration, err := client.newSession(ctx, request.Cwd, servers, initialized.AuthMethods)
+	return sessionID, configuration, false, err
+}
+
+// resumeSession continues sessionID with method. Updates the adapter sends for the session before
+// it answers are replayed history and are discarded. A JSON-RPC refusal is returned as a
+// *ResponseError, except an authentication refusal, which fails like session/new would.
+func (client *Client) resumeSession(ctx context.Context, method, sessionID, cwd string, servers []mcpServerHTTP, methods []authMethod) (configState, error) {
+	requestContext, cancel := context.WithTimeout(ctx, client.options.RequestTimeout)
+	defer cancel()
+	client.stateMu.Lock()
+	client.sessionID = sessionID
+	client.loading = true
+	client.stateMu.Unlock()
+	var response resumeSessionResponse
+	err := client.peer.call(requestContext, method, resumeSessionRequest{SessionID: sessionID, Cwd: cwd, McpServers: servers}, &response)
+	client.stateMu.Lock()
+	client.loading = false
+	client.resumed = err == nil
+	if err != nil {
+		client.sessionID = ""
+	}
+	client.stateMu.Unlock()
+	var responseError *ResponseError
+	if errors.As(err, &responseError) {
+		if responseError.Code == CodeAuthenticationRequired {
+			return nil, authenticationRequired(methods)
+		}
+		return nil, err
+	}
+	if err != nil {
+		return nil, client.setupError(ctx, method, err)
+	}
+	return newConfigState(response.ConfigOptions), nil
+}
+
+func authenticationRequired(methods []authMethod) error {
+	names := make([]string, 0, len(methods))
+	for _, method := range methods {
+		names = append(names, truncateBytes(method.ID, eventIdentifierBytes))
+	}
+	return fmt.Errorf("%w (advertised methods: %s)", ErrAuthenticationRequired, truncateBytes(strings.Join(names, ", "), MaximumDiagnosticBytes))
+}
+
 func (client *Client) newSession(ctx context.Context, cwd string, servers []mcpServerHTTP, methods []authMethod) (string, configState, error) {
 	requestContext, cancel := context.WithTimeout(ctx, client.options.RequestTimeout)
 	defer cancel()
@@ -355,11 +455,7 @@ func (client *Client) newSession(ctx context.Context, cwd string, servers []mcpS
 	err := client.peer.call(requestContext, methodSessionNew, newSessionRequest{Cwd: cwd, McpServers: servers}, &response)
 	var responseError *ResponseError
 	if errors.As(err, &responseError) && responseError.Code == CodeAuthenticationRequired {
-		names := make([]string, 0, len(methods))
-		for _, method := range methods {
-			names = append(names, truncateBytes(method.ID, eventIdentifierBytes))
-		}
-		return "", nil, fmt.Errorf("%w (advertised methods: %s)", ErrAuthenticationRequired, truncateBytes(strings.Join(names, ", "), MaximumDiagnosticBytes))
+		return "", nil, authenticationRequired(methods)
 	}
 	if err != nil {
 		return "", nil, client.setupError(ctx, methodSessionNew, err)
@@ -472,7 +568,7 @@ func (client *Client) sessionUpdate(params json.RawMessage) error {
 	}
 	client.stateMu.Lock()
 	sessionID, completed := client.sessionID, client.completed
-	if sessionID == "" {
+	if sessionID == "" || (client.loading && notification.SessionID == sessionID) {
 		client.stateMu.Unlock()
 		return nil
 	}
@@ -520,9 +616,9 @@ func (client *Client) requestPermission(ctx context.Context, params json.RawMess
 		return cancelledPermission()
 	}
 	client.stateMu.Lock()
-	sessionID, completed := client.sessionID, client.completed
+	sessionID, completed, loading := client.sessionID, client.completed, client.loading
 	client.stateMu.Unlock()
-	if sessionID == "" || request.SessionID != sessionID || completed {
+	if sessionID == "" || request.SessionID != sessionID || completed || loading {
 		client.emit(warningEvent(WarningPermissionMalformed, "permission request does not belong to the active prompt turn and was cancelled"))
 		return cancelledPermission()
 	}

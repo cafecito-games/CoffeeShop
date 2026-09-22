@@ -22,6 +22,7 @@ import {
   planEntryStatuses,
   placementRequirementKinds,
   sessionBindingStatuses,
+  sessionResumePromptMaximumBytes,
   supportsControlCapability,
   taskDependencyPolicies,
   taskMessageKinds,
@@ -392,6 +393,16 @@ test("control-v4 dispatch, approval, and register fixtures honor their version g
 
   const registerFixture = readFixture("register.json");
   assert.equal(isControlProtocolVersion(registerFixture.protocolVersion), true);
+});
+
+test("control-v4 dispatch-resume fixture carries a string resume prompt within the bound", () => {
+  const dispatch = readFixture("dispatch-resume.json");
+  const resumePrompt = dispatch.execution?.sessionBinding?.resumePrompt;
+  assert.equal(typeof resumePrompt, "string", "dispatch-resume.json must carry execution.sessionBinding.resumePrompt");
+  assert.ok(
+    Buffer.byteLength(resumePrompt, "utf8") <= sessionResumePromptMaximumBytes,
+    "resumePrompt must not exceed sessionResumePromptMaximumBytes"
+  );
 });
 
 const baseHarnessEvent = () => ({ type: "message.delta", runId: "run-one", sequence: 1, at, text: "hello" });

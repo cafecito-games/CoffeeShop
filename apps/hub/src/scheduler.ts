@@ -26,6 +26,7 @@ import {
 } from "@coffee-shop/protocol";
 import { isWorkspaceWithinRoot } from "./agentConfiguration.js";
 import { computeNodeProjectReadiness, defaultEvidenceTTLMilliseconds } from "./projectReadiness.js";
+import { sessionDispatchFor, type SessionDispatchSource } from "./sessionBindings.js";
 import { newEvent, newId, type State } from "./store.js";
 import { assignTaskAttempt, readyTasks, taskReadiness } from "./tasks.js";
 import { dispatchableLease, exclusiveWorkspaceHolder, leasedIsolation, planWorkspaceLease } from "./workspaceLeases.js";
@@ -377,19 +378,31 @@ export function placeTask(task: Task, environment: PlacementEnvironment): Placem
 }
 
 /**
- * The dispatch message for a run; task attempts also carry their version-4 execution. A leased
- * attempt carries its grant only while the lease may still be provisioned, so a settled lease can
- * never be resurrected by a replayed dispatch: Barista rejects a run naming a lease without one.
+ * The dispatch message for a run; task attempts and orchestrator continuations also carry their
+ * version-4 execution. A leased attempt carries its grant only while the lease may still be
+ * provisioned, so a settled lease can never be resurrected by a replayed dispatch: Barista rejects
+ * a run naming a lease without one. A run naming a session binding carries it only while that
+ * binding may still be resumed by this run (see `sessionDispatchFor`).
  */
-export function dispatchMessageFor(run: Run, agent: Agent, agents: readonly Agent[], leases: readonly WorkspaceLease[] = []): Extract<HubToControlAgent, { type: "dispatch" }> {
+export function dispatchMessageFor(
+  run: Run,
+  agent: Agent,
+  agents: readonly Agent[],
+  leases: readonly WorkspaceLease[] = [],
+  sessions: SessionDispatchSource = {}
+): Extract<HubToControlAgent, { type: "dispatch" }> {
   const directory = agents.filter((item) => item.id !== agent.id).map((item) => `${item.id} (${item.title})`).join(", ");
   const dispatchAgent = { ...agent, systemPrompt: `${agent.systemPrompt}\n\nAvailable teammates: ${directory || "none"}` };
-  if (run.taskId === undefined) return { type: "dispatch", run, agent: dispatchAgent };
-  const execution: DispatchExecution = { transport: run.transport ?? "native-cli", taskId: run.taskId, attempt: run.attempt };
+  if (run.taskId === undefined && run.transport === undefined && run.sessionBindingId === undefined) return { type: "dispatch", run, agent: dispatchAgent };
+  const session = sessionDispatchFor(run, sessions);
+  const execution: DispatchExecution = run.taskId === undefined
+    ? { transport: run.transport ?? "native-cli" }
+    : { transport: run.transport ?? "native-cli", taskId: run.taskId, attempt: run.attempt };
   if (run.transport === "acp-v1" && run.fallbackTransport === "native-cli") execution.fallbackTransport = "native-cli";
+  if (session.sessionBinding) execution.sessionBinding = session.sessionBinding;
   const lease = dispatchableLease(leases, run.id, run.workspaceLeaseId);
   if (lease) execution.workspaceLease = workspaceLeaseGrant(lease);
-  return { type: "dispatch", run, agent: dispatchAgent, execution };
+  return { type: "dispatch", run: session.run, agent: dispatchAgent, execution };
 }
 
 export interface SchedulingContext {
@@ -508,7 +521,7 @@ export function runSchedulingPass(state: State, context: SchedulingContext, at: 
     }
     assignTaskAttempt(state, task.id, run, at);
     task.placement = decision.diagnostic;
-    const delivered = context.canDeliver(run.nodeId, dispatchMessageFor(run, agent, state.agents, state.workspaceLeases));
+    const delivered = context.canDeliver(run.nodeId, dispatchMessageFor(run, agent, state.agents, state.workspaceLeases, state));
     if (delivered) run.dispatchedAt = at;
     agent.state = delivered ? "thinking" : "waiting";
     agent.currentAction = delivered ? "Starting task" : "Waiting for compute";
