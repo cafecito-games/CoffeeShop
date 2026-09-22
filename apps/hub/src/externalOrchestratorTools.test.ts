@@ -427,22 +427,31 @@ test("a connection holding no attachment cannot read the inventory", async () =>
   assert.equal(errorOf(await call(peer, "get_execution_inventory", {})).code, "not_attached");
 });
 
-test("every tool the hub serves is reachable and every other declared tool is not", async () => {
+test("every tool the hub serves is reachable with a well-formed call", async () => {
   const context = await harness();
   const { peer, threadId } = await attached(context);
+  const submitted = resultOf(await call(peer, "submit_tasks", { threadId, idempotencyKey: "batch-0", tasks: [oneTask("seed")] }));
+  const taskId = submitted.taskIdsByKey.seed as string;
+  // `detach_thread` is called last: once it runs, every thread-scoped tool answers `not_attached`.
+  const calls: Array<[ExternalOrchestratorToolName, Record<string, unknown>]> = [
+    ["create_thread", { objective: "Another thread" }],
+    ["list_threads", {}],
+    ["attach_thread", { threadId }],
+    ["get_thread_context", { threadId }],
+    ["get_thread_events", { threadId }],
+    ["get_execution_inventory", {}],
+    ["submit_tasks", { threadId, idempotencyKey: "batch-1", tasks: [oneTask("one")] }],
+    ["send_task_message", { threadId, idempotencyKey: "message-1", recipient: { type: "task", taskId }, kind: "note", body: "hello" }],
+    ["update_task", { threadId, taskId, idempotencyKey: "update-1", progress: "halfway" }],
+    ["update_thread", { threadId, title: "Renamed" }],
+    ["detach_thread", { threadId }]
+  ];
+  assert.deepEqual([...calls.map(([tool]) => tool)].sort(), [...servedExternalOrchestratorTools].sort(), "every served tool is exercised");
 
-  const wellFormed: Partial<Record<ExternalOrchestratorToolName, Record<string, unknown>>> = {
-    create_thread: { objective: "Another thread" },
-    list_threads: {},
-    update_task: { threadId, idempotencyKey: "update-1", progress: "halfway" },
-    send_task_message: { threadId, idempotencyKey: "message-1", recipient: { type: "orchestrator" }, kind: "note", body: "hello" },
-    submit_tasks: { threadId, idempotencyKey: "batch-1", tasks: [oneTask("one")] },
-    update_thread: { threadId, title: "Renamed" }
-  };
-  for (const tool of servedExternalOrchestratorTools) {
-    const response = await call(peer, tool, wellFormed[tool] ?? { threadId });
-    assert.ok("error" in response || "result" in response, tool);
-    if ("error" in response) assert.notEqual(response.error.code, "invalid_arguments", `${tool} is served: ${response.error.message}`);
+  for (const [tool, argumentsValue] of calls) {
+    const response = await call(peer, tool, argumentsValue);
+    if (!("error" in response)) continue;
+    assert.equal(response.error.code, tool === "update_task" ? "forbidden" : "", `${tool}: ${response.error.message}`);
   }
   for (const tool of ["list_approvals", "resolve_approval"] as ExternalOrchestratorToolName[]) {
     assert.equal(errorOf(await call(peer, tool, { threadId })).code, "forbidden", `${tool} needs another scope`);
@@ -455,7 +464,7 @@ test("every hub tool failure maps to a code the protocol declares", async () => 
     "persistence_failed", "inconsistent_state", "internal_error", "run_not_active", "thread_inactive", "thread_archived",
     "cursor_invalid", "cursor_stale", "invalid_arguments", "invalid_artifact", "invalid_target", "invalid_transition",
     "batch_too_large", "dependency_cycle", "unknown_dependency", "depth_limit", "fanout_limit", "mailbox_full",
-    "update_limit", "task_not_ready", "invalid_attempt", "a_code_this_hub_has_never_raised"
+    "update_limit", "task_not_ready", "invalid_attempt", "invalid_target", "a_code_this_hub_has_never_raised"
   ];
   for (const code of codes) {
     const mapped = externalOrchestratorErrorFor(new CoordinationError(code, "why"));

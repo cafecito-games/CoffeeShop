@@ -126,6 +126,10 @@ const externalOrchestratorErrorCodes: Readonly<Record<string, OrchestratorClient
   idempotency_conflict: "conflict",
   duplicate_task_key: "conflict",
   thread_in_use: "conflict",
+  thread_inactive: "conflict",
+  thread_archived: "conflict",
+  task_not_ready: "conflict",
+  invalid_transition: "conflict",
   persistence_failed: "hub_unavailable",
   inconsistent_state: "hub_unavailable",
   internal_error: "hub_unavailable"
