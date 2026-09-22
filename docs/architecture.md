@@ -109,6 +109,19 @@ Every status vocabulary has an explicit transition table in which terminal state
 
 The scheduler's choice is the attempt's requested `transport`, persisted on the immutable run. Barista makes the final selection once, before the harness receives the prompt, and reports it on `run.started` as `transport` (`RunTransportSelection`): requested and selected transports, a fallback reason when they differ, the native CLI version, the verified adapter's id, version, and source, and the ACP capabilities negotiated for the run. The hub records a well-formed selection that matches the run's requested transport and permitted fallback on `run.transportSelection`, exposes it on task attempts, and adds a timeline event when the run fell back; anything else is not recorded and is reported as a timeline event. A failure after the prompt is sent fails the attempt; a retry is a new attempt that selects its transport anew.
 
+### ACP status: where it is the preferred path
+
+ACP is the preferred transport exactly where the end-to-end acceptance suite (`task system:test`, `apps/control-agent/internal/systemtest`) proves it, and nowhere else:
+
+| Execution | Preferred transport | Evidence |
+|---|---|---|
+| Task attempts on a node whose harness advertises `acp-v1` (a verified adapter passed its startup probe) | `acp-v1`; `native-cli` when no adapter is advertised or the task or profile excludes ACP | Codex and Claude attempts run concurrently over ACP on two real Barista processes, with structured plan, tool, diff, and usage events, approval accept, reject, and expiry, cancellation, adapter crash, and malformed-frame handling |
+| Orchestrator continuations (wakes) | `acp-v1` when the owner's harness advertises it | A wake opens a new session, the next resumes it, and a stale provider session is replaced with bounded durable context; every inbox event is delivered to exactly one wake |
+| ACP failure before the prompt on a node whose operator enabled `--acp-native-fallback` | `native-cli`, recorded as a fallback | The run completes through the native CLI with `transportSelection.fallbackReason` and a `transport-native-fallback` warning |
+| Direct operator messages, handoffs, and version 1–3 Baristas | `native-cli` only | Direct runs never carry an `execution` object; version-3 nodes keep direct runs and never receive task attempts |
+
+The suite drives real hub and Barista processes but replaces every provider executable with `fakeharness`, which reproduces the pinned adapters' identity (codex-acp 1.12.0, claude-agent-acp 0.79.0), configuration options, and ACP framing without contacting a provider. It therefore proves Coffee Shop's side of the contract; it does not prove that a particular real adapter build behaves identically, which each node establishes with its startup probe and `barista doctor`. Claude over ACP additionally stays experimental at the account boundary and loads only with an explicit `--claude-acp-auth-mode` (see `docs/anthropic-usage.md`). The native CLI paths are not removed and remain the fallback. Operating procedures are in `docs/operations.md`.
+
 ### Task graph persistence
 
 `apps/hub/src/tasks.ts` owns the hub's task DAG. A running source run whose agent may delegate submits one batch with a batch-level idempotency key; tasks name each other with client-local keys and may also depend on existing tasks in the same thread. The whole batch is normalized (trimmed strings, requirement sets deduplicated and sorted, ranked preferences deduplicated in order, dependencies sorted), validated for malformed fields, duplicate keys, missing or cross-thread dependencies, self-edges, and cycles, and rejected as a unit on any failure. Validation runs once as a preflight and again inside `Store.transact`, where it is authoritative, so concurrent duplicates converge.
@@ -199,11 +212,10 @@ The MVP deliberately proves the seams before adding infrastructure. Recommended 
 1. Replace the JSON snapshot with PostgreSQL and append-only run/event tables.
 2. Add OIDC for users and per-Barista enrollment tokens with rotation.
 3. Add a scheduler/lease table so multiple hub replicas cannot dispatch the same run.
-4. Build the PWA approval and structured-activity views on top of the hub's approval endpoints and `runActivity` projection.
-5. Move artifact content from hub-local storage to object storage with signed upload and download URLs.
-6. Add container/VM workspace providers and a policy engine before untrusted workloads.
-7. Add AG-UI as an external harness adapter while preserving the same run/event model.
-8. Add routines only after retries, idempotency, cancellation, and budgets are durable.
+4. Move artifact content from hub-local storage to object storage with signed upload and download URLs.
+5. Add container/VM workspace providers and a policy engine before untrusted workloads.
+6. Add AG-UI as an external harness adapter while preserving the same run/event model.
+7. Add routines only after retries, idempotency, cancellation, and budgets are durable.
 
 ## Deliberate non-goals in this bootstrap
 

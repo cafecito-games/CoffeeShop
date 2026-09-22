@@ -48,6 +48,14 @@ tasks:
     cmds:
       - pnpm -r test
       - task: control-agent:test
+      - task: system:test
+
+  system:test:
+    desc: Run the deterministic multi-node end-to-end system test (real hub and Barista processes, fake harnesses)
+    deps: [protocol:build]
+    dir: apps/control-agent
+    cmds:
+      - go test -tags system -count=1 -timeout 10m ./internal/systemtest/...
 
   typecheck:
     desc: Type-check every TypeScript workspace
@@ -173,6 +181,7 @@ tasks:
     dir: apps/control-agent
     cmds:
       - go vet ./...
+      - go vet -tags system ./internal/systemtest/...
 
   control-agent:fmt:
     desc: Format Barista source files
