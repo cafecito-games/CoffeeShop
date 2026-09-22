@@ -1,7 +1,8 @@
 import { useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { FolderOpen } from "@phosphor-icons/react";
 import type {
-  Agent, ApprovalRequest, ComputeNode, Run, Task, TaskMessage, TaskMessageAcknowledgement, Thread, WorkspaceLease
+  Agent, ApprovalRequest, ComputeNode, OrchestratorClient, Run, Task, TaskMessage, TaskMessageAcknowledgement,
+  Thread, WorkspaceLease
 } from "@coffee-shop/protocol";
 import { ApprovalsView } from "./ApprovalsView.js";
 import { TaskGraph } from "./TaskGraph.js";
@@ -17,7 +18,7 @@ const orchestrationTabs: readonly { key: OrchestrationTab; label: string }[] = [
 
 export function OrchestrationView({
   threads, tasks, taskMessages, taskMessageAcknowledgements, approvals, workspaceLeases,
-  agents, nodes, runs, canMutate, apiFetch, onInspectRun
+  agents, nodes, runs, orchestratorClients, canMutate, apiFetch, onInspectRun
 }: {
   threads: Thread[];
   tasks: Task[];
@@ -28,6 +29,7 @@ export function OrchestrationView({
   agents: Agent[];
   nodes: ComputeNode[];
   runs: Run[];
+  orchestratorClients: OrchestratorClient[];
   canMutate: boolean;
   apiFetch: (path: string, init?: RequestInit) => Promise<Response>;
   onInspectRun: (runId: string) => void;
@@ -101,7 +103,7 @@ export function OrchestrationView({
           )
         )}
         {tab === "approvals" && (
-          <ApprovalsView approvals={approvals} agents={agents} nodes={nodes} runs={runs} tasks={tasks} canMutate={canMutate} apiFetch={apiFetch} />
+          <ApprovalsView approvals={approvals} agents={agents} nodes={nodes} runs={runs} tasks={tasks} orchestratorClients={orchestratorClients} canMutate={canMutate} apiFetch={apiFetch} />
         )}
         {tab === "leases" && <WorkspaceLeasesPanel leases={workspaceLeases} nodes={nodes} />}
       </div>

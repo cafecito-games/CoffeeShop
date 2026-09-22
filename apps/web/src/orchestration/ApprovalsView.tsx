@@ -1,7 +1,8 @@
 import { useEffect, useReducer, useState } from "react";
 import { Prohibit, ShieldWarning, WarningCircle, X } from "@phosphor-icons/react";
-import type { Agent, ApprovalOption, ApprovalRequest, ComputeNode, Run, Task } from "@coffee-shop/protocol";
+import type { Agent, ApprovalOption, ApprovalRequest, ComputeNode, OrchestratorClient, Run, Task } from "@coffee-shop/protocol";
 import { AccessibleDialog } from "../AccessibleDialog.js";
+import { approvalResolverLabel, isOrchestratorResolution } from "../orchestratorPresentation.js";
 import { approvalOptionKindLabels, approvalStatusLabels, timeAgo, timeUntil } from "./orchestrationLabels.js";
 
 function randomIdempotencyKey(): string {
@@ -16,12 +17,13 @@ interface ResolutionOutcome {
   error?: string;
 }
 
-export function ApprovalDialog({ approval, agents, nodes, runs, tasks, canMutate, onClose, apiFetch }: {
+export function ApprovalDialog({ approval, agents, nodes, runs, tasks, orchestratorClients, canMutate, onClose, apiFetch }: {
   approval: ApprovalRequest;
   agents: Agent[];
   nodes: ComputeNode[];
   runs: Run[];
   tasks: Task[];
+  orchestratorClients: OrchestratorClient[];
   canMutate: boolean;
   onClose: () => void;
   apiFetch: (path: string, init?: RequestInit) => Promise<Response>;
@@ -97,6 +99,7 @@ export function ApprovalDialog({ approval, agents, nodes, runs, tasks, canMutate
   }
 
   const isPending = latest.status === "pending" && !expired;
+  const resolvedByLabel = approvalResolverLabel(latest.resolvedBy, orchestratorClients);
 
   return (
     <AccessibleDialog labelledBy={titleId} onClose={onClose} className="approval-dialog">
@@ -113,7 +116,7 @@ export function ApprovalDialog({ approval, agents, nodes, runs, tasks, canMutate
         {latest.toolCallId && <div><dt>Tool call</dt><dd><code>{latest.toolCallId}</code></dd></div>}
         <div><dt>Requested</dt><dd><time>{timeAgo(latest.requestedAt)}</time></dd></div>
         <div><dt>Expires</dt><dd>{latest.expiresAt ? (expired ? "Expired" : <>in <time>{timeUntil(latest.expiresAt)}</time></>) : "No expiry reported"}</dd></div>
-        {latest.resolvedBy && <div><dt>Resolved by</dt><dd>{latest.resolvedBy.kind}</dd></div>}
+        {resolvedByLabel && <div><dt>Resolved by</dt><dd className={isOrchestratorResolution(latest.resolvedBy) ? "approval-orchestrator-resolution" : undefined}>{resolvedByLabel}</dd></div>}
       </dl>
       {!isPending && (
         <p className="approval-resolved-notice" role="status">
@@ -155,12 +158,13 @@ export function ApprovalDialog({ approval, agents, nodes, runs, tasks, canMutate
   );
 }
 
-export function ApprovalsView({ approvals, agents, nodes, runs, tasks, canMutate, apiFetch }: {
+export function ApprovalsView({ approvals, agents, nodes, runs, tasks, orchestratorClients, canMutate, apiFetch }: {
   approvals: ApprovalRequest[];
   agents: Agent[];
   nodes: ComputeNode[];
   runs: Run[];
   tasks: Task[];
+  orchestratorClients: OrchestratorClient[];
   canMutate: boolean;
   apiFetch: (path: string, init?: RequestInit) => Promise<Response>;
 }) {
@@ -202,6 +206,9 @@ export function ApprovalsView({ approvals, agents, nodes, runs, tasks, canMutate
                 <button className="approval-row" onClick={() => setOpenId(approval.id)}>
                   <span className={`approval-status approval-status-${approval.status}`}>{approvalStatusLabels[approval.status]}</span>
                   <span className="approval-row-title">{approval.title}</span>
+                  <span className={isOrchestratorResolution(approval.resolvedBy) ? "approval-row-meta approval-orchestrator-resolution" : "approval-row-meta"}>
+                    {approvalResolverLabel(approval.resolvedBy, orchestratorClients) ?? "Resolver unreported"}
+                  </span>
                   <time>{approval.resolvedAt ? timeAgo(approval.resolvedAt) : "—"}</time>
                 </button>
               </li>
@@ -210,7 +217,7 @@ export function ApprovalsView({ approvals, agents, nodes, runs, tasks, canMutate
         </details>
       )}
       {pending.length === 0 && resolved.length === 0 && <div className="approvals-empty"><strong>No approvals yet</strong><p>Permission requests raised by a running harness will appear here.</p></div>}
-      {open && <ApprovalDialog approval={open} agents={agents} nodes={nodes} runs={runs} tasks={tasks} canMutate={canMutate} onClose={() => setOpenId(undefined)} apiFetch={apiFetch} />}
+      {open && <ApprovalDialog approval={open} agents={agents} nodes={nodes} runs={runs} tasks={tasks} orchestratorClients={orchestratorClients} canMutate={canMutate} onClose={() => setOpenId(undefined)} apiFetch={apiFetch} />}
     </section>
   );
 }

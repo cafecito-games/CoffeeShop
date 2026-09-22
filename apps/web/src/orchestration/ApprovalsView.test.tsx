@@ -1,4 +1,4 @@
-import type { Agent, ApprovalRequest, ComputeNode, Run, Task } from "@coffee-shop/protocol";
+import type { Agent, ApprovalRequest, ComputeNode, OrchestratorClient, Run, Task } from "@coffee-shop/protocol";
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
@@ -29,13 +29,13 @@ function approval(overrides: Partial<ApprovalRequest>): ApprovalRequest {
 
 describe("ApprovalsView", () => {
   it("shows an empty state when there is nothing to review", () => {
-    render(<ApprovalsView approvals={[]} agents={agents} nodes={nodes} runs={runs} tasks={tasks} canMutate apiFetch={vi.fn()} />);
+    render(<ApprovalsView approvals={[]} agents={agents} nodes={nodes} runs={runs} tasks={tasks} orchestratorClients={[]} canMutate apiFetch={vi.fn()} />);
     expect(screen.getByText("No approvals yet")).toBeInTheDocument();
   });
 
   it("lists a pending approval and resolves an allow-once option without confirmation", async () => {
     const apiFetch = vi.fn(async (_path: string, _init?: RequestInit) => new Response(JSON.stringify({ approval: { ...approval({}), status: "approved", selectedOptionId: "opt-once" } }), { status: 200 }));
-    render(<ApprovalsView approvals={[approval({})]} agents={agents} nodes={nodes} runs={runs} tasks={tasks} canMutate apiFetch={apiFetch} />);
+    render(<ApprovalsView approvals={[approval({})]} agents={agents} nodes={nodes} runs={runs} tasks={tasks} orchestratorClients={[]} canMutate apiFetch={apiFetch} />);
     await userEvent.click(screen.getByRole("button", { name: /Write to config.json/ }));
     expect(screen.getByRole("dialog")).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: /^Allow once/ }));
@@ -49,7 +49,7 @@ describe("ApprovalsView", () => {
 
   it("requires explicit confirmation before sending an allow-always resolution", async () => {
     const apiFetch = vi.fn(async () => new Response(JSON.stringify({ approval: approval({ status: "approved" }) }), { status: 200 }));
-    render(<ApprovalsView approvals={[approval({})]} agents={agents} nodes={nodes} runs={runs} tasks={tasks} canMutate apiFetch={apiFetch} />);
+    render(<ApprovalsView approvals={[approval({})]} agents={agents} nodes={nodes} runs={runs} tasks={tasks} orchestratorClients={[]} canMutate apiFetch={apiFetch} />);
     await userEvent.click(screen.getByRole("button", { name: /Write to config.json/ }));
     await userEvent.click(screen.getByRole("button", { name: /^Always allow writes/ }));
     expect(apiFetch).not.toHaveBeenCalled();
@@ -61,7 +61,7 @@ describe("ApprovalsView", () => {
   it("shows the authoritative state on a 409 conflict instead of claiming success", async () => {
     const conflicted = approval({ status: "approved", selectedOptionId: "opt-once" });
     const apiFetch = vi.fn(async (_path: string, _init?: RequestInit) => new Response(JSON.stringify({ error: "already resolved", approval: conflicted }), { status: 409 }));
-    render(<ApprovalsView approvals={[approval({})]} agents={agents} nodes={nodes} runs={runs} tasks={tasks} canMutate apiFetch={apiFetch} />);
+    render(<ApprovalsView approvals={[approval({})]} agents={agents} nodes={nodes} runs={runs} tasks={tasks} orchestratorClients={[]} canMutate apiFetch={apiFetch} />);
     await userEvent.click(screen.getByRole("button", { name: /Write to config.json/ }));
     await userEvent.click(screen.getByRole("button", { name: /^Allow once/ }));
     expect(await screen.findByText(/already changed/)).toBeInTheDocument();
@@ -69,7 +69,7 @@ describe("ApprovalsView", () => {
   });
 
   it("disables resolution controls while disconnected", async () => {
-    render(<ApprovalsView approvals={[approval({})]} agents={agents} nodes={nodes} runs={runs} tasks={tasks} canMutate={false} apiFetch={vi.fn()} />);
+    render(<ApprovalsView approvals={[approval({})]} agents={agents} nodes={nodes} runs={runs} tasks={tasks} orchestratorClients={[]} canMutate={false} apiFetch={vi.fn()} />);
     await userEvent.click(screen.getByRole("button", { name: /Write to config.json/ }));
     expect(screen.getByRole("button", { name: /^Allow once/ })).toBeDisabled();
     expect(screen.getByText(/Reconnect to the hub/)).toBeInTheDocument();
@@ -77,7 +77,7 @@ describe("ApprovalsView", () => {
 
   it("sends a cancel resolution distinct from any option", async () => {
     const apiFetch = vi.fn(async (_path: string, _init?: RequestInit) => new Response(JSON.stringify({ approval: approval({ status: "cancelled" }) }), { status: 200 }));
-    render(<ApprovalsView approvals={[approval({})]} agents={agents} nodes={nodes} runs={runs} tasks={tasks} canMutate apiFetch={apiFetch} />);
+    render(<ApprovalsView approvals={[approval({})]} agents={agents} nodes={nodes} runs={runs} tasks={tasks} orchestratorClients={[]} canMutate apiFetch={apiFetch} />);
     await userEvent.click(screen.getByRole("button", { name: /Write to config.json/ }));
     await userEvent.click(screen.getByRole("button", { name: /Cancel this approval/ }));
     const body = JSON.parse((apiFetch.mock.calls[0][1] as RequestInit).body as string);
@@ -88,12 +88,12 @@ describe("ApprovalsView", () => {
   it("stops offering pending actions the moment a live snapshot update resolves the open approval elsewhere", async () => {
     const apiFetch = vi.fn();
     const pending = approval({});
-    const rendered = render(<ApprovalsView approvals={[pending]} agents={agents} nodes={nodes} runs={runs} tasks={tasks} canMutate apiFetch={apiFetch} />);
+    const rendered = render(<ApprovalsView approvals={[pending]} agents={agents} nodes={nodes} runs={runs} tasks={tasks} orchestratorClients={[]} canMutate apiFetch={apiFetch} />);
     await userEvent.click(screen.getByRole("button", { name: /Write to config.json/ }));
     expect(screen.getByRole("button", { name: /^Allow once/ })).toBeInTheDocument();
 
     const resolvedElsewhere = { ...pending, status: "approved" as const, resolvedAt: "2026-01-01T00:05:00Z", resolvedBy: { kind: "operator" } as const, selectedOptionId: "opt-once" };
-    rendered.rerender(<ApprovalsView approvals={[resolvedElsewhere]} agents={agents} nodes={nodes} runs={runs} tasks={tasks} canMutate apiFetch={apiFetch} />);
+    rendered.rerender(<ApprovalsView approvals={[resolvedElsewhere]} agents={agents} nodes={nodes} runs={runs} tasks={tasks} orchestratorClients={[]} canMutate apiFetch={apiFetch} />);
 
     expect(screen.queryByRole("button", { name: /^Allow once/ })).not.toBeInTheDocument();
     expect(screen.getByText(/already approved; no further action can be taken here/)).toBeInTheDocument();
@@ -105,7 +105,7 @@ describe("ApprovalsView", () => {
     vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
     try {
       const expiring = approval({ expiresAt: "2026-01-01T00:00:05Z" });
-      render(<ApprovalsView approvals={[expiring]} agents={agents} nodes={nodes} runs={runs} tasks={tasks} canMutate apiFetch={vi.fn()} />);
+      render(<ApprovalsView approvals={[expiring]} agents={agents} nodes={nodes} runs={runs} tasks={tasks} orchestratorClients={[]} canMutate apiFetch={vi.fn()} />);
       fireEvent.click(screen.getByRole("button", { name: /Write to config.json/ }));
       expect(screen.getByRole("button", { name: /^Allow once/ })).toBeInTheDocument();
 
@@ -119,5 +119,40 @@ describe("ApprovalsView", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  describe("resolution attribution", () => {
+    const clients: OrchestratorClient[] = [
+      { id: "orchestrator-client-1", name: "Christian's laptop", scopes: ["orchestrate", "resolve-approvals"], createdAt: "2026-01-01T00:00:00Z" }
+    ];
+
+    async function openHistory(resolvedBy: ApprovalRequest["resolvedBy"], orchestratorClients: OrchestratorClient[] = clients) {
+      const resolved = approval({ status: "approved", resolvedAt: "2026-01-01T00:05:00Z", selectedOptionId: "opt-once", resolvedBy });
+      render(<ApprovalsView approvals={[resolved]} agents={agents} nodes={nodes} runs={runs} tasks={tasks} orchestratorClients={orchestratorClients} canMutate apiFetch={vi.fn()} />);
+      await userEvent.click(screen.getByText(/Resolved approvals/));
+    }
+
+    it("tells an orchestrator resolution apart from the operator's own, in history and on the detail dialog", async () => {
+      await openHistory({ kind: "orchestrator", clientId: "orchestrator-client-1", attachmentId: "attachment-1" });
+      expect(screen.getByText("Resolved by orchestrator (Christian's laptop)")).toBeInTheDocument();
+      await userEvent.click(screen.getByRole("button", { name: /Write to config.json/ }));
+      expect(screen.getAllByText("Resolved by orchestrator (Christian's laptop)").length).toBeGreaterThan(1);
+    });
+
+    it("labels the operator's own resolution", async () => {
+      await openHistory({ kind: "operator" });
+      expect(screen.getByText("Resolved by you")).toBeInTheDocument();
+      expect(screen.queryByText(/orchestrator/)).not.toBeInTheDocument();
+    });
+
+    it("names the client id when the resolving client is no longer published", async () => {
+      await openHistory({ kind: "orchestrator", clientId: "orchestrator-client-gone", attachmentId: "attachment-1" }, []);
+      expect(screen.getByText("Resolved by orchestrator (orchestrator-client-gone)")).toBeInTheDocument();
+    });
+
+    it("says the resolver is unreported for a resolution from a hub that records none", async () => {
+      await openHistory(undefined);
+      expect(screen.getByText("Resolver unreported")).toBeInTheDocument();
+    });
   });
 });
