@@ -200,8 +200,46 @@ func TestDispatchWithNativeCliExecutionIsNotRejectedByTheExecutionGuard(t *testi
 	// A nil transport (plain dispatch) and an explicit "native-cli" transport with neither a
 	// session binding nor a workspace lease are both fully supported today; neither should ever
 	// produce the unsupported-execution run.failed message.
-	require.Equal(t, "", unsupportedExecutionReason(nil))
-	require.Equal(t, "", unsupportedExecutionReason(&protocol.DispatchExecution{Transport: "native-cli"}))
+	require.Equal(t, "", unsupportedExecutionReason(protocol.Run{}, nil))
+	require.Equal(t, "", unsupportedExecutionReason(protocol.Run{Transport: "native-cli"}, &protocol.DispatchExecution{Transport: "native-cli"}))
+}
+
+func TestDispatchRejectsUnsupportedTransportOnTheRunWithNoExecutionObject(t *testing.T) {
+	// A hub could set run.transport directly without an execution object at all; the guard must
+	// still reject it instead of letting the run start natively.
+	client := NewClient(config.Config{Concurrency: 1}, protocol.ComputeNode{ID: "node-one"}, nil, emptyCapabilityReport)
+	client.handle(context.Background(), protocol.Inbound{
+		Type:  "dispatch",
+		Run:   protocol.Run{ID: "run-one", Transport: "acp-v1"},
+		Agent: protocol.Agent{ID: "agent-one"},
+	})
+
+	require.Zero(t, client.activeRuns(), "a run.transport of acp-v1 with no execution object must still be rejected")
+	message := waitForMessage(t, client, "run.failed")
+	require.Equal(t, "run-one", message.RunID)
+	require.Equal(t, "unsupported execution: acp-v1 transport not available on this Barista", message.Error)
+}
+
+func TestDispatchRejectsRunLevelSessionBindingAndWorkspaceLeaseFields(t *testing.T) {
+	sessionBindingClient := NewClient(config.Config{Concurrency: 1}, protocol.ComputeNode{ID: "node-one"}, nil, emptyCapabilityReport)
+	sessionBindingClient.handle(context.Background(), protocol.Inbound{
+		Type:  "dispatch",
+		Run:   protocol.Run{ID: "run-one", SessionBindingID: "binding-one"},
+		Agent: protocol.Agent{ID: "agent-one"},
+	})
+	require.Zero(t, sessionBindingClient.activeRuns())
+	message := waitForMessage(t, sessionBindingClient, "run.failed")
+	require.Equal(t, "unsupported execution: session binding resume not available on this Barista", message.Error)
+
+	workspaceLeaseClient := NewClient(config.Config{Concurrency: 1}, protocol.ComputeNode{ID: "node-two"}, nil, emptyCapabilityReport)
+	workspaceLeaseClient.handle(context.Background(), protocol.Inbound{
+		Type:  "dispatch",
+		Run:   protocol.Run{ID: "run-two", WorkspaceLeaseID: "lease-one"},
+		Agent: protocol.Agent{ID: "agent-two"},
+	})
+	require.Zero(t, workspaceLeaseClient.activeRuns())
+	message = waitForMessage(t, workspaceLeaseClient, "run.failed")
+	require.Equal(t, "unsupported execution: workspace lease provisioning not available on this Barista", message.Error)
 }
 
 func TestActiveCancellationAcknowledgesWithoutFailureOrCompletion(t *testing.T) {

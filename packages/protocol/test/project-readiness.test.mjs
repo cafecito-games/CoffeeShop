@@ -10,10 +10,14 @@ import {
   computeProjectProfileFingerprint,
   containsSecretLikeValue,
   evaluateProjectReadiness,
+  evidenceClockSkewAllowanceMilliseconds,
+  isNonNegativeIntegerQuantity,
   isNormalizedVersion,
   parseVersionConstraint,
   projectProfileSchemaVersion,
   readinessRequirementKinds,
+  resolveNodeCapability,
+  satisfiesMinimumQuantity,
   satisfiesVersionConstraint,
   validateNodeCapabilityEvidence,
   validateNodeCapabilityReport,
@@ -605,4 +609,112 @@ test("readiness is deterministic regardless of evidence order", () => {
   evaluateProjectReadiness(profileInput, contextInput, evidenceTTL, nowIso);
   assert.deepEqual(profileInput, readinessProfile(), "the profile is never mutated");
   assert.deepEqual(contextInput, readinessContext(), "the context is never mutated");
+});
+
+test("isNonNegativeIntegerQuantity and satisfiesMinimumQuantity handle plain integer counts beyond the version grammar's per-segment digit bound", () => {
+  assert.equal(isNormalizedVersion("16384"), false, "a single 5-digit segment is not a normalized version");
+  assert.equal(isNonNegativeIntegerQuantity("16384"), true);
+  assert.equal(isNonNegativeIntegerQuantity("0"), true);
+  assert.equal(isNonNegativeIntegerQuantity("01"), false, "a leading zero is not a plain integer");
+  assert.equal(isNonNegativeIntegerQuantity("-1"), false);
+  assert.equal(isNonNegativeIntegerQuantity("1.5"), false);
+  assert.equal(isNonNegativeIntegerQuantity(16384), false, "must be a string, like every other evidence value");
+
+  assert.equal(satisfiesMinimumQuantity("16384", 16384), true);
+  assert.equal(satisfiesMinimumQuantity("16384", 32768), false);
+  assert.equal(satisfiesMinimumQuantity("32768", 16384), true);
+  assert.equal(satisfiesMinimumQuantity("not-a-number", 1), false);
+});
+
+test("readiness matches a configured memory quantity that exceeds the version grammar's 4-digit segment bound", () => {
+  const profile = readinessProfile({
+    requirements: {
+      hard: { minimumConfiguredMemoryMegabytes: 16384 },
+      preferred: undefined
+    }
+  });
+  const satisfied = evaluateProjectReadiness(
+    profile,
+    readinessContext({ evidence: [{ capabilityId: "configured-memory-megabytes", source: "configured", success: true, normalizedValue: "32768", observedAt }] }),
+    evidenceTTL,
+    nowIso
+  );
+  assert.equal(satisfied.ready, true, "32768 must satisfy a >=16384 requirement even though both exceed 4 digits");
+
+  const unsatisfied = evaluateProjectReadiness(
+    profile,
+    readinessContext({ evidence: [{ capabilityId: "configured-memory-megabytes", source: "configured", success: true, normalizedValue: "8192", observedAt }] }),
+    evidenceTTL,
+    nowIso
+  );
+  assert.equal(unsatisfied.ready, false);
+  assert.deepEqual(unsatisfied.unmetHardRequirements.map((unmet) => unmet.kind), ["memory"]);
+});
+
+test("resolveNodeCapability picks the freshest agreeing entry regardless of array order", () => {
+  const older = { capabilityId: "os", source: "runtime", success: true, normalizedValue: "macos", observedAt: "2026-09-21T11:00:00Z" };
+  const freshest = { capabilityId: "os", source: "configured", success: true, normalizedValue: "macos", observedAt: "2026-09-21T11:59:30Z" };
+  const staleOnly = [{ ...older }];
+
+  const forward = resolveNodeCapability([older, freshest], "os", nowIso, evidenceTTL);
+  const reversed = resolveNodeCapability([freshest, older], "os", nowIso, evidenceTTL);
+  assert.deepEqual(forward, reversed);
+  assert.equal(forward.state, "ok", "the freshest agreeing entry is within the TTL even though the first-listed entry is not");
+
+  const onlyStale = resolveNodeCapability(staleOnly, "os", nowIso, 30 * 1000);
+  assert.equal(onlyStale.state, "stale", "sanity check: the older entry alone is in fact outside a tight TTL");
+});
+
+test("readiness resolution of multiple agreeing entries is order-insensitive end to end", () => {
+  const stale = { capabilityId: "toolchain:xcode", source: "runtime", success: true, normalizedValue: "16.4", observedAt: "2020-01-01T00:00:00Z" };
+  const fresh = { capabilityId: "toolchain:xcode", source: "probe", success: true, normalizedValue: "16.4", probeDefinitionVersion: "1", observedAt };
+  const baseEvidence = readinessContext().evidence.filter((entry) => entry.capabilityId !== "toolchain:xcode");
+
+  const staleFirst = evaluateProjectReadiness(readinessProfile(), readinessContext({ evidence: [...baseEvidence, stale, fresh] }), evidenceTTL, nowIso);
+  const freshFirst = evaluateProjectReadiness(readinessProfile(), readinessContext({ evidence: [...baseEvidence, fresh, stale] }), evidenceTTL, nowIso);
+  assert.equal(JSON.stringify(staleFirst), JSON.stringify(freshFirst));
+  assert.equal(staleFirst.ready, true, "the freshest agreeing entry must be used regardless of which one appears first");
+});
+
+test("evidence timestamped further in the future than the clock-skew allowance is treated as stale, never accepted", () => {
+  const skewedButWithinAllowance = new Date(Date.parse(nowIso) + evidenceClockSkewAllowanceMilliseconds - 1000).toISOString();
+  const farFuture = new Date(Date.parse(nowIso) + evidenceClockSkewAllowanceMilliseconds + 60_000).toISOString();
+
+  const withinAllowance = resolveNodeCapability(
+    [{ capabilityId: "os", source: "runtime", success: true, normalizedValue: "macos", observedAt: skewedButWithinAllowance }],
+    "os", nowIso, evidenceTTL
+  );
+  assert.equal(withinAllowance.state, "ok", "small clock drift within the allowance must not be rejected");
+
+  const beyondAllowance = resolveNodeCapability(
+    [{ capabilityId: "os", source: "runtime", success: true, normalizedValue: "macos", observedAt: farFuture }],
+    "os", nowIso, evidenceTTL
+  );
+  assert.equal(beyondAllowance.state, "stale", "a future-dated timestamp must never produce a negative age that reads as fresh");
+
+  const readiness = evaluateProjectReadiness(
+    readinessProfile(),
+    readinessContext({ evidence: readinessContext().evidence.map((entry) =>
+      entry.capabilityId === "os" ? { ...entry, observedAt: farFuture } : entry) }),
+    evidenceTTL,
+    nowIso
+  );
+  assert.equal(readiness.ready, false);
+  assert.ok(readiness.unmetHardRequirements.some((unmet) => unmet.kind === "operating-system"));
+});
+
+test("node capability evidence rejects a secret-like value embedded in free-form output", () => {
+  const base = { capabilityId: "toolchain:xcode", source: "probe", success: false, probeDefinitionVersion: "1", observedAt };
+  const negatives = [
+    ["secret-like diagnostic", { ...base, diagnostic: "build failed: token sk-abcdefghij1234567890 was rejected" }],
+    ["secret-like rawValue", { ...base, success: true, rawValue: "Authorization: Bearer abcdefghijklmnopqrstuvwxyz" }],
+    ["secret-like normalizedValue", { ...base, success: true, normalizedValue: "ghp_abcdefghij1234" }]
+  ];
+  for (const [label, value] of negatives) {
+    const result = validateNodeCapabilityEvidence(value);
+    assert.equal(result.ok, false, `${label} must be rejected`);
+  }
+
+  const clean = { ...base, success: true, rawValue: "go version go1.24.0 darwin/arm64", normalizedValue: "1.24.0" };
+  assert.equal(validateNodeCapabilityEvidence(clean).ok, true);
 });

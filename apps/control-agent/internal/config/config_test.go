@@ -185,6 +185,20 @@ func TestParseRejectsOversizedLabelAndAccelerator(t *testing.T) {
 	require.EqualError(t, err, fmt.Sprintf("accelerator %q exceeds 128 bytes", oversized))
 }
 
+func TestParseRejectsLabelsAndAcceleratorsThatWouldNotFormAValidCapabilityID(t *testing.T) {
+	// readiness.BuildCapabilityReport embeds every label/accelerator verbatim into a capability id
+	// ("label:<label>", "accelerator:<accelerator>"); a value the shared capability id grammar
+	// rejects would make the hub reject the whole capability report, not just that entry, so
+	// config load must fail closed on it instead.
+	t.Setenv("WORKSPACE_ROOTS", absoluteExistingRoot(t))
+
+	_, err := Parse([]string{"--name", "Worker 1", "--id", "worker-1", "--label", "GPU Runner"})
+	require.EqualError(t, err, `label "GPU Runner" must contain only lowercase letters, numbers, and hyphens`)
+
+	_, err = Parse([]string{"--name", "Worker 1", "--id", "worker-1", "--accelerator", "Apple_M3_Max"})
+	require.EqualError(t, err, `accelerator "Apple_M3_Max" must contain only lowercase letters, numbers, and hyphens`)
+}
+
 func TestParseTreatsExplicitZeroMemoryAsUnset(t *testing.T) {
 	t.Setenv("WORKSPACE_ROOTS", absoluteExistingRoot(t))
 	t.Setenv("BARISTA_MEMORY_MEGABYTES", "0")

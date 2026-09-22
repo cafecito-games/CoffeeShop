@@ -65,7 +65,7 @@ const satisfiedReport = (overrides: Partial<NodeCapabilityReport> = {}) => repor
 
 test("a node with zero workspace roots is never ready regardless of evidence", () => {
   const bareNode = node({ workspaceRoots: [] });
-  assert.equal(workspaceAuthorizedForProject(bareNode, satisfiedReport(), profile), false);
+  assert.equal(workspaceAuthorizedForProject(bareNode, satisfiedReport(), profile, nowIso), false);
   const readiness = computeNodeProjectReadiness(bareNode, satisfiedReport(), profile, nowIso);
   assert.equal(readiness.ready, false);
   assert.ok(readiness.unmetHardRequirements.some((unmet) => unmet.kind === "workspace"));
@@ -90,6 +90,28 @@ test("an allowlist that excludes the profile's id blocks readiness even when all
   const readiness = computeNodeProjectReadiness(node(), restricted, profile, nowIso);
   assert.equal(readiness.ready, false);
   assert.ok(readiness.unmetHardRequirements.some((unmet) => unmet.kind === "project-allowlist"));
+});
+
+test("stale workspace-writable evidence does not satisfy the requireWritable gate", () => {
+  const staleReport = report([
+    runtimeEvidence("os", "darwin"),
+    { ...runtimeEvidence("workspace-writable", "true"), observedAt: "2020-01-01T00:00:00Z" },
+    probeEvidence("node", "22.11.0")
+  ]);
+  assert.equal(workspaceAuthorizedForProject(node(), staleReport, profile, nowIso), false);
+  const readiness = computeNodeProjectReadiness(node(), staleReport, profile, nowIso);
+  assert.equal(readiness.ready, false);
+  assert.ok(readiness.unmetHardRequirements.some((unmet) => unmet.kind === "workspace"));
+});
+
+test("ambiguous workspace-writable evidence does not satisfy the requireWritable gate", () => {
+  const ambiguousReport = report([
+    runtimeEvidence("os", "darwin"),
+    { ...runtimeEvidence("workspace-writable", "true"), source: "runtime" },
+    { ...runtimeEvidence("workspace-writable", "true"), source: "configured", success: false, normalizedValue: undefined },
+    probeEvidence("node", "22.11.0")
+  ]);
+  assert.equal(workspaceAuthorizedForProject(node(), ambiguousReport, profile, nowIso), false);
 });
 
 test("defaultEvidenceTTLMilliseconds is exported as a positive number", () => {

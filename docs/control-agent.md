@@ -48,8 +48,8 @@ The web app’s **Compute → Add compute** flow generates a shell-quoted equiva
 | `WORKSPACE_ROOTS` | Absolute allowlisted roots |
 | `COFFEE_SHOP_TOKEN` | Coffee Shop hub secret, never a provider credential |
 | `BARISTA_PROJECT_ALLOWLIST` | Comma-separated project IDs this node accepts work for; empty means unrestricted |
-| `BARISTA_LABELS` | Comma-separated operator-assigned capability labels |
-| `BARISTA_ACCELERATORS` | Comma-separated hardware accelerators available on this node |
+| `BARISTA_LABELS` | Comma-separated operator-assigned capability labels (lowercase letters, numbers, and hyphens) |
+| `BARISTA_ACCELERATORS` | Comma-separated hardware accelerators available on this node (lowercase letters, numbers, and hyphens) |
 | `BARISTA_MEMORY_MEGABYTES` | Configured system memory in megabytes; absent or `0` means not configured |
 
 The UI deliberately emits `COFFEE_SHOP_TOKEN='replace-with-hub-token'`; it never reads the browser’s stored hub token into setup guidance. Replace the placeholder locally on the compute machine, or use a protected environment file when installing Barista as a service.

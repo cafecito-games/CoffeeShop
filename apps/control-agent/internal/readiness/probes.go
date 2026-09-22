@@ -19,6 +19,22 @@ const (
 	probeMaxOutputBytes = 4096
 )
 
+/*
+ * Secret-like value detection, mirroring the narrow denylist in packages/protocol/src/index.ts
+ * (vendor token prefixes, a bearer header, a PEM private key marker). Probe stdout/stderr is
+ * free-form process output, not a discrete field, so a token can appear embedded in a longer
+ * line; the patterns are unanchored (with word boundaries) for that reason, matching the shared
+ * TypeScript implementation exactly.
+ */
+var secretLikeTokenPattern = regexp.MustCompile(`(?i)\b(sk|pk|ghp|gho|ghu|ghs|ghr|xox[abp]|AKIA|glpat)-?[A-Za-z0-9_-]{10,}\b`)
+var bearerHeaderPattern = regexp.MustCompile(`(?i)\bBearer\s+\S{10,}`)
+
+func looksSecretLike(text string) bool {
+	return secretLikeTokenPattern.MatchString(text) ||
+		bearerHeaderPattern.MatchString(text) ||
+		(strings.Contains(text, "-----BEGIN") && strings.Contains(text, "PRIVATE KEY"))
+}
+
 // probeDefinitionVersion identifies the current compile-time definition of every probe below.
 // Bump it by hand whenever a probe's Args or Parse semantics change so the hub can distinguish
 // evidence produced by incompatible probe generations.
@@ -130,6 +146,9 @@ func RunProbe(ctx context.Context, probe Probe) protocol.NodeCapabilityEvidence 
 		evidence.Diagnostic = fmt.Sprintf("probe output exceeded %d bytes", probe.MaxOutputBytes)
 	case execution.Err != nil:
 		evidence.Diagnostic = boundedString(execution.Output, diagnosticMaximumBytes)
+		if looksSecretLike(evidence.Diagnostic) {
+			evidence.Diagnostic = "probe diagnostic withheld: output looked secret-like"
+		}
 	default:
 		evidence.Success = true
 		evidence.RawValue = boundedString(execution.Output, rawValueMaximumBytes)
@@ -137,6 +156,14 @@ func RunProbe(ctx context.Context, probe Probe) protocol.NodeCapabilityEvidence 
 		// never satisfy a versioned hard requirement, which the hub enforces by finding no value.
 		if normalized, ok := probe.Parse(execution.Output); ok {
 			evidence.NormalizedValue = boundedString(normalized, normalizedMaximumBytes)
+		}
+		// Probe output is never trusted verbatim when it looks like it carries a credential: the
+		// whole entry is downgraded to a redacted failure rather than sending any matched value.
+		if looksSecretLike(evidence.RawValue) || looksSecretLike(evidence.NormalizedValue) {
+			evidence.Success = false
+			evidence.RawValue = ""
+			evidence.NormalizedValue = ""
+			evidence.Diagnostic = "probe output withheld: output looked secret-like"
 		}
 	}
 	return evidence

@@ -965,6 +965,23 @@ export function satisfiesVersionConstraint(normalizedVersion: string, constraint
   return versionComparatorPredicates[constraint.comparator](compareVersions(normalizedVersion, constraint.version));
 }
 
+/*
+ * Non-negative integer quantities (logical CPU count, configured memory in megabytes) are plain
+ * counts, not dotted versions: `isNormalizedVersion`'s per-segment 4-digit bound rejects an
+ * ordinary value like "16384" megabytes outright, so quantities use their own grammar and a
+ * BigInt comparison that never loses precision for a large but plausible count.
+ */
+const nonNegativeIntegerQuantityPattern = /^\d{1,15}$/;
+
+export function isNonNegativeIntegerQuantity(value: unknown): value is string {
+  return typeof value === "string" && nonNegativeIntegerQuantityPattern.test(value) && (value === "0" || !value.startsWith("0"));
+}
+
+export function satisfiesMinimumQuantity(reportedValue: string, minimum: number): boolean {
+  if (!isNonNegativeIntegerQuantity(reportedValue)) return false;
+  return BigInt(reportedValue) >= BigInt(minimum);
+}
+
 const projectIdPattern = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 const capabilityIdPattern = /^[a-z0-9]+(-[a-z0-9]+)*(:[a-z0-9]+(-[a-z0-9]+)*)?$/;
 
@@ -1093,8 +1110,13 @@ function validateRequirementSet(value: unknown, path: string): Validation<Requir
  * hashes routinely look high-entropy to heuristics, and a false positive would block a legitimate
  * profile outright.
  */
-const secretLikeTokenPattern = /^(sk|pk|ghp|gho|ghu|ghs|ghr|xox[abp]|AKIA|glpat)-?[A-Za-z0-9_-]{10,}$/i;
-const bearerHeaderPattern = /^Bearer\s+\S{10,}$/i;
+/*
+ * Unanchored (with word boundaries) rather than a whole-string match: this same detection also
+ * scans free-form evidence diagnostics and raw probe output, where a token can appear embedded in
+ * a longer line rather than as the entire string.
+ */
+const secretLikeTokenPattern = /\b(sk|pk|ghp|gho|ghu|ghs|ghr|xox[abp]|AKIA|glpat)-?[A-Za-z0-9_-]{10,}\b/i;
+const bearerHeaderPattern = /\bBearer\s+\S{10,}/i;
 
 export function containsSecretLikeValue(value: unknown): boolean {
   if (typeof value === "string") {
@@ -1257,6 +1279,9 @@ export function validateNodeCapabilityEvidence(value: unknown): Validation<NodeC
   if (!isTimestamp(value.observedAt)) {
     return reject("node capability evidence observedAt is malformed");
   }
+  if (containsSecretLikeValue({ rawValue: value.rawValue, normalizedValue: value.normalizedValue, diagnostic: value.diagnostic })) {
+    return reject("node capability evidence contains a secret-like value");
+  }
   return accept(value as unknown as NodeCapabilityEvidence);
 }
 
@@ -1337,12 +1362,14 @@ export function computeEvidenceFingerprint(evidence: readonly NodeCapabilityEvid
   return fnv1aHex(JSON.stringify(canonicalizeForFingerprint(tuples)));
 }
 
-interface ResolvedCapability {
-  state: "ok" | "missing" | "ambiguous" | "stale" | "failed";
+export type ResolvedNodeCapabilityState = "ok" | "missing" | "ambiguous" | "stale" | "failed";
+
+export interface ResolvedNodeCapability {
+  state: ResolvedNodeCapabilityState;
   value?: string;
 }
 
-const resolveStateDetails: Readonly<Record<Exclude<ResolvedCapability["state"], "ok">, string>> = {
+const resolveStateDetails: Readonly<Record<Exclude<ResolvedNodeCapabilityState, "ok">, string>> = {
   missing: "missing evidence",
   failed: "evidence failed",
   stale: "evidence is stale",
@@ -1350,6 +1377,50 @@ const resolveStateDetails: Readonly<Record<Exclude<ResolvedCapability["state"], 
 };
 
 const effectiveEvidenceValue = (entry: NodeCapabilityEvidence) => entry.normalizedValue ?? entry.rawValue ?? "";
+
+/**
+ * Evidence timestamped further in the future than this allowance relative to evaluation time is
+ * never trusted as fresh: without this bound a future-dated `observedAt` would produce a negative
+ * age and be accepted regardless of how implausible the timestamp is.
+ */
+export const evidenceClockSkewAllowanceMilliseconds = 60_000;
+
+/**
+ * Resolves the freshest, mutually agreeing evidence for one capability id: `missing` when no
+ * entry exists, `ambiguous` when entries disagree on success or effective value, `stale` when the
+ * freshest entry is older than `evidenceTTLMilliseconds` or timestamped further in the future than
+ * `evidenceClockSkewAllowanceMilliseconds`, `failed` when it is fresh but unsuccessful, and `ok`
+ * otherwise. This is the single evidence-resolution path every hard/preferred requirement check in
+ * `evaluateProjectReadiness` uses, and any other caller that needs to gate on one capability (for
+ * example, the hub's workspace-writable check) must use this instead of hand-rolling its own scan,
+ * so freshness, clock-skew, and ambiguity handling can never be bypassed or reimplemented. Pure:
+ * every timestamp comparison uses `nowIso`, never the system clock. Resolution is order-insensitive
+ * — every entry is compared for agreement and freshness regardless of array order.
+ */
+export function resolveNodeCapability(
+  evidence: readonly NodeCapabilityEvidence[],
+  capabilityId: string,
+  nowIso: string,
+  evidenceTTLMilliseconds: number
+): ResolvedNodeCapability {
+  const entries = evidence.filter((entry) => entry.capabilityId === capabilityId);
+  if (entries.length === 0) return { state: "missing" };
+  const nowMilliseconds = Date.parse(nowIso);
+  const [first, ...rest] = entries;
+  let freshest = first;
+  for (const entry of rest) {
+    const disagrees = entry.success !== first.success
+      || (entry.success && first.success && effectiveEvidenceValue(entry) !== effectiveEvidenceValue(first));
+    if (disagrees) return { state: "ambiguous" };
+    if (Date.parse(entry.observedAt) > Date.parse(freshest.observedAt)) freshest = entry;
+  }
+  const ageMilliseconds = nowMilliseconds - Date.parse(freshest.observedAt);
+  if (ageMilliseconds > evidenceTTLMilliseconds || ageMilliseconds < -evidenceClockSkewAllowanceMilliseconds) {
+    return { state: "stale", value: effectiveEvidenceValue(freshest) };
+  }
+  if (!freshest.success) return { state: "failed" };
+  return { state: "ok", value: effectiveEvidenceValue(freshest) };
+}
 
 /**
  * Decides whether a node is ready for a project. Pure: every timestamp comparison uses `nowIso`,
@@ -1363,35 +1434,11 @@ export function evaluateProjectReadiness(
 ): ProjectReadiness {
   const unmetHardRequirements: UnmetReadinessRequirement[] = [];
   const unmetPreferences: UnmetReadinessRequirement[] = [];
-  const nowMilliseconds = Date.parse(nowIso);
 
-  const evidenceByCapabilityId = new Map<string, NodeCapabilityEvidence[]>();
-  for (const entry of context.evidence) {
-    const entries = evidenceByCapabilityId.get(entry.capabilityId);
-    if (entries === undefined) {
-      evidenceByCapabilityId.set(entry.capabilityId, [entry]);
-    } else {
-      entries.push(entry);
-    }
-  }
+  const resolveCapability = (capabilityId: string): ResolvedNodeCapability =>
+    resolveNodeCapability(context.evidence, capabilityId, nowIso, evidenceTTLMilliseconds);
 
-  const resolveCapability = (capabilityId: string): ResolvedCapability => {
-    const entries = evidenceByCapabilityId.get(capabilityId);
-    if (entries === undefined || entries.length === 0) return { state: "missing" };
-    const resolved = entries[0];
-    for (const entry of entries.slice(1)) {
-      const disagrees = entry.success !== resolved.success
-        || (entry.success && resolved.success && effectiveEvidenceValue(entry) !== effectiveEvidenceValue(resolved));
-      if (disagrees) return { state: "ambiguous" };
-    }
-    if (nowMilliseconds - Date.parse(resolved.observedAt) > evidenceTTLMilliseconds) {
-      return { state: "stale", value: effectiveEvidenceValue(resolved) };
-    }
-    if (!resolved.success) return { state: "failed" };
-    return { state: "ok", value: effectiveEvidenceValue(resolved) };
-  };
-
-  const detailFor = (resolved: ResolvedCapability) =>
+  const detailFor = (resolved: ResolvedNodeCapability) =>
     resolved.state === "ok" ? "reported value does not match" : resolveStateDetails[resolved.state];
 
   const evaluateRequirementSet = (requirementSet: RequirementSet, unmet: UnmetReadinessRequirement[]) => {
@@ -1419,8 +1466,8 @@ export function evaluateProjectReadiness(
       if (requiredCount === undefined) continue;
       const resolved = resolveCapability(capabilityId);
       const matched = resolved.state === "ok"
-        && isNormalizedVersion(resolved.value)
-        && satisfiesVersionConstraint(resolved.value as string, { comparator: ">=", version: String(requiredCount) });
+        && isNonNegativeIntegerQuantity(resolved.value)
+        && satisfiesMinimumQuantity(resolved.value as string, requiredCount);
       if (!matched) {
         unmet.push({ kind, requirement: String(requiredCount), detail: detailFor(resolved) });
       }

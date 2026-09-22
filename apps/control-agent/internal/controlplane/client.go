@@ -237,14 +237,26 @@ func (client *Client) handle(ctx context.Context, message protocol.Inbound) {
 	}
 }
 
-// unsupportedExecutionReason reports why a version-4 dispatch execution cannot be honored by this
-// Barista, or "" when the execution is absent or fully supported. Barista only implements native
-// CLI execution today: an ACP transport, a session binding to resume, or a workspace lease to
-// provision would each silently fall back to plain native execution if not rejected explicitly,
-// which is exactly what registering control protocol version 4 must never allow (see
-// docs/architecture.md's compatibility policy). Rejecting here, before any process starts, keeps
-// that promise regardless of what a hub scheduler eventually sends.
-func unsupportedExecutionReason(execution *protocol.DispatchExecution) string {
+// unsupportedExecutionReason reports why a version-4 dispatch cannot be honored by this Barista,
+// or "" when it is fully supported. Barista only implements native CLI execution today: an ACP
+// transport, a session binding to resume, or a workspace lease to provision would each silently
+// fall back to plain native execution if not rejected explicitly, which is exactly what
+// registering control protocol version 4 must never allow (see docs/architecture.md's
+// compatibility policy). The version-4 run itself, not only the optional execution object, can
+// carry these fields (protocol.Run.Transport/SessionBindingID/WorkspaceLeaseID), so both are
+// checked: a hub could send run.transport="acp-v1" with no execution object at all, and that must
+// be rejected exactly like an execution object naming the same transport. Rejecting here, before
+// any process starts, keeps that promise regardless of what a hub scheduler eventually sends.
+func unsupportedExecutionReason(run protocol.Run, execution *protocol.DispatchExecution) string {
+	if run.Transport != "" && run.Transport != "native-cli" {
+		return fmt.Sprintf("unsupported execution: %s transport not available on this Barista", run.Transport)
+	}
+	if run.SessionBindingID != "" {
+		return "unsupported execution: session binding resume not available on this Barista"
+	}
+	if run.WorkspaceLeaseID != "" {
+		return "unsupported execution: workspace lease provisioning not available on this Barista"
+	}
 	if execution == nil {
 		return ""
 	}
@@ -270,7 +282,7 @@ func (client *Client) dispatch(ctx context.Context, run protocol.Run, agent prot
 		client.runsMu.Unlock()
 		return
 	}
-	if reason := unsupportedExecutionReason(execution); reason != "" {
+	if reason := unsupportedExecutionReason(run, execution); reason != "" {
 		client.runsMu.Unlock()
 		client.send(protocol.Outbound{Type: "run.failed", RunID: run.ID, Error: reason, At: now()})
 		return

@@ -2,6 +2,9 @@ package readiness
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -196,4 +199,50 @@ func TestRunProbeAgainstRealGoAndGitBinaries(t *testing.T) {
 			require.Equal(t, probeDefinitionVersion, evidence.ProbeDefinitionVersion)
 		})
 	}
+}
+
+func TestLooksSecretLikeMatchesTokensEmbeddedInFreeFormOutput(t *testing.T) {
+	require.True(t, looksSecretLike("build failed: token sk-abcdefghij1234567890 was rejected"))
+	require.True(t, looksSecretLike("Authorization: Bearer abcdefghijklmnopqrstuvwxyz"))
+	require.True(t, looksSecretLike("-----BEGIN RSA PRIVATE KEY-----\nMIIExyz\n-----END RSA PRIVATE KEY-----"))
+	require.False(t, looksSecretLike("go version go1.24.0 darwin/arm64"))
+	require.False(t, looksSecretLike("git version 2.43.0"))
+}
+
+func TestRunProbeRedactsSecretLikeSuccessfulOutputInsteadOfForwardingIt(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test fixture is a shell script")
+	}
+	directory := t.TempDir()
+	binary := filepath.Join(directory, "fake-tool")
+	require.NoError(t, os.WriteFile(binary, []byte("#!/bin/sh\nprintf 'tool version 1.0.0, token sk-abcdefghij1234567890 embedded\\n'\n"), 0o755))
+
+	probe := Probe{
+		CapabilityID: "fake-tool", Binary: binary, Args: nil,
+		Timeout: probeTimeout, MaxOutputBytes: probeMaxOutputBytes, Parse: GenericVersionParser,
+	}
+	evidence := RunProbe(context.Background(), probe)
+	require.False(t, evidence.Success, "output containing a secret-like token must never be reported as successful evidence")
+	require.Empty(t, evidence.RawValue)
+	require.Empty(t, evidence.NormalizedValue)
+	require.NotContains(t, evidence.Diagnostic, "sk-abcdefghij1234567890")
+	require.Contains(t, evidence.Diagnostic, "secret-like")
+}
+
+func TestRunProbeRedactsSecretLikeFailureDiagnostic(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test fixture is a shell script")
+	}
+	directory := t.TempDir()
+	binary := filepath.Join(directory, "fake-tool")
+	require.NoError(t, os.WriteFile(binary, []byte("#!/bin/sh\nprintf 'error: Bearer abcdefghijklmnopqrstuvwxyz rejected\\n' 1>&2\nexit 1\n"), 0o755))
+
+	probe := Probe{
+		CapabilityID: "fake-tool", Binary: binary, Args: nil,
+		Timeout: probeTimeout, MaxOutputBytes: probeMaxOutputBytes, Parse: GenericVersionParser,
+	}
+	evidence := RunProbe(context.Background(), probe)
+	require.False(t, evidence.Success)
+	require.NotContains(t, evidence.Diagnostic, "abcdefghijklmnopqrstuvwxyz")
+	require.Contains(t, evidence.Diagnostic, "secret-like")
 }

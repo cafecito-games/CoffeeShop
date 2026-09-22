@@ -15,14 +15,23 @@ import (
 
 const DefaultEndpoint = "http://localhost:8787"
 
-// Byte bounds for operator-supplied capability values; labels and accelerators are free-form text
-// so only their length is restricted.
+// Byte bounds for operator-supplied capability values.
 const (
 	labelMaximumBytes       = 128
 	acceleratorMaximumBytes = 128
 )
 
 var projectIDPattern = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
+
+// capabilitySegmentPattern matches the kebab-case grammar every reported capability id segment
+// must satisfy (see capabilityIDPattern in internal/protocol/capability.go and the TypeScript
+// source of truth's capabilityIdPattern). readiness.BuildCapabilityReport embeds every label and
+// accelerator verbatim into a capability id ("label:<label>", "accelerator:<accelerator>"), so a
+// value that does not match this grammar would make the hub reject the whole capability report,
+// not just that one entry. Rejecting it here at config load, rather than accepting free-form text
+// and discovering the failure later on the wire, keeps that fail-closed rather than silently
+// dropping every reported capability.
+var capabilitySegmentPattern = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
 
 type Config struct {
 	ControlEndpoint  string
@@ -80,8 +89,8 @@ func Parse(args []string) (Config, error) {
 	kind := set.String("kind", env("BARISTA_KIND", "local"), "compute node kind: local, home-server, or cloud")
 	set.Var(&roots, "workspace-root", "allowed workspace root; repeat the flag for multiple roots")
 	set.Var(&projects, "project", "project ID this node accepts work for; repeat the flag for multiple IDs")
-	set.Var(&labels, "label", "operator-assigned capability label; repeat the flag for multiple labels")
-	set.Var(&accelerators, "accelerator", "hardware accelerator available on this node; repeat the flag for multiple accelerators")
+	set.Var(&labels, "label", "operator-assigned capability label (lowercase letters, numbers, and hyphens); repeat the flag for multiple labels")
+	set.Var(&accelerators, "accelerator", "hardware accelerator available on this node (lowercase letters, numbers, and hyphens); repeat the flag for multiple accelerators")
 	limit := set.Int("concurrency", concurrency, "maximum number of simultaneous runs")
 	memory := set.Int("memory-megabytes", memoryMegabytes, "configured system memory in megabytes (0 means not configured)")
 	token := set.String("token", os.Getenv("COFFEE_SHOP_TOKEN"), "control-plane token (prefer COFFEE_SHOP_TOKEN)")
@@ -125,10 +134,16 @@ func Parse(args []string) (Config, error) {
 		if len(label) > labelMaximumBytes {
 			return Config{}, fmt.Errorf("label %q exceeds %d bytes", label, labelMaximumBytes)
 		}
+		if !capabilitySegmentPattern.MatchString(label) {
+			return Config{}, fmt.Errorf("label %q must contain only lowercase letters, numbers, and hyphens", label)
+		}
 	}
 	for _, accelerator := range accelerators {
 		if len(accelerator) > acceleratorMaximumBytes {
 			return Config{}, fmt.Errorf("accelerator %q exceeds %d bytes", accelerator, acceleratorMaximumBytes)
+		}
+		if !capabilitySegmentPattern.MatchString(accelerator) {
+			return Config{}, fmt.Errorf("accelerator %q must contain only lowercase letters, numbers, and hyphens", accelerator)
 		}
 	}
 	if *memory < 0 {
