@@ -118,6 +118,100 @@ describe("snapshot validation", () => {
   });
 });
 
+describe("version-4 orchestration snapshot validation", () => {
+  const task = {
+    id: "task-1", threadId: "thread-1", title: "Build", instructions: "Build the thing",
+    status: "ready", requirements: {}, dependencies: [], idempotencyKey: "key-1",
+    attemptRunIds: [], createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z"
+  };
+
+  const approval = {
+    id: "approval-1", harnessApprovalId: "acp-permission-1", threadId: "thread-1", runId: "run-1",
+    nodeId: "node-1", title: "Write file", options: [{ id: "opt-1", label: "Allow once", kind: "allow-once" }],
+    status: "pending", requestedAt: "2026-01-01T00:00:00Z"
+  };
+
+  const lease = {
+    id: "lease-1", threadId: "thread-1", taskId: "task-1", runId: "run-1", nodeId: "node-1",
+    projectProfileId: "profile-1", policy: "git-worktree", cleanup: "retain", root: "/srv/repos",
+    sourcePath: "/srv/repos/app", worktreePath: "/srv/repos/.coffee-shop/worktrees/lease-1", status: "active",
+    createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z"
+  };
+
+  const runActivity = {
+    runId: "run-1", nodeId: "node-1", streamStatus: "open", lastSequence: 1, acceptedEvents: 1,
+    message: { text: "hello", truncatedBytes: 0 }, thought: { text: "", truncatedBytes: 0 },
+    plan: [], toolCalls: [], diffs: [], terminals: [], warnings: [], unknownEvents: 0,
+    omitted: { toolCalls: 0, diffs: 0, terminals: 0, warnings: 0 }, summary: "hello", updatedAt: "2026-01-01T00:00:00Z"
+  };
+
+  const taskMessage = {
+    id: "message-1", threadId: "thread-1", sender: { type: "task", taskId: "task-1" },
+    recipient: { type: "orchestrator" }, sequence: 1, kind: "question", body: "Need input",
+    idempotencyKey: "key-2", createdAt: "2026-01-01T00:00:00Z"
+  };
+
+  const acknowledgement = {
+    messageId: "message-1", threadId: "thread-1", recipient: { type: "orchestrator" },
+    runId: "run-1", acknowledgedAt: "2026-01-01T00:00:00Z"
+  };
+
+  const sessionBinding = {
+    id: "binding-1", threadId: "thread-1", agentId: "agent-1", nodeId: "node-1", harnessId: "claude-cli",
+    transport: "acp-v1", workspace: "/workspace", providerSessionId: "provider-session", status: "active",
+    createdByRunId: "run-1", lastRunId: "run-1", createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z"
+  };
+
+  it("accepts a fully populated version-4 snapshot", () => {
+    expect(isSnapshot({
+      ...snapshot("v4"),
+      tasks: [task],
+      taskMessages: [taskMessage],
+      taskMessageAcknowledgements: [acknowledgement],
+      sessionBindings: [sessionBinding],
+      approvals: [approval],
+      workspaceLeases: [lease],
+      runActivity: [runActivity]
+    })).toBe(true);
+  });
+
+  it("accepts a legacy snapshot with every orchestration collection absent", () => {
+    expect(isSnapshot(snapshot("legacy"))).toBe(true);
+  });
+
+  it("rejects an unknown task status rather than coercing it", () => {
+    expect(isSnapshot({ ...snapshot("bad"), tasks: [{ ...task, status: "in-limbo" }] })).toBe(false);
+  });
+
+  it("rejects an approval with an option of an unknown kind", () => {
+    expect(isSnapshot({ ...snapshot("bad"), approvals: [{ ...approval, options: [{ id: "opt-1", label: "?", kind: "maybe" }] }] })).toBe(false);
+  });
+
+  it("rejects a workspace lease with an unknown status", () => {
+    expect(isSnapshot({ ...snapshot("bad"), workspaceLeases: [{ ...lease, status: "vanished" }] })).toBe(false);
+  });
+
+  it("rejects run activity missing its bounded text fields", () => {
+    expect(isSnapshot({ ...snapshot("bad"), runActivity: [{ ...runActivity, message: "hello" }] })).toBe(false);
+  });
+
+  it("rejects a task message with a malformed participant", () => {
+    expect(isSnapshot({ ...snapshot("bad"), taskMessages: [{ ...taskMessage, sender: { type: "task" } }] })).toBe(false);
+  });
+
+  it("accepts a run carrying version-4 task attempt and transport fields", () => {
+    const run = {
+      id: "run-1", agentId: "agent-1", nodeId: "node-1", harnessId: "claude-cli", model: "sonnet",
+      workspace: "/workspace", prompt: "go", status: "running", output: "", depth: 0, createdAt: "2026-01-01T00:00:00Z",
+      taskId: "task-1", attempt: 1, transport: "acp-v1", fallbackTransport: "native-cli",
+      transportSelection: { requestedTransport: "acp-v1", selectedTransport: "native-cli", fallbackReason: "acp-adapter-unavailable" },
+      sessionBindingId: "binding-1", workspaceLeaseId: "lease-1"
+    };
+    expect(isSnapshot({ ...snapshot("v4"), runs: [run] })).toBe(true);
+    expect(isSnapshot({ ...snapshot("bad"), runs: [{ ...run, transport: "carrier-pigeon" }] })).toBe(false);
+  });
+});
+
 describe("HubConnection", () => {
   it("loads REST before opening a socket and only a valid socket snapshot becomes current", async () => {
     const pending = deferred<Response>();
