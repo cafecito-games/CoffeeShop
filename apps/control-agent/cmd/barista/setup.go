@@ -264,6 +264,7 @@ func runDoctor(args []string) int {
 	dataRoot := set.String("data-root", setup.DefaultDataRoot(), "Barista-owned data root; never $HOME itself")
 	manifestPath := set.String("manifest", "", "path to an adapter manifest JSON file (default: the manifest embedded in this binary)")
 	controlEndpoint := set.String("control-endpoint", config.DefaultEndpoint, "Coffee Shop URL or WebSocket endpoint to test for reachability")
+	claudeACPAuthMode := set.String("claude-acp-auth-mode", os.Getenv("BARISTA_CLAUDE_ACP_AUTH_MODE"), "administrator auth-mode policy that would be required before Claude ACP loads: local-subscription or api")
 	asJSON := set.Bool("json", false, "print the report as JSON instead of a human-readable summary")
 	if err := set.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -289,6 +290,7 @@ func runDoctor(args []string) int {
 	// the existing capability, not a new one.
 	profiles := harness.Discover(context.Background())
 	report := setup.RunDoctor(context.Background(), manifest, ledger, *dataRoot, currentPlatform(), profiles, *controlEndpoint, dialHubEndpoint)
+	addClaudeACPAuthModeNote(report.Adapters, strings.TrimSpace(*claudeACPAuthMode))
 	if *asJSON {
 		encoded, err := json.MarshalIndent(report, "", "  ")
 		if err != nil {
@@ -387,4 +389,22 @@ func hostPortFromEndpoint(raw string) (string, error) {
 		}
 	}
 	return net.JoinHostPort(hostname, port), nil
+}
+
+// addClaudeACPAuthModeNote appends the Claude ACP auth-mode gate's outcome to the claude-acp
+// adapter's doctor entry, using exactly the reason the daemon itself would log and, unlike the
+// daemon, without depending on the daemon's own launch environment having already been screened:
+// doctor evaluates the gate itself against the current process environment so an operator sees the
+// same reason `barista doctor` and the daemon would each report for the current configuration.
+func addClaudeACPAuthModeNote(adapters []setup.AdapterDoctorEntry, claudeACPAuthMode string) {
+	for index := range adapters {
+		if adapters[index].HarnessID != "claude-cli" {
+			continue
+		}
+		if authMode, err := harness.ClaudeACPAuthGate(claudeACPAuthMode, os.Environ()); err != nil {
+			adapters[index].Notes = append(adapters[index].Notes, "claude ACP: "+err.Error())
+		} else {
+			adapters[index].Notes = append(adapters[index].Notes, "claude ACP: auth mode "+authMode)
+		}
+	}
 }

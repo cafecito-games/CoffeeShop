@@ -166,3 +166,60 @@ func TestClaudeACPFallsBackToNativeBeforeThePromptOnlyWhenPermitted(t *testing.T
 	require.ErrorIs(t, forbidden.err, acp.ErrMissingCapability)
 	require.Empty(t, forbidden.selections)
 }
+
+func TestClaudeSessionConfiguration(t *testing.T) {
+	modeOnly := []acp.ConfigSelection{{ID: "mode", Value: "default", Requirement: acp.ConfigPolicy}}
+	for _, testCase := range []struct {
+		model    string
+		expected []acp.ConfigSelection
+	}{
+		{model: "", expected: modeOnly},
+		{model: "default", expected: modeOnly},
+		{model: acptest.ClaudeAlternateModel, expected: []acp.ConfigSelection{
+			{ID: "mode", Value: "default", Requirement: acp.ConfigPolicy},
+			{ID: "model", Value: acptest.ClaudeAlternateModel, Requirement: acp.ConfigRequested},
+		}},
+	} {
+		t.Run("model "+testCase.model, func(t *testing.T) {
+			require.Equal(t, testCase.expected, claudeSessionConfiguration(protocol.Run{Model: testCase.model}))
+		})
+	}
+}
+
+func TestClaudeACPAuthGateRequiresAnExplicitMode(t *testing.T) {
+	for _, mode := range []string{"", "trust-me", "subscription", "API"} {
+		t.Run("mode "+mode, func(t *testing.T) {
+			authMode, err := ClaudeACPAuthGate(mode, nil)
+			require.ErrorIs(t, err, ErrClaudeACPAuthModeNotConfigured)
+			require.Empty(t, authMode)
+		})
+	}
+}
+
+func TestClaudeACPAuthGateLocalSubscriptionRejectsEveryBillingSwitchingVariable(t *testing.T) {
+	require.NotEmpty(t, ClaudeACPBillingSwitchingVariables)
+	for _, variable := range ClaudeACPBillingSwitchingVariables {
+		t.Run(variable, func(t *testing.T) {
+			environment := []string{"PATH=/usr/bin", variable + "=super-secret-value"}
+			authMode, err := ClaudeACPAuthGate(ClaudeACPAuthModeLocalSubscription, environment)
+			require.ErrorIs(t, err, ErrClaudeACPBillingVariablePresent)
+			require.Contains(t, err.Error(), variable)
+			require.NotContains(t, err.Error(), "super-secret-value")
+			require.Empty(t, authMode)
+		})
+	}
+}
+
+func TestClaudeACPAuthGateLocalSubscriptionAllowsACleanEnvironment(t *testing.T) {
+	authMode, err := ClaudeACPAuthGate(ClaudeACPAuthModeLocalSubscription, []string{"PATH=/usr/bin", "HOME=/home/operator"})
+	require.NoError(t, err)
+	require.Equal(t, ClaudeACPAuthModeLocalSubscription, authMode)
+}
+
+func TestClaudeACPAuthGateAPIModeAllowsBillingSwitchingVariables(t *testing.T) {
+	for _, variable := range ClaudeACPBillingSwitchingVariables {
+		authMode, err := ClaudeACPAuthGate(ClaudeACPAuthModeAPI, []string{variable + "=value"})
+		require.NoError(t, err)
+		require.Equal(t, ClaudeACPAuthModeAPI, authMode)
+	}
+}

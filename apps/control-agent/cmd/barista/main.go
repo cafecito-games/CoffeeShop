@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -52,7 +53,7 @@ func run(args []string) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	nativeProfiles := harness.Discover(ctx)
-	driver, err := acpDriver(cfg, nativeProfiles)
+	driver, claudeACPAuthMode, err := acpDriver(cfg, nativeProfiles)
 	if err != nil {
 		log.Printf("ACP adapters: %v", err)
 		return 2
@@ -63,6 +64,17 @@ func run(args []string) int {
 			log.Printf("ACP adapter for %s is disabled: %s", harnessID, displayableError(failure))
 		} else {
 			log.Printf("ACP adapter for %s passed its startup probe", harnessID)
+		}
+	}
+	// The Claude ACP harness profile's authMode reflects the administrator's explicit policy only
+	// once the adapter actually advertises acp-v1: a gate failure or a probe failure leaves the
+	// harness on its native, local-subscription default rather than claiming an "api" auth mode
+	// nothing verified.
+	if claudeACPAuthMode == harness.ClaudeACPAuthModeAPI {
+		for index := range profiles {
+			if profiles[index].ID == "claude-cli" && slices.Contains(profiles[index].Transports, harness.TransportACP) {
+				profiles[index].AuthMode = harness.ClaudeACPAuthModeAPI
+			}
 		}
 	}
 	available := make([]string, 0, len(profiles))
@@ -112,14 +124,30 @@ func run(args []string) int {
 
 // acpDriver loads the ACP adapters this node may launch: administrator overrides, which must
 // verify or startup fails, and setup-installed adapters re-verified against the ownership ledger.
-func acpDriver(cfg config.Config, nativeProfiles []protocol.HarnessProfile) (*harness.ACPDriver, error) {
+// It also applies the Claude ACP auth-mode gate: an adapter otherwise ready to load for claude-cli
+// is dropped, with a logged reason, unless the administrator explicitly configured an auth mode
+// and, for local-subscription, none of Claude's billing-switching variables are present in
+// Barista's own environment. The second return value is the auth mode the gate resolved for
+// claude-cli ("" when Claude ACP did not load), so the caller can reflect it on the advertised
+// harness profile once the adapter has actually proven itself over ACP.
+func acpDriver(cfg config.Config, nativeProfiles []protocol.HarnessProfile) (*harness.ACPDriver, string, error) {
 	_, manifest, err := loadSetupManifest(cfg.AdapterManifestPath)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	loaded, err := acpadapter.Load(acpadapter.Options{DataRoot: cfg.DataRoot, Manifest: manifest, Platform: setup.CurrentPlatform(), Overrides: cfg.ACPAdapters})
 	if err != nil {
-		return nil, err
+		return nil, "", err
+	}
+	claudeACPAuthMode := ""
+	if _, configured := loaded.Adapters["claude-cli"]; configured {
+		resolved, gateErr := harness.ClaudeACPAuthGate(cfg.ClaudeACPAuthMode, os.Environ())
+		if gateErr != nil {
+			delete(loaded.Adapters, "claude-cli")
+			loaded.Skipped["claude-cli"] = gateErr.Error()
+		} else {
+			claudeACPAuthMode = resolved
+		}
 	}
 	for harnessID, reason := range loaded.Skipped {
 		log.Printf("no ACP adapter loaded for %s: %s", harnessID, reason)
@@ -130,7 +158,7 @@ func acpDriver(cfg config.Config, nativeProfiles []protocol.HarnessProfile) (*ha
 			nativeBinaries[profile.ID] = profile.Binary
 		}
 	}
-	return harness.NewACPDriver(harness.ACPDriverOptions{Adapters: loaded.Adapters, NativeBinaries: nativeBinaries, ClientVersion: version}), nil
+	return harness.NewACPDriver(harness.ACPDriverOptions{Adapters: loaded.Adapters, NativeBinaries: nativeBinaries, ClientVersion: version}), claudeACPAuthMode, nil
 }
 
 // displayableError keeps a probe failure out of the log when it looks like it carries a secret,

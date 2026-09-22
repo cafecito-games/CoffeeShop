@@ -194,3 +194,42 @@ func TestParseRejectsAnUnknownNativeFallbackHarness(t *testing.T) {
 	require.EqualError(t, err, "acp native fallback at index 0 is not a known harness id")
 	require.NotContains(t, err.Error(), "carrier-pigeon")
 }
+
+func TestParseLeavesTheClaudeACPAuthModeEmptyByDefault(t *testing.T) {
+	t.Setenv("WORKSPACE_ROOTS", absoluteExistingRoot(t))
+	t.Setenv("BARISTA_CLAUDE_ACP_AUTH_MODE", "")
+
+	parsed, err := Parse(acpBaseArguments)
+	require.NoError(t, err)
+	require.Empty(t, parsed.ClaudeACPAuthMode)
+}
+
+func TestParseAcceptsTheDocumentedClaudeACPAuthModes(t *testing.T) {
+	for _, mode := range []string{"local-subscription", "api"} {
+		t.Run(mode, func(t *testing.T) {
+			t.Setenv("WORKSPACE_ROOTS", absoluteExistingRoot(t))
+			t.Setenv("BARISTA_CLAUDE_ACP_AUTH_MODE", "")
+
+			parsed, err := Parse(append(acpBaseArguments, "--claude-acp-auth-mode", mode))
+			require.NoError(t, err)
+			require.Equal(t, mode, parsed.ClaudeACPAuthMode)
+		})
+	}
+}
+
+func TestParseReadsTheClaudeACPAuthModeFromTheEnvironment(t *testing.T) {
+	t.Setenv("WORKSPACE_ROOTS", absoluteExistingRoot(t))
+	t.Setenv("BARISTA_CLAUDE_ACP_AUTH_MODE", "api")
+
+	parsed, err := Parse(acpBaseArguments)
+	require.NoError(t, err)
+	require.Equal(t, "api", parsed.ClaudeACPAuthMode)
+}
+
+func TestParseRejectsAnUnknownClaudeACPAuthMode(t *testing.T) {
+	t.Setenv("WORKSPACE_ROOTS", absoluteExistingRoot(t))
+	t.Setenv("BARISTA_CLAUDE_ACP_AUTH_MODE", "")
+
+	_, err := Parse(append(acpBaseArguments, "--claude-acp-auth-mode", "trust-me"))
+	require.EqualError(t, err, `claude acp auth mode must be "local-subscription" or "api"`)
+}

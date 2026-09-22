@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/harness"
 	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/protocol"
 	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/setup"
 )
@@ -71,6 +72,11 @@ type Config struct {
 	ACPAdapters         []ACPAdapterOverride
 	// ACPNativeFallback lists harnesses whose acp-v1 runs may fall back to the native CLI.
 	ACPNativeFallback []string
+	// ClaudeACPAuthMode is the administrator's explicit auth-mode policy for the Claude ACP
+	// adapter: harness.ClaudeACPAuthModeLocalSubscription, harness.ClaudeACPAuthModeAPI, or empty
+	// when unconfigured. An empty value makes Claude ACP unavailable; it never defaults to either
+	// mode. The native claude-cli path never reads this setting.
+	ClaudeACPAuthMode string
 }
 
 type stringList []string
@@ -140,6 +146,7 @@ func Parse(args []string) (Config, error) {
 	adapterManifest := set.String("adapter-manifest", env("BARISTA_ADAPTER_MANIFEST", ""), "adapter manifest JSON file used by setup (default: the manifest embedded in this binary)")
 	set.Var(&acpAdapters, "acp-adapter", "ACP adapter override as <harness-id>=sha256:<64 lowercase hex>:<absolute path>; repeat the flag for multiple harnesses")
 	set.Var(&nativeFallback, "acp-native-fallback", "harness ID whose acp-v1 runs may fall back to the native CLI before the prompt when the dispatch permits it; repeat the flag for multiple harnesses")
+	claudeACPAuthMode := set.String("claude-acp-auth-mode", env("BARISTA_CLAUDE_ACP_AUTH_MODE", ""), "administrator auth-mode policy required before Claude ACP is loaded: local-subscription or api (unset keeps Claude ACP unavailable)")
 	if err := set.Parse(args); err != nil {
 		return Config{}, err
 	}
@@ -208,6 +215,10 @@ func Parse(args []string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	trimmedClaudeACPAuthMode := strings.TrimSpace(*claudeACPAuthMode)
+	if trimmedClaudeACPAuthMode != "" && trimmedClaudeACPAuthMode != harness.ClaudeACPAuthModeLocalSubscription && trimmedClaudeACPAuthMode != harness.ClaudeACPAuthModeAPI {
+		return Config{}, fmt.Errorf("claude acp auth mode must be %q or %q", harness.ClaudeACPAuthModeLocalSubscription, harness.ClaudeACPAuthModeAPI)
+	}
 
 	return Config{
 		ControlEndpoint:  wsEndpoint,
@@ -228,6 +239,7 @@ func Parse(args []string) (Config, error) {
 		AdapterManifestPath: *adapterManifest,
 		ACPAdapters:         validatedOverrides,
 		ACPNativeFallback:   validatedFallback,
+		ClaudeACPAuthMode:   trimmedClaudeACPAuthMode,
 	}, nil
 }
 
