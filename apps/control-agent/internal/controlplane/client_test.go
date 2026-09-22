@@ -145,6 +145,65 @@ func TestCancelBeforeDispatchCreatesTombstoneAndAcknowledgesDuplicates(t *testin
 	}
 }
 
+func TestDispatchRejectsUnsupportedAcpTransportWithoutStartingAProcess(t *testing.T) {
+	client := NewClient(config.Config{Concurrency: 1}, protocol.ComputeNode{ID: "node-one"}, nil, emptyCapabilityReport)
+	client.handle(context.Background(), protocol.Inbound{
+		Type:      "dispatch",
+		Run:       protocol.Run{ID: "run-one"},
+		Agent:     protocol.Agent{ID: "agent-one"},
+		Execution: &protocol.DispatchExecution{Transport: "acp-v1"},
+	})
+
+	require.Zero(t, client.activeRuns(), "an unsupported execution must never occupy a run slot")
+	message := waitForMessage(t, client, "run.failed")
+	require.Equal(t, "run-one", message.RunID)
+	require.Equal(t, "unsupported execution: acp-v1 transport not available on this Barista", message.Error)
+}
+
+func TestDispatchRejectsSessionBindingResumeWithoutStartingAProcess(t *testing.T) {
+	client := NewClient(config.Config{Concurrency: 1}, protocol.ComputeNode{ID: "node-one"}, nil, emptyCapabilityReport)
+	client.handle(context.Background(), protocol.Inbound{
+		Type:  "dispatch",
+		Run:   protocol.Run{ID: "run-one"},
+		Agent: protocol.Agent{ID: "agent-one"},
+		Execution: &protocol.DispatchExecution{
+			Transport:      "native-cli",
+			SessionBinding: &protocol.DispatchSessionBinding{ID: "binding-one", ProviderSessionID: "session-one"},
+		},
+	})
+
+	require.Zero(t, client.activeRuns())
+	message := waitForMessage(t, client, "run.failed")
+	require.Equal(t, "run-one", message.RunID)
+	require.Equal(t, "unsupported execution: session binding resume not available on this Barista", message.Error)
+}
+
+func TestDispatchRejectsWorkspaceLeaseGrantWithoutStartingAProcess(t *testing.T) {
+	client := NewClient(config.Config{Concurrency: 1}, protocol.ComputeNode{ID: "node-one"}, nil, emptyCapabilityReport)
+	client.handle(context.Background(), protocol.Inbound{
+		Type:  "dispatch",
+		Run:   protocol.Run{ID: "run-one"},
+		Agent: protocol.Agent{ID: "agent-one"},
+		Execution: &protocol.DispatchExecution{
+			Transport:      "native-cli",
+			WorkspaceLease: &protocol.WorkspaceLeaseGrant{ID: "lease-one"},
+		},
+	})
+
+	require.Zero(t, client.activeRuns())
+	message := waitForMessage(t, client, "run.failed")
+	require.Equal(t, "run-one", message.RunID)
+	require.Equal(t, "unsupported execution: workspace lease provisioning not available on this Barista", message.Error)
+}
+
+func TestDispatchWithNativeCliExecutionIsNotRejectedByTheExecutionGuard(t *testing.T) {
+	// A nil transport (plain dispatch) and an explicit "native-cli" transport with neither a
+	// session binding nor a workspace lease are both fully supported today; neither should ever
+	// produce the unsupported-execution run.failed message.
+	require.Equal(t, "", unsupportedExecutionReason(nil))
+	require.Equal(t, "", unsupportedExecutionReason(&protocol.DispatchExecution{Transport: "native-cli"}))
+}
+
 func TestActiveCancellationAcknowledgesWithoutFailureOrCompletion(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("test fixture is a shell script")

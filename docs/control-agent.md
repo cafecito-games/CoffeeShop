@@ -101,7 +101,7 @@ On reconnect, protocol versions 2 and 3 send `register`, flush the lifecycle out
 
 ## Protocol versions
 
-Barista registers exactly one control protocol version per connection. The Go package defines every version the hub accepts and the capability each introduced: `replay-barrier` in 2, `hub-rpc` in 3, and `orchestration` in 4. This release registers version 4 so it can send the `capability.report` message; consuming version-4 ACP dispatch fields, approval decisions, session bindings, and workspace leases remains separate work. The hub rejects unknown versions before dispatch and never sends a message whose capability the registered version lacks.
+Barista registers exactly one control protocol version per connection. The Go package defines every version the hub accepts and the capability each introduced: `replay-barrier` in 2, `hub-rpc` in 3, and `orchestration` in 4. Barista registers version 4 to report capability evidence, and it rejects version-4 dispatch execution it cannot honor rather than falling back: a dispatch `execution` naming a transport other than `native-cli`, or carrying a `sessionBinding` or `workspaceLease`, is failed with an explicit `run.failed` error before any process starts. Approval decisions, ACP dispatch, session-binding resume, and workspace-lease provisioning remain separate work. The hub rejects unknown versions before dispatch and never sends a message whose capability the registered version lacks.
 
 ACP runs only between Barista and a locally installed harness adapter. Barista translates ACP updates into the normalized `harness.event` vocabulary; ACP frames and schema names never reach the hub, and MCP remains the model-facing tool protocol.
 

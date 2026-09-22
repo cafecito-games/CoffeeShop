@@ -102,7 +102,7 @@ Every status vocabulary has an explicit transition table in which terminal state
 - Each socket registers exactly one version. The hub records it and checks every outbound message against the capability that message requires, so version-4 dispatch fields, approval decisions, and other orchestration messages are never sent to version 1–3 peers.
 - Orchestration messages received on a version 1–3 connection are rejected without changing state; they are never reinterpreted as legacy output.
 - Snapshots persisted before version 4 load with empty orchestration collections. Migration never invents tasks, messages, bindings, approvals, or leases.
-- Barista advertises version 4 only once it consumes the version-4 dispatch fields, so a hub cannot request ACP execution from a Barista that would silently fall back to native behavior.
+- Barista registers version 4 to report capability evidence, and it rejects version-4 dispatch execution it cannot honor rather than falling back: a dispatch whose `execution` names a non-`native-cli` transport, or carries a `sessionBinding` or `workspaceLease`, is failed with an explicit error before any process starts, so a hub can never get silent native-behavior fallback from ACP execution it requested.
 
 ### Task graph persistence
 

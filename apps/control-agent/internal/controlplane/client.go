@@ -231,13 +231,36 @@ func (client *Client) handle(ctx context.Context, message protocol.Inbound) {
 			client.send(protocol.Outbound{Type: "run.cancelled", RunID: message.RunID, At: now()})
 		}
 	case "dispatch":
-		client.dispatch(ctx, message.Run, message.Agent)
+		client.dispatch(ctx, message.Run, message.Agent, message.Execution)
 	default:
 		log.Printf("ignore unknown control-plane message type %q", message.Type)
 	}
 }
 
-func (client *Client) dispatch(ctx context.Context, run protocol.Run, agent protocol.Agent) {
+// unsupportedExecutionReason reports why a version-4 dispatch execution cannot be honored by this
+// Barista, or "" when the execution is absent or fully supported. Barista only implements native
+// CLI execution today: an ACP transport, a session binding to resume, or a workspace lease to
+// provision would each silently fall back to plain native execution if not rejected explicitly,
+// which is exactly what registering control protocol version 4 must never allow (see
+// docs/architecture.md's compatibility policy). Rejecting here, before any process starts, keeps
+// that promise regardless of what a hub scheduler eventually sends.
+func unsupportedExecutionReason(execution *protocol.DispatchExecution) string {
+	if execution == nil {
+		return ""
+	}
+	if execution.Transport != "" && execution.Transport != "native-cli" {
+		return fmt.Sprintf("unsupported execution: %s transport not available on this Barista", execution.Transport)
+	}
+	if execution.SessionBinding != nil {
+		return "unsupported execution: session binding resume not available on this Barista"
+	}
+	if execution.WorkspaceLease != nil {
+		return "unsupported execution: workspace lease provisioning not available on this Barista"
+	}
+	return ""
+}
+
+func (client *Client) dispatch(ctx context.Context, run protocol.Run, agent protocol.Agent, execution *protocol.DispatchExecution) {
 	client.runsMu.Lock()
 	if _, cancelled := client.cancelled[run.ID]; cancelled {
 		client.runsMu.Unlock()
@@ -245,6 +268,11 @@ func (client *Client) dispatch(ctx context.Context, run protocol.Run, agent prot
 	}
 	if _, exists := client.runs[run.ID]; exists {
 		client.runsMu.Unlock()
+		return
+	}
+	if reason := unsupportedExecutionReason(execution); reason != "" {
+		client.runsMu.Unlock()
+		client.send(protocol.Outbound{Type: "run.failed", RunID: run.ID, Error: reason, At: now()})
 		return
 	}
 	if len(client.runs) >= client.config.Concurrency {
