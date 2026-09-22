@@ -8,7 +8,7 @@ import (
 )
 
 func TestCancellationMessagesUseTypedWireContract(t *testing.T) {
-	require.Equal(t, "3", Version)
+	require.Equal(t, "4", Version)
 	inbound, err := DecodeInbound([]byte(`{"type":"cancel","runId":"run-one"}`))
 	require.NoError(t, err)
 	require.Equal(t, "cancel", inbound.Type)

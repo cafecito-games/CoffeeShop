@@ -1,0 +1,68 @@
+{
+  "profiles": [
+    {
+      "schemaVersion": 1,
+      "id": "coffee-shop-web",
+      "name": "Coffee Shop web app",
+      "repository": {
+        "url": "https://github.com/cafecito-games/CoffeeShop",
+        "defaultBranch": "main"
+      },
+      "workspacePolicy": {
+        "requireWritable": true
+      },
+      "requirements": {
+        "hard": {
+          "operatingSystems": ["linux", "darwin"],
+          "toolchains": [
+            { "capabilityId": "node", "label": "Node.js", "versionConstraint": ">=20.0.0" },
+            { "capabilityId": "pnpm", "label": "pnpm", "versionConstraint": ">=9.0.0" },
+            { "capabilityId": "go", "label": "Go toolchain", "versionConstraint": ">=1.24.0" }
+          ]
+        },
+        "preferred": {
+          "labels": ["ci"]
+        }
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "coffee-shop-ios-companion",
+      "name": "Coffee Shop iOS companion",
+      "workspacePolicy": {
+        "requireWritable": true
+      },
+      "requirements": {
+        "hard": {
+          "operatingSystems": ["darwin"],
+          "architectures": ["arm64"],
+          "toolchains": [
+            { "capabilityId": "xcodebuild", "label": "Xcode", "versionConstraint": ">=15.0.0" }
+          ]
+        }
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "coffee-shop-native-runner",
+      "name": "Coffee Shop native performance runner",
+      "workspacePolicy": {
+        "requireWritable": true,
+        "allowedRepositories": ["https://github.com/cafecito-games/CoffeeShop"]
+      },
+      "requirements": {
+        "hard": {
+          "operatingSystems": ["linux"],
+          "minimumLogicalCpuCount": 8,
+          "toolchains": [
+            { "capabilityId": "gcc", "label": "GCC", "versionConstraint": ">=12.0.0" }
+          ]
+        },
+        "preferred": {
+          "accelerators": ["cuda"],
+          "minimumConfiguredMemoryMegabytes": 32768
+        }
+      }
+    }
+  ]
+}

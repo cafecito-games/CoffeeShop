@@ -47,6 +47,10 @@ The web app’s **Compute → Add compute** flow generates a shell-quoted equiva
 | `BARISTA_CONCURRENCY` | Positive maximum simultaneous run count |
 | `WORKSPACE_ROOTS` | Absolute allowlisted roots |
 | `COFFEE_SHOP_TOKEN` | Coffee Shop hub secret, never a provider credential |
+| `BARISTA_PROJECT_ALLOWLIST` | Comma-separated project IDs this node accepts work for; empty means unrestricted |
+| `BARISTA_LABELS` | Comma-separated operator-assigned capability labels |
+| `BARISTA_ACCELERATORS` | Comma-separated hardware accelerators available on this node |
+| `BARISTA_MEMORY_MEGABYTES` | Configured system memory in megabytes; absent or `0` means not configured |
 
 The UI deliberately emits `COFFEE_SHOP_TOKEN='replace-with-hub-token'`; it never reads the browser’s stored hub token into setup guidance. Replace the placeholder locally on the compute machine, or use a protected environment file when installing Barista as a service.
 
@@ -72,6 +76,7 @@ Barista sends:
 - `harness.event` (version 4): one normalized, bounded harness event;
 - `session.binding` (version 4): the provider session a run created, resumed, idled, or replaced;
 - `workspace.lease` (version 4): provisioning, release, cleanup, or retention of a workspace lease.
+- `capability.report` (version 4): bounded runtime, configured, and probed node capability evidence sent once per connection and refreshed periodically.
 
 The hub sends `hub.rpc.response` with either a structured result or a typed error. Protocol version 3 adds these RPC messages. They are not placed in the reconnect lifecycle outbox: a disconnected call fails promptly, while mutation idempotency makes an explicit retry safe.
 
@@ -96,7 +101,7 @@ On reconnect, protocol versions 2 and 3 send `register`, flush the lifecycle out
 
 ## Protocol versions
 
-Barista registers exactly one control protocol version per connection. The Go package defines every version the hub accepts and the capability each introduced: `replay-barrier` in 2, `hub-rpc` in 3, and `orchestration` in 4. This release still registers version 3; it will register version 4 once it consumes version-4 dispatch fields and approval decisions. The hub rejects unknown versions before dispatch and never sends a message whose capability the registered version lacks.
+Barista registers exactly one control protocol version per connection. The Go package defines every version the hub accepts and the capability each introduced: `replay-barrier` in 2, `hub-rpc` in 3, and `orchestration` in 4. This release registers version 4 so it can send the `capability.report` message; consuming version-4 ACP dispatch fields, approval decisions, session bindings, and workspace leases remains separate work. The hub rejects unknown versions before dispatch and never sends a message whose capability the registered version lacks.
 
 ACP runs only between Barista and a locally installed harness adapter. Barista translates ACP updates into the normalized `harness.event` vocabulary; ACP frames and schema names never reach the hub, and MCP remains the model-facing tool protocol.
 
@@ -131,6 +136,14 @@ The token authenticates a Barista to the current single-user control plane; it i
 Copy the binary to a stable location and run it under the platform service manager with a dedicated environment file. The service account must be able to read/write the enrolled workspaces and access the locally authenticated CLI state. It should not have broader filesystem permissions than the agents need.
 
 Barista logs discovery, connection state, enrolled roots, and failures to stdout/stderr so systemd, launchd, or the Windows Service wrapper can collect them.
+
+## Project capability evidence
+
+Barista reports what the node actually has as bounded capability evidence tagged with a provenance source. `runtime` facts (operating system, architecture, logical CPU count, workspace-root writability) and `probe` results (toolchain versions) come from direct observation; `configured` declarations (labels, accelerators, memory) are the node administrator's word. Every entry carries bounded diagnostics so a failed observation is explainable without leaking process output.
+
+The allowlisted probes are fixed at compile time in `apps/control-agent/internal/readiness`: a known set of `{binary, args}` pairs for Go, Git, Node, pnpm, GCC, Clang, and Xcode, plus a generic "first reported version" parser. Barista never accepts a command, executable name, or argument list from the hub, a task, or any network message, so a compromise of the control plane cannot turn a version check into arbitrary execution. `--project`, `--label`, `--accelerator`, and `--memory-megabytes` (and their `BARISTA_*` environment equivalents) are node-admin declarations, never trusted as proof.
+
+The hub evaluates readiness by combining this evidence with a hub-loaded project profile; Barista does not decide whether it is ready for any project itself. A node administrator can additionally restrict the node to specific project IDs through the project allowlist, which the hub enforces independently of any profile's requirements.
 
 ## Reviewing reported policy
 

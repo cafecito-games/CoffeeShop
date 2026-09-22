@@ -1,9 +1,11 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -118,4 +120,88 @@ func TestParseUsesWorkingDirectoryAsTheDefaultRoot(t *testing.T) {
 	want, err = filepath.Abs(want)
 	require.NoError(t, err)
 	require.Equal(t, want, cfg.WorkspaceRoots[0])
+}
+
+func TestParseReadsCapabilityValuesFromEnvironment(t *testing.T) {
+	t.Setenv("WORKSPACE_ROOTS", absoluteExistingRoot(t))
+	t.Setenv("BARISTA_PROJECT_ALLOWLIST", "coffee-shop,internal-tools")
+	t.Setenv("BARISTA_LABELS", "gpu,latency-sensitive")
+	t.Setenv("BARISTA_ACCELERATORS", "apple-m3-max,cuda")
+	t.Setenv("BARISTA_MEMORY_MEGABYTES", "32768")
+
+	cfg, err := Parse([]string{"--name", "Worker 1", "--id", "worker-1"})
+	require.NoError(t, err)
+	require.Equal(t, []string{"coffee-shop", "internal-tools"}, cfg.ProjectAllowlist)
+	require.Equal(t, []string{"gpu", "latency-sensitive"}, cfg.Labels)
+	require.Equal(t, []string{"apple-m3-max", "cuda"}, cfg.Accelerators)
+	require.Equal(t, 32768, cfg.MemoryMegabytes)
+}
+
+func TestParseAccumulatesRepeatedCapabilityFlags(t *testing.T) {
+	t.Setenv("WORKSPACE_ROOTS", absoluteExistingRoot(t))
+	t.Setenv("BARISTA_PROJECT_ALLOWLIST", "")
+	t.Setenv("BARISTA_LABELS", "")
+	t.Setenv("BARISTA_ACCELERATORS", "")
+
+	cfg, err := Parse([]string{
+		"--name", "Worker 1", "--id", "worker-1",
+		"--project", "coffee-shop", "--project", "internal-tools",
+		"--label", "gpu", "--label", "latency-sensitive",
+		"--accelerator", "cuda",
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{"coffee-shop", "internal-tools"}, cfg.ProjectAllowlist)
+	require.Equal(t, []string{"gpu", "latency-sensitive"}, cfg.Labels)
+	require.Equal(t, []string{"cuda"}, cfg.Accelerators)
+}
+
+func TestParseRejectsInvalidProjectID(t *testing.T) {
+	t.Setenv("WORKSPACE_ROOTS", absoluteExistingRoot(t))
+
+	_, err := Parse([]string{"--name", "Worker 1", "--id", "worker-1", "--project", "Coffee Shop"})
+	require.EqualError(t, err, `project id "Coffee Shop" must contain only letters, numbers, and hyphens`)
+}
+
+func TestParseDeduplicatesCapabilityValuesPreservingOrder(t *testing.T) {
+	t.Setenv("WORKSPACE_ROOTS", absoluteExistingRoot(t))
+
+	cfg, err := Parse([]string{
+		"--name", "Worker 1", "--id", "worker-1",
+		"--project", "coffee-shop", "--project", "internal-tools", "--project", "coffee-shop",
+		"--label", "gpu", "--label", "gpu",
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{"coffee-shop", "internal-tools"}, cfg.ProjectAllowlist)
+	require.Equal(t, []string{"gpu"}, cfg.Labels)
+}
+
+func TestParseRejectsOversizedLabelAndAccelerator(t *testing.T) {
+	t.Setenv("WORKSPACE_ROOTS", absoluteExistingRoot(t))
+	oversized := strings.Repeat("x", 129)
+
+	_, err := Parse([]string{"--name", "Worker 1", "--id", "worker-1", "--label", oversized})
+	require.EqualError(t, err, fmt.Sprintf("label %q exceeds 128 bytes", oversized))
+	_, err = Parse([]string{"--name", "Worker 1", "--id", "worker-1", "--accelerator", oversized})
+	require.EqualError(t, err, fmt.Sprintf("accelerator %q exceeds 128 bytes", oversized))
+}
+
+func TestParseTreatsExplicitZeroMemoryAsUnset(t *testing.T) {
+	t.Setenv("WORKSPACE_ROOTS", absoluteExistingRoot(t))
+	t.Setenv("BARISTA_MEMORY_MEGABYTES", "0")
+
+	cfg, err := Parse([]string{"--name", "Worker 1", "--id", "worker-1"})
+	require.NoError(t, err)
+	require.Zero(t, cfg.MemoryMegabytes)
+}
+
+func TestParseRejectsNegativeMemory(t *testing.T) {
+	t.Setenv("WORKSPACE_ROOTS", absoluteExistingRoot(t))
+	t.Setenv("BARISTA_MEMORY_MEGABYTES", "-512")
+
+	_, err := Parse([]string{"--name", "Worker 1", "--id", "worker-1"})
+	require.EqualError(t, err, `BARISTA_MEMORY_MEGABYTES must be a non-negative integer`)
+
+	t.Setenv("BARISTA_MEMORY_MEGABYTES", "")
+	_, err = Parse([]string{"--name", "Worker 1", "--id", "worker-1", "--memory-megabytes", "-1"})
+	require.EqualError(t, err, "memory megabytes must not be negative")
 }

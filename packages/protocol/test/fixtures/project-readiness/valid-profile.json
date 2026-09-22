@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "id": "cafecito-ios",
+  "name": "Cafecito iOS app",
+  "repository": {
+    "url": "https://github.com/CafecitoGames/cafecito-ios.git",
+    "defaultBranch": "main"
+  },
+  "workspacePolicy": {
+    "requireWritable": true,
+    "allowedRepositories": ["https://github.com/CafecitoGames/cafecito-ios.git"]
+  },
+  "requirements": {
+    "hard": {
+      "operatingSystems": ["macos"],
+      "architectures": ["arm64"],
+      "minimumLogicalCpuCount": 8,
+      "minimumConfiguredMemoryMegabytes": 16384,
+      "labels": ["ci"],
+      "toolchains": [
+        { "capabilityId": "toolchain:xcode", "label": "Xcode", "versionConstraint": ">=16.0" },
+        { "capabilityId": "toolchain:go", "label": "Go" }
+      ],
+      "harnessIds": ["claude-cli"],
+      "transports": ["native-cli", "acp-v1"]
+    },
+    "preferred": {
+      "accelerators": ["metal"],
+      "labels": ["fast-storage"]
+    }
+  }
+}

@@ -24,10 +24,11 @@ import (
 )
 
 type Client struct {
-	config config.Config
-	node   protocol.ComputeNode
-	runner *harness.Runner
-	bridge *mcpserver.Server
+	config                config.Config
+	node                  protocol.ComputeNode
+	runner                *harness.Runner
+	bridge                *mcpserver.Server
+	buildCapabilityReport func(context.Context) protocol.NodeCapabilityReport
 
 	connectionMu sync.Mutex
 	connection   *websocket.Conn
@@ -45,9 +46,9 @@ type rpcResult struct {
 	err    error
 }
 
-func NewClient(cfg config.Config, node protocol.ComputeNode, runner *harness.Runner) *Client {
+func NewClient(cfg config.Config, node protocol.ComputeNode, runner *harness.Runner, buildCapabilityReport func(context.Context) protocol.NodeCapabilityReport) *Client {
 	client := &Client{
-		config: cfg, node: node, runner: runner,
+		config: cfg, node: node, runner: runner, buildCapabilityReport: buildCapabilityReport,
 		runs: map[string]context.CancelFunc{}, cancelled: map[string]struct{}{}, pending: map[string]chan rpcResult{},
 	}
 	client.bridge = mcpserver.New(client.callHub, client.uploadArtifact)
@@ -112,6 +113,12 @@ func (client *Client) runOnce(ctx context.Context) (bool, error) {
 	heartbeatCtx, cancelHeartbeat := context.WithCancel(ctx)
 	defer cancelHeartbeat()
 	go client.heartbeat(heartbeatCtx)
+	go client.capabilityReportLoop(heartbeatCtx)
+
+	// Sent through client.send so a disconnected connection queues the report in the outbox and
+	// replays it on the next successful attach, giving resend-after-reconnect for free.
+	capabilityReport := client.buildCapabilityReport(ctx)
+	client.send(protocol.Outbound{Type: "capability.report", Report: &capabilityReport})
 
 	for {
 		_, data, err := connection.Read(ctx)
@@ -189,6 +196,20 @@ func (client *Client) heartbeat(ctx context.Context) {
 		select {
 		case <-ticker.C:
 			client.send(protocol.Outbound{Type: "heartbeat", NodeID: client.node.ID, ActiveRuns: client.activeRuns(), At: now()})
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+func (client *Client) capabilityReportLoop(ctx context.Context) {
+	ticker := time.NewTicker(15 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			report := client.buildCapabilityReport(ctx)
+			client.send(protocol.Outbound{Type: "capability.report", Report: &report})
 		case <-ctx.Done():
 			return
 		}

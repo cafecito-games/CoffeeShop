@@ -224,7 +224,8 @@ export type ControlAgentToHub =
   | { type: "hub.rpc.request"; requestId: string; runId: string; operation: HubToolName; arguments: unknown; at: string }
   | { type: "harness.event"; event: HarnessEvent }
   | { type: "session.binding"; runId: string; binding: HarnessSessionBindingUpdate; at: string }
-  | { type: "workspace.lease"; runId: string; lease: WorkspaceLeaseUpdate; at: string };
+  | { type: "workspace.lease"; runId: string; lease: WorkspaceLeaseUpdate; at: string }
+  | { type: "capability.report"; report: NodeCapabilityReport };
 
 /** @deprecated Use HubToControlAgent. */
 export type HubToWorker = HubToControlAgent;
@@ -286,6 +287,7 @@ export function requiredCapabilityForControlAgentMessage(message: ControlAgentTo
     case "harness.event":
     case "session.binding":
     case "workspace.lease":
+    case "capability.report":
       return "orchestration";
     case "register":
     case "heartbeat":
@@ -893,4 +895,612 @@ export function validateOrchestrationControlAgentMessage(value: unknown, version
   }
   const lease = validateWorkspaceLeaseUpdate(value.lease);
   return lease.ok ? accept({ type: value.type, runId: value.runId, lease: lease.value, at: value.at }) : reject(lease.reason);
+}
+
+/*
+ * Project execution profiles and node capability evidence.
+ *
+ * A project profile is a hub-authoritative, non-secret, versioned description of what a project
+ * needs from a node. A node proves what it actually has via bounded capability evidence it reports
+ * itself; readiness is decided by pure evaluation of a profile against that evidence. Everything in
+ * this section is pure data and pure functions — no filesystem, process, or clock access — so it is
+ * safe to bundle into both the hub and the web app.
+ */
+export const projectProfileSchemaVersion = 1;
+
+export const versionComparators = ["=", ">=", ">", "<=", "<"] as const;
+export type VersionComparator = typeof versionComparators[number];
+
+export interface VersionConstraint {
+  comparator: VersionComparator;
+  version: string;
+}
+
+const normalizedVersionPattern = /^\d{1,4}(\.\d{1,4}){0,3}$/;
+const versionComparatorPrefixes = [">=", "<=", ">", "<", "="] as const satisfies readonly VersionComparator[];
+
+export function isNormalizedVersion(value: unknown): value is string {
+  if (typeof value !== "string" || byteLength(value) > 32 || !normalizedVersionPattern.test(value)) return false;
+  return value.split(".").every((segment) => segment === "0" || !segment.startsWith("0"));
+}
+
+export function parseVersionConstraint(raw: unknown): Validation<VersionConstraint> {
+  if (!isBoundedString(raw, 40)) return reject("version constraint must be a bounded string");
+  for (const comparator of versionComparatorPrefixes) {
+    if (raw.startsWith(comparator)) {
+      const version = raw.slice(comparator.length);
+      if (!isNormalizedVersion(version)) return reject(`version constraint has an invalid version: ${raw}`);
+      return accept({ comparator, version });
+    }
+  }
+  if (!isNormalizedVersion(raw)) return reject(`version constraint has an invalid version: ${raw}`);
+  return accept({ comparator: "=", version: raw });
+}
+
+const versionComparatorPredicates: Readonly<Record<VersionComparator, (compared: number) => boolean>> = {
+  "=": (compared) => compared === 0,
+  ">=": (compared) => compared >= 0,
+  ">": (compared) => compared > 0,
+  "<=": (compared) => compared <= 0,
+  "<": (compared) => compared < 0
+};
+
+/**
+ * Compares two dotted-integer versions. Both arguments must already satisfy `isNormalizedVersion`;
+ * callers validate first because this function is also used on trusted internal data.
+ */
+export function compareVersions(a: string, b: string): number {
+  const left = a.split(".").map((segment) => Number.parseInt(segment, 10));
+  const right = b.split(".").map((segment) => Number.parseInt(segment, 10));
+  const length = Math.max(left.length, right.length);
+  for (let index = 0; index < length; index += 1) {
+    const compared = (left[index] ?? 0) - (right[index] ?? 0);
+    if (compared !== 0) return compared < 0 ? -1 : 1;
+  }
+  return 0;
+}
+
+export function satisfiesVersionConstraint(normalizedVersion: string, constraint: VersionConstraint): boolean {
+  if (!isNormalizedVersion(normalizedVersion)) return false;
+  return versionComparatorPredicates[constraint.comparator](compareVersions(normalizedVersion, constraint.version));
+}
+
+const projectIdPattern = /^[a-z0-9]+(-[a-z0-9]+)*$/;
+const capabilityIdPattern = /^[a-z0-9]+(-[a-z0-9]+)*(:[a-z0-9]+(-[a-z0-9]+)*)?$/;
+
+export interface ToolchainRequirement {
+  capabilityId: string;
+  label: string;
+  versionConstraint?: string;
+}
+
+export interface WorkspacePolicy {
+  requireWritable: boolean;
+  allowedRepositories?: string[];
+}
+
+export interface RequirementSet {
+  operatingSystems?: string[];
+  architectures?: string[];
+  minimumLogicalCpuCount?: number;
+  minimumConfiguredMemoryMegabytes?: number;
+  accelerators?: string[];
+  labels?: string[];
+  toolchains?: ToolchainRequirement[];
+  harnessIds?: HarnessId[];
+  transports?: HarnessTransport[];
+}
+
+export interface ProjectRequirements {
+  hard: RequirementSet;
+  preferred?: RequirementSet;
+}
+
+export interface ProjectRepositoryIdentity {
+  url: string;
+  defaultBranch: string;
+}
+
+export interface ProjectProfile {
+  schemaVersion: number;
+  id: string;
+  name: string;
+  repository?: ProjectRepositoryIdentity;
+  workspacePolicy: WorkspacePolicy;
+  requirements: ProjectRequirements;
+}
+
+const isBoundedNonEmptyString = (value: unknown, limit: number): value is string =>
+  isBoundedString(value, limit) && value.length > 0;
+
+const isUniqueBoundedStringArray = (value: unknown, limit: number): value is string[] =>
+  Array.isArray(value)
+  && value.length > 0
+  && value.every((entry) => isBoundedNonEmptyString(entry, limit))
+  && new Set(value as string[]).size === value.length;
+
+const requirementSetKeys = [
+  "operatingSystems", "architectures", "minimumLogicalCpuCount", "minimumConfiguredMemoryMegabytes",
+  "accelerators", "labels", "toolchains", "harnessIds", "transports"
+] as const;
+
+const requirementStringArrayFields = ["operatingSystems", "architectures", "accelerators", "labels"] as const;
+const requirementPositiveIntegerFields = ["minimumLogicalCpuCount", "minimumConfiguredMemoryMegabytes"] as const;
+
+function validateRequirementSet(value: unknown, path: string): Validation<RequirementSet> {
+  if (!isRecord(value) || !hasOnlyKeys(value, requirementSetKeys)) {
+    return reject(`${path} requirements must contain only declared fields`);
+  }
+  for (const field of requirementStringArrayFields) {
+    if (value[field] !== undefined && !isUniqueBoundedStringArray(value[field], 128)) {
+      return reject(`${path} ${field} must be a non-empty array of unique non-empty strings`);
+    }
+  }
+  for (const field of requirementPositiveIntegerFields) {
+    const entry = value[field];
+    if (entry !== undefined && !(isNonNegativeInteger(entry) && entry > 0)) {
+      return reject(`${path} ${field} must be a positive integer`);
+    }
+  }
+  if (value.harnessIds !== undefined) {
+    const harnessIdRequirements = value.harnessIds;
+    if (!Array.isArray(harnessIdRequirements) || harnessIdRequirements.length === 0
+      || !harnessIdRequirements.every((entry) => isHarnessId(entry))
+      || new Set(harnessIdRequirements as string[]).size !== harnessIdRequirements.length) {
+      return reject(`${path} harnessIds must be a non-empty array of known harness ids without duplicates`);
+    }
+  }
+  if (value.transports !== undefined) {
+    const transportRequirements = value.transports;
+    if (!Array.isArray(transportRequirements) || transportRequirements.length === 0
+      || !transportRequirements.every((entry) => isHarnessTransport(entry))
+      || new Set(transportRequirements as string[]).size !== transportRequirements.length) {
+      return reject(`${path} transports must be a non-empty array of known transports without duplicates`);
+    }
+  }
+  if (value.toolchains !== undefined) {
+    const toolchains = value.toolchains;
+    if (!Array.isArray(toolchains) || toolchains.length === 0) {
+      return reject(`${path} toolchains must be a non-empty array`);
+    }
+    const seenCapabilityIds = new Set<string>();
+    for (const toolchain of toolchains) {
+      if (!isRecord(toolchain) || !hasOnlyKeys(toolchain, ["capabilityId", "label", "versionConstraint"])) {
+        return reject(`${path} toolchain must contain only declared fields`);
+      }
+      if (!isBoundedNonEmptyString(toolchain.capabilityId, 64) || !capabilityIdPattern.test(toolchain.capabilityId)) {
+        return reject(`${path} toolchain capabilityId is malformed`);
+      }
+      if (!isBoundedNonEmptyString(toolchain.label, 128)) {
+        return reject(`${path} toolchain label is malformed`);
+      }
+      if (toolchain.versionConstraint !== undefined) {
+        const constraint = parseVersionConstraint(toolchain.versionConstraint);
+        if (!constraint.ok) return reject(constraint.reason);
+      }
+      if (seenCapabilityIds.has(toolchain.capabilityId)) {
+        return reject(`duplicate toolchain requirement ${toolchain.capabilityId}`);
+      }
+      seenCapabilityIds.add(toolchain.capabilityId);
+    }
+  }
+  return accept(value as unknown as RequirementSet);
+}
+
+/*
+ * Secret-like value detection. This is intentionally a narrow denylist of well-known vendor token
+ * shapes rather than a generic entropy heuristic: repository URLs, branch names, and revision
+ * hashes routinely look high-entropy to heuristics, and a false positive would block a legitimate
+ * profile outright.
+ */
+const secretLikeTokenPattern = /^(sk|pk|ghp|gho|ghu|ghs|ghr|xox[abp]|AKIA|glpat)-?[A-Za-z0-9_-]{10,}$/i;
+const bearerHeaderPattern = /^Bearer\s+\S{10,}$/i;
+
+export function containsSecretLikeValue(value: unknown): boolean {
+  if (typeof value === "string") {
+    return secretLikeTokenPattern.test(value)
+      || bearerHeaderPattern.test(value)
+      || (value.includes("-----BEGIN") && value.includes("PRIVATE KEY"));
+  }
+  if (Array.isArray(value)) return value.some((entry) => containsSecretLikeValue(entry));
+  if (isRecord(value)) return Object.values(value).some((entry) => containsSecretLikeValue(entry));
+  return false;
+}
+
+export function validateProjectProfile(value: unknown): Validation<ProjectProfile> {
+  if (!isRecord(value) || !hasOnlyKeys(value, ["schemaVersion", "id", "name", "repository", "workspacePolicy", "requirements"])) {
+    return reject("project profile must contain only declared fields");
+  }
+  if (value.schemaVersion !== projectProfileSchemaVersion) {
+    return reject("project profile schema version is missing or unknown");
+  }
+  if (!isBoundedNonEmptyString(value.id, 64) || !projectIdPattern.test(value.id)) {
+    return reject("project profile id is malformed");
+  }
+  if (!isBoundedNonEmptyString(value.name, 128)) {
+    return reject("project profile name is malformed");
+  }
+  if (value.repository !== undefined) {
+    const repository = value.repository;
+    if (!isRecord(repository) || !hasOnlyKeys(repository, ["url", "defaultBranch"])) {
+      return reject("project profile repository must contain only declared fields");
+    }
+    if (!isBoundedNonEmptyString(repository.url, 512) || !isBoundedNonEmptyString(repository.defaultBranch, 256)) {
+      return reject("project profile repository url or default branch is malformed");
+    }
+  }
+  const workspacePolicy = value.workspacePolicy;
+  if (!isRecord(workspacePolicy) || !hasOnlyKeys(workspacePolicy, ["requireWritable", "allowedRepositories"])) {
+    return reject("project profile workspace policy must contain only declared fields");
+  }
+  if (typeof workspacePolicy.requireWritable !== "boolean") {
+    return reject("project profile workspace policy requireWritable must be a boolean");
+  }
+  if (workspacePolicy.allowedRepositories !== undefined && !isUniqueBoundedStringArray(workspacePolicy.allowedRepositories, 512)) {
+    return reject("project profile allowedRepositories must be a non-empty array of unique non-empty strings");
+  }
+  const requirements = value.requirements;
+  if (!isRecord(requirements) || !hasOnlyKeys(requirements, ["hard", "preferred"])) {
+    return reject("project profile requirements must contain only declared fields");
+  }
+  const hard = validateRequirementSet(requirements.hard, "hard");
+  if (!hard.ok) return reject(hard.reason);
+  if (requirements.preferred !== undefined) {
+    const preferred = validateRequirementSet(requirements.preferred, "preferred");
+    if (!preferred.ok) return reject(preferred.reason);
+  }
+  if (containsSecretLikeValue(value)) {
+    return reject("project profile contains a secret-like value");
+  }
+  return accept(value as unknown as ProjectProfile);
+}
+
+/** Deterministic fingerprint input: object keys are sorted and array elements are order-insensitive. */
+function canonicalizeForFingerprint(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    const canonicalized = value.map((entry) => canonicalizeForFingerprint(entry));
+    canonicalized.sort((left, right) => {
+      const leftText = JSON.stringify(left);
+      const rightText = JSON.stringify(right);
+      return leftText < rightText ? -1 : leftText > rightText ? 1 : 0;
+    });
+    return canonicalized;
+  }
+  if (isRecord(value)) {
+    const canonical: Record<string, unknown> = {};
+    for (const key of Object.keys(value).sort()) {
+      canonical[key] = canonicalizeForFingerprint(value[key]);
+    }
+    return canonical;
+  }
+  return value;
+}
+
+/** FNV-1a over the UTF-8 bytes: a change-detection fingerprint, not a cryptographic hash. */
+function fnv1aHex(text: string): string {
+  let hash = 0x811c9dc5;
+  for (const byte of encoder.encode(text)) {
+    hash ^= byte;
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+export function computeProjectProfileFingerprint(
+  profile: Pick<ProjectProfile, "id" | "repository" | "workspacePolicy" | "requirements">
+): string {
+  const canonical = canonicalizeForFingerprint({
+    id: profile.id,
+    repository: profile.repository ?? null,
+    workspacePolicy: profile.workspacePolicy,
+    requirements: profile.requirements
+  });
+  return fnv1aHex(JSON.stringify(canonical));
+}
+
+export const capabilityEvidenceSources = ["runtime", "configured", "probe"] as const;
+export type CapabilityEvidenceSource = typeof capabilityEvidenceSources[number];
+const isCapabilityEvidenceSource = isOneOf(capabilityEvidenceSources);
+
+export const capabilityEvidenceLimits = {
+  capabilityIdBytes: 128,
+  rawValueBytes: 256,
+  normalizedValueBytes: 64,
+  diagnosticBytes: 512,
+  maxEvidenceEntries: 256
+} as const;
+
+export interface NodeCapabilityEvidence {
+  capabilityId: string;
+  source: CapabilityEvidenceSource;
+  success: boolean;
+  rawValue?: string;
+  normalizedValue?: string;
+  probeDefinitionVersion?: string;
+  observedAt: string;
+  diagnostic?: string;
+}
+
+export interface NodeCapabilityReport {
+  nodeId: string;
+  projectAllowlist?: string[];
+  evidence: NodeCapabilityEvidence[];
+  at: string;
+}
+
+export function validateNodeCapabilityEvidence(value: unknown): Validation<NodeCapabilityEvidence> {
+  if (!isRecord(value) || !hasOnlyKeys(value, ["capabilityId", "source", "success", "rawValue", "normalizedValue", "probeDefinitionVersion", "observedAt", "diagnostic"])) {
+    return reject("node capability evidence must contain only declared fields");
+  }
+  if (!isBoundedNonEmptyString(value.capabilityId, capabilityEvidenceLimits.capabilityIdBytes) || !capabilityIdPattern.test(value.capabilityId)) {
+    return reject("node capability evidence capabilityId is malformed");
+  }
+  if (!isCapabilityEvidenceSource(value.source)) {
+    return reject("node capability evidence source is missing or unknown");
+  }
+  if (typeof value.success !== "boolean") {
+    return reject("node capability evidence success must be a boolean");
+  }
+  if (!isOptional(value.rawValue, (entry) => isBoundedString(entry, capabilityEvidenceLimits.rawValueBytes))) {
+    return reject("node capability evidence rawValue exceeds its bound");
+  }
+  if (!isOptional(value.normalizedValue, (entry) => isBoundedNonEmptyString(entry, capabilityEvidenceLimits.normalizedValueBytes))) {
+    return reject("node capability evidence normalizedValue is malformed");
+  }
+  const isProbe = value.source === "probe";
+  if (isProbe ? !isBoundedNonEmptyString(value.probeDefinitionVersion, 64) : value.probeDefinitionVersion !== undefined) {
+    return reject("probe definition version does not match its source");
+  }
+  if (!isOptional(value.diagnostic, (entry) => isBoundedString(entry, capabilityEvidenceLimits.diagnosticBytes))) {
+    return reject("node capability evidence diagnostic exceeds its bound");
+  }
+  if (!isTimestamp(value.observedAt)) {
+    return reject("node capability evidence observedAt is malformed");
+  }
+  return accept(value as unknown as NodeCapabilityEvidence);
+}
+
+export function validateNodeCapabilityReport(value: unknown): Validation<NodeCapabilityReport> {
+  if (!isRecord(value) || !hasOnlyKeys(value, ["nodeId", "projectAllowlist", "evidence", "at"])) {
+    return reject("node capability report must contain only declared fields");
+  }
+  if (!isIdentifier(value.nodeId)) {
+    return reject("node capability report is missing node identity");
+  }
+  if (value.projectAllowlist !== undefined) {
+    const projectAllowlist = value.projectAllowlist;
+    if (!Array.isArray(projectAllowlist) || projectAllowlist.length === 0
+      || !projectAllowlist.every((entry) => typeof entry === "string" && projectIdPattern.test(entry))
+      || new Set(projectAllowlist as string[]).size !== projectAllowlist.length) {
+      return reject("node capability report projectAllowlist is malformed");
+    }
+  }
+  const evidence = value.evidence;
+  if (!Array.isArray(evidence) || evidence.length > capabilityEvidenceLimits.maxEvidenceEntries) {
+    return reject("node capability report evidence is missing or exceeds its bound");
+  }
+  const seenEvidence = new Set<string>();
+  for (const entry of evidence) {
+    const validated = validateNodeCapabilityEvidence(entry);
+    if (!validated.ok) return reject(validated.reason);
+    const pair = `${validated.value.capabilityId}\u0000${validated.value.source}`;
+    if (seenEvidence.has(pair)) {
+      return reject(`node capability report contains duplicate evidence for ${validated.value.capabilityId} via ${validated.value.source}`);
+    }
+    seenEvidence.add(pair);
+  }
+  if (!isTimestamp(value.at)) {
+    return reject("node capability report timestamp is malformed");
+  }
+  return accept(value as unknown as NodeCapabilityReport);
+}
+
+export const readinessRequirementKinds = [
+  "operating-system", "architecture", "cpu", "memory", "accelerator", "label",
+  "toolchain", "harness", "transport", "workspace", "project-allowlist"
+] as const;
+export type ReadinessRequirementKind = typeof readinessRequirementKinds[number];
+
+export interface UnmetReadinessRequirement {
+  kind: ReadinessRequirementKind;
+  requirement: string;
+  detail: string;
+}
+
+export interface ProjectReadiness {
+  nodeId: string;
+  projectId: string;
+  profileFingerprint: string;
+  evidenceFingerprint: string;
+  ready: boolean;
+  unmetHardRequirements: UnmetReadinessRequirement[];
+  unmetPreferences: UnmetReadinessRequirement[];
+  evaluatedAt: string;
+}
+
+export interface ProjectReadinessNodeContext {
+  nodeId: string;
+  harnesses: HarnessProfile[];
+  projectAllowlist?: string[];
+  evidence: NodeCapabilityEvidence[];
+  workspaceAuthorized: boolean;
+}
+
+export function computeEvidenceFingerprint(evidence: readonly NodeCapabilityEvidence[]): string {
+  const tuples = evidence.map((entry) => ({
+    capabilityId: entry.capabilityId,
+    source: entry.source,
+    normalizedValue: entry.normalizedValue ?? null,
+    success: entry.success,
+    probeDefinitionVersion: entry.probeDefinitionVersion ?? null
+  }));
+  return fnv1aHex(JSON.stringify(canonicalizeForFingerprint(tuples)));
+}
+
+interface ResolvedCapability {
+  state: "ok" | "missing" | "ambiguous" | "stale" | "failed";
+  value?: string;
+}
+
+const resolveStateDetails: Readonly<Record<Exclude<ResolvedCapability["state"], "ok">, string>> = {
+  missing: "missing evidence",
+  failed: "evidence failed",
+  stale: "evidence is stale",
+  ambiguous: "ambiguous evidence"
+};
+
+const effectiveEvidenceValue = (entry: NodeCapabilityEvidence) => entry.normalizedValue ?? entry.rawValue ?? "";
+
+/**
+ * Decides whether a node is ready for a project. Pure: every timestamp comparison uses `nowIso`,
+ * never the system clock, and neither `profile` nor `context` is mutated.
+ */
+export function evaluateProjectReadiness(
+  profile: ProjectProfile,
+  context: ProjectReadinessNodeContext,
+  evidenceTTLMilliseconds: number,
+  nowIso: string
+): ProjectReadiness {
+  const unmetHardRequirements: UnmetReadinessRequirement[] = [];
+  const unmetPreferences: UnmetReadinessRequirement[] = [];
+  const nowMilliseconds = Date.parse(nowIso);
+
+  const evidenceByCapabilityId = new Map<string, NodeCapabilityEvidence[]>();
+  for (const entry of context.evidence) {
+    const entries = evidenceByCapabilityId.get(entry.capabilityId);
+    if (entries === undefined) {
+      evidenceByCapabilityId.set(entry.capabilityId, [entry]);
+    } else {
+      entries.push(entry);
+    }
+  }
+
+  const resolveCapability = (capabilityId: string): ResolvedCapability => {
+    const entries = evidenceByCapabilityId.get(capabilityId);
+    if (entries === undefined || entries.length === 0) return { state: "missing" };
+    const resolved = entries[0];
+    for (const entry of entries.slice(1)) {
+      const disagrees = entry.success !== resolved.success
+        || (entry.success && resolved.success && effectiveEvidenceValue(entry) !== effectiveEvidenceValue(resolved));
+      if (disagrees) return { state: "ambiguous" };
+    }
+    if (nowMilliseconds - Date.parse(resolved.observedAt) > evidenceTTLMilliseconds) {
+      return { state: "stale", value: effectiveEvidenceValue(resolved) };
+    }
+    if (!resolved.success) return { state: "failed" };
+    return { state: "ok", value: effectiveEvidenceValue(resolved) };
+  };
+
+  const detailFor = (resolved: ResolvedCapability) =>
+    resolved.state === "ok" ? "reported value does not match" : resolveStateDetails[resolved.state];
+
+  const evaluateRequirementSet = (requirementSet: RequirementSet, unmet: UnmetReadinessRequirement[]) => {
+    if (requirementSet.operatingSystems !== undefined) {
+      const resolved = resolveCapability("os");
+      const matched = resolved.state === "ok"
+        && requirementSet.operatingSystems.some((operatingSystem) => (resolved.value ?? "").toLowerCase() === operatingSystem.toLowerCase());
+      if (!matched) {
+        unmet.push({ kind: "operating-system", requirement: requirementSet.operatingSystems.join(", "), detail: detailFor(resolved) });
+      }
+    }
+    if (requirementSet.architectures !== undefined) {
+      const resolved = resolveCapability("architecture");
+      const matched = resolved.state === "ok"
+        && requirementSet.architectures.some((architecture) => (resolved.value ?? "").toLowerCase() === architecture.toLowerCase());
+      if (!matched) {
+        unmet.push({ kind: "architecture", requirement: requirementSet.architectures.join(", "), detail: detailFor(resolved) });
+      }
+    }
+    for (const [field, capabilityId, kind] of [
+      ["minimumLogicalCpuCount", "logical-cpu-count", "cpu"],
+      ["minimumConfiguredMemoryMegabytes", "configured-memory-megabytes", "memory"]
+    ] as const) {
+      const requiredCount = requirementSet[field];
+      if (requiredCount === undefined) continue;
+      const resolved = resolveCapability(capabilityId);
+      const matched = resolved.state === "ok"
+        && isNormalizedVersion(resolved.value)
+        && satisfiesVersionConstraint(resolved.value as string, { comparator: ">=", version: String(requiredCount) });
+      if (!matched) {
+        unmet.push({ kind, requirement: String(requiredCount), detail: detailFor(resolved) });
+      }
+    }
+    for (const name of requirementSet.accelerators ?? []) {
+      const resolved = resolveCapability(`accelerator:${name}`);
+      if (resolved.state !== "ok") {
+        unmet.push({ kind: "accelerator", requirement: name, detail: resolveStateDetails[resolved.state] });
+      }
+    }
+    for (const name of requirementSet.labels ?? []) {
+      const resolved = resolveCapability(`label:${name}`);
+      if (resolved.state !== "ok") {
+        unmet.push({ kind: "label", requirement: name, detail: resolveStateDetails[resolved.state] });
+      }
+    }
+    for (const toolchain of requirementSet.toolchains ?? []) {
+      const resolved = resolveCapability(toolchain.capabilityId);
+      const requirement = `${toolchain.label} ${toolchain.versionConstraint ?? ""}`.trim();
+      if (resolved.state !== "ok") {
+        unmet.push({ kind: "toolchain", requirement, detail: resolveStateDetails[resolved.state] });
+        continue;
+      }
+      if (toolchain.versionConstraint === undefined) continue;
+      const constraint = parseVersionConstraint(toolchain.versionConstraint);
+      if (!constraint.ok) {
+        unmet.push({ kind: "toolchain", requirement, detail: "version constraint is invalid" });
+        continue;
+      }
+      const value = resolved.value ?? "";
+      if (!isNormalizedVersion(value) || !satisfiesVersionConstraint(value, constraint.value)) {
+        unmet.push({ kind: "toolchain", requirement, detail: "version is unparseable or unreported" });
+      }
+    }
+    if (requirementSet.harnessIds !== undefined) {
+      const matched = context.harnesses.some((harness) => harness.available && requirementSet.harnessIds!.includes(harness.id));
+      if (!matched) {
+        unmet.push({ kind: "harness", requirement: requirementSet.harnessIds.join(", "), detail: "no available harness matches" });
+      }
+    }
+    if (requirementSet.transports !== undefined) {
+      const matched = context.harnesses.some((harness) => {
+        if (!harness.available) return false;
+        const transports = harness.transports ?? ["native-cli"];
+        return transports.some((transport) => requirementSet.transports!.includes(transport));
+      });
+      if (!matched) {
+        unmet.push({ kind: "transport", requirement: requirementSet.transports.join(", "), detail: "no available harness supports a matching transport" });
+      }
+    }
+  };
+
+  evaluateRequirementSet(profile.requirements.hard, unmetHardRequirements);
+  if (profile.requirements.preferred !== undefined) {
+    evaluateRequirementSet(profile.requirements.preferred, unmetPreferences);
+  }
+
+  if (context.projectAllowlist !== undefined && context.projectAllowlist.length > 0 && !context.projectAllowlist.includes(profile.id)) {
+    unmetHardRequirements.push({
+      kind: "project-allowlist",
+      requirement: profile.id,
+      detail: "node does not authorize this project"
+    });
+  }
+  if (!context.workspaceAuthorized) {
+    unmetHardRequirements.push({
+      kind: "workspace",
+      requirement: profile.workspacePolicy.requireWritable ? "writable workspace root" : "workspace root",
+      detail: "no authorized workspace root supports this project's workspace policy"
+    });
+  }
+
+  return {
+    nodeId: context.nodeId,
+    projectId: profile.id,
+    profileFingerprint: computeProjectProfileFingerprint(profile),
+    evidenceFingerprint: computeEvidenceFingerprint(context.evidence),
+    ready: unmetHardRequirements.length === 0,
+    unmetHardRequirements,
+    unmetPreferences,
+    evaluatedAt: nowIso
+  };
 }
