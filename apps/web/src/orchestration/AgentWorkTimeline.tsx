@@ -9,7 +9,7 @@ import { taskMessageKindLabels, taskStatusLabels, timeAgo, toolCallKindLabels, t
  */
 export type AgentTimelineEntry =
   | { kind: "chat"; id: string; at: string; message: ChatMessage }
-  | { kind: "assignment"; id: string; at: string; task: Task; run: Run; assignedBy: string }
+  | { kind: "assignment"; id: string; at: string; task: Task; run: Run; assignedBy: string; attempts: number }
   | { kind: "mailbox"; id: string; at: string; message: TaskMessage; direction: "incoming" | "outgoing"; counterpart: string }
   | { kind: "live"; id: string; at: string; run: Run; task?: Task; activity?: RunActivity; pendingApprovals: ApprovalRequest[]; linkedFromChat: boolean };
 
@@ -43,11 +43,15 @@ export function buildAgentTimeline(sources: AgentTimelineSources): AgentTimeline
 
   const ownTaskRuns = runs.filter((run) => run.agentId === agentId && run.taskId && inScope(run.threadId));
   const ownTaskIds = new Set(ownTaskRuns.map((run) => run.taskId!));
-  for (const run of ownTaskRuns) {
-    const task = tasksById.get(run.taskId!);
+  // One card per task: a retried task keeps its first assignment's place and counts its attempts.
+  const attemptsByTask = new Map<string, Run[]>();
+  for (const run of ownTaskRuns) attemptsByTask.set(run.taskId!, [...(attemptsByTask.get(run.taskId!) ?? []), run]);
+  for (const [taskId, attempts] of attemptsByTask) {
+    const task = tasksById.get(taskId);
     if (!task) continue;
+    const first = attempts.reduce((earliest, run) => run.createdAt < earliest.createdAt ? run : earliest);
     const source = task.sourceRunId ? runsById.get(task.sourceRunId) : undefined;
-    entries.push({ kind: "assignment", id: `assignment:${run.id}`, at: run.createdAt, task, run, assignedBy: source ? agentName(source.agentId) : "Operator" });
+    entries.push({ kind: "assignment", id: `assignment:${taskId}`, at: first.createdAt, task, run: first, assignedBy: source ? agentName(source.agentId) : "Operator", attempts: attempts.length });
   }
 
   for (const run of runs) {
@@ -98,7 +102,7 @@ export function AgentTimelineItem({ entry, onInspectRun, onReviewApproval }: {
         <div className="message-meta"><ClipboardText size={13} /><strong>Task from {entry.assignedBy}</strong><span>{timeAgo(entry.at)}</span></div>
         <h3>{entry.task.title}</h3>
         <details><summary>Instructions</summary><p>{entry.task.instructions}</p></details>
-        <small>{taskStatusLabels[entry.task.status]}</small>
+        <small>{taskStatusLabels[entry.task.status]}{entry.attempts > 1 ? ` · ${entry.attempts} attempts` : ""}</small>
       </article>
     );
   }
@@ -122,7 +126,7 @@ export function AgentTimelineItem({ entry, onInspectRun, onReviewApproval }: {
     <article className="timeline-live" aria-live="polite">
       <div className="message-meta"><span className="timeline-live-pulse" aria-hidden="true" /><strong>{entry.run.status === "queued" ? "Queued" : "Working"}{entry.task ? ` on ${entry.task.title}` : ""}</strong><span>updated {timeAgo(entry.at)}</span></div>
       {entry.activity && entry.activity.plan.length > 0 && (
-        <ul className="run-plan">{entry.activity.plan.map((item, index) => <li key={index} className={`plan-status-${item.status}`}>{item.content}</li>)}</ul>
+        <ul className="run-plan">{entry.activity.plan.map((item, index) => <li key={`${index}:${item.content}`} className={`plan-status-${item.status}`}>{item.content}</li>)}</ul>
       )}
       {recentToolCalls.length > 0 && (
         <ul className="timeline-tool-calls">

@@ -91,6 +91,15 @@ describe("buildAgentTimeline", () => {
     expect(timeline.find((entry) => entry.kind === "live")).toMatchObject({ linkedFromChat: true });
   });
 
+  it("shows one assignment per task however many attempts the agent made", () => {
+    const timeline = buildAgentTimeline(sources({
+      runs: [run({ id: "run-2", taskId: "task-1", attempt: 2, status: "failed", createdAt: "2026-01-01T00:03:00Z" }), run({ id: "run-1", taskId: "task-1", status: "failed" })],
+      tasks: [task({ attemptRunIds: ["run-1", "run-2"] })]
+    }));
+
+    expect(timeline).toEqual([expect.objectContaining({ kind: "assignment", id: "assignment:task-1", run: expect.objectContaining({ id: "run-1" }), attempts: 2 })]);
+  });
+
   it("limits every entry to the selected thread", () => {
     const timeline = buildAgentTimeline(sources({
       threadId: "thread-2",

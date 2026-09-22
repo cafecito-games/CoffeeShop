@@ -130,6 +130,26 @@ describe("durable threads", () => {
     expect(JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body))).toEqual({ body: "Add consent text", threadId: thread.id });
   });
 
+  it("keeps the chat filter in step with the send target and drops a filter whose thread was archived", async () => {
+    currentSnapshot.threads = [thread];
+    currentSnapshot.runs = [{ ...testRun("completed"), threadId: thread.id, parentRunId: undefined }];
+    const { default: App } = await import("./App.js");
+    const { rerender } = render(<App />);
+    fireEvent.click(screen.getAllByRole("button", { name: "Threads" })[0]);
+    fireEvent.click(screen.getByRole("button", { name: "Continue thread" }));
+    expect(screen.getByRole("button", { name: thread.title, pressed: true })).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Send to"), { target: { value: "" } });
+    expect(screen.getByRole("button", { name: "All", pressed: true })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: thread.title }));
+    expect(screen.getByRole("button", { name: thread.title, pressed: true })).toBeInTheDocument();
+    currentSnapshot.threads = [{ ...thread, status: "archived" }];
+    rerender(<App />);
+    expect(screen.queryByRole("button", { name: thread.title })).not.toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: "Show activity from" })).not.toBeInTheDocument();
+  });
+
   it("archives through the operator endpoint", async () => {
     currentSnapshot.threads = [thread];
     const fetchMock = vi.mocked(fetch);

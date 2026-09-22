@@ -367,19 +367,6 @@ function CoffeeShopApp() {
   const [creating, setCreating] = useState(false);
   const selected = snapshot.agents.find((agent) => agent.id === selectedId);
   const [reviewingApprovalId, setReviewingApprovalId] = useState<string>();
-  const selectedTimeline = useMemo(() => selectedId ? buildAgentTimeline({
-    agentId: selectedId,
-    threadId: threadFilter || undefined,
-    agents: snapshot.agents,
-    messages: snapshot.messages,
-    runs: snapshot.runs,
-    tasks: snapshot.tasks ?? [],
-    threads: snapshot.threads ?? [],
-    taskMessages: snapshot.taskMessages ?? [],
-    runActivity: snapshot.runActivity ?? [],
-    approvals: snapshot.approvals ?? []
-  }) : [], [snapshot, selectedId, threadFilter]);
-  const reviewingApproval = (snapshot.approvals ?? []).find((approval) => approval.id === reviewingApprovalId);
   const selectedThreads = useMemo(() => (snapshot.threads ?? []).filter((thread) => thread.ownerAgentId === selectedId), [snapshot.threads, selectedId]);
   const viewableThreads = useMemo(() => {
     const workedIn = new Set(snapshot.runs.filter((run) => run.agentId === selectedId && run.threadId).map((run) => run.threadId!));
@@ -387,14 +374,29 @@ function CoffeeShopApp() {
       .filter((thread) => thread.status !== "archived" && (thread.ownerAgentId === selectedId || workedIn.has(thread.id)))
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   }, [snapshot.threads, snapshot.runs, selectedId]);
+  // A filtered thread that was archived or otherwise left the list falls back to showing everything.
+  const effectiveThreadFilter = viewableThreads.some((thread) => thread.id === threadFilter) ? threadFilter : "";
+  const { agents, messages, runs, tasks, threads, taskMessages, runActivity, approvals } = snapshot;
+  const selectedTimeline = useMemo(() => selectedId ? buildAgentTimeline({
+    agentId: selectedId,
+    threadId: effectiveThreadFilter || undefined,
+    agents,
+    messages,
+    runs,
+    tasks: tasks ?? [],
+    threads: threads ?? [],
+    taskMessages: taskMessages ?? [],
+    runActivity: runActivity ?? [],
+    approvals: approvals ?? []
+  }) : [], [selectedId, effectiveThreadFilter, agents, messages, runs, tasks, threads, taskMessages, runActivity, approvals]);
+  const reviewingApproval = (snapshot.approvals ?? []).find((approval) => approval.id === reviewingApprovalId);
   const orchestratorName = useMemo(() => {
-    if (selectedThreads.length > 0) return undefined;
     const ownerId = viewableThreads.find((thread) => thread.ownerAgentId !== selectedId)?.ownerAgentId;
     return ownerId ? snapshot.agents.find((agent) => agent.id === ownerId)?.name ?? ownerId : undefined;
-  }, [selectedThreads, viewableThreads, selectedId, snapshot.agents]);
+  }, [viewableThreads, selectedId, snapshot.agents]);
   function chooseSendTarget(threadId: string) {
     setSelectedThreadId(threadId);
-    if (threadId) setThreadFilter(threadId);
+    setThreadFilter(threadId);
   }
   function chooseThreadFilter(threadId: string) {
     setThreadFilter(threadId);
@@ -459,7 +461,7 @@ function CoffeeShopApp() {
       <div className="workspace">
         <FreshnessNotice connection={connection} onRetry={retry} />
         {view === "agents" && !selected && <EmptyAgents agents={snapshot.agents} onSelect={selectAgent} onCreate={() => { if (canMutate) setCreating(true); }} canMutate={canMutate} />}
-        {view === "agents" && selected && <Chat agent={selected} nodes={snapshot.nodes} threads={selectedThreads} viewableThreads={viewableThreads} threadFilter={threadFilter} orchestratorName={orchestratorName} selectedThreadId={selectedThreadId} timeline={selectedTimeline} sending={sending} inspectorOpen={inspectorOpen} onBack={() => setSelectedId(undefined)} onSend={send} onThreadChange={chooseSendTarget} onThreadFilterChange={chooseThreadFilter} onInspector={() => setInspectorOpen((open) => !open)} onInspectRun={setSelectedRunId} onReviewApproval={setReviewingApprovalId} canMutate={canMutate} />}
+        {view === "agents" && selected && <Chat agent={selected} nodes={snapshot.nodes} threads={selectedThreads} viewableThreads={viewableThreads} threadFilter={effectiveThreadFilter} orchestratorName={orchestratorName} selectedThreadId={selectedThreadId} timeline={selectedTimeline} sending={sending} inspectorOpen={inspectorOpen} onBack={() => setSelectedId(undefined)} onSend={send} onThreadChange={chooseSendTarget} onThreadFilterChange={chooseThreadFilter} onInspector={() => setInspectorOpen((open) => !open)} onInspectRun={setSelectedRunId} onReviewApproval={setReviewingApprovalId} canMutate={canMutate} />}
         {view === "threads" && <ThreadsView threads={snapshot.threads ?? []} runs={snapshot.runs} artifacts={snapshot.artifacts ?? []} agents={snapshot.agents} canMutate={canMutate} onContinue={continueThread} onInspectRun={setSelectedRunId} onSetStatus={setThreadStatus} />}
         {view === "activity" && <ActivityView events={snapshot.events} agents={snapshot.agents} onInspectRun={setSelectedRunId} />}
         {view === "orchestration" && (

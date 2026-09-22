@@ -287,10 +287,11 @@ export type ControlAgentToHub =
   | { type: "heartbeat"; nodeId: string; activeRuns: number; at: string }
   | { type: "run.started"; runId: string; at: string; transport?: RunTransportSelection }
   /**
-   * `providerSessionId` is sent at most once, by a native CLI run, with the vendor's own session
-   * identity so an operator can resume the conversation outside Coffee Shop.
+   * Carries a text `chunk`, a `providerSessionId`, or both. `providerSessionId` is sent at most once,
+   * by a native CLI run, with the vendor's own session identity so an operator can resume the
+   * conversation outside Coffee Shop.
    */
-  | { type: "run.output"; runId: string; chunk: string; at: string; providerSessionId?: string }
+  | { type: "run.output"; runId: string; chunk?: string; at: string; providerSessionId?: string }
   | { type: "run.completed"; runId: string; output: string; at: string }
   | { type: "run.failed"; runId: string; error: string; at: string }
   | { type: "run.cancelled"; runId: string; at: string }

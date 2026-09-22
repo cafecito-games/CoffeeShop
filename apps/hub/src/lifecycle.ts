@@ -253,6 +253,14 @@ export function acceptedTransportSelection(run: Run, reported: unknown): RunTran
   return selection;
 }
 
+/**
+ * Only the node a run was dispatched to may report its lifecycle; another socket could otherwise
+ * rewrite its output or attach a provider session the operator is invited to resume.
+ */
+export function isReportedByOwningNode(run: Pick<Run, "nodeId"> | undefined, reportingNodeId: string): run is Pick<Run, "nodeId"> {
+  return run !== undefined && reportingNodeId !== "" && run.nodeId === reportingNodeId;
+}
+
 /** A vendor session identity as Claude and Codex issue them: short, opaque, and shell-safe. */
 function isProviderSessionId(value: unknown): value is string {
   return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value);
@@ -264,8 +272,7 @@ export function applyRunLifecycle(state: State, message: RunLifecycleMessage) {
   if (!run) return false;
   if (typeof message.at !== "string") return false;
   // A native run reports its provider session on a run.output that carries no text.
-  if (message.type === "run.output" && message.chunk === undefined && message.providerSessionId !== undefined) message = { ...message, chunk: "" };
-  if (message.type === "run.output" && typeof message.chunk !== "string") return false;
+  if (message.type === "run.output" && !(typeof message.chunk === "string" || (message.chunk === undefined && message.providerSessionId !== undefined))) return false;
   if (message.type === "run.completed" && typeof message.output !== "string") return false;
   if (message.type === "run.failed" && typeof message.error !== "string") return false;
   if (message.type === "run.cancelled") return false;
@@ -301,8 +308,9 @@ export function applyRunLifecycle(state: State, message: RunLifecycleMessage) {
     }
   } else if (message.type === "run.output") {
     if (run.status !== "running") return false;
-    run.output += message.chunk;
-    if (message.chunk.trim()) agent.currentAction = message.chunk.trim().slice(-90);
+    const chunk = message.chunk ?? "";
+    run.output += chunk;
+    if (chunk.trim()) agent.currentAction = chunk.trim().slice(-90);
     const selectedTransport = run.transportSelection?.selectedTransport ?? run.transport ?? "native-cli";
     if (selectedTransport === "native-cli" && run.providerSessionId === undefined && isProviderSessionId(message.providerSessionId)) {
       run.providerSessionId = message.providerSessionId;

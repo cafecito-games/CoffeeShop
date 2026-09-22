@@ -22,7 +22,7 @@ import {
 } from "@coffee-shop/protocol";
 import { createConfiguredAgent, markDisconnectedNodesOffline, updateConfiguredAgent } from "./agentConfiguration.js";
 import { ControlConnectionRegistry, type ControlConnection } from "./controlConnections.js";
-import { applyRunLifecycle, cancelPersistedRun, coalesceAsync, failLostTaskAttempts, queuedRunsForNode, retryAsync, serializeAsync } from "./lifecycle.js";
+import { applyRunLifecycle, cancelPersistedRun, coalesceAsync, failLostTaskAttempts, isReportedByOwningNode, queuedRunsForNode, retryAsync, serializeAsync } from "./lifecycle.js";
 import { CoordinationError } from "./coordination.js";
 import { createHubToolHandler, hubToolError } from "./hubTools.js";
 import { TaskEventWaiters } from "./mailbox.js";
@@ -573,7 +573,7 @@ wss.on("connection", (socket, request) => {
     } else if (message.type.startsWith("run.")) {
       const runId = message.runId;
       const current = store.getRun(runId);
-      if (!current) return;
+      if (!current || !isReportedByOwningNode(current, nodeId)) return;
       let accepted = false;
       await retryAsync(async () => {
         accepted = false;
