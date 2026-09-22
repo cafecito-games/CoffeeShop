@@ -6,6 +6,7 @@ import {
   harnessTransports,
   isTaskDependencyPolicy,
   isTerminalTaskStatus,
+  recordSourceKey,
   type DependencyOutcome,
   type ExecutionPreferences,
   type ExecutionRequirements,
@@ -19,6 +20,7 @@ import {
   type TaskStatus
 } from "@coffee-shop/protocol";
 import { CoordinationError } from "./coordinationError.js";
+import { callerAgent, callerCanDelegate, callerRun, resolveCallerFor, runSource, type CallerSource } from "./mailbox.js";
 import { newEvent, newId, type State, type Store, type TaskSubmission } from "./store.js";
 
 export const taskBatchLimits = {
@@ -246,10 +248,10 @@ function canonicalJson(value: unknown): string {
  * local key, dependency edge, and policy; it deliberately excludes timestamps. Task order does not
  * change identity because local keys, not positions, name tasks.
  */
-export function taskBatchDigest(batch: NormalizedTaskBatch, threadId: string, sourceRunId: string, placementOverrides?: Readonly<Record<string, PlacementOverride>>) {
+export function taskBatchDigest(batch: NormalizedTaskBatch, threadId: string, sourceIdentity: string, placementOverrides?: Readonly<Record<string, PlacementOverride>>) {
   const tasks = [...batch.tasks].sort((left, right) => (left.key < right.key ? -1 : left.key > right.key ? 1 : 0));
   const overrides = placementOverrides && Object.keys(placementOverrides).length ? placementOverrides : undefined;
-  return createHash("sha256").update(canonicalJson({ version: 1, threadId, sourceRunId, idempotencyKey: batch.idempotencyKey, tasks, placementOverrides: overrides })).digest("hex");
+  return createHash("sha256").update(canonicalJson({ version: 1, threadId, sourceRunId: sourceIdentity, idempotencyKey: batch.idempotencyKey, tasks, placementOverrides: overrides })).digest("hex");
 }
 
 /** Hub-side policy applied to one submission; none of it can be supplied by tool arguments. */
@@ -260,7 +262,10 @@ export interface TaskBatchOptions {
   maximumSourceTasks?: number;
   /** Source runs at or beyond this depth cannot submit. */
   maximumSourceDepth?: number;
-  /** Extra policy checked against the authoritative state before a new batch is created; never for a replay. */
+  /**
+   * Extra policy checked against the authoritative state before a new batch is created; never for a
+   * replay. It names the submitting run, so it is only available to a hub-hosted submitter.
+   */
   assertAcceptable?: (state: Readonly<State>, sourceRunId: string) => void;
 }
 
@@ -296,19 +301,31 @@ export function validateTaskBatchGraph(batch: NormalizedTaskBatch) {
 }
 
 interface SubmissionSource {
-  run: Run;
+  /** The submitting run, or `undefined` when an external orchestrator submitted the batch. */
+  run?: Run;
   threadId: string;
-  agentId: string;
+  agentId?: string;
+  /** The lineage and idempotency identity of the submitter. */
+  sourceKey: string;
+  /**
+   * What the batch digest binds. A run principal keeps binding its bare run id, because every batch
+   * persisted before source keys existed was digested that way and a replay of one must still match.
+   * The two forms cannot collide: a hub identifier never contains a colon.
+   */
+  digestIdentity: string;
 }
 
-function authorizeSource(state: Readonly<State>, sourceRunId: string): SubmissionSource {
-  const run = state.runs.find((item) => item.id === sourceRunId);
-  if (!run || run.status !== "running") throw new CoordinationError("run_not_active", "The source task is not running");
-  const thread = run.threadId ? state.threads?.find((item) => item.id === run.threadId) : undefined;
-  if (!thread) throw new CoordinationError("not_found", "The source task is not attached to a thread");
-  const agent = state.agents.find((item) => item.id === run.agentId);
-  if (!agent?.canDelegate) throw new CoordinationError("forbidden", "This agent is not allowed to submit tasks");
-  return { run, threadId: thread.id, agentId: agent.id };
+function authorizeSource(state: Readonly<State>, source: CallerSource): SubmissionSource {
+  const caller = resolveCallerFor(state, source);
+  if (!callerCanDelegate(caller)) throw new CoordinationError("forbidden", "This agent is not allowed to submit tasks");
+  const run = callerRun(caller);
+  return {
+    run,
+    threadId: caller.thread.id,
+    agentId: callerAgent(caller)?.id,
+    sourceKey: caller.sourceKey,
+    digestIdentity: run ? run.id : caller.sourceKey
+  };
 }
 
 type BatchPlan =
@@ -319,9 +336,9 @@ type BatchPlan =
  * Decides a submission against one consistent view of state. Called once as a fast preflight and
  * again inside the transaction, where its answer is authoritative.
  */
-function planTaskBatch(state: Readonly<State>, sourceRunId: string, batch: NormalizedTaskBatch, options: TaskBatchOptions): BatchPlan {
-  const source = authorizeSource(state, sourceRunId);
-  const digest = taskBatchDigest(batch, source.threadId, source.run.id, options.placementOverrides);
+function planTaskBatch(state: Readonly<State>, callerSource: CallerSource, batch: NormalizedTaskBatch, options: TaskBatchOptions): BatchPlan {
+  const source = authorizeSource(state, callerSource);
+  const digest = taskBatchDigest(batch, source.threadId, source.digestIdentity, options.placementOverrides);
   const prior = state.taskSubmissions?.find((item) => item.threadId === source.threadId && item.idempotencyKey === batch.idempotencyKey);
   if (prior) {
     if (prior.digest !== digest) throw new CoordinationError("idempotency_conflict", "The idempotency key was already used with a different task batch");
@@ -331,15 +348,18 @@ function planTaskBatch(state: Readonly<State>, sourceRunId: string, batch: Norma
   if (thread?.status !== "active") throw new CoordinationError("thread_inactive", "Task submission requires an active thread");
   validateTaskBatchGraph(batch);
   const tasks = state.tasks ?? [];
-  if (options.maximumSourceDepth !== undefined && source.run.depth >= options.maximumSourceDepth) {
+  if (options.maximumSourceDepth !== undefined && (source.run?.depth ?? 0) >= options.maximumSourceDepth) {
     throw new CoordinationError("depth_limit", "The delegation depth limit has been reached");
   }
   if (options.maximumSourceTasks !== undefined) {
-    const prior = tasks.filter((task) => task.sourceRunId === source.run.id).length
-      + (state.delegations ?? []).filter((delegation) => delegation.parentRunId === source.run.id).length;
+    const prior = tasks.filter((task) => recordSourceKey(task) === source.sourceKey).length
+      + (source.run === undefined ? 0 : (state.delegations ?? []).filter((delegation) => delegation.parentRunId === source.run!.id).length);
     if (prior + batch.tasks.length > options.maximumSourceTasks) throw new CoordinationError("fanout_limit", "The task delegation limit has been reached");
   }
-  options.assertAcceptable?.(state, source.run.id);
+  if (options.assertAcceptable !== undefined) {
+    if (source.run === undefined) throw new CoordinationError("forbidden", "This submission path requires a hub-hosted source run");
+    options.assertAcceptable(state, source.run.id);
+  }
   const keys = new Set(batch.tasks.map((task) => task.key));
   for (const [key, override] of Object.entries(options.placementOverrides ?? {})) {
     if (!keys.has(key)) throw invalid("A placement override names a task key outside the batch");
@@ -392,19 +412,28 @@ function statusFromDependencies(state: Readonly<State>, task: Task): { status: T
  * return the original tasks and write nothing; conflicting replays and every invalid batch reject
  * without mutation. If persistence fails the in-memory state is unchanged.
  */
-export async function submitTaskBatch(
+export const submitTaskBatch = (
   store: Store,
   sourceRunId: string,
+  argumentsValue: unknown,
+  at = new Date().toISOString(),
+  options: TaskBatchOptions = {}
+) => submitTaskBatchForSource(store, runSource(sourceRunId), argumentsValue, at, options);
+
+/** `submitTaskBatch` for either principal; the source is resolved again inside the transaction. */
+export async function submitTaskBatchForSource(
+  store: Store,
+  callerSource: CallerSource,
   argumentsValue: unknown,
   at = new Date().toISOString(),
   options: TaskBatchOptions = {}
 ): Promise<TaskBatchResult> {
   const batch = normalizeTaskBatch(argumentsValue);
   const order = batch.tasks.map((task) => task.key);
-  store.read((state) => planTaskBatch(state, sourceRunId, batch, options));
+  store.read((state) => planTaskBatch(state, callerSource, batch, options));
   let result: TaskBatchResult | undefined;
   await store.transact((state) => {
-    const plan = planTaskBatch(state, sourceRunId, batch, options);
+    const plan = planTaskBatch(state, callerSource, batch, options);
     if (plan.kind === "replay") {
       result = replayResult(state, plan.submission, order);
       return false;
@@ -424,7 +453,7 @@ export async function submitTaskBatch(
         policy: dependency.policy
       })),
       ...(options.placementOverrides?.[input.key] ? { placementOverride: { ...options.placementOverrides[input.key] } } : {}),
-      sourceRunId: plan.source.run.id,
+      ...(plan.source.run ? { sourceRunId: plan.source.run.id } : { sourceKey: plan.source.sourceKey }),
       idempotencyKey: batch.idempotencyKey,
       attemptRunIds: [],
       createdAt: at,
@@ -434,8 +463,8 @@ export async function submitTaskBatch(
     const submission: TaskSubmission = {
       id: newId("tasksub"),
       threadId: plan.source.threadId,
-      sourceRunId: plan.source.run.id,
-      creatorAgentId: plan.source.agentId,
+      ...(plan.source.run ? { sourceRunId: plan.source.run.id } : { sourceKey: plan.source.sourceKey }),
+      ...(plan.source.agentId === undefined ? {} : { creatorAgentId: plan.source.agentId }),
       idempotencyKey: batch.idempotencyKey,
       digest: plan.digest,
       tasks: batch.tasks.map((task) => ({ key: task.key, taskId: idsByKey.get(task.key)! })),
@@ -450,8 +479,8 @@ export async function submitTaskBatch(
       title: `${created.length} task${created.length === 1 ? "" : "s"} submitted`,
       detail: created.map((task) => task.title).join(", ").slice(0, 240),
       threadId: plan.source.threadId,
-      agentId: plan.source.agentId,
-      runId: plan.source.run.id
+      ...(plan.source.agentId === undefined ? {} : { agentId: plan.source.agentId }),
+      ...(plan.source.run === undefined ? {} : { runId: plan.source.run.id })
     }));
     result = {
       created: true,

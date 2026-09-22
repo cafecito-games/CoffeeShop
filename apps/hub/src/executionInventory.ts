@@ -7,7 +7,7 @@ import {
   type ResolvedNodeCapabilityState
 } from "@coffee-shop/protocol";
 import { CoordinationError } from "./coordinationError.js";
-import { resolveCaller } from "./mailbox.js";
+import { callerAgent, callerCanDelegate, resolveCallerFor, runSource, type CallerSource } from "./mailbox.js";
 import { defaultEvidenceTTLMilliseconds } from "./projectReadiness.js";
 import { nodeUsage, type NodeConnection } from "./scheduler.js";
 import type { State } from "./store.js";
@@ -34,12 +34,17 @@ const compareText = (left: string, right: string) => (left < right ? -1 : left >
  * paths, binary locations, raw evidence, or diagnostics. Every collection is bounded and reports
  * truncation.
  */
-export function executionInventory(state: Readonly<State>, sourceRunId: string, argumentsValue: unknown, environment: InventoryEnvironment) {
+export const executionInventory = (state: Readonly<State>, sourceRunId: string, argumentsValue: unknown, environment: InventoryEnvironment) =>
+  executionInventoryForSource(state, runSource(sourceRunId), argumentsValue, environment);
+
+/** `get_execution_inventory` for either principal; an external orchestrator is never one of the agents. */
+export function executionInventoryForSource(state: Readonly<State>, source: CallerSource, argumentsValue: unknown, environment: InventoryEnvironment) {
   if (typeof argumentsValue !== "object" || argumentsValue === null || Array.isArray(argumentsValue) || Object.keys(argumentsValue).length) {
     throw new CoordinationError("invalid_arguments", "get_execution_inventory takes no arguments");
   }
-  const caller = resolveCaller(state, sourceRunId);
-  if (!caller.agent.canDelegate) throw new CoordinationError("forbidden", "This agent is not allowed to inspect execution inventory");
+  const caller = resolveCallerFor(state, source);
+  if (!callerCanDelegate(caller)) throw new CoordinationError("forbidden", "This agent is not allowed to inspect execution inventory");
+  const callingAgentId = callerAgent(caller)?.id;
   const ttl = environment.evidenceTTLMilliseconds ?? defaultEvidenceTTLMilliseconds;
   const agents = [...state.agents].sort((left, right) => compareText(left.id, right.id));
   const nodes = [...state.nodes].sort((left, right) => compareText(left.id, right.id));
@@ -49,7 +54,7 @@ export function executionInventory(state: Readonly<State>, sourceRunId: string, 
       id: agent.id,
       name: agent.name,
       title: agent.title,
-      self: agent.id === caller.agent.id,
+      self: agent.id === callingAgentId,
       skills: [...(agent.skills ?? [])],
       harnessId: agent.harnessId,
       model: agent.model,

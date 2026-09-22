@@ -1,6 +1,7 @@
 import { isActiveRunStatus, threadStatuses, type Thread, type ThreadStatus } from "@coffee-shop/protocol";
 import { CoordinationError } from "./coordinationError.js";
-import { newEvent, newId, type Store } from "./store.js";
+import { resolveExternalCaller } from "./mailbox.js";
+import { newEvent, newId, type State, type Store } from "./store.js";
 
 /** Bounds shared by every thread producer, including the external-orchestrator `create_thread`. */
 export const threadTitleLimit = 120;
@@ -101,32 +102,66 @@ function requestedChanges(argumentsValue: unknown, allowArchive: boolean) {
   return { title, objective, summary, status };
 }
 
+interface ThreadChanges {
+  title?: string;
+  objective?: string;
+  summary?: string;
+  status?: ThreadStatus;
+}
+
+/** Applies validated changes inside a transaction the caller already owns. */
+function applyThreadChanges(state: State, threadId: string, changes: ThreadChanges, at: string, currentRunId?: string) {
+  const thread = state.threads?.find((item) => item.id === threadId);
+  if (!thread) throw new CoordinationError("not_found", "Thread not found");
+  if (thread.status === "archived" && changes.status !== "active") throw new CoordinationError("thread_archived", "Archived threads are read-only until reopened");
+  if (changes.status === "completed" && state.runs.some((run) => run.threadId === thread.id && run.id !== currentRunId && isActiveRunStatus(run.status))) {
+    throw new CoordinationError("thread_in_use", "A thread with other active runs cannot be completed");
+  }
+  if (changes.status === "archived" && state.runs.some((run) => run.threadId === thread.id && isActiveRunStatus(run.status))) {
+    throw new CoordinationError("thread_in_use", "A thread with active runs cannot be archived");
+  }
+  if (changes.title !== undefined) thread.title = changes.title;
+  if (changes.objective !== undefined) thread.objective = changes.objective;
+  if (changes.summary !== undefined) thread.summary = changes.summary;
+  if (changes.status !== undefined) applyStatus(thread, changes.status, at);
+  thread.updatedAt = at;
+  state.events.unshift(newEvent({
+    type: "status",
+    title: changes.status === "archived" ? "Thread archived" : changes.status === "completed" ? "Thread completed" : "Thread updated",
+    detail: thread.title,
+    agentId: thread.ownerAgentId,
+    threadId: thread.id
+  }));
+  return thread;
+}
+
 async function changeThread(store: Store, threadId: string, argumentsValue: unknown, allowArchive: boolean, at: string, currentRunId?: string) {
   const changes = requestedChanges(argumentsValue, allowArchive);
   let updated: Thread | undefined;
   await store.transact((state) => {
-    const thread = state.threads?.find((item) => item.id === threadId);
-    if (!thread) throw new CoordinationError("not_found", "Thread not found");
-    if (thread.status === "archived" && changes.status !== "active") throw new CoordinationError("thread_archived", "Archived threads are read-only until reopened");
-    if (changes.status === "completed" && state.runs.some((run) => run.threadId === thread.id && run.id !== currentRunId && isActiveRunStatus(run.status))) {
-      throw new CoordinationError("thread_in_use", "A thread with other active runs cannot be completed");
-    }
-    if (changes.status === "archived" && state.runs.some((run) => run.threadId === thread.id && isActiveRunStatus(run.status))) {
-      throw new CoordinationError("thread_in_use", "A thread with active runs cannot be archived");
-    }
-    if (changes.title !== undefined) thread.title = changes.title;
-    if (changes.objective !== undefined) thread.objective = changes.objective;
-    if (changes.summary !== undefined) thread.summary = changes.summary;
-    if (changes.status !== undefined) applyStatus(thread, changes.status, at);
-    thread.updatedAt = at;
-    state.events.unshift(newEvent({
-      type: "status",
-      title: changes.status === "archived" ? "Thread archived" : changes.status === "completed" ? "Thread completed" : "Thread updated",
-      detail: thread.title,
-      agentId: thread.ownerAgentId,
-      threadId: thread.id
-    }));
-    updated = thread;
+    updated = applyThreadChanges(state, threadId, changes, at, currentRunId);
+  });
+  if (!updated) throw new CoordinationError("persistence_failed", "The thread was not updated", true);
+  return updated;
+}
+
+/**
+ * `update_thread` for an attached external orchestrator. The attachment is re-resolved inside the
+ * transaction that writes the change, so an attachment replaced or detached between the call and
+ * the commit cannot have its change land. Archiving stays an operator decision.
+ */
+export async function updateThreadForExternalOrchestrator(
+  store: Store,
+  connectionId: string,
+  threadId: string,
+  argumentsValue: unknown,
+  at = new Date().toISOString()
+) {
+  const changes = requestedChanges(argumentsValue, false);
+  let updated: Thread | undefined;
+  await store.transact((state) => {
+    const caller = resolveExternalCaller(state, connectionId, threadId);
+    updated = applyThreadChanges(state, caller.thread.id, changes, at);
   });
   if (!updated) throw new CoordinationError("persistence_failed", "The thread was not updated", true);
   return updated;

@@ -1,7 +1,15 @@
-import { orchestratorContinuationLimits as limits, type Task, type TaskMessage, type Thread } from "@coffee-shop/protocol";
+import {
+  orchestrationToolLimits as toolLimits,
+  orchestratorContinuationLimits as limits,
+  type ApprovalOption,
+  type Task,
+  type TaskMessage,
+  type Thread
+} from "@coffee-shop/protocol";
 import { headBytes } from "./harnessEvents.js";
 import { encodeTaskEventCursor } from "./mailbox.js";
 import type { State } from "./store.js";
+import { threadTaskGraph, type TaskProjection } from "./tasks.js";
 import { participantKey, taskEventStream, type TaskEventEntry } from "./taskEvents.js";
 
 /*
@@ -152,4 +160,85 @@ export function continuationDelivery(state: Readonly<State>, thread: Thread, ran
 export function continuationPrompts(state: Readonly<State>, thread: Thread, range: ContinuationRange): ContinuationPrompts {
   const delivery = continuationDelivery(state, thread, range);
   return { resumePrompt: delivery, prompt: `${durableThreadContext(state, thread)}\n\n${delivery}` };
+}
+
+/*
+ * `get_thread_context` for an external orchestrator.
+ *
+ * It answers with the same durable narrative a continuation prompt carries, plus the structured
+ * task graph, the approvals still awaiting a decision, and the cursor the caller should resume
+ * from. The bridge owns the `channels` field of the tool result and adds it to what the hub
+ * returns, so the hub never claims to know whether doorbells are reaching a session.
+ */
+export const externalThreadContextLimits = {
+  tasks: toolLimits.contextTasks,
+  /** A bound on the projected task graph, well inside the protocol's result size. */
+  taskBytes: 256 * 1024,
+  approvals: 50
+} as const;
+
+export interface ExternalThreadApprovalView {
+  id: string;
+  taskId?: string;
+  runId: string;
+  title: string;
+  detail?: string;
+  options: ApprovalOption[];
+  requestedAt: string;
+  expiresAt?: string;
+}
+
+export interface ExternalThreadContext {
+  thread: { id: string; title: string; objective: string; summary: string; status: Thread["status"]; createdAt: string; updatedAt: string };
+  /** The bounded durable narrative a session without provider history would be given. */
+  context: string;
+  tasks: TaskProjection[];
+  /** Whether older tasks were dropped to stay within the bound; the most recent are always kept. */
+  tasksTruncated: boolean;
+  approvals: ExternalThreadApprovalView[];
+  approvalsTruncated: boolean;
+  /** Resume `get_thread_events` from here; passing it back acknowledges everything up to it. */
+  cursor: string;
+}
+
+/** The most recent tasks of a thread that fit the bound, oldest first. */
+function boundedTaskGraph(state: Readonly<State>, threadId: string) {
+  const projected = threadTaskGraph(state, threadId);
+  let tasks = projected.slice(-externalThreadContextLimits.tasks);
+  let used = tasks.reduce((total, task) => total + JSON.stringify(task).length, 0);
+  while (tasks.length > 1 && used > externalThreadContextLimits.taskBytes) {
+    used -= JSON.stringify(tasks[0]).length;
+    tasks = tasks.slice(1);
+  }
+  return { tasks, tasksTruncated: tasks.length < projected.length };
+}
+
+export function externalThreadContext(state: Readonly<State>, thread: Thread): ExternalThreadContext {
+  const open = (state.approvals ?? []).filter((approval) => approval.threadId === thread.id && approval.status === "pending");
+  const head = taskEventStream(state, thread.id).head;
+  return {
+    thread: {
+      id: thread.id,
+      title: thread.title,
+      objective: thread.objective,
+      summary: thread.summary,
+      status: thread.status,
+      createdAt: thread.createdAt,
+      updatedAt: thread.updatedAt
+    },
+    context: durableThreadContext(state, thread),
+    ...boundedTaskGraph(state, thread.id),
+    approvals: open.slice(0, externalThreadContextLimits.approvals).map((approval) => ({
+      id: approval.id,
+      ...(approval.taskId === undefined ? {} : { taskId: approval.taskId }),
+      runId: approval.runId,
+      title: approval.title,
+      ...(approval.detail === undefined ? {} : { detail: approval.detail }),
+      options: approval.options.map((option) => ({ ...option })),
+      requestedAt: approval.requestedAt,
+      ...(approval.expiresAt === undefined ? {} : { expiresAt: approval.expiresAt })
+    })),
+    approvalsTruncated: open.length > externalThreadContextLimits.approvals,
+    cursor: encodeTaskEventCursor(thread.id, participantKey({ type: "orchestrator" }), head)
+  };
 }

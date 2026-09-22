@@ -1,4 +1,5 @@
 import {
+  orchestrationToolLimits,
   orchestratorClientHeartbeatSeconds,
   orchestratorClientLimits,
   orchestratorClientProtocolVersion,
@@ -10,8 +11,22 @@ import {
   type OrchestratorClientCloseReason,
   type OrchestratorClientError,
   type OrchestratorClientErrorCode,
-  type OrchestratorHubToClient
+  type OrchestratorHubToClient,
+  type Validation
 } from "@coffee-shop/protocol";
+import { CoordinationError } from "./coordinationError.js";
+import { submitTasksForSource, updateTaskForSource } from "./coordination.js";
+import { executionInventoryForSource, type InventoryEnvironment } from "./executionInventory.js";
+import {
+  externalSource,
+  resolveExternalCaller,
+  sendTaskMessageForSource,
+  TaskEventWaiters
+} from "./mailbox.js";
+import { submittedTask } from "./hubTools.js";
+import { externalThreadContext } from "./orchestratorContext.js";
+import { persistExternalOrchestratorCursor } from "./orchestratorInbox.js";
+import { updateThreadForExternalOrchestrator } from "./threads.js";
 import {
   attachThreadInState,
   createExternalThreadInState,
@@ -75,6 +90,12 @@ export interface OrchestratorClientGatewayDependencies {
   broadcast: () => void;
   now?: () => string;
   timers?: OrchestratorClientTimers;
+  /** Shared with the Barista tool handler so one registry bounds every pending long poll. */
+  waiters?: TaskEventWaiters;
+  /** What `get_execution_inventory` may report about node connectivity; empty when unwired. */
+  inventory?: () => Omit<InventoryEnvironment, "now">;
+  /** Runs a scheduling pass after a submission commits; it never rejects. */
+  schedule?: () => Promise<void>;
 }
 
 export interface OrchestratorClientGateway {
@@ -92,6 +113,68 @@ type ToolOutcome = { result: unknown } | { error: OrchestratorClientError };
 const failure = (code: OrchestratorClientErrorCode, message: string): ToolOutcome => ({ error: { code, message } });
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
+
+/**
+ * How a hub tool failure is reported to a bridge. Every code the orchestration handlers raise is
+ * either named here or is an argument the caller got wrong, so a code this hub does not know is
+ * reported as a bad call rather than as a hub fault the bridge would retry.
+ */
+const externalOrchestratorErrorCodes: Readonly<Record<string, OrchestratorClientErrorCode>> = {
+  not_attached: "not_attached",
+  forbidden: "forbidden",
+  not_found: "not_found",
+  idempotency_conflict: "conflict",
+  duplicate_task_key: "conflict",
+  thread_in_use: "conflict",
+  persistence_failed: "hub_unavailable",
+  inconsistent_state: "hub_unavailable",
+  internal_error: "hub_unavailable"
+};
+
+export const externalOrchestratorErrorFor = (error: unknown): OrchestratorClientError =>
+  error instanceof CoordinationError
+    ? { code: externalOrchestratorErrorCodes[error.code] ?? "invalid_arguments", message: error.message }
+    : { code: "hub_unavailable", message: "The hub could not complete this call" };
+
+/** The thread every orchestration tool acts on, and the arguments the hub tool itself interprets. */
+function parseThreadScopedArguments(value: unknown): Validation<{ threadId: string; rest: Record<string, unknown> }> {
+  if (!isRecord(value)) return { ok: false, reason: "Arguments must be an object" };
+  const { threadId, ...rest } = value;
+  if (typeof threadId !== "string" || !threadId.trim()) return { ok: false, reason: "threadId is required" };
+  if (threadId.length > 200) return { ok: false, reason: "threadId must be at most 200 characters" };
+  return { ok: true, value: { threadId: threadId.trim(), rest } };
+}
+
+export interface ThreadEventsRequest {
+  cursor?: string;
+  /** Already capped at the hub's maximum wait. */
+  waitMilliseconds: number;
+}
+
+/**
+ * Parses what `get_thread_events` adds to its thread. A wait longer than the hub's maximum is
+ * capped rather than refused, because the caller asked for a long poll and the hub decides how long
+ * it is willing to hold one open. Omitting it polls without waiting.
+ */
+export function parseThreadEventsRequest(value: Record<string, unknown>): Validation<ThreadEventsRequest> {
+  if (Object.keys(value).some((key) => key !== "cursor" && key !== "waitMilliseconds")) {
+    return { ok: false, reason: "get_thread_events accepts only threadId, cursor, and waitMilliseconds" };
+  }
+  if (value.cursor !== undefined && (typeof value.cursor !== "string" || !value.cursor)) return { ok: false, reason: "cursor must be a cursor string" };
+  const requested = value.waitMilliseconds;
+  if (requested !== undefined && (typeof requested !== "number" || !Number.isSafeInteger(requested) || requested < 0)) {
+    return { ok: false, reason: "waitMilliseconds must be a whole number of milliseconds" };
+  }
+  return {
+    ok: true,
+    value: {
+      ...(value.cursor === undefined ? {} : { cursor: value.cursor as string }),
+      waitMilliseconds: Math.min(requested ?? 0, orchestrationToolLimits.maximumWaitMilliseconds)
+    }
+  };
+}
+
+const unwiredInventory: Omit<InventoryEnvironment, "now"> = { connection: () => undefined, capabilityReport: () => undefined };
 
 const defaultTimers: OrchestratorClientTimers = {
   setTimeout(handler, milliseconds) {
@@ -117,7 +200,15 @@ interface LiveConnection {
   close(reason: OrchestratorClientCloseReason): void;
 }
 
-export function createOrchestratorClientGateway({ store, broadcast, now = () => new Date().toISOString(), timers = defaultTimers }: OrchestratorClientGatewayDependencies): OrchestratorClientGateway {
+export function createOrchestratorClientGateway({
+  store,
+  broadcast,
+  now = () => new Date().toISOString(),
+  timers = defaultTimers,
+  waiters = new TaskEventWaiters(store),
+  inventory = () => unwiredInventory,
+  schedule
+}: OrchestratorClientGatewayDependencies): OrchestratorClientGateway {
   const connections = new Map<string, LiveConnection>();
 
   const gateway: OrchestratorClientGateway = {
@@ -256,23 +347,140 @@ export function createOrchestratorClientGateway({ store, broadcast, now = () => 
         return { result: { threadId: threadId.value, attachmentId: detached.attachment.id, detachedAt: detached.attachment.detachedAt } };
       };
 
+
+      /*
+       * Orchestration tools.
+       *
+       * Every one of them names its thread, and that thread is authorized by the connection's live
+       * attachment rather than by anything in the frame. The check is repeated inside the store
+       * transaction that commits a change, so an attachment replaced or detached while a call was
+       * in flight cannot have its change land.
+       */
+      const threadScoped = (
+        run: (threadId: string, rest: Record<string, unknown>) => ToolOutcome | Promise<ToolOutcome>
+      ) => async (_client: OrchestratorClient, argumentsValue: unknown): Promise<ToolOutcome> => {
+        const parsed = parseThreadScopedArguments(argumentsValue);
+        if (!parsed.ok) return failure("invalid_arguments", parsed.reason);
+        return run(parsed.value.threadId, parsed.value.rest);
+      };
+
+      const settleScheduling = async () => {
+        if (!schedule) return;
+        try {
+          await schedule();
+        } catch (error) {
+          // Placement is never part of a submission's success; the pass reports its own failures.
+          console.error("scheduling after an external submission failed", error);
+        }
+      };
+
+      const getThreadContext = threadScoped((threadId, rest) => {
+        if (Object.keys(rest).length) return failure("invalid_arguments", "get_thread_context accepts only threadId");
+        return {
+          result: store.read((state) => structuredClone(externalThreadContext(state, resolveExternalCaller(state, connectionId!, threadId).thread)))
+        };
+      });
+
+      const getThreadEvents = threadScoped(async (threadId, rest) => {
+        const request = parseThreadEventsRequest(rest);
+        if (!request.ok) return failure("invalid_arguments", request.reason);
+        const { cursor, waitMilliseconds } = request.value;
+        const connection = connectionId!;
+        // The cursor acknowledges only once the whole call has been validated against the live
+        // attachment, so a rejected call never advances the thread's acknowledged position.
+        const acknowledge = cursor === undefined ? undefined : () =>
+          persistExternalOrchestratorCursor(store, connection, threadId, cursor, "processed").then((changed) => { if (changed) broadcast(); });
+        const page = await waiters.wait(externalSource(connection, threadId), {
+          ...(cursor === undefined ? {} : { cursor }),
+          timeoutMilliseconds: waitMilliseconds,
+          maximumEvents: orchestrationToolLimits.maximumEventsPerWait
+        }, undefined, acknowledge);
+        if (page.events.length && await persistExternalOrchestratorCursor(store, connection, threadId, page.cursor, "delivered")) broadcast();
+        return { result: { threadId, events: page.events, cursor: page.cursor, hasMore: page.hasMore, timedOut: page.timedOut } };
+      });
+
+      const submitTasks = threadScoped(async (threadId, rest) => {
+        const result = await submitTasksForSource(store, externalSource(connectionId!, threadId), rest, now());
+        if (result.created) {
+          broadcast();
+          await settleScheduling();
+        }
+        return {
+          result: store.read((state) => ({
+            created: result.created,
+            submissionId: result.submissionId,
+            taskIdsByKey: { ...result.taskIdsByKey },
+            tasks: result.tasks.map((task) => structuredClone(submittedTask(state, task)))
+          }))
+        };
+      });
+
+      const updateTask = threadScoped(async (threadId, rest) => {
+        const result = await updateTaskForSource(store, externalSource(connectionId!, threadId), rest, now());
+        if (result.created) broadcast();
+        return { result: structuredClone(result) };
+      });
+
+      const sendTaskMessage = threadScoped(async (threadId, rest) => {
+        const sent = await sendTaskMessageForSource(store, externalSource(connectionId!, threadId), rest, now());
+        if (sent.created) broadcast();
+        return {
+          result: {
+            created: sent.created,
+            messageId: sent.message.id,
+            sequence: sent.message.sequence,
+            recipient: { ...sent.message.recipient },
+            createdAt: sent.message.createdAt
+          }
+        };
+      });
+
+      const updateThread = threadScoped(async (threadId, rest) => {
+        const thread = await updateThreadForExternalOrchestrator(store, connectionId!, threadId, rest, now());
+        broadcast();
+        return { result: { thread: structuredClone(thread) } };
+      });
+
+      /**
+       * The inventory describes the whole fleet rather than one thread, so it only has to prove that
+       * this connection is a live orchestrator. A named thread must still be one this connection
+       * holds; with none named, any thread it holds proves the same thing.
+       */
+      const getExecutionInventory = (_client: OrchestratorClient, argumentsValue: unknown): ToolOutcome => {
+        if (!isRecord(argumentsValue)) return failure("invalid_arguments", "Arguments must be an object");
+        const { threadId, ...rest } = argumentsValue;
+        if (Object.keys(rest).length) return failure("invalid_arguments", "get_execution_inventory accepts only an optional threadId");
+        if (threadId !== undefined && (typeof threadId !== "string" || !threadId.trim())) return failure("invalid_arguments", "threadId must be a thread id");
+        const connection = connectionId!;
+        const scoped = typeof threadId === "string"
+          ? threadId.trim()
+          : store.read((state) => (state.orchestratorAttachments ?? [])
+            .find((attachment) => attachment.connectionId === connection && attachment.status === "attached")?.threadId);
+        if (scoped === undefined) return failure("not_attached", "This connection holds no attachment");
+        return {
+          result: store.read((state) => structuredClone(
+            executionInventoryForSource(state, externalSource(connection, scoped), {}, { ...inventory(), now: now() })
+          ))
+        };
+      };
+
       /*
        * Every tool name the protocol declares is named here, so adding one to `packages/protocol`
        * without serving it answers `invalid_arguments` instead of reaching an undefined handler.
-       * The tools left unserved belong to the orchestration, doorbell, and approval work.
+       * The tools left unserved belong to the doorbell and approval work.
        */
       const handlers: Readonly<Record<ExternalOrchestratorToolName, ((client: OrchestratorClient, argumentsValue: unknown) => ToolOutcome | Promise<ToolOutcome>) | undefined>> = {
         create_thread: createThread,
         list_threads: listThreads,
         attach_thread: attachThread,
         detach_thread: detachThread,
-        get_thread_context: undefined,
-        get_thread_events: undefined,
-        submit_tasks: undefined,
-        update_task: undefined,
-        send_task_message: undefined,
-        update_thread: undefined,
-        get_execution_inventory: undefined,
+        get_thread_context: getThreadContext,
+        get_thread_events: getThreadEvents,
+        submit_tasks: submitTasks,
+        update_task: updateTask,
+        send_task_message: sendTaskMessage,
+        update_thread: updateThread,
+        get_execution_inventory: getExecutionInventory,
         list_approvals: undefined,
         resolve_approval: undefined
       };
@@ -301,8 +509,8 @@ export function createOrchestratorClientGateway({ store, broadcast, now = () => 
         try {
           outcome = await handler(client, argumentsValue);
         } catch (error) {
-          console.error(`orchestrator-client tool ${tool} failed`, error);
-          outcome = failure("hub_unavailable", "The hub could not complete this call");
+          if (!(error instanceof CoordinationError)) console.error(`orchestrator-client tool ${tool} failed`, error);
+          outcome = { error: externalOrchestratorErrorFor(error) };
         } finally {
           inFlight.delete(requestId);
         }
@@ -403,4 +611,16 @@ export function createOrchestratorClientGateway({ store, broadcast, now = () => 
 }
 
 /** The tools this hub serves; every other declared tool is answered `invalid_arguments`. */
-export const servedExternalOrchestratorTools: readonly ExternalOrchestratorToolName[] = ["create_thread", "list_threads", "attach_thread", "detach_thread"];
+export const servedExternalOrchestratorTools: readonly ExternalOrchestratorToolName[] = [
+  "create_thread",
+  "list_threads",
+  "attach_thread",
+  "detach_thread",
+  "get_thread_context",
+  "get_thread_events",
+  "submit_tasks",
+  "update_task",
+  "send_task_message",
+  "update_thread",
+  "get_execution_inventory"
+];

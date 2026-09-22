@@ -30,8 +30,12 @@ import { recordTaskEvents, type TaskEventEntry, type TaskEventStream } from "./t
 export interface TaskSubmission {
   id: string;
   threadId: string;
-  sourceRunId: string;
-  creatorAgentId: string;
+  /** The submitting run; absent when an external orchestrator submitted the batch. */
+  sourceRunId?: string;
+  /** The submitting principal; written only when it is not the run named by `sourceRunId`. */
+  sourceKey?: string;
+  /** The agent the submitting run executes as; absent for an external orchestrator. */
+  creatorAgentId?: string;
   idempotencyKey: string;
   /** SHA-256 of the normalized batch; see `taskBatchDigest`. */
   digest: string;

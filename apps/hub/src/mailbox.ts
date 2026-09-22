@@ -2,7 +2,12 @@ import { createHash } from "node:crypto";
 import {
   isTaskMessageKind,
   orchestrationToolLimits as limits,
+  orchestratorClientSourceKey,
+  recordSourceKey,
+  runSourceKey,
   type Agent,
+  type OrchestratorAttachment,
+  type OrchestratorClient,
   type Run,
   type Task,
   type TaskMailboxEvent,
@@ -13,7 +18,7 @@ import {
   type Thread
 } from "@coffee-shop/protocol";
 import { CoordinationError } from "./coordinationError.js";
-import { newId, type State, type Store } from "./store.js";
+import { newId, publicOrchestratorClient, type State, type Store } from "./store.js";
 import { participantKey, taskEventsAfter, taskEventStream } from "./taskEvents.js";
 
 /*
@@ -26,21 +31,92 @@ import { participantKey, taskEventsAfter, taskEventStream } from "./taskEvents.j
  * same code and wording whether or not the target exists.
  */
 
+/**
+ * Who is calling. A hub-hosted caller is a running run executing as an agent; an external caller is
+ * a bridge connection holding a live attachment on the thread. Everything a handler needs that is
+ * specific to one of them is reached through the helpers below, never by assuming a `Run`.
+ */
+export type CallerPrincipal =
+  | { kind: "run"; run: Run; agent: Agent }
+  | { kind: "external"; client: OrchestratorClient; attachment: OrchestratorAttachment };
+
 export interface Caller {
-  run: Run;
+  principal: CallerPrincipal;
   thread: Thread;
-  agent: Agent;
-  /** The task this run is an attempt of. */
+  /** The task this run is an attempt of; an external orchestrator is never a task attempt. */
   task?: Task;
   /** Mailbox identity; absent for a run that is neither a task attempt nor a thread-owner run. */
   participant?: TaskMessageParticipant;
   /** The scope event cursors are bound to. */
   scopeKey: string;
+  /** The stable lineage and idempotency identity of this caller; see `runSourceKey`. */
+  sourceKey: string;
 }
+
+/** What names a caller to `resolveCallerFor`; a tool's arguments never widen either of them. */
+export type CallerSource =
+  | { kind: "run"; runId: string }
+  | { kind: "external"; connectionId: string; threadId: string };
+
+export const runSource = (runId: string): CallerSource => ({ kind: "run", runId });
+export const externalSource = (connectionId: string, threadId: string): CallerSource => ({ kind: "external", connectionId, threadId });
+
+/** The calling run, or `undefined` for an external orchestrator. */
+export const callerRun = (caller: Caller) => (caller.principal.kind === "run" ? caller.principal.run : undefined);
+/** The agent the calling run executes as, or `undefined` for an external orchestrator. */
+export const callerAgent = (caller: Caller) => (caller.principal.kind === "run" ? caller.principal.agent : undefined);
+
+/** A run for a tool that can only be served to a hub-hosted caller. */
+export function requireCallerRun(caller: Caller, message: string) {
+  const run = callerRun(caller);
+  if (!run) throw new CoordinationError("forbidden", message);
+  return { run, agent: (caller.principal as Extract<CallerPrincipal, { kind: "run" }>).agent };
+}
+
+/**
+ * Whether the caller may submit work and inspect the execution inventory. A hub-hosted caller needs
+ * its agent's `canDelegate`; an external orchestrator that reached a handler at all holds the
+ * `orchestrate` scope, which is the same authority for its own thread.
+ */
+export const callerCanDelegate = (caller: Caller) => (caller.principal.kind === "run" ? caller.principal.agent.canDelegate === true : true);
 
 export const notVisible = () => new CoordinationError("not_found", "Task not found in the current task lineage");
 const messageNotVisible = () => new CoordinationError("not_found", "Message not found in the current mailbox");
 const invalid = (message: string) => new CoordinationError("invalid_arguments", message);
+
+/**
+ * The single answer for every thread an external call may not act on: one this connection never
+ * attached, one whose attachment was replaced or detached, one belonging to another credential, and
+ * one that does not exist. They are indistinguishable so that a caller cannot probe for thread ids.
+ */
+export const notAttached = () => new CoordinationError("not_attached", "This connection holds no attachment on that thread");
+
+/**
+ * Resolves the external orchestrator behind a bridge connection. Authority comes from the committed
+ * attachment and the credential's current scopes, never from the frame: a credential revoked or
+ * narrowed since the welcome stops being able to act the moment the change commits.
+ */
+export function resolveExternalCaller(state: Readonly<State>, connectionId: string, threadId: string): Caller {
+  const attachment = (state.orchestratorAttachments ?? [])
+    .find((item) => item.threadId === threadId && item.connectionId === connectionId && item.status === "attached");
+  if (!attachment) throw notAttached();
+  const stored = (state.orchestratorClients ?? []).find((item) => item.id === attachment.clientId);
+  if (!stored || stored.revokedAt !== undefined || !stored.scopes.includes("orchestrate")) throw notAttached();
+  const thread = (state.threads ?? []).find((item) => item.id === attachment.threadId);
+  if (!thread) throw notAttached();
+  const participant: TaskMessageParticipant = { type: "orchestrator" };
+  return {
+    principal: { kind: "external", client: publicOrchestratorClient(stored), attachment },
+    thread,
+    participant,
+    scopeKey: participantKey(participant),
+    sourceKey: orchestratorClientSourceKey(stored.id)
+  };
+}
+
+/** Resolves either principal; the authoritative check inside the transaction that commits a change. */
+export const resolveCallerFor = (state: Readonly<State>, source: CallerSource): Caller =>
+  source.kind === "run" ? resolveCaller(state, source.runId) : resolveExternalCaller(state, source.connectionId, source.threadId);
 
 /** Resolves the authenticated caller of a hub tool; only a running run attached to a thread qualifies. */
 export function resolveCaller(state: Readonly<State>, sourceRunId: string): Caller {
@@ -50,17 +126,19 @@ export function resolveCaller(state: Readonly<State>, sourceRunId: string): Call
   if (!thread) throw new CoordinationError("not_found", "The source task is not attached to a thread");
   const agent = state.agents.find((item) => item.id === run.agentId);
   if (!agent) throw new CoordinationError("forbidden", "The source agent is not configured");
+  const principal: CallerPrincipal = { kind: "run", run, agent };
+  const sourceKey = runSourceKey(run.id);
   if (run.taskId !== undefined) {
     const task = state.tasks?.find((item) => item.id === run.taskId && item.threadId === thread.id && item.attemptRunIds.includes(run.id));
     if (!task) throw new CoordinationError("forbidden", "The source run's task is unavailable");
     const participant: TaskMessageParticipant = { type: "task", taskId: task.id };
-    return { run, thread, agent, task, participant, scopeKey: participantKey(participant) };
+    return { principal, thread, task, participant, scopeKey: participantKey(participant), sourceKey };
   }
   if (agent.id === thread.ownerAgentId) {
     const participant: TaskMessageParticipant = { type: "orchestrator" };
-    return { run, thread, agent, participant, scopeKey: participantKey(participant) };
+    return { principal, thread, participant, scopeKey: participantKey(participant), sourceKey };
   }
-  return { run, thread, agent, scopeKey: `run:${run.id}` };
+  return { principal, thread, scopeKey: sourceKey, sourceKey };
 }
 
 interface Lineage {
@@ -92,14 +170,16 @@ function ancestorsOf(graph: Lineage, task: Task) {
 
 /** Tasks submitted, directly or transitively, by the caller's run or by any attempt of its task. */
 function descendantsOf(graph: Lineage, caller: Caller) {
-  const ownRunIds = new Set(caller.task ? caller.task.attemptRunIds : [caller.run.id]);
+  const run = callerRun(caller);
+  const ownKeys = new Set((caller.task ? caller.task.attemptRunIds : run ? [run.id] : []).map(runSourceKey));
   const descendants: Task[] = [];
   for (const task of graph.tasks.values()) {
     if (task.id === caller.task?.id) continue;
     const seen = new Set<string>();
     for (let current: Task | undefined = task; current && !seen.has(current.id); current = graph.parentOf(current)) {
       seen.add(current.id);
-      if (current.sourceRunId !== undefined && ownRunIds.has(current.sourceRunId)) {
+      const sourceKey = recordSourceKey(current);
+      if (sourceKey !== undefined && ownKeys.has(sourceKey)) {
         descendants.push(task);
         break;
       }
@@ -315,8 +395,8 @@ function normalizeMessage(value: unknown): NormalizedMessage {
   };
 }
 
-const sameMessage = (message: TaskMessage, normalized: NormalizedMessage, sourceRunId: string) =>
-  message.sourceRunId === sourceRunId
+const sameMessage = (message: TaskMessage, normalized: NormalizedMessage, sourceKey: string) =>
+  recordSourceKey(message) === sourceKey
   && participantKey(message.recipient) === participantKey(normalized.recipient)
   && message.kind === normalized.kind
   && message.body === normalized.body
@@ -345,17 +425,21 @@ export interface SentMessage {
  * allocated inside the transaction, so concurrent sends never share a sequence. Replaying the
  * sender's idempotency key with the same content returns the original message.
  */
-export async function sendTaskMessage(store: Store, sourceRunId: string, argumentsValue: unknown, at = new Date().toISOString()): Promise<SentMessage> {
+export const sendTaskMessage = (store: Store, sourceRunId: string, argumentsValue: unknown, at = new Date().toISOString()) =>
+  sendTaskMessageForSource(store, runSource(sourceRunId), argumentsValue, at);
+
+/** `sendTaskMessage` for either principal; the sender is always the resolved caller, never an argument. */
+export async function sendTaskMessageForSource(store: Store, source: CallerSource, argumentsValue: unknown, at = new Date().toISOString()): Promise<SentMessage> {
   const normalized = normalizeMessage(argumentsValue);
   let result: SentMessage | undefined;
   await store.transact((state) => {
-    const caller = resolveCaller(state, sourceRunId);
+    const caller = resolveCallerFor(state, source);
     if (!caller.participant) throw new CoordinationError("forbidden", "This run has no task mailbox");
     state.taskMessages ??= [];
     const replay = state.taskMessages.find((message) => message.threadId === caller.thread.id
       && participantKey(message.sender) === caller.scopeKey && message.idempotencyKey === normalized.idempotencyKey);
     if (replay) {
-      if (!sameMessage(replay, normalized, caller.run.id)) throw new CoordinationError("idempotency_conflict", "The idempotency key was already used with a different message");
+      if (!sameMessage(replay, normalized, caller.sourceKey)) throw new CoordinationError("idempotency_conflict", "The idempotency key was already used with a different message");
       result = { created: false, message: messageView(replay, false) };
       return false;
     }
@@ -387,7 +471,7 @@ export async function sendTaskMessage(store: Store, sourceRunId: string, argumen
       ...(normalized.correlationId !== undefined ? { correlationId: normalized.correlationId } : {}),
       ...(normalized.inReplyToMessageId !== undefined ? { inReplyToMessageId: normalized.inReplyToMessageId } : {}),
       artifactIds: normalized.artifactIds,
-      sourceRunId: caller.run.id,
+      ...(caller.principal.kind === "run" ? { sourceRunId: caller.principal.run.id } : { sourceKey: caller.sourceKey }),
       idempotencyKey: normalized.idempotencyKey,
       createdAt: at
     };
@@ -414,8 +498,12 @@ export function acknowledgeMessages(state: State, caller: Caller, messageIds: re
     if (!acknowledged.has(message.id) && !pending.includes(message)) pending.push(message);
   }
   state.taskMessageAcknowledgements ??= [];
+  if (!pending.length) return 0;
+  // An acknowledgement record names the run that made it; an external orchestrator acknowledges
+  // through its event cursor instead, and never reaches this path.
+  const { run } = requireCallerRun(caller, "Only a hub-hosted run can acknowledge messages individually");
   for (const message of pending) {
-    state.taskMessageAcknowledgements.push({ messageId: message.id, threadId: message.threadId, recipient: { ...message.recipient }, runId: caller.run.id, acknowledgedAt: at });
+    state.taskMessageAcknowledgements.push({ messageId: message.id, threadId: message.threadId, recipient: { ...message.recipient }, runId: run.id, acknowledgedAt: at });
   }
   return pending.length;
 }
@@ -454,6 +542,19 @@ interface ActiveWait {
 }
 
 /**
+ * The concurrency and displacement key of a wait. A run is one waiter; an external orchestrator is
+ * one waiter per connection and thread, so long-polling two threads at once is not self-displacing.
+ */
+const waitKeyOf = (source: CallerSource) =>
+  source.kind === "run" ? runSourceKey(source.runId) : `orchestrator-connection:${source.connectionId}:${source.threadId}`;
+
+/** Whether the principal a pending wait belongs to can still receive events. */
+const principalStillLive = (state: Readonly<State>, source: CallerSource) => source.kind === "run"
+  ? state.runs.some((run) => run.id === source.runId && run.status === "running")
+  : (state.orchestratorAttachments ?? []).some((attachment) =>
+    attachment.connectionId === source.connectionId && attachment.threadId === source.threadId && attachment.status === "attached");
+
+/**
  * Long-poll waits for task events. A wait observes only committed state, holds no transaction or
  * socket while pending, and always ends: when a relevant event commits, at its bounded timeout,
  * when its signal aborts, or when a newer wait from the same run displaces it. Ending a wait never
@@ -476,17 +577,19 @@ export class TaskEventWaiters {
    * been validated and applied, before the wait blocks; a call that fails validation never reaches
    * it. It may return a promise to await, or undefined to continue without yielding.
    */
-  async wait(sourceRunId: string, argumentsValue: unknown, signal?: AbortSignal, accepted?: () => Promise<unknown> | undefined): Promise<TaskEventWaitResult> {
+  async wait(source: string | CallerSource, argumentsValue: unknown, signal?: AbortSignal, accepted?: () => Promise<unknown> | undefined): Promise<TaskEventWaitResult> {
+    const callerSource = typeof source === "string" ? runSource(source) : source;
+    const waitKey = waitKeyOf(callerSource);
     const request = normalizeWait(argumentsValue);
     const evaluate = (state: Readonly<State>) => {
-      const caller = resolveCaller(state, sourceRunId);
+      const caller = resolveCallerFor(state, callerSource);
       const after = request.cursor === undefined ? taskEventStream(state, caller.thread.id).floor : decodeTaskEventCursor(state, caller, request.cursor);
       return { page: collectTaskEvents(state, caller, after, request.maximumEvents), threadId: caller.thread.id };
     };
     if (request.acknowledgeMessageIds.length) {
       this.store.read(evaluate);
       await this.store.transact((state) => {
-        const caller = resolveCaller(state, sourceRunId);
+        const caller = resolveCallerFor(state, callerSource);
         if (caller.thread.status === "archived") throw new CoordinationError("thread_inactive", "Archived threads are read-only");
         return acknowledgeMessages(state, caller, request.acknowledgeMessageIds, new Date().toISOString()) > 0;
       });
@@ -511,14 +614,13 @@ export class TaskEventWaiters {
         clearTimeout(timer);
         unsubscribe();
         signal?.removeEventListener("abort", entry.finish);
-        const waits = (this.active.get(sourceRunId) ?? []).filter((item) => item !== entry);
-        if (waits.length) this.active.set(sourceRunId, waits); else this.active.delete(sourceRunId);
+        const waits = (this.active.get(waitKey) ?? []).filter((item) => item !== entry);
+        if (waits.length) this.active.set(waitKey, waits); else this.active.delete(waitKey);
         complete();
       };
       const unsubscribe = this.store.onCommit((state) => {
         const head = taskEventStream(state, first.threadId).head;
-        const running = state.runs.some((run) => run.id === sourceRunId && run.status === "running");
-        if (head === observedHead && running) return;
+        if (head === observedHead && principalStillLive(state, callerSource)) return;
         observedHead = head;
         try {
           latest = evaluate(state).page;
@@ -529,8 +631,8 @@ export class TaskEventWaiters {
       });
       const timer = setTimeout(entry.finish, request.timeoutMilliseconds);
       signal?.addEventListener("abort", entry.finish, { once: true });
-      const waits = [...(this.active.get(sourceRunId) ?? []), entry];
-      this.active.set(sourceRunId, waits);
+      const waits = [...(this.active.get(waitKey) ?? []), entry];
+      this.active.set(waitKey, waits);
       if (waits.length > limits.concurrentWaitsPerRun) waits[0].finish();
     });
   }

@@ -10,10 +10,20 @@ import {
   type TaskProgress
 } from "@coffee-shop/protocol";
 import { CoordinationError } from "./coordinationError.js";
-import { assertVisibleArtifacts, mailboxSummary, notVisible, resolveCaller, taskVisibility } from "./mailbox.js";
+import {
+  assertVisibleArtifacts,
+  mailboxSummary,
+  notVisible,
+  requireCallerRun,
+  resolveCaller,
+  resolveCallerFor,
+  runSource,
+  taskVisibility,
+  type CallerSource
+} from "./mailbox.js";
 import { staticPlacementFailures } from "./scheduler.js";
 import { newEvent, newId, type State, type Store, type TaskUpdateRecord } from "./store.js";
-import { submitTaskBatch, taskContextProjection, type TaskBatchResult } from "./tasks.js";
+import { submitTaskBatchForSource, taskContextProjection, type TaskBatchResult } from "./tasks.js";
 import { threadTitleFromObjective } from "./threads.js";
 
 export { CoordinationError } from "./coordinationError.js";
@@ -97,9 +107,10 @@ export function taskContext(state: Readonly<State>, sourceRunId: string, argumen
   const values = record(argumentsValue);
   onlyKeys(values, ["taskId"], "get_task_context arguments");
   const caller = resolveCaller(state, sourceRunId);
+  const { run: callingRun, agent: callingAgent } = requireCallerRun(caller, "get_task_context is served only to a hub-hosted run");
   const visibility = taskVisibility(state, caller);
   const runs = new Map(state.runs.map((run) => [run.id, run]));
-  let focusRun: Run | undefined = caller.run;
+  let focusRun: Run | undefined = callingRun;
   let focusTask: Task | undefined = caller.task;
   if (values.taskId !== undefined) {
     const requested = requiredString(values, "taskId", orchestrationToolLimits.idempotencyKeyLength);
@@ -110,7 +121,7 @@ export function taskContext(state: Readonly<State>, sourceRunId: string, argumen
       focusRun = attemptRunId === undefined ? undefined : runs.get(attemptRunId);
     } else {
       const run = runs.get(requested);
-      if (!run || run.threadId !== caller.thread.id || !relatedRun(state, caller.run.id, run.id)) throw notVisible();
+      if (!run || run.threadId !== caller.thread.id || !relatedRun(state, callingRun.id, run.id)) throw notVisible();
       focusRun = run;
       focusTask = run.taskId === undefined ? undefined : state.tasks?.find((item) => item.id === run.taskId && visibility.readable.has(item.id));
     }
@@ -119,7 +130,7 @@ export function taskContext(state: Readonly<State>, sourceRunId: string, argumen
   const delegationByChild = new Map((state.delegations ?? []).filter((item) => item.parentRunId === focusRun?.id).map((item) => [item.childRunId, item]));
   const ownRunIds = new Set(focusTask ? focusTask.attemptRunIds : focusRun ? [focusRun.id] : []);
   const visibleTasks = (state.tasks ?? []).filter((task) => task.threadId === caller.thread.id && visibility.readable.has(task.id));
-  const limitRun = focusRun ?? caller.run;
+  const limitRun = focusRun ?? callingRun;
   const createdByLimitRun = createdBy(state, limitRun.id);
   return {
     thread: {
@@ -132,10 +143,10 @@ export function taskContext(state: Readonly<State>, sourceRunId: string, argumen
       updatedAt: caller.thread.updatedAt
     },
     caller: {
-      runId: caller.run.id,
+      runId: callingRun.id,
       ...(caller.task ? { taskId: caller.task.id } : {}),
       role: caller.participant?.type ?? "run",
-      canDelegate: caller.agent.canDelegate === true
+      canDelegate: callingAgent.canDelegate === true
     },
     task: focusRun ? {
       id: focusRun.id,
@@ -171,8 +182,8 @@ export function taskContext(state: Readonly<State>, sourceRunId: string, argumen
     artifacts: (state.artifacts ?? [])
       .filter((artifact) => artifact.uploaded && artifact.threadId === caller.thread.id)
       .slice(0, 16),
-    availableAgents: caller.agent.canDelegate ? state.agents
-      .filter((agent) => agent.id !== caller.agent.id)
+    availableAgents: callingAgent.canDelegate ? state.agents
+      .filter((agent) => agent.id !== callingAgent.id)
       .map((agent) => ({ id: agent.id, title: agent.title, state: agent.state })) : [],
     limits: {
       maxDepth: maxDelegationDepth,
@@ -205,7 +216,16 @@ function normalizePin(value: unknown, context: string): PlacementOverride {
  * becomes a policy-authorized placement override that narrows scheduler candidates without
  * bypassing any hard requirement, and is part of the batch's idempotency identity.
  */
-export async function submitTasks(store: Store, sourceRunId: string, argumentsValue: unknown, at = new Date().toISOString()): Promise<TaskBatchResult> {
+export const submitTasks = (store: Store, sourceRunId: string, argumentsValue: unknown, at = new Date().toISOString()) =>
+  submitTasksForSource(store, runSource(sourceRunId), argumentsValue, at);
+
+/**
+ * `submit_tasks` for either principal. An external orchestrator submits at the root of its own
+ * thread: it has no run lineage, so the per-run depth and fan-out bounds that govern a delegating
+ * worker do not apply to it, exactly as they do not apply across a hub orchestrator's successive
+ * continuation runs.
+ */
+export async function submitTasksForSource(store: Store, source: CallerSource, argumentsValue: unknown, at = new Date().toISOString()): Promise<TaskBatchResult> {
   const values = record(argumentsValue);
   const placementOverrides: Record<string, PlacementOverride> = {};
   let batch: unknown = values;
@@ -221,10 +241,9 @@ export async function submitTasks(store: Store, sourceRunId: string, argumentsVa
       })
     };
   }
-  return submitTaskBatch(store, sourceRunId, batch, at, {
+  return submitTaskBatchForSource(store, source, batch, at, {
     placementOverrides,
-    maximumSourceTasks: orchestrationToolLimits.tasksPerSourceRun,
-    maximumSourceDepth: maxDelegationDepth
+    ...(source.kind === "run" ? { maximumSourceTasks: orchestrationToolLimits.tasksPerSourceRun, maximumSourceDepth: maxDelegationDepth } : {})
   });
 }
 
@@ -276,8 +295,9 @@ export async function delegateTask(store: Store, sourceRunId: string, argumentsV
   const artifactIds = stringArray(values, "artifactIds", 16);
   const preflight = store.read((state) => {
     const caller = resolveCaller(state, sourceRunId);
-    if (!caller.agent.canDelegate) throw new CoordinationError("forbidden", "This agent is not allowed to delegate tasks");
-    const legacy = (state.delegations ?? []).find((item) => item.parentRunId === caller.run.id && item.idempotencyKey === idempotencyKey);
+    const { run, agent } = requireCallerRun(caller, "delegate_task is served only to a hub-hosted run");
+    if (!agent.canDelegate) throw new CoordinationError("forbidden", "This agent is not allowed to delegate tasks");
+    const legacy = (state.delegations ?? []).find((item) => item.parentRunId === run.id && item.idempotencyKey === idempotencyKey);
     if (legacy) {
       if (legacy.toAgentId !== targetAgentId || legacy.task !== instructions || JSON.stringify(legacy.artifactIds ?? []) !== JSON.stringify(artifactIds)) {
         throw new CoordinationError("idempotency_conflict", "The idempotency key was already used with different arguments");
@@ -286,7 +306,7 @@ export async function delegateTask(store: Store, sourceRunId: string, argumentsV
       if (!child) throw new CoordinationError("inconsistent_state", "The prior delegated task is unavailable", true);
       return { kind: "legacy" as const, result: { taskId: child.id, status: child.status, agentId: legacy.toAgentId, created: false } };
     }
-    const attached = artifactIds.map((id) => state.artifacts?.find((artifact) => artifact.id === id && artifact.runId === caller.run.id && artifact.uploaded));
+    const attached = artifactIds.map((id) => state.artifacts?.find((artifact) => artifact.id === id && artifact.runId === run.id && artifact.uploaded));
     if (attached.some((artifact) => !artifact)) throw new CoordinationError("invalid_artifact", "Every attached artifact must be uploaded by the source task");
     return { kind: "submit" as const, attached: attached as Artifact[] };
   });
@@ -298,7 +318,7 @@ export async function delegateTask(store: Store, sourceRunId: string, argumentsV
     id: "delegation-probe", threadId: "", title: delegated.title, instructions: delegated.instructions, status: "ready",
     requirements: {}, dependencies: [], placementOverride, idempotencyKey: "", attemptRunIds: [], createdAt: at, updatedAt: at
   };
-  const submitted = await submitTaskBatch(store, sourceRunId, {
+  const submitted = await submitTaskBatchForSource(store, runSource(sourceRunId), {
     idempotencyKey: legacyIdempotencyKey(idempotencyKey),
     tasks: [delegated]
   }, at, {
@@ -397,14 +417,30 @@ const taskUpdateDigest = (update: NormalizedTaskUpdate, sourceRunId: string) => 
  * `update_task`: progress, an advisory blocked reason, or completion fields reported by the task's
  * current assignee. It never changes task status; the attempt's run lifecycle does that.
  */
-export async function updateTask(store: Store, sourceRunId: string, argumentsValue: unknown, at = new Date().toISOString()) {
+export const updateTask = (store: Store, sourceRunId: string, argumentsValue: unknown, at = new Date().toISOString()) =>
+  updateTaskForSource(store, runSource(sourceRunId), argumentsValue, at);
+
+/**
+ * `update_task` for either principal. It stays assignee-only, and an external orchestrator is never
+ * a task's assignee, so it is refused after its attachment has been checked — the refusal must not
+ * tell it whether the thread it named is one it holds.
+ */
+export async function updateTaskForSource(store: Store, source: CallerSource, argumentsValue: unknown, at = new Date().toISOString()) {
+  if (source.kind === "external") {
+    // Resolved first, so a thread this connection does not hold answers exactly as a thread it does;
+    // refused before its arguments are read, so the answer is the stable reason rather than whichever
+    // field the caller got wrong on a call that could never succeed.
+    store.read((state) => resolveCallerFor(state, source));
+    throw new CoordinationError("forbidden", "Only the task's current assignee can update it");
+  }
   const update = normalizeTaskUpdate(argumentsValue);
   let result: { created: boolean; updateId: string; task: ReturnType<typeof taskContextProjection> } | undefined;
   await store.transact((state) => {
-    const caller = resolveCaller(state, sourceRunId);
+    const caller = resolveCallerFor(state, source);
     const task = caller.task;
     if (!task) throw new CoordinationError("forbidden", "Only a task attempt can update a task");
-    const digest = taskUpdateDigest(update, caller.run.id);
+    const { run: callingRun, agent: callingAgent } = requireCallerRun(caller, "Only a task attempt can update a task");
+    const digest = taskUpdateDigest(update, callingRun.id);
     state.taskUpdates ??= [];
     const replay = state.taskUpdates.find((item) => item.threadId === caller.thread.id && item.taskId === task.id && item.idempotencyKey === update.idempotencyKey);
     if (replay) {
@@ -412,13 +448,13 @@ export async function updateTask(store: Store, sourceRunId: string, argumentsVal
       result = { created: false, updateId: replay.id, task: taskContextProjection(state, caller.thread.id, task.id) };
       return false;
     }
-    if (task.assignment?.runId !== caller.run.id || isTerminalTaskStatus(task.status)) throw new CoordinationError("forbidden", "Only the task's current assignee can update it");
+    if (task.assignment?.runId !== callingRun.id || isTerminalTaskStatus(task.status)) throw new CoordinationError("forbidden", "Only the task's current assignee can update it");
     if (caller.thread.status !== "active") throw new CoordinationError("thread_inactive", "Task updates require an active thread");
     if (state.taskUpdates.filter((item) => item.taskId === task.id).length >= orchestrationToolLimits.updatesPerTask) {
       throw new CoordinationError("update_limit", "The task's update limit has been reached");
     }
     if (update.completion) assertVisibleArtifacts(state, caller.thread.id, update.completion.artifactIds, new Set(task.attemptRunIds));
-    const progress: TaskProgress = { ...task.progress, runId: caller.run.id, updatedAt: at };
+    const progress: TaskProgress = { ...task.progress, runId: callingRun.id, updatedAt: at };
     if (update.progress !== undefined) progress.summary = update.progress;
     if (update.blockedReason === null) delete progress.blockedReason;
     else if (update.blockedReason !== undefined) progress.blockedReason = update.blockedReason;
@@ -426,7 +462,7 @@ export async function updateTask(store: Store, sourceRunId: string, argumentsVal
     task.progress = progress;
     task.updatedAt = at;
     const record: TaskUpdateRecord = {
-      id: newId("taskupd"), threadId: caller.thread.id, taskId: task.id, sourceRunId: caller.run.id, agentId: caller.agent.id,
+      id: newId("taskupd"), threadId: caller.thread.id, taskId: task.id, sourceRunId: callingRun.id, agentId: callingAgent.id,
       idempotencyKey: update.idempotencyKey, digest, createdAt: at
     };
     state.taskUpdates.push(record);

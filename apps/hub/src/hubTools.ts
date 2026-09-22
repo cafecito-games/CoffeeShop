@@ -28,7 +28,7 @@ async function boundedWait(operation: Promise<void>, milliseconds: number) {
 }
 
 /** The latest committed view of submitted tasks, including any placement the first pass recorded. */
-function submittedTask(state: Readonly<State>, task: Task) {
+export function submittedTask(state: Readonly<State>, task: Task) {
   const current = state.tasks?.find((item) => item.id === task.id) ?? task;
   return {
     id: current.id,
