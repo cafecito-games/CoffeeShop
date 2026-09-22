@@ -141,6 +141,11 @@ export interface Run {
   transportSelection?: RunTransportSelection;
   sessionBindingId?: string;
   workspaceLeaseId?: string;
+  /**
+   * Native CLI runs: the vendor's own session identity, recorded for operator reference only.
+   * Coffee Shop never resumes it; ACP sessions are identified by their session binding instead.
+   */
+  providerSessionId?: string;
 }
 
 export const timelineEventTypes = ["run", "status", "handoff", "node", "message"] as const;
@@ -281,7 +286,11 @@ export type ControlAgentToHub =
   | { type: "sync.complete"; nodeId: string; activeRunIds?: string[]; at: string }
   | { type: "heartbeat"; nodeId: string; activeRuns: number; at: string }
   | { type: "run.started"; runId: string; at: string; transport?: RunTransportSelection }
-  | { type: "run.output"; runId: string; chunk: string; at: string }
+  /**
+   * `providerSessionId` is sent at most once, by a native CLI run, with the vendor's own session
+   * identity so an operator can resume the conversation outside Coffee Shop.
+   */
+  | { type: "run.output"; runId: string; chunk: string; at: string; providerSessionId?: string }
   | { type: "run.completed"; runId: string; output: string; at: string }
   | { type: "run.failed"; runId: string; error: string; at: string }
   | { type: "run.cancelled"; runId: string; at: string }

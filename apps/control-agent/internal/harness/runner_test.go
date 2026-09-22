@@ -52,6 +52,27 @@ func TestRunnerCancellationTerminatesDescendantProcessTree(t *testing.T) {
 	}
 }
 
+func TestProviderSessionIdentityReadsEachVendorStream(t *testing.T) {
+	require.Equal(t, "3b729b65-f2e4-48c7-bc3b-0302a7ea1c34", providerSessionIdentity("claude-cli", []byte(`{"type":"system","subtype":"init","session_id":"3b729b65-f2e4-48c7-bc3b-0302a7ea1c34"}`)))
+	require.Equal(t, "01a0c881-6c5c-7b42-a6ca-cb1fa772c4e7", providerSessionIdentity("codex-cli", []byte(`{"type":"thread.started","thread_id":"01a0c881-6c5c-7b42-a6ca-cb1fa772c4e7"}`)))
+	require.Empty(t, providerSessionIdentity("codex-cli", []byte(`{"type":"turn.started","thread_id":"01a0c881"}`)))
+	require.Empty(t, providerSessionIdentity("claude-cli", []byte(`{"type":"system","session_id":"id; rm -rf /"}`)))
+	require.Empty(t, providerSessionIdentity("claude-cli", []byte(`not json`)))
+}
+
+func TestReadEventsReportsProviderSessionOnce(t *testing.T) {
+	stream := strings.Join([]string{
+		`{"type":"system","subtype":"init","session_id":"session-one"}`,
+		`{"type":"assistant","session_id":"session-one","message":{"content":[{"type":"text","text":"working"}]}}`,
+		`{"type":"result","session_id":"session-one","result":"done"}`,
+	}, "\n")
+	var sessions []string
+	final, err := readEvents(strings.NewReader(stream), "claude-cli", func(string) {}, func(identity string) { sessions = append(sessions, identity) })
+	require.NoError(t, err)
+	require.Equal(t, "done", final)
+	require.Equal(t, []string{"session-one"}, sessions)
+}
+
 func TestReadableCodexAgentMessage(t *testing.T) {
 	line := []byte(`{"type":"item.completed","item":{"type":"agent_message","text":"done"}}`)
 	require.Equal(t, "done", readableEvent("codex-cli", line))

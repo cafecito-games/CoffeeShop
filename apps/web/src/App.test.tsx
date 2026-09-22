@@ -122,7 +122,7 @@ describe("durable threads", () => {
     expect(screen.getByRole("heading", { name: thread.title })).toBeInTheDocument();
     expect(screen.getAllByText("1", { selector: ".thread-card dd" })).toHaveLength(2);
     fireEvent.click(screen.getByRole("button", { name: "Continue thread" }));
-    expect(screen.getByLabelText("Thread")).toHaveValue(thread.id);
+    expect(screen.getByLabelText("Send to")).toHaveValue(thread.id);
     expect(screen.getByText("Initial work complete")).toBeInTheDocument();
     fireEvent.change(screen.getByPlaceholderText("Message Milo"), { target: { value: "Add consent text" } });
     fireEvent.click(screen.getByRole("button", { name: "Send" }));

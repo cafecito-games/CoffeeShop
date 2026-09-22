@@ -16,7 +16,7 @@ interface ResolutionOutcome {
   error?: string;
 }
 
-function ApprovalDialog({ approval, agents, nodes, runs, tasks, canMutate, onClose, apiFetch }: {
+export function ApprovalDialog({ approval, agents, nodes, runs, tasks, canMutate, onClose, apiFetch }: {
   approval: ApprovalRequest;
   agents: Agent[];
   nodes: ComputeNode[];

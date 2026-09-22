@@ -479,6 +479,11 @@ func (client *Client) dispatch(ctx context.Context, run protocol.Run, agent prot
 				return
 			}
 			client.send(protocol.Outbound{Type: "run.output", RunID: run.ID, Chunk: chunk, At: now()})
+		}, ProviderSession: func(identity string) {
+			if runContext.Err() != nil {
+				return
+			}
+			client.send(protocol.Outbound{Type: "run.output", RunID: run.ID, ProviderSessionID: identity, At: now()})
 		}, Started: func(selection protocol.RunTransportSelection) {
 			session.start(selection)
 		}}

@@ -101,6 +101,9 @@ type Outbound struct {
 	Report       *NodeCapabilityReport `json:"report,omitempty"`
 	// Transport is the version-4 transport selection reported once on run.started.
 	Transport *RunTransportSelection `json:"transport,omitempty"`
+	// ProviderSessionID is the vendor's own session identity, reported at most once on a native
+	// CLI run's run.output so an operator can resume the conversation outside Coffee Shop.
+	ProviderSessionID string `json:"providerSessionId,omitempty"`
 }
 
 func DecodeInbound(data []byte) (Inbound, error) {
