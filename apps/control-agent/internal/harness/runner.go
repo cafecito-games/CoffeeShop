@@ -17,24 +17,24 @@ import (
 	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/protocol"
 )
 
+const emptyResponse = "Run completed without a text response."
+
 const coordinationContract = `
 
 You are running inside Coffee Shop. Use the Coffee Shop hub tools for durable thread context, artifacts, and bounded delegation when they are available. Refine the thread title, objective, and summary when that improves the shared record, and mark it completed only when the overall objective is satisfied. Keep returned task and artifact ids. If hub delegation is unavailable and another specialist must continue, end your response with exactly <handoff to="agent-id">task and context</handoff>. Use only an agent id you were given.`
 
-type Runner struct {
-	profiles []protocol.HarnessProfile
+// nativeDriver runs a vendor CLI directly and parses its vendor-specific JSON stream.
+type nativeDriver struct {
+	runner *Runner
 }
 
-func NewRunner(profiles []protocol.HarnessProfile) *Runner {
-	return &Runner{profiles: profiles}
-}
-
-func (r *Runner) Run(ctx context.Context, run protocol.Run, agent protocol.Agent, cwd string, mcpConfig mcpserver.Config, output func(string)) (string, error) {
-	profile, available := r.profile(run.HarnessID)
+func (driver nativeDriver) Execute(ctx context.Context, invocation Invocation) (string, error) {
+	run, mcpConfig, output := invocation.Run, invocation.MCP, invocation.Output
+	profile, available := driver.runner.profile(run.HarnessID)
 	if !available {
 		return "", fmt.Errorf("harness %s is not installed or did not pass its version check", run.HarnessID)
 	}
-	binary, args, err := commandFor(run, agent, mcpConfig)
+	binary, args, err := commandFor(run, invocation.Agent, mcpConfig)
 	if err != nil {
 		return "", err
 	}
@@ -43,7 +43,7 @@ func (r *Runner) Run(ctx context.Context, run protocol.Run, agent protocol.Agent
 	}
 	command := exec.CommandContext(ctx, binary, args...)
 	configureProcessCancellation(command)
-	command.Dir = cwd
+	command.Dir = invocation.Workspace
 	command.Env = os.Environ()
 	if mcpConfig.URL != "" {
 		command.Env = append(command.Env, "COFFEE_SHOP_MCP_TOKEN="+mcpConfig.Token)
@@ -70,7 +70,7 @@ func (r *Runner) Run(ctx context.Context, run protocol.Run, agent protocol.Agent
 		return "", waitErr
 	}
 	if strings.TrimSpace(final) == "" {
-		return "Run completed without a text response.", nil
+		return emptyResponse, nil
 	}
 	return strings.TrimSpace(final), nil
 }
@@ -84,8 +84,12 @@ func (r *Runner) profile(id string) (protocol.HarnessProfile, bool) {
 	return protocol.HarnessProfile{}, false
 }
 
+func composePrompt(run protocol.Run, agent protocol.Agent) string {
+	return agent.SystemPrompt + coordinationContract + "\n\nAvailable teammate ids may be listed by the control plane.\n\nUser task:\n" + run.Prompt
+}
+
 func commandFor(run protocol.Run, agent protocol.Agent, mcpConfig mcpserver.Config) (string, []string, error) {
-	prompt := agent.SystemPrompt + coordinationContract + "\n\nAvailable teammate ids may be listed by the control plane.\n\nUser task:\n" + run.Prompt
+	prompt := composePrompt(run, agent)
 	switch run.HarnessID {
 	case "claude-cli":
 		args := []string{"-p", prompt, "--output-format", "stream-json", "--verbose", "--permission-mode", "auto", "--permission-prompts", "none", "--model", run.Model}
