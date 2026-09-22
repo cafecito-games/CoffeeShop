@@ -18,6 +18,9 @@ type HarnessProfile struct {
 	Models      []string              `json:"models"`
 	Transports  []string              `json:"transports,omitempty"`
 	ACP         *AcpAgentCapabilities `json:"acp,omitempty"`
+	// ApprovalPolicy is the node administrator's approval policy for this harness. Barista omits
+	// ApprovalPolicyManual, so an absent value means manual and older hubs see an unchanged profile.
+	ApprovalPolicy string `json:"approvalPolicy,omitempty"`
 }
 
 type ComputeNode struct {

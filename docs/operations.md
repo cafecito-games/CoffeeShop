@@ -40,7 +40,7 @@ Node setup workflow:
 
 - `barista setup plan --data-root <path> [--manifest <path>] [--out <file>]` — read-only; renders the exact operations an apply would perform as a digest-sealed JSON plan. It writes nothing under the data root and creates no ledger.
 - `barista setup apply --plan <file> [--manual-artifact <adapterId>=<path>] [--manual-checksum <adapterId>=<sha256>] [--manifest <path>] [--allowed-host <host>]` — the only mutating command, and the only one that creates the data root. A hand-edited plan, a changed manifest, or a target that changed since planning is refused before any mutation.
-- `barista doctor [--data-root] [--manifest] [--control-endpoint] [--claude-acp-auth-mode] [--json]` — entirely read-only: re-verifies installed adapters against the ownership ledger, runs coarse exit-code auth probes, and makes one unauthenticated TCP connection attempt to the control endpoint. Doctor exits 0 whenever it could build a report; problems show up in the report itself.
+- `barista doctor [--data-root] [--manifest] [--control-endpoint] [--claude-acp-auth-mode] [--approval-policy] [--json]` — entirely read-only (it also prints the effective [approval policy](#approval-policy) per harness): re-verifies installed adapters against the ownership ledger, runs coarse exit-code auth probes, and makes one unauthenticated TCP connection attempt to the control endpoint. Doctor exits 0 whenever it could build a report; problems show up in the report itself.
 
 The default data root resolves through `os.UserConfigDir()` to `<user config>/coffee-shop/barista`, never `$HOME` itself. The adapter manifest is compiled into the binary; `--adapter-manifest` (`BARISTA_ADAPTER_MANIFEST`) overrides it for both the daemon and setup.
 
@@ -162,6 +162,19 @@ A pending approval expires nine minutes after the hub received it — deliberate
 
 Delivery is tracked separately from the decision: `pending` → `sent` → `applied` (only the harness's own `permission.resolved` event confirms it) or `not-applied`. `not-applied` means the decision stands but never reached the harness session that raised it — the run ended, the session was replaced, the approval expired first, or Barista refused it (`approval.undeliverable`). Decisions are never retargeted to another session; re-answer the new permission request instead. Settled approvals are pruned beyond 50 per run and 500 total; pending and undelivered ones are always kept.
 
+### Approval policy
+
+Each compute node's administrator decides how many permission requests reach these approvals, with `--approval-policy` on Barista (environment `BARISTA_APPROVAL_POLICY`, comma-separated). It is a node-administrator declaration only: the hub and PWA display it read-only, and no dispatch, task requirement, run instruction, or API call can set or change it.
+
+| Setting | Effect |
+|---|---|
+| `--approval-policy manual` (default) | Every ACP permission request becomes a Coffee Shop approval: Claude ACP runs in `default` ("Manual") mode, Codex ACP in `read-only` ("Ask for approval"). Native CLI runs are unchanged (`--permission-mode auto`, `--sandbox workspace-write`) and never prompt. |
+| `--approval-policy auto` | The harness decides permission requests itself: Claude ACP `auto`, Codex ACP `agent` ("Approve for me", same workspace-write sandbox). Only what the harness still escalates reaches Coffee Shop. Native runs are unchanged. |
+| `--approval-policy bypass` | No approvals and, for Codex, no sandbox: Claude ACP `bypassPermissions`, Codex ACP `agent-full-access`, native Claude `--permission-mode bypassPermissions`, native Codex `--dangerously-bypass-approvals-and-sandbox`. Use only on an externally sandboxed node. |
+| `--approval-policy <harness-id>=<policy>` | Sets one harness (`claude-cli` or `codex-cli`); repeatable, and overrides the node-wide value. Example: `--approval-policy auto --approval-policy claude-cli=manual`. |
+
+Two different values for the same scope (node-wide, or the same harness), an unknown policy, or an unknown harness stop Barista at startup. A mode the adapter does not offer — claude-agent-acp offers `bypassPermissions` only conditionally — fails the run instead of running under another mode. At startup Barista logs one line per relaxed harness, for example `approval policy for claude-cli is bypass: permission requests are not sent to Coffee Shop`; `barista doctor` prints the effective policy for every harness. The Compute view marks a relaxed harness with an "Auto approvals" or "Approvals bypassed" badge, the run inspector's Transport section shows the policy each run actually executed under, and the snapshot carries it as `nodes[].harnesses[].approvalPolicy` and `runs[].transportSelection.approvalPolicy` (absent means `manual`). A policy value the hub does not recognize — reported by a Barista newer than the hub — is never shown as `manual`: the hub records `approvalPolicyUnrecognized: true` instead and the PWA shows an "Unrecognized approval policy" badge. Upgrade the hub first to avoid it.
+
 ## Orchestrator sessions and mailbox recovery
 
 Each thread's orchestrator has a durable inbox (`snapshot.orchestratorInboxes`): `deliveredThrough` and `processedThrough` journal sequences, the `redeliveries` and `consecutiveFailures` counters, `retryAfter`, and the most recent 20 wakes with their statuses (`scheduled`, `delivered`, `completed`, `failed`) and `sessionOutcome`. Only the orchestrator's own `wait_for_task_events` cursor advances processing; nothing is lost while the orchestrator is not running, because events wait in the mailbox.
@@ -218,7 +231,7 @@ These must remain true in any deployment; do not weaken them:
 - `WORKSPACE_ROOTS` must stay absolute and are enforced after canonicalization, including through symlinks.
 - Adapters are never downloaded at runtime; only verified setup-installed or digest-pinned administrator executables are launched.
 - The hub never supplies commands, executable names, or argument lists to Barista; toolchain probes are fixed at compile time.
-- Approvals fail closed: unanswered, timed-out, or invalid permission requests are never allowed, and a harness can never approve or reject on its own.
+- Approvals fail closed under the default `manual` approval policy: unanswered, timed-out, or invalid permission requests are never allowed, and a harness can never approve or reject on its own. `auto` and `bypass` are explicit node-administrator opt-ins, set only in that node's Barista configuration, that let the harness decide or skip its own permission requests and so bypass Coffee Shop approvals for that harness; nothing the hub sends can enable them.
 - Dirty or ambiguous worktrees are retained, never reset or force-removed.
 - Secrets are redacted: accepted events are screened for common credential shapes before retention, configuration rejections never echo the rejected value, and secret-looking probe output is withheld from logs.
 

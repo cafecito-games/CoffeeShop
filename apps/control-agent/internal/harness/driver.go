@@ -55,6 +55,10 @@ type Invocation struct {
 
 	// begin is installed by Runner.Execute; drivers call it when the prompt is about to be sent.
 	begin func(transportDetails)
+	// approvalPolicy is set by Runner.Execute from the node's configuration. It is deliberately
+	// unexported: a caller building an Invocation from a dispatch cannot set it, and a driver
+	// reached without the Runner sees "" and applies the manual policy.
+	approvalPolicy string
 }
 
 // SessionResume identifies the provider session to continue and the prompt it receives if it does.
@@ -92,7 +96,9 @@ type Runner struct {
 	native         Driver
 	acp            *ACPDriver
 	nativeFallback map[string]bool
-	now            func() time.Time
+	// approvalPolicies is the administrator's approval policy per harness; see ApprovalPolicies.
+	approvalPolicies ApprovalPolicies
+	now              func() time.Time
 }
 
 func NewRunner(profiles []protocol.HarnessProfile) *Runner {
@@ -116,6 +122,21 @@ func (r *Runner) WithNativeFallback(harnessIDs ...string) *Runner {
 		r.nativeFallback[harnessID] = true
 	}
 	return r
+}
+
+// WithApprovalPolicies records the node administrator's approval policy per harness. Every run of
+// a harness, over either transport, executes under its policy; a harness without an entry is manual.
+func (r *Runner) WithApprovalPolicies(policies ApprovalPolicies) *Runner {
+	r.approvalPolicies = ApprovalPolicies{}
+	for harnessID, policy := range policies {
+		r.approvalPolicies[harnessID] = policy
+	}
+	return r
+}
+
+// ApprovalPolicy returns the effective approval policy for the harness.
+func (r *Runner) ApprovalPolicy(harnessID string) string {
+	return r.approvalPolicies.For(harnessID)
 }
 
 // Run executes a run with text output only, preserving the original native runner contract.
@@ -156,6 +177,7 @@ func (r *Runner) Execute(ctx context.Context, invocation Invocation) (string, er
 	if invocation.Output == nil {
 		invocation.Output = func(string) {}
 	}
+	invocation.approvalPolicy = r.approvalPolicies.For(invocation.Run.HarnessID)
 	switch invocation.Run.Transport {
 	case "", TransportNative:
 		return r.native.Execute(ctx, r.beginning(invocation, protocol.RunTransportSelection{RequestedTransport: TransportNative, SelectedTransport: TransportNative}, nil))
@@ -208,6 +230,7 @@ func (r *Runner) fallBack(ctx context.Context, invocation Invocation, reason str
 // beginning installs the begin hook that reports selection to Started exactly once, records that
 // the run started, and adds what the driver learned about the transport.
 func (r *Runner) beginning(invocation Invocation, selection protocol.RunTransportSelection, started *atomic.Bool) Invocation {
+	selection.ApprovalPolicy = reportedApprovalPolicy(invocation.approvalPolicy)
 	if selection.SelectedTransport == TransportNative {
 		if profile, available := r.profile(invocation.Run.HarnessID); available {
 			selection.HarnessVersion = normalizedHarnessVersion(profile.Description)

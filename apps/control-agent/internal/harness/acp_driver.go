@@ -189,12 +189,15 @@ type adapterProcess struct {
 	killProcessTree context.CancelFunc
 }
 
-func (driver *ACPDriver) start(harnessID string, adapter ACPAdapter, provider ACPProvider, directory string, secrets []string) (*adapterProcess, error) {
+func (driver *ACPDriver) start(harnessID string, adapter ACPAdapter, provider ACPProvider, approvalPolicy string, directory string, secrets []string) (*adapterProcess, error) {
 	killContext, killProcessTree := context.WithCancel(context.Background())
 	command := exec.CommandContext(killContext, adapter.Binary, adapter.Arguments...)
 	configureProcessCancellation(command)
 	command.Dir = directory
-	environment := append(append([]string{}, adapter.Environment...), provider.Environment...)
+	environment := append([]string{}, adapter.Environment...)
+	if provider.Environment != nil {
+		environment = append(environment, provider.Environment(approvalPolicy)...)
+	}
 	if native := driver.options.NativeBinaries[harnessID]; provider.NativeBinaryVariable != "" && filepath.IsAbs(native) {
 		environment = append(environment, provider.NativeBinaryVariable+"="+native)
 	}
@@ -255,7 +258,8 @@ func (driver *ACPDriver) Probe(ctx context.Context, harnessID string) (ACPProbe,
 			directory, _ = canonicalDirectory(temporary)
 		}
 	}
-	process, err := driver.start(harnessID, adapter, provider, directory, nil)
+	// The probe never sends a prompt, so it launches under the strictest policy whatever the node's.
+	process, err := driver.start(harnessID, adapter, provider, protocol.ApprovalPolicyManual, directory, nil)
 	if err != nil {
 		return ACPProbe{}, err
 	}
@@ -295,7 +299,7 @@ func (driver *ACPDriver) Execute(ctx context.Context, invocation Invocation) (st
 		return "", err
 	}
 	secrets := []string{invocation.MCP.Token}
-	process, err := driver.start(invocation.Run.HarnessID, adapter, provider, cwd, secrets)
+	process, err := driver.start(invocation.Run.HarnessID, adapter, provider, invocation.approvalPolicy, cwd, secrets)
 	if err != nil {
 		return "", err
 	}
@@ -329,7 +333,7 @@ func (driver *ACPDriver) Execute(ctx context.Context, invocation Invocation) (st
 		}
 	}
 	if provider.Configuration != nil {
-		request.Configuration = provider.Configuration(invocation.Run)
+		request.Configuration = provider.Configuration(invocation.Run, invocation.approvalPolicy)
 	}
 	if invocation.MCP.URL != "" {
 		request.MCPServer = &acp.MCPServer{Name: mcpServerName, URL: invocation.MCP.URL, BearerToken: invocation.MCP.Token}

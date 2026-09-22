@@ -4,6 +4,8 @@ import test from "node:test";
 import {
   acpAdapterNameMaximumBytes,
   acpAdapterSources,
+  approvalPolicies,
+  isApprovalPolicy,
   canSendToControlAgent,
   requiredCapabilityForHubMessage,
   transportFallbackReasons,
@@ -49,6 +51,9 @@ test("transport vocabularies keep their exact contents", () => {
   assert.deepEqual(acpAdapterSources, ["setup-ledger", "administrator-override"]);
   assert.equal(transportNativeFallbackWarning, "transport-native-fallback");
   assert.equal(acpAdapterNameMaximumBytes, 128);
+  assert.deepEqual(approvalPolicies, ["manual", "auto", "bypass"]);
+  assert.equal(isApprovalPolicy("bypass"), true);
+  assert.equal(isApprovalPolicy("acceptEdits"), false);
 });
 
 test("the run-started fixtures' transport selections validate and round-trip unchanged", () => {
@@ -64,7 +69,9 @@ test("well-formed selections validate", () => {
   const accepted = [
     ["native selection without extras", nativeSelection()],
     ["native selection with harness version", { ...nativeSelection(), harnessVersion: "0.154.0" }],
-    ...transportFallbackReasons.map((reason) => [`fallback for ${reason}`, fallbackSelection(reason)])
+    ...transportFallbackReasons.map((reason) => [`fallback for ${reason}`, fallbackSelection(reason)]),
+    ...approvalPolicies.map((policy) => [`acp selection under the ${policy} approval policy`, { ...acpSelection(), approvalPolicy: policy }]),
+    ["native fallback under the bypass approval policy", { ...fallbackSelection("acp-adapter-unavailable"), approvalPolicy: "bypass" }]
   ];
   for (const [label, value] of accepted) {
     const result = validateRunTransportSelection(value);
@@ -86,6 +93,8 @@ test("malformed selections are rejected", () => {
     ["acp to native without a reason", { requestedTransport: "acp-v1", selectedTransport: "native-cli" }],
     ["acp to native with an unknown reason", { ...fallbackSelection("acp-adapter-unavailable"), fallbackReason: "adapter-crashed" }],
     ["non-normalized harness version", { ...nativeSelection(), harnessVersion: "1.02" }],
+    ["unknown approval policy", { ...nativeSelection(), approvalPolicy: "acceptEdits" }],
+    ["non-string approval policy", { ...nativeSelection(), approvalPolicy: true }],
     ["adapter with an uppercase id", { ...acpSelection(), adapter: { id: "Codex-ACP", version: "1.12.0", source: "setup-ledger" } }],
     ["adapter id over 64 bytes", { ...acpSelection(), adapter: { id: "a".repeat(65), version: "1.12.0", source: "setup-ledger" } }],
     ["adapter with a pre-release version", { ...acpSelection(), adapter: { id: "codex-acp", version: "1.2.3-beta", source: "setup-ledger" } }],

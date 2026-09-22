@@ -266,6 +266,8 @@ func runDoctor(args []string) int {
 	controlEndpoint := set.String("control-endpoint", config.DefaultEndpoint, "Coffee Shop URL or WebSocket endpoint to test for reachability")
 	claudeACPAuthMode := set.String("claude-acp-auth-mode", os.Getenv("BARISTA_CLAUDE_ACP_AUTH_MODE"), "administrator auth-mode policy that would be required before Claude ACP loads: local-subscription or api")
 	asJSON := set.Bool("json", false, "print the report as JSON instead of a human-readable summary")
+	approvalPolicyEntries := config.ApprovalPolicyEnvironment()
+	config.ApprovalPolicyFlag(set, &approvalPolicyEntries)
 	if err := set.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -274,6 +276,11 @@ func runDoctor(args []string) int {
 	}
 	if set.NArg() > 0 {
 		fmt.Fprintf(os.Stderr, "doctor: unexpected arguments: %s\n", strings.Join(set.Args(), " "))
+		return 2
+	}
+	approvalPolicies, err := config.ParseApprovalPolicies(approvalPolicyEntries)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "doctor: %v\n", err)
 		return 2
 	}
 	_, manifest, err := loadSetupManifest(*manifestPath)
@@ -291,6 +298,10 @@ func runDoctor(args []string) int {
 	profiles := harness.Discover(context.Background())
 	report := setup.RunDoctor(context.Background(), manifest, ledger, *dataRoot, currentPlatform(), profiles, *controlEndpoint, dialHubEndpoint)
 	addClaudeACPAuthModeNote(report.Adapters, strings.TrimSpace(*claudeACPAuthMode))
+	report.ApprovalPolicies = map[string]string{}
+	for _, harnessID := range harness.ApprovalPolicyHarnessIDs {
+		report.ApprovalPolicies[harnessID] = approvalPolicies.For(harnessID)
+	}
 	if *asJSON {
 		encoded, err := json.MarshalIndent(report, "", "  ")
 		if err != nil {
@@ -310,6 +321,10 @@ func runDoctor(args []string) int {
 		for _, note := range entry.Notes {
 			fmt.Printf("  note: %s\n", note)
 		}
+	}
+	for _, harnessID := range harness.ApprovalPolicyHarnessIDs {
+		policy := report.ApprovalPolicies[harnessID]
+		fmt.Printf("approval policy for %s: %s (%s)\n", harnessID, policy, harness.ApprovalPolicyEffect(policy))
 	}
 	fmt.Printf("hub %s: %s\n", report.HubConnectivity.Endpoint, reachableSummary(report.HubConnectivity))
 	fmt.Printf("project readiness: %s\n", report.ProjectReadiness)

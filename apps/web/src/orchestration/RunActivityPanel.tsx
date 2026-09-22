@@ -1,4 +1,5 @@
 import type { ApprovalRequest, HarnessSessionBinding, RunActivity, RunTransportSelection } from "@coffee-shop/protocol";
+import { ApprovalPolicyBadge, isRelaxedOrUnrecognizedPolicy } from "../compute/ApprovalPolicyBadge.js";
 import { approvalStatusLabels, timeAgo, toolCallKindLabels, toolCallStatusLabels } from "./orchestrationLabels.js";
 
 function BoundedBlock({ label, text, truncatedBytes }: { label: string; text: string; truncatedBytes: number }) {
@@ -27,6 +28,7 @@ export function RunActivityPanel({ activity, transportSelection, sessionBinding,
           <h3>Transport</h3>
           <dl className="run-details">
             {transportSelection && <div><dt>Requested / selected</dt><dd>{transportSelection.requestedTransport} → {transportSelection.selectedTransport}</dd></div>}
+            {transportSelection && isRelaxedOrUnrecognizedPolicy(transportSelection.approvalPolicy, transportSelection.approvalPolicyUnrecognized) && <div><dt>Approval policy</dt><dd><ApprovalPolicyBadge policy={transportSelection.approvalPolicy} unrecognized={transportSelection.approvalPolicyUnrecognized} /></dd></div>}
             {transportSelection?.fallbackReason && <div><dt>Fallback reason</dt><dd>{transportSelection.fallbackReason}</dd></div>}
             {transportSelection?.adapter && <div><dt>Adapter</dt><dd>{transportSelection.adapter.id} {transportSelection.adapter.version} · {transportSelection.adapter.source}</dd></div>}
             {transportSelection?.harnessVersion && <div><dt>Harness version</dt><dd>{transportSelection.harnessVersion}</dd></div>}

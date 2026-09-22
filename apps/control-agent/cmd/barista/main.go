@@ -77,6 +77,12 @@ func run(args []string) int {
 			}
 		}
 	}
+	profiles = harness.AdvertiseApprovalPolicies(profiles, cfg.ApprovalPolicies)
+	for _, harnessID := range harness.ApprovalPolicyHarnessIDs {
+		if policy := cfg.ApprovalPolicies.For(harnessID); policy != protocol.ApprovalPolicyManual {
+			log.Printf("approval policy for %s is %s: %s", harnessID, policy, harness.ApprovalPolicyEffect(policy))
+		}
+	}
 	available := make([]string, 0, len(profiles))
 	for _, profile := range profiles {
 		if profile.Available {
@@ -113,7 +119,7 @@ func run(args []string) int {
 		}
 	}
 	log.Printf("node capability report ready: %d of %d evidence entries succeeded", succeeded, len(report.Evidence))
-	runner := harness.NewRunner(nativeProfiles).WithACP(driver).WithNativeFallback(cfg.ACPNativeFallback...)
+	runner := harness.NewRunner(nativeProfiles).WithACP(driver).WithNativeFallback(cfg.ACPNativeFallback...).WithApprovalPolicies(cfg.ApprovalPolicies)
 	client := controlplane.NewClient(cfg, node, runner, buildCapabilityReport)
 	if err := client.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		log.Printf("Barista stopped: %v", err)

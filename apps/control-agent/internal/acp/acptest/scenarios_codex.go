@@ -99,6 +99,24 @@ func init() {
 			Update(`{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"codex done"}}`),
 		}, Finish()),
 
+		"codex-agent": join(
+			CodexHandshake(CodexConfigOptions("read-only", CodexModel)),
+			CodexSetOption(CodexConfigOptions("agent", CodexModel)),
+			[]Step{
+				ConnectMCP(),
+				Expect("session/prompt"),
+				Update(`{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"codex done"}}`),
+			}, Finish()),
+
+		"codex-full-access": join(
+			CodexHandshake(CodexConfigOptions("read-only", CodexModel)),
+			CodexSetOption(CodexConfigOptions("agent-full-access", CodexModel)),
+			[]Step{
+				ConnectMCP(),
+				Expect("session/prompt"),
+				Update(`{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"codex done"}}`),
+			}, Finish()),
+
 		"codex-mode-already-set": join(CodexHandshake(CodexConfigOptions("read-only", CodexModel)), []Step{
 			ConnectMCP(),
 			Expect("session/prompt"),

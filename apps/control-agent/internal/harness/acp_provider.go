@@ -9,11 +9,12 @@ import (
 // deliberately not part of the adapter manifest, which an operator may replace: sandbox,
 // approval, and tool requirements are Barista's to enforce, not the manifest's to relax.
 type ACPProvider struct {
-	// Environment is added after the inherited and manifest launch environment, so it wins. It
-	// must never carry a credential.
-	Environment []string
-	// Configuration returns the session options to apply and confirm before a run's prompt.
-	Configuration func(run protocol.Run) []acp.ConfigSelection
+	// Environment returns variables added after the inherited and manifest launch environment, so
+	// they win, for the harness's effective approval policy. It must never carry a credential.
+	Environment func(approvalPolicy string) []string
+	// Configuration returns the session options to apply and confirm before a run's prompt, for the
+	// harness's effective approval policy. The policy comes from Barista's configuration, never the run.
+	Configuration func(run protocol.Run, approvalPolicy string) []acp.ConfigSelection
 	// RequireMCPConnection holds the prompt until the adapter has listed the run's Coffee Shop MCP
 	// tools, for adapters that connect MCP servers when the session is created.
 	RequireMCPConnection bool
