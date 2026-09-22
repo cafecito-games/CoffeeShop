@@ -7,6 +7,8 @@
 export const redactionMarker = "[redacted]";
 
 const secretPatterns: readonly RegExp[] = [
+  // An orchestrator client credential, `csoc_<clientId>_<base64url secret>`; see orchestratorClients.ts.
+  /csoc_[A-Za-z0-9-]{1,128}_[A-Za-z0-9_-]{22,}/g,
   /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|$)/g,
   /\b(?:sk|rk)-(?:ant-|proj-|live-|test-)?[A-Za-z0-9_-]{20,}/g,
   /\bgh[pousr]_[A-Za-z0-9]{30,}\b/g,
