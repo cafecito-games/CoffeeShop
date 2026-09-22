@@ -2,10 +2,12 @@ import {
   isTerminalApprovalStatus,
   isTerminalRunStatus,
   type ApprovalDecision,
+  type ApprovalOption,
   type ApprovalRequest,
   type ApprovalResolvedBy,
   type ApprovalStatus,
   type HarnessEvent,
+  type OrchestratorAttachment,
   type Run,
   type Validation
 } from "@coffee-shop/protocol";
@@ -19,6 +21,12 @@ import { newEvent, newId, type State } from "./store.js";
  * operator choosing an offered option (or cancelling), by expiry, by the run ending, or by the
  * harness itself timing out. The resolution is persisted before any decision is sent, and decision
  * delivery is tracked separately so an offline Barista never makes a decision look applied.
+ *
+ * An external orchestrator may also resolve an approval, but only through the authority decided by
+ * `orchestratorApprovalAuthority` below: a live attachment on the approval's own thread whose
+ * credential still carries the operator-granted `resolve-approvals` scope. Every resolution records
+ * who made it in `resolvedBy`, so an orchestrator decision stays attributable after its attachment
+ * ends.
  */
 
 /** Settled approvals kept per run and in total; pending or still-undelivered approvals are never pruned. */
@@ -309,8 +317,18 @@ function sameResolution(approval: ApprovalRequest, input: ApprovalResolutionInpu
   return selectsOption(approval.status) && approval.selectedOptionId === input.optionId;
 }
 
-/** Applies an operator resolution. Only a pending approval of a live, unchanged session can be resolved. */
-export function resolveApprovalInState(state: State, approvalId: string, input: ApprovalResolutionInput, at: string): ApprovalResolutionResult {
+/**
+ * Applies a resolution. Only a pending approval of a live, unchanged session can be resolved, and
+ * `resolvedBy` records who resolved it; the caller has already proved that authority. An expiry
+ * discovered here is the hub's own, so it is always recorded as a system resolution.
+ */
+export function resolveApprovalInState(
+  state: State,
+  approvalId: string,
+  input: ApprovalResolutionInput,
+  at: string,
+  resolvedBy: ApprovalResolvedBy = { kind: "operator" }
+): ApprovalResolutionResult {
   const approval = (state.approvals ?? []).find((item) => item.id === approvalId);
   if (!approval) return { kind: "not-found" };
   if (input.runId !== undefined && input.runId !== approval.runId) return { kind: "conflict", reason: "The approval belongs to a different run", approval, changed: false };
@@ -329,14 +347,158 @@ export function resolveApprovalInState(state: State, approvalId: string, input: 
     return { kind: "conflict", reason: "The approval expired", approval, changed: true };
   }
   if (input.cancel) {
-    resolve(approval, "cancelled", { kind: "operator" }, at, true);
+    resolve(approval, "cancelled", resolvedBy, at, true);
   } else {
     const option = approval.options.find((item) => item.id === input.optionId);
     if (!option) return { kind: "option-not-offered", approval };
-    resolve(approval, decisionStatus(option.kind), { kind: "operator" }, at, true);
+    resolve(approval, decisionStatus(option.kind), resolvedBy, at, true);
     approval.selectedOptionId = option.id;
   }
   approval.resolutionIdempotencyKey = input.idempotencyKey;
   recordApprovalEvent(state, approval, `Approval ${approval.status}`);
   return { kind: "resolved", approval };
+}
+
+/*
+ * External orchestrator access to approvals.
+ *
+ * `docs/architecture.md` records that nothing a harness reports can approve anything. This is the
+ * one path that lets a caller other than an operator decide a worker approval, and it is narrow on
+ * purpose: the credential must hold `resolve-approvals`, which only an operator can grant, and the
+ * approval must belong to a task of a thread the calling connection is attached to right now.
+ *
+ * Nothing here reads a cached scope, a welcome frame, or anything the client sent: authority is
+ * recomputed from committed state on every call, inside the transaction that commits a resolution,
+ * so a scope removed or a credential revoked while the call was in flight refuses it.
+ */
+
+/** How many approvals of a thread one `list_approvals` call reports, newest first. */
+export const orchestratorApprovalListLimits = { pending: 50, settled: 20 } as const;
+
+export interface OrchestratorApprovalView {
+  id: string;
+  taskId: string;
+  runId: string;
+  title: string;
+  detail?: string;
+  options: ApprovalOption[];
+  status: ApprovalStatus;
+  requestedAt: string;
+  expiresAt?: string;
+  resolvedAt?: string;
+  resolvedBy?: ApprovalResolvedBy;
+  selectedOptionId?: string;
+}
+
+/**
+ * The thread whose task attempt raised this approval. An approval whose run is not an attempt of a
+ * known task belongs to no thread an orchestrator may act on, so it is invisible to these tools.
+ */
+function threadOfApprovedTask(state: Readonly<State>, approval: ApprovalRequest): string | undefined {
+  if (approval.taskId === undefined) return undefined;
+  const task = (state.tasks ?? []).find((item) => item.id === approval.taskId);
+  return task !== undefined && task.attemptRunIds.includes(approval.runId) ? task.threadId : undefined;
+}
+
+export function orchestratorApprovalView(approval: ApprovalRequest, taskId: string): OrchestratorApprovalView {
+  return {
+    id: approval.id,
+    taskId,
+    runId: approval.runId,
+    title: approval.title,
+    ...(approval.detail === undefined ? {} : { detail: approval.detail }),
+    options: approval.options.map((option) => ({ ...option })),
+    status: approval.status,
+    requestedAt: approval.requestedAt,
+    ...(approval.expiresAt === undefined ? {} : { expiresAt: approval.expiresAt }),
+    ...(approval.resolvedAt === undefined ? {} : { resolvedAt: approval.resolvedAt }),
+    ...(approval.resolvedBy === undefined ? {} : { resolvedBy: { ...approval.resolvedBy } }),
+    ...(approval.selectedOptionId === undefined ? {} : { selectedOptionId: approval.selectedOptionId })
+  };
+}
+
+/**
+ * A thread's approvals: every pending one first, then the most recently settled ones. Approvals are
+ * stored newest first, so the settled tail is the recent history an orchestrator can learn from
+ * without being handed the whole record.
+ */
+export function orchestratorApprovalViews(state: Readonly<State>, threadId: string): OrchestratorApprovalView[] {
+  const owned = (state.approvals ?? [])
+    .map((approval) => ({ approval, threadId: threadOfApprovedTask(state, approval) }))
+    .filter((entry) => entry.threadId === threadId);
+  const pending = owned.filter((entry) => entry.approval.status === "pending").slice(0, orchestratorApprovalListLimits.pending);
+  const settled = owned.filter((entry) => entry.approval.status !== "pending").slice(0, orchestratorApprovalListLimits.settled);
+  return [...pending, ...settled].map((entry) => orchestratorApprovalView(entry.approval, entry.approval.taskId!));
+}
+
+export type OrchestratorApprovalAuthority =
+  | { kind: "authorized"; attachments: OrchestratorAttachment[] }
+  | { kind: "not-attached" }
+  | { kind: "forbidden" };
+
+/**
+ * Whether this connection may act on approvals, decided only from committed state. Naming a thread
+ * narrows the answer to that thread's attachment; omitting it answers for every thread the
+ * connection holds.
+ */
+export function orchestratorApprovalAuthority(state: Readonly<State>, connectionId: string, threadId?: string): OrchestratorApprovalAuthority {
+  const held = (state.orchestratorAttachments ?? []).filter((attachment) =>
+    attachment.connectionId === connectionId && attachment.status === "attached" && (threadId === undefined || attachment.threadId === threadId));
+  if (held.length === 0) return { kind: "not-attached" };
+  const attachments = held.filter((attachment) => {
+    const client = (state.orchestratorClients ?? []).find((item) => item.id === attachment.clientId);
+    return client !== undefined && client.revokedAt === undefined && client.scopes.includes("resolve-approvals");
+  });
+  return attachments.length === 0 ? { kind: "forbidden" } : { kind: "authorized", attachments };
+}
+
+export interface OrchestratorApprovalResolutionRequest {
+  approvalId: string;
+  resolution: ApprovalResolutionInput;
+}
+
+export type OrchestratorApprovalResolutionResult =
+  | { kind: "not-attached" }
+  | { kind: "forbidden" }
+  | ApprovalResolutionResult;
+
+/** Parses `resolve_approval` arguments; the resolution itself is validated by the operator parser. */
+export function parseOrchestratorApprovalResolution(value: unknown): Validation<OrchestratorApprovalResolutionRequest> {
+  const allowed = ["approvalId", "idempotencyKey", "optionId", "cancel"];
+  if (!isRecord(value) || !Object.keys(value).every((key) => allowed.includes(key))) {
+    return { ok: false, reason: "resolve_approval accepts only approvalId, idempotencyKey, optionId, and cancel" };
+  }
+  const { approvalId, ...rest } = value;
+  if (typeof approvalId !== "string" || approvalId.length === 0) return { ok: false, reason: "approvalId must be a non-empty string" };
+  const resolution = parseApprovalResolution({ ...rest, expectedStatus: "pending" });
+  if (!resolution.ok) return resolution;
+  return { ok: true, value: { approvalId, resolution: resolution.value } };
+}
+
+/**
+ * Resolves one approval on behalf of an attached external orchestrator. Call it inside the store
+ * transaction that commits the resolution: it re-reads the credential's scopes and revocation from
+ * the state being committed, so no earlier read can authorize a decision.
+ *
+ * An approval this connection may not act on — another thread's, or one whose run is no attempt of
+ * a known task — is reported exactly as an approval that does not exist, so the answer never leaks
+ * which approvals the hub holds.
+ */
+export function resolveApprovalForOrchestrator(
+  state: State,
+  connectionId: string,
+  request: OrchestratorApprovalResolutionRequest,
+  at: string
+): OrchestratorApprovalResolutionResult {
+  const authority = orchestratorApprovalAuthority(state, connectionId);
+  if (authority.kind !== "authorized") return authority;
+  const approval = (state.approvals ?? []).find((item) => item.id === request.approvalId);
+  const threadId = approval === undefined ? undefined : threadOfApprovedTask(state, approval);
+  const attachment = threadId === undefined ? undefined : authority.attachments.find((item) => item.threadId === threadId);
+  if (approval === undefined || attachment === undefined) return { kind: "not-found" };
+  return resolveApprovalInState(state, approval.id, request.resolution, at, {
+    kind: "orchestrator",
+    clientId: attachment.clientId,
+    attachmentId: attachment.id
+  });
 }
