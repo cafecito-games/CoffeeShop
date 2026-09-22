@@ -7,7 +7,13 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
+
+// attachmentReleaseBound is how long a closed bridge socket may take to release its attachments.
+// It is well under the heartbeat expiry the hub falls back on (45 seconds, refreshed every 15 by a
+// live bridge), so the two paths cannot be mistaken for each other.
+const attachmentReleaseBound = 25 * time.Second
 
 // mintOrchestratorClient mints one orchestrator credential through the operator REST API, exactly
 // as the PWA's "Connect a Claude Code orchestrator" dialog does, and returns its id and the secret
@@ -256,10 +262,17 @@ func TestExternalClaudeCodeOrchestration(t *testing.T) {
 	// The operator's machine dies. Work continues, events accumulate, and the hub never starts an
 	// orchestrator of its own for a thread an operator's session owns.
 	session.stop(true)
+	killedAt := time.Now()
 	cluster.eventually("the dead session's attachment to be released", func(current snapshot) (bool, string) {
 		_, attached := current.attachedTo(threadID)
 		return !attached, "the thread is still attached"
 	})
+	// The closed socket is what must release the attachment. The heartbeat expiry sweep reaches the
+	// same state eventually, so a release that takes longer than a heartbeat interval means the
+	// socket path stopped working and only the slow safety net is left.
+	if elapsed := time.Since(killedAt); elapsed > attachmentReleaseBound {
+		t.Fatalf("the attachment was released only after %s, which is the heartbeat expiry sweep rather than the closed socket", elapsed)
+	}
 	orphaned := cluster.eventually("alpha to finish while no session is attached", func(current snapshot) (bool, string) {
 		item, found := current.run(alphaRun.ID)
 		return found && item.Status == "completed", "alpha is " + item.Status
