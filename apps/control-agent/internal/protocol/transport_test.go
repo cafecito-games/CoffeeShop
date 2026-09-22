@@ -41,6 +41,11 @@ func TestRunTransportSelectionValidateAcceptsEveryWellFormedSelection(t *testing
 		}
 		valid = append(valid, fallback)
 	}
+	for _, policy := range ApprovalPolicies {
+		withPolicy := validAcpSelection()
+		withPolicy.ApprovalPolicy = policy
+		valid = append(valid, withPolicy)
+	}
 	for index, selection := range valid {
 		require.NoError(t, selection.Validate(), "selection %d (%s -> %s)", index, selection.RequestedTransport, selection.SelectedTransport)
 	}
@@ -161,6 +166,13 @@ func TestRunTransportSelectionValidateRejectsMalformedSelections(t *testing.T) {
 			},
 			want: "ACP adapter version is not a normalized version",
 		},
+		{
+			name: "unknown approval policy",
+			selection: RunTransportSelection{
+				RequestedTransport: TransportNativeCLI, SelectedTransport: TransportNativeCLI, ApprovalPolicy: "yolo",
+			},
+			want: "transport selection names an unknown approval policy",
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -213,5 +225,6 @@ func TestTransportVocabularyMatchesTheProtocolSourceOfTruth(t *testing.T) {
 		"acp-adapter-unavailable", "acp-protocol-incompatible", "acp-capability-missing", "acp-mcp-unavailable",
 	}, TransportFallbackReasons)
 	require.Equal(t, []string{"setup-ledger", "administrator-override"}, ACPAdapterSources)
+	require.Equal(t, []string{"manual", "auto", "bypass"}, ApprovalPolicies)
 	require.Equal(t, "transport-native-fallback", WarningTransportNativeFallback)
 }

@@ -48,6 +48,9 @@ type Report struct {
 	Adapters         []AdapterDoctorEntry `json:"adapters"`
 	HubConnectivity  HubConnectivity      `json:"hubConnectivity"`
 	ProjectReadiness string               `json:"projectReadiness"`
+	// ApprovalPolicies is the effective approval policy per harness that the given configuration
+	// would run under; the doctor command fills it in from its --approval-policy setting.
+	ApprovalPolicies map[string]string `json:"approvalPolicies,omitempty"`
 }
 
 // ProjectReadinessNotAvailable documents that no hub REST endpoint yet exists for a Barista-local

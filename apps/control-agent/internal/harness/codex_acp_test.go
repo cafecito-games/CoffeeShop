@@ -35,6 +35,7 @@ type codexRunOptions struct {
 	mcpConnectTimeout time.Duration
 	context           context.Context
 	onEvent           func(protocol.HarnessEvent)
+	approvalPolicies  ApprovalPolicies
 }
 
 // fakeCodexNativeBinary is the native CLI path Barista passes to codex-acp as CODEX_PATH.
@@ -71,7 +72,7 @@ func executeCodex(t *testing.T, options codexRunOptions) codexRun {
 		CancelGracePeriod: 2 * time.Second,
 		MCPConnectTimeout: timeout,
 	})
-	runner := NewRunner(options.native).WithACP(driver)
+	runner := NewRunner(options.native).WithACP(driver).WithApprovalPolicies(options.approvalPolicies)
 	if options.operatorFallback {
 		runner.WithNativeFallback("codex-cli")
 	}

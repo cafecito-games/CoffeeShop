@@ -77,6 +77,9 @@ type Config struct {
 	// when unconfigured. An empty value makes Claude ACP unavailable; it never defaults to either
 	// mode. The native claude-cli path never reads this setting.
 	ClaudeACPAuthMode string
+	// ApprovalPolicies is the administrator's effective approval policy for each harness that has a
+	// non-manual one; a harness without an entry is manual. Only this configuration sets it.
+	ApprovalPolicies harness.ApprovalPolicies
 }
 
 type stringList []string
@@ -127,6 +130,7 @@ func Parse(args []string) (Config, error) {
 	toolchains := strictStringList(splitStrictEnv("BARISTA_TOOLCHAINS"))
 	acpAdapters := strictStringList(splitStrictEnv("BARISTA_ACP_ADAPTERS"))
 	nativeFallback := strictStringList(splitStrictEnv("BARISTA_ACP_NATIVE_FALLBACK"))
+	approvalPolicies := ApprovalPolicyEnvironment()
 	set := flag.NewFlagSet("barista", flag.ContinueOnError)
 	set.SetOutput(os.Stderr)
 	endpoint := set.String("control-endpoint", env("CONTROL_ENDPOINT", DefaultEndpoint), "Coffee Shop URL or WebSocket endpoint")
@@ -147,6 +151,7 @@ func Parse(args []string) (Config, error) {
 	set.Var(&acpAdapters, "acp-adapter", "ACP adapter override as <harness-id>=sha256:<64 lowercase hex>:<absolute path>; repeat the flag for multiple harnesses")
 	set.Var(&nativeFallback, "acp-native-fallback", "harness ID whose acp-v1 runs may fall back to the native CLI before the prompt when the dispatch permits it; repeat the flag for multiple harnesses")
 	claudeACPAuthMode := set.String("claude-acp-auth-mode", env("BARISTA_CLAUDE_ACP_AUTH_MODE", ""), "administrator auth-mode policy required before Claude ACP is loaded: local-subscription or api (unset keeps Claude ACP unavailable)")
+	ApprovalPolicyFlag(set, &approvalPolicies)
 	if err := set.Parse(args); err != nil {
 		return Config{}, err
 	}
@@ -219,6 +224,10 @@ func Parse(args []string) (Config, error) {
 	if trimmedClaudeACPAuthMode != "" && trimmedClaudeACPAuthMode != harness.ClaudeACPAuthModeLocalSubscription && trimmedClaudeACPAuthMode != harness.ClaudeACPAuthModeAPI {
 		return Config{}, fmt.Errorf("claude acp auth mode must be %q or %q", harness.ClaudeACPAuthModeLocalSubscription, harness.ClaudeACPAuthModeAPI)
 	}
+	validatedApprovalPolicies, err := ParseApprovalPolicies(approvalPolicies)
+	if err != nil {
+		return Config{}, err
+	}
 
 	return Config{
 		ControlEndpoint:  wsEndpoint,
@@ -240,7 +249,67 @@ func Parse(args []string) (Config, error) {
 		ACPAdapters:         validatedOverrides,
 		ACPNativeFallback:   validatedFallback,
 		ClaudeACPAuthMode:   trimmedClaudeACPAuthMode,
+		ApprovalPolicies:    validatedApprovalPolicies,
 	}, nil
+}
+
+// ParseApprovalPolicies resolves the approval policy entries into the effective policy per
+// harness. An entry is either a bare policy, which applies to every harness Barista drives, or
+// <harness-id>=<policy>, which applies to that harness and overrides the bare policy regardless of
+// order. Exact repeats are harmless, but two different policies for the same scope conflict and
+// stop startup rather than letting the last one silently win. Only non-manual results are kept.
+func ParseApprovalPolicies(values []string) (harness.ApprovalPolicies, error) {
+	nodePolicy := ""
+	harnessPolicies := map[string]string{}
+	for index, value := range values {
+		if value == "" {
+			return nil, fmt.Errorf("approval policy at index %d is empty", index)
+		}
+		harnessID, policy, scoped := strings.Cut(value, "=")
+		if !scoped {
+			harnessID, policy = "", value
+		}
+		harnessID, policy = strings.TrimSpace(harnessID), strings.TrimSpace(policy)
+		if !slices.Contains(protocol.ApprovalPolicies, policy) {
+			return nil, fmt.Errorf("approval policy at index %d must be %s", index, strings.Join(protocol.ApprovalPolicies, ", "))
+		}
+		if !scoped {
+			if nodePolicy != "" && nodePolicy != policy {
+				return nil, fmt.Errorf("approval policy at index %d conflicts with an earlier node-wide approval policy", index)
+			}
+			nodePolicy = policy
+			continue
+		}
+		if !slices.Contains(harness.ApprovalPolicyHarnessIDs, harnessID) {
+			return nil, fmt.Errorf("approval policy at index %d must name one of the harnesses %s", index, strings.Join(harness.ApprovalPolicyHarnessIDs, ", "))
+		}
+		if existing, seen := harnessPolicies[harnessID]; seen && existing != policy {
+			return nil, fmt.Errorf("approval policy at index %d conflicts with an earlier approval policy for %s", index, harnessID)
+		}
+		harnessPolicies[harnessID] = policy
+	}
+	effective := harness.ApprovalPolicies{}
+	for _, harnessID := range harness.ApprovalPolicyHarnessIDs {
+		policy, scoped := harnessPolicies[harnessID]
+		if !scoped {
+			policy = nodePolicy
+		}
+		if policy != "" && policy != protocol.ApprovalPolicyManual {
+			effective[harnessID] = policy
+		}
+	}
+	return effective, nil
+}
+
+// ApprovalPolicyEnvironment returns the BARISTA_APPROVAL_POLICY entries, for commands that accept
+// the same --approval-policy setting as the daemon.
+func ApprovalPolicyEnvironment() []string {
+	return splitStrictEnv("BARISTA_APPROVAL_POLICY")
+}
+
+// ApprovalPolicyFlag registers the repeatable --approval-policy flag on set, seeded with values.
+func ApprovalPolicyFlag(set *flag.FlagSet, values *[]string) {
+	set.Var((*strictStringList)(values), "approval-policy", "approval policy as manual, auto, or bypass for every harness, or <harness-id>=<policy> for one harness (which overrides the node-wide policy); repeat the flag for multiple harnesses (default manual)")
 }
 
 // validatedACPAdapterOverrides parses <harness-id>=sha256:<digest>:<absolute path> entries. Like

@@ -56,6 +56,7 @@ Queued runs record `dispatchedAt` when the hub makes a persisted delivery decisi
 - Barista canonicalizes paths before enforcing `WORKSPACE_ROOTS`.
 - Claude Code runs in auto permission mode with unanswered prompts denied.
 - Codex runs with `workspace-write` sandboxing.
+- Both hold under the default `manual` approval policy; only a compute node's administrator can relax it for a harness with Barista's `--approval-policy`, and the hub merely displays the result.
 - Automatic agent handoffs have a hard depth limit.
 - MCP binds every tool call to an active run and derives thread, node, agent, parent, and workspace identity server-side.
 - Only agents explicitly configured to delegate receive `delegate_task`, `submit_tasks`, and `get_execution_inventory`; the hub re-checks that permission on every call.

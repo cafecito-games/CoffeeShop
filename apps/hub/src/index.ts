@@ -27,6 +27,7 @@ import { CoordinationError } from "./coordination.js";
 import { createHubToolHandler, hubToolError } from "./hubTools.js";
 import { TaskEventWaiters } from "./mailbox.js";
 import { forgetNodeCapabilityReport, getNodeCapabilityReport, recordNodeCapabilityReport } from "./nodeCapabilities.js";
+import { registeredComputeNode } from "./nodeRegistration.js";
 import { loadProjectProfilesFromFile, ProjectProfileRegistry } from "./projectProfiles.js";
 import { computeNodeProjectReadiness } from "./projectReadiness.js";
 import { retainedHarnessEvents } from "./harnessEvents.js";
@@ -486,7 +487,7 @@ wss.on("connection", (socket, request) => {
       forgetNodeCapabilityReport(nodeId);
       await store.transact((state) => {
         const index = state.nodes.findIndex((node) => node.id === nodeId);
-        const online: ComputeNode = { ...message.node, status: "online", lastSeen: new Date().toISOString() };
+        const online: ComputeNode = registeredComputeNode(message.node, new Date().toISOString());
         if (index >= 0) state.nodes[index] = online; else state.nodes.push(online);
         state.events.unshift(newEvent({ type: "node", title: `${online.name} connected`, detail: `${online.platform} · ${online.harnesses.filter((h) => h.available).map((h) => h.label).join(" + ")}` }));
       });

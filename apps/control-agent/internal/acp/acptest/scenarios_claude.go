@@ -11,16 +11,27 @@ const (
 	ClaudeAlternateModel = "claude-opus-4-2"
 	claudeAgentInfo      = `{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude","version":"` + ClaudeAdapterVersion + `"}`
 	claudeCapabilities   = `{"loadSession":true,"promptCapabilities":{"image":true,"embeddedContext":true},"mcpCapabilities":{"http":true,"sse":false},"sessionCapabilities":{"close":{},"resume":{}}}`
-	// claudeModes uses claude-agent-acp's wire ids. "bypassPermissions" is deliberately absent: the
-	// real adapter offers it only conditionally and Barista must never select or rely on it.
-	claudeModes  = `[{"value":"default","name":"Manual"},{"value":"acceptEdits","name":"Accept edits"},{"value":"plan","name":"Plan"},{"value":"auto","name":"Auto"}]`
-	claudeModels = `[{"group":"anthropic","name":"Anthropic","options":[{"value":"` + ClaudeModel + `","name":"Sonnet 4.6"},{"value":"` + ClaudeAlternateModel + `","name":"Opus 4.2"}]}]`
+	// claudeModes uses claude-agent-acp's wire ids. "bypassPermissions" is absent because the real
+	// adapter offers it only conditionally, so a bypass approval policy must fail closed against
+	// it; claudeModesWithBypass is the offer from an adapter that permits bypass.
+	claudeModes           = `[{"value":"default","name":"Manual"},{"value":"acceptEdits","name":"Accept edits"},{"value":"plan","name":"Plan"},{"value":"auto","name":"Auto"}]`
+	claudeModesWithBypass = `[{"value":"default","name":"Manual"},{"value":"acceptEdits","name":"Accept edits"},{"value":"plan","name":"Plan"},{"value":"auto","name":"Auto"},{"value":"bypassPermissions","name":"Bypass permissions"}]`
+	claudeModels          = `[{"group":"anthropic","name":"Anthropic","options":[{"value":"` + ClaudeModel + `","name":"Sonnet 4.6"},{"value":"` + ClaudeAlternateModel + `","name":"Opus 4.2"}]}]`
 )
 
 // ClaudeConfigOptions renders claude-agent-acp's configOptions array with the given current mode
 // and model.
 func ClaudeConfigOptions(mode, model string) string {
-	return `[{"id":"mode","name":"Mode","category":"mode","type":"select","currentValue":"` + mode + `","options":` + claudeModes + `},` +
+	return claudeConfigOptions(claudeModes, mode, model)
+}
+
+// ClaudeBypassConfigOptions is ClaudeConfigOptions from an adapter that also offers bypassPermissions.
+func ClaudeBypassConfigOptions(mode, model string) string {
+	return claudeConfigOptions(claudeModesWithBypass, mode, model)
+}
+
+func claudeConfigOptions(modes, mode, model string) string {
+	return `[{"id":"mode","name":"Mode","category":"mode","type":"select","currentValue":"` + mode + `","options":` + modes + `},` +
 		`{"id":"model","name":"Model","category":"model","type":"select","currentValue":"` + model + `","options":` + claudeModels + `}]`
 }
 
@@ -105,6 +116,26 @@ func init() {
 			Expect("session/prompt"),
 			Update(`{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"claude done"}}`),
 		}, Finish()),
+
+		"claude-auto": join(
+			ClaudeHandshake(ClaudeConfigOptions("acceptEdits", ClaudeModel)),
+			ClaudeSetOption(ClaudeConfigOptions("auto", ClaudeModel)),
+			[]Step{
+				ConnectMCP(),
+				Expect("session/prompt"),
+				Update(`{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"claude done"}}`),
+			}, Finish()),
+
+		"claude-bypass": join(
+			ClaudeHandshake(ClaudeBypassConfigOptions("acceptEdits", ClaudeModel)),
+			ClaudeSetOption(ClaudeBypassConfigOptions("bypassPermissions", ClaudeModel)),
+			[]Step{
+				ConnectMCP(),
+				Expect("session/prompt"),
+				Update(`{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"claude done"}}`),
+			}, Finish()),
+
+		"claude-no-bypass": join(ClaudeHandshake(ClaudeConfigOptions("acceptEdits", ClaudeModel)), []Step{DrainUntilEOF()}),
 
 		"claude-mode-already-set": join(ClaudeHandshake(ClaudeConfigOptions("default", ClaudeModel)), []Step{
 			ConnectMCP(),

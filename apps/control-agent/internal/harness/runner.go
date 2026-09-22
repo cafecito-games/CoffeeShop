@@ -34,7 +34,7 @@ func (driver nativeDriver) Execute(ctx context.Context, invocation Invocation) (
 	if !available {
 		return "", fmt.Errorf("harness %s is not installed or did not pass its version check", run.HarnessID)
 	}
-	binary, args, err := commandFor(run, invocation.Agent, mcpConfig)
+	binary, args, err := commandFor(run, invocation.Agent, mcpConfig, invocation.approvalPolicy)
 	if err != nil {
 		return "", err
 	}
@@ -89,11 +89,31 @@ func composePrompt(run protocol.Run, agent protocol.Agent) string {
 	return agent.SystemPrompt + coordinationContract + "\n\nAvailable teammate ids may be listed by the control plane.\n\nUser task:\n" + run.Prompt
 }
 
-func commandFor(run protocol.Run, agent protocol.Agent, mcpConfig mcpserver.Config) (string, []string, error) {
+// nativeClaudePermissionMode maps an approval policy onto the native Claude CLI's permission mode.
+// The native CLI never prompts: under manual and auto, "auto" lets Claude's classifier approve
+// routine actions and denies anything that would prompt; only bypass approves everything.
+func nativeClaudePermissionMode(approvalPolicy string) string {
+	if approvalPolicy == protocol.ApprovalPolicyBypass {
+		return "bypassPermissions"
+	}
+	return "auto"
+}
+
+// nativeCodexSandboxArguments maps an approval policy onto the native Codex CLI's sandbox. `codex
+// exec` never prompts: under manual and auto it runs in the workspace-write sandbox; only bypass
+// removes both the sandbox and approvals.
+func nativeCodexSandboxArguments(approvalPolicy string) []string {
+	if approvalPolicy == protocol.ApprovalPolicyBypass {
+		return []string{"--dangerously-bypass-approvals-and-sandbox"}
+	}
+	return []string{"--sandbox", "workspace-write"}
+}
+
+func commandFor(run protocol.Run, agent protocol.Agent, mcpConfig mcpserver.Config, approvalPolicy string) (string, []string, error) {
 	prompt := composePrompt(run, agent)
 	switch run.HarnessID {
 	case "claude-cli":
-		args := []string{"-p", prompt, "--output-format", "stream-json", "--verbose", "--permission-mode", "auto", "--permission-prompts", "none", "--model", run.Model}
+		args := []string{"-p", prompt, "--output-format", "stream-json", "--verbose", "--permission-mode", nativeClaudePermissionMode(approvalPolicy), "--permission-prompts", "none", "--model", run.Model}
 		if mcpConfig.URL != "" {
 			configuration, err := json.Marshal(map[string]any{"mcpServers": map[string]any{"coffee_shop_hub": map[string]any{
 				"type": "http", "url": mcpConfig.URL, "headers": map[string]string{"Authorization": "Bearer ${COFFEE_SHOP_MCP_TOKEN}"},
@@ -109,7 +129,7 @@ func commandFor(run protocol.Run, agent protocol.Agent, mcpConfig mcpserver.Conf
 		}
 		return "claude", args, nil
 	case "codex-cli":
-		args := []string{"exec", "--json", "--sandbox", "workspace-write"}
+		args := append([]string{"exec", "--json"}, nativeCodexSandboxArguments(approvalPolicy)...)
 		if run.Model != "" && run.Model != "default" {
 			args = append(args, "--model", run.Model)
 		}

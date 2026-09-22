@@ -255,6 +255,56 @@ func TestDispatchRunsCodexThroughAcpEndToEnd(t *testing.T) {
 	require.NotNil(t, acptest.ReceivedMethod(t, record, "session/set_config_option"))
 }
 
+func TestDispatchCannotChangeTheNodeApprovalPolicy(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		policies harness.ApprovalPolicies
+		injected string
+		scenario string
+		mode     string
+		reported string
+	}{
+		{name: "manual node", policies: nil, injected: "bypass", scenario: "codex-success", mode: "read-only", reported: ""},
+		{name: "auto node", policies: harness.ApprovalPolicies{"codex-cli": "auto"}, injected: "manual", scenario: "codex-agent", mode: "agent", reported: "auto"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			executable, err := os.Executable()
+			require.NoError(t, err)
+			directory := t.TempDir()
+			record := filepath.Join(directory, "frames.jsonl")
+			t.Cleanup(func() { acptest.KillDescendants(t, record) })
+			runner := harness.NewRunner(nil).WithACP(harness.NewACPDriver(harness.ACPDriverOptions{
+				Adapters: map[string]harness.ACPAdapter{"codex-cli": {
+					Binary: executable, Environment: acptest.Environment(test.scenario, record),
+					ID: "codex-acp", Version: acptest.CodexAdapterVersion, Source: protocol.ACPAdapterSourceSetupLedger,
+				}},
+				RequestTimeout:    5 * time.Second,
+				MCPConnectTimeout: 5 * time.Second,
+			})).WithApprovalPolicies(test.policies)
+			client := NewClient(config.Config{Concurrency: 1, WorkspaceRoots: []string{directory}}, protocol.ComputeNode{ID: "node-one"}, runner, emptyCapabilityReport)
+			bridgeForDispatch(t, client)
+
+			// A hub that tries to choose the policy anywhere in the dispatch is ignored: no dispatch
+			// field carries it, so it never reaches the runner.
+			raw := fmt.Sprintf(`{"type":"dispatch","approvalPolicy":%[1]q,`+
+				`"run":{"id":"run-policy","harnessId":"codex-cli","model":"default","workspace":%[2]q,"prompt":"fix","approvalPolicy":%[1]q,"mode":%[1]q},`+
+				`"agent":{"id":"agent-one","approvalPolicy":%[1]q},`+
+				`"execution":{"transport":"acp-v1","approvalPolicy":%[1]q}}`, test.injected, directory)
+			inbound, err := protocol.DecodeInbound([]byte(raw))
+			require.NoError(t, err)
+			client.handle(context.Background(), inbound)
+
+			waitForDispatchMessage(t, client, "run.completed")
+			started := outboundMessages(t, client)[messageIndexOf(t, client, "run.started")]
+			require.NotNil(t, started.Transport)
+			require.Equal(t, test.reported, started.Transport.ApprovalPolicy)
+			setOption := acptest.ReceivedMethod(t, record, "session/set_config_option")
+			require.Equal(t, map[string]any{"sessionId": acptest.SessionID, "configId": "mode", "value": test.mode}, setOption["params"])
+			require.Equal(t, test.mode, acptest.RecordedEnvironment(t, record)["INITIAL_AGENT_MODE"])
+		})
+	}
+}
+
 func TestSessionHoldsEventsUntilStartAndThenForwardsThemInOrder(t *testing.T) {
 	client := newSessionClient()
 	session := client.openSession("run-one")

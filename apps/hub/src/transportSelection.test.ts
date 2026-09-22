@@ -9,6 +9,7 @@ import type {
   HubToControlAgent,
   ProjectProfile,
   Run,
+  RunTransportSelection,
   Task,
   Thread
 } from "@coffee-shop/protocol";
@@ -230,6 +231,18 @@ test("run.started records a consistent transport selection", () => {
   assert.equal(current.runs[0].status, "running");
   assert.deepEqual(current.runs[0].transportSelection, acpReportedSelection);
   assert.equal(current.events.filter((event) => event.title.includes("transport")).length, 0);
+});
+
+test("run.started records the approval policy the run executed under", () => {
+  const current = lifecycleState({ transport: "acp-v1" });
+  const reported = { ...acpReportedSelection, approvalPolicy: "bypass" } as const;
+  assert.equal(applyRunLifecycle(current, { type: "run.started", runId: "run-one", at, transport: reported }), true);
+  assert.equal(current.runs[0].transportSelection?.approvalPolicy, "bypass");
+
+  const unrecognized = lifecycleState({ transport: "acp-v1" });
+  const malformed = { ...acpReportedSelection, approvalPolicy: "yolo" } as unknown as RunTransportSelection;
+  assert.equal(applyRunLifecycle(unrecognized, { type: "run.started", runId: "run-one", at, transport: malformed }), true);
+  assert.equal(unrecognized.runs[0].transportSelection, undefined);
 });
 
 test("run.started announces a permitted fallback to the native CLI", () => {

@@ -36,6 +36,8 @@ export interface HarnessProfile {
   transports?: HarnessTransport[];
   /** Version-4 inventory: capabilities negotiated with an explicitly installed ACP adapter. */
   acp?: AcpAgentCapabilities;
+  /** The node administrator's approval policy for this harness; absent means `manual`. Read-only to the hub. */
+  approvalPolicy?: ApprovalPolicy;
 }
 
 export interface ComputeNode {
@@ -417,6 +419,17 @@ export const isTransportFallbackReason = isOneOf(transportFallbackReasons);
 export const acpAdapterSources = ["setup-ledger", "administrator-override"] as const;
 export type AcpAdapterSource = typeof acpAdapterSources[number];
 
+/**
+ * How a harness's permission requests are decided, as declared by the compute node's administrator
+ * in Barista's own configuration. `manual` sends every ACP permission request to Coffee Shop
+ * approvals; `auto` lets the harness decide them itself and escalate only what it still asks about;
+ * `bypass` disables approvals (and, for Codex, its sandbox). The hub and PWA only display it: no
+ * dispatch, task, or run instruction can set or change it.
+ */
+export const approvalPolicies = ["manual", "auto", "bypass"] as const;
+export type ApprovalPolicy = typeof approvalPolicies[number];
+export const isApprovalPolicy = isOneOf(approvalPolicies);
+
 /** The harness warning code Barista emits when a run falls back to the native CLI. */
 export const transportNativeFallbackWarning = "transport-native-fallback";
 
@@ -432,6 +445,8 @@ export interface RunTransportSelection {
   adapter?: { id: string; version: string; source: AcpAdapterSource };
   /** Capabilities negotiated for this run, when ACP was selected. */
   acp?: AcpAgentCapabilities;
+  /** The node approval policy the run executed under; absent means `manual`. */
+  approvalPolicy?: ApprovalPolicy;
 }
 
 /*
@@ -1370,7 +1385,7 @@ const isAdapterProvenance = (value: unknown) =>
 
 /** Validates a Barista-reported transport selection; mirrors Go `RunTransportSelection.Validate`. */
 export function validateRunTransportSelection(value: unknown): Validation<RunTransportSelection> {
-  if (!isRecord(value) || !hasOnlyKeys(value, ["requestedTransport", "selectedTransport", "fallbackReason", "harnessVersion", "adapter", "acp"])) return reject("transport selection must contain only declared fields");
+  if (!isRecord(value) || !hasOnlyKeys(value, ["requestedTransport", "selectedTransport", "fallbackReason", "harnessVersion", "adapter", "acp", "approvalPolicy"])) return reject("transport selection must contain only declared fields");
   if (!isHarnessTransport(value.requestedTransport) || !isHarnessTransport(value.selectedTransport)) return reject("transport selection names an unknown transport");
   if (value.selectedTransport === value.requestedTransport) {
     if (value.fallbackReason !== undefined) return reject("transport selection has a fallback reason without a fallback");
@@ -1379,6 +1394,7 @@ export function validateRunTransportSelection(value: unknown): Validation<RunTra
   }
   if (!isOptional(value.harnessVersion, isNormalizedVersion)) return reject("transport selection harness version is not a normalized version");
   if (!isOptional(value.adapter, isAdapterProvenance)) return reject("transport selection adapter provenance is malformed");
+  if (!isOptional(value.approvalPolicy, isApprovalPolicy)) return reject("transport selection names an unknown approval policy");
   if (value.acp !== undefined && (value.selectedTransport !== "acp-v1" || !isAcpAgentCapabilities(value.acp))) return reject("transport selection ACP capabilities are malformed or belong to a native run");
   return accept(value as unknown as RunTransportSelection);
 }

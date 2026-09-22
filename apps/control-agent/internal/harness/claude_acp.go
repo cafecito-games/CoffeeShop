@@ -9,24 +9,43 @@ import (
 	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/protocol"
 )
 
-// claude-acp session configuration option identifiers and the permission mode Barista requires.
+// claude-acp session configuration option identifiers and the permission modes Barista selects.
 const (
 	claudeModeOption  = "mode"
 	claudeModelOption = "model"
 	// claudeManualPermissionMode is claude-agent-acp's wire id for its "Manual" preset. Every tool
 	// call is sent to the client as an ACP permission request instead of being auto-approved, the
 	// same fail-closed posture as the native CLI's `--permission-mode auto` with unanswered prompts
-	// denied. Barista never selects "acceptEdits", "auto", or "bypassPermissions", each of which
-	// lets the adapter approve a tool call without a Coffee Shop decision.
+	// denied. It is the mode for the default manual approval policy.
 	claudeManualPermissionMode = "default"
+	// claudeAutoPermissionMode lets Claude's own classifier approve routine tool calls; only the
+	// calls it escalates reach Coffee Shop approvals. Used only under the administrator's auto policy.
+	claudeAutoPermissionMode = "auto"
+	// claudeBypassPermissionMode approves every tool call without asking anyone. Used only under
+	// the administrator's bypass policy. The adapter offers it conditionally, and a run whose
+	// adapter does not offer it fails rather than running under another mode.
+	claudeBypassPermissionMode = "bypassPermissions"
 )
+
+// claudePermissionMode maps an approval policy onto claude-agent-acp's mode. "acceptEdits" and
+// "plan" are never selected.
+func claudePermissionMode(approvalPolicy string) string {
+	switch approvalPolicy {
+	case protocol.ApprovalPolicyAuto:
+		return claudeAutoPermissionMode
+	case protocol.ApprovalPolicyBypass:
+		return claudeBypassPermissionMode
+	default:
+		return claudeManualPermissionMode
+	}
+}
 
 // claudeACPProvider drives the claude-agent-acp adapter. The adapter authenticates through
 // Claude's own locally owned subscription storage or inherited provider environment exactly as
 // the native CLI does; Barista never sets, reads, or forwards an account credential, and never
-// switches a subscription session onto API billing. The permission mode is applied through
-// session configuration and confirmed before the prompt is sent, so neither an adapter default nor
-// an inherited operator environment can weaken it to an auto-approving mode.
+// switches a subscription session onto API billing. The permission mode follows the node's
+// approval policy and is applied through session configuration and confirmed before the prompt is
+// sent, so neither an adapter default nor an inherited operator environment can change it.
 func claudeACPProvider() ACPProvider {
 	return ACPProvider{
 		Configuration:        claudeSessionConfiguration,
@@ -40,8 +59,8 @@ func claudeACPProvider() ACPProvider {
 // keeps Claude's own configured model, exactly like the native CLI without --model; any other
 // model must be offered and applied by the adapter or the run fails rather than silently using the
 // provider default.
-func claudeSessionConfiguration(run protocol.Run) []acp.ConfigSelection {
-	selections := []acp.ConfigSelection{{ID: claudeModeOption, Value: claudeManualPermissionMode, Requirement: acp.ConfigPolicy}}
+func claudeSessionConfiguration(run protocol.Run, approvalPolicy string) []acp.ConfigSelection {
+	selections := []acp.ConfigSelection{{ID: claudeModeOption, Value: claudePermissionMode(approvalPolicy), Requirement: acp.ConfigPolicy}}
 	if run.Model != "" && run.Model != "default" {
 		selections = append(selections, acp.ConfigSelection{ID: claudeModelOption, Value: run.Model, Requirement: acp.ConfigRequested})
 	}

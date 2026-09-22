@@ -26,6 +26,17 @@ const (
 	ACPAdapterSourceAdministrator = "administrator-override"
 )
 
+// Approval policies a node administrator may declare for a harness, mirroring approvalPolicies in
+// the protocol source of truth. Manual sends every permission request to Coffee Shop approvals;
+// auto lets the harness approve routine actions itself; bypass disables the harness's approval
+// prompts and, for Codex, its sandbox. Only Barista's own configuration selects one: nothing the
+// hub sends can change it.
+const (
+	ApprovalPolicyManual = "manual"
+	ApprovalPolicyAuto   = "auto"
+	ApprovalPolicyBypass = "bypass"
+)
+
 // WarningTransportNativeFallback is the harness warning code Barista emits when a run falls back.
 const WarningTransportNativeFallback = "transport-native-fallback"
 
@@ -35,6 +46,7 @@ const ACPAdapterNameMaximumBytes = 128
 var (
 	TransportFallbackReasons = []string{FallbackACPAdapterUnavailable, FallbackACPProtocolIncompatible, FallbackACPCapabilityMissing, FallbackACPMCPUnavailable}
 	ACPAdapterSources        = []string{ACPAdapterSourceSetupLedger, ACPAdapterSourceAdministrator}
+	ApprovalPolicies         = []string{ApprovalPolicyManual, ApprovalPolicyAuto, ApprovalPolicyBypass}
 )
 
 // ACPAdapterProvenance identifies the verified adapter executable an ACP run used or attempted.
@@ -54,6 +66,9 @@ type RunTransportSelection struct {
 	HarnessVersion     string                `json:"harnessVersion,omitempty"`
 	Adapter            *ACPAdapterProvenance `json:"adapter,omitempty"`
 	ACP                *AcpAgentCapabilities `json:"acp,omitempty"`
+	// ApprovalPolicy is the approval policy the run executed under. Barista omits
+	// ApprovalPolicyManual, so an absent value means manual.
+	ApprovalPolicy string `json:"approvalPolicy,omitempty"`
 }
 
 // Validate mirrors validateRunTransportSelection in the protocol source of truth.
@@ -75,6 +90,9 @@ func (selection RunTransportSelection) Validate() error {
 		if len(adapter.ID) > LabelOrAcceleratorMaximumBytes || !LabelOrAcceleratorPattern.MatchString(adapter.ID) || !IsNormalizedVersion(adapter.Version) || !slices.Contains(ACPAdapterSources, adapter.Source) {
 			return errors.New("transport selection adapter provenance is malformed")
 		}
+	}
+	if selection.ApprovalPolicy != "" && !slices.Contains(ApprovalPolicies, selection.ApprovalPolicy) {
+		return errors.New("transport selection names an unknown approval policy")
 	}
 	if selection.ACP != nil {
 		if selection.SelectedTransport != TransportACP {

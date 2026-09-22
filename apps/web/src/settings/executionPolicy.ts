@@ -15,14 +15,14 @@ interface PolicyCopy {
 export const harnessPolicy = {
   "claude-cli": {
     label: "Claude Code",
-    detail: "Barista starts the official Claude CLI directly. Prompts are not answered interactively.",
+    detail: "Barista starts the official Claude CLI directly. Prompts are not answered interactively. These are the default manual approval policy's flags; a node administrator's bypass policy uses --permission-mode bypassPermissions instead.",
     verified: true,
     documentedAuthMode: "local-subscription",
     documentedFlags: "-p … --output-format stream-json --verbose --permission-mode auto --permission-prompts none --model …"
   },
   "codex-cli": {
     label: "Codex",
-    detail: "Barista starts Codex directly with workspace-scoped writes.",
+    detail: "Barista starts Codex directly with workspace-scoped writes. A node administrator's bypass approval policy replaces the sandbox with --dangerously-bypass-approvals-and-sandbox.",
     verified: true,
     documentedAuthMode: "local-account",
     documentedFlags: "exec --json --sandbox workspace-write [--model …] …"

@@ -35,6 +35,7 @@ type claudeRunOptions struct {
 	mcpConnectTimeout time.Duration
 	context           context.Context
 	onEvent           func(protocol.HarnessEvent)
+	approvalPolicies  ApprovalPolicies
 }
 
 // fakeClaudeNativeBinary is the native CLI path Barista passes to claude-agent-acp as
@@ -72,7 +73,7 @@ func executeClaude(t *testing.T, options claudeRunOptions) claudeRun {
 		CancelGracePeriod: 2 * time.Second,
 		MCPConnectTimeout: timeout,
 	})
-	runner := NewRunner(options.native).WithACP(driver)
+	runner := NewRunner(options.native).WithACP(driver).WithApprovalPolicies(options.approvalPolicies)
 	if options.operatorFallback {
 		runner.WithNativeFallback("claude-cli")
 	}
@@ -181,7 +182,7 @@ func TestClaudeSessionConfiguration(t *testing.T) {
 		}},
 	} {
 		t.Run("model "+testCase.model, func(t *testing.T) {
-			require.Equal(t, testCase.expected, claudeSessionConfiguration(protocol.Run{Model: testCase.model}))
+			require.Equal(t, testCase.expected, claudeSessionConfiguration(protocol.Run{Model: testCase.model}, protocol.ApprovalPolicyManual))
 		})
 	}
 }

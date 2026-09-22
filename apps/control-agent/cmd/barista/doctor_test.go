@@ -86,6 +86,37 @@ func TestDoctorHumanSummaryReportsUnreachableHub(t *testing.T) {
 	require.Contains(t, stdout, "manual-acp (manual-cli): harness=missing adapter=missing auth=unknown launch=not-ready")
 	require.Contains(t, stdout, "hub http://127.0.0.1:1: unreachable")
 	require.Contains(t, stdout, "project readiness:")
+	require.Contains(t, stdout, "approval policy for claude-cli: manual (every ACP permission request is sent to Coffee Shop)")
+	require.Contains(t, stdout, "approval policy for codex-cli: manual")
+}
+
+func TestDoctorReportsTheEffectiveApprovalPolicy(t *testing.T) {
+	emptyPATH(t)
+	manifestPath := doctorManifestFixture(t)
+	t.Setenv("BARISTA_APPROVAL_POLICY", "auto")
+
+	stdout, _, code := captureOutput(t, func() int {
+		return runDoctor([]string{"--manifest", manifestPath, "--data-root", t.TempDir(), "--control-endpoint", "http://127.0.0.1:1", "--approval-policy", "claude-cli=bypass"})
+	})
+	require.Equal(t, 0, code)
+	require.Contains(t, stdout, "approval policy for claude-cli: bypass (permission requests are not sent to Coffee Shop)")
+	require.Contains(t, stdout, "approval policy for codex-cli: auto")
+
+	stdout, _, code = captureOutput(t, func() int {
+		return runDoctor([]string{"--json", "--manifest", manifestPath, "--data-root", t.TempDir(), "--control-endpoint", "http://127.0.0.1:1", "--approval-policy", "codex-cli=bypass"})
+	})
+	require.Equal(t, 0, code)
+	var report struct {
+		ApprovalPolicies map[string]string `json:"approvalPolicies"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(stdout), &report))
+	require.Equal(t, map[string]string{"claude-cli": "auto", "codex-cli": "bypass"}, report.ApprovalPolicies)
+
+	_, stderr, code := captureOutput(t, func() int {
+		return runDoctor([]string{"--manifest", manifestPath, "--data-root", t.TempDir(), "--approval-policy", "auto", "--approval-policy", "bypass"})
+	})
+	require.Equal(t, 2, code)
+	require.Contains(t, stderr, "conflicts with an earlier node-wide approval policy")
 }
 
 // TestHostPortFromEndpointNeverEmbedsTheRawEndpointInErrors proves the fix-4 property: an invalid

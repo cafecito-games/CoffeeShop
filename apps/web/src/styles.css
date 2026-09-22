@@ -307,6 +307,8 @@ button:disabled, textarea:disabled, fieldset:disabled button { cursor: not-allow
 .harness-tags small { color: var(--success); font-size: 7px; }
 .harness-tags .unavailable { opacity: .55; }
 .harness-tags .unavailable small { color: var(--muted); }
+.approval-policy-badge { padding: 2px 5px; border: 1px solid rgba(200,121,110,.32); border-radius: 4px; display: inline-flex; align-items: center; gap: 4px; color: var(--danger); background: rgba(200,121,110,.07); font: 600 7px "DM Mono", monospace; text-transform: uppercase; white-space: nowrap; }
+.approval-policy-auto { border-color: var(--line); color: var(--accent); background: transparent; }
 .worker-callout { max-width: 820px; margin-top: 32px; padding: 18px; border: 1px solid var(--line); border-radius: 8px; display: grid; grid-template-columns: 24px 1fr; gap: 12px; color: var(--accent); background: var(--surface-2); }
 .worker-callout strong { color: var(--text); font-size: 10px; }
 .worker-callout code { display: inline-block; margin-left: 10px; padding: 3px 5px; border-radius: 3px; color: var(--accent); background: var(--surface-3); font-size: 8px; }
