@@ -107,6 +107,7 @@ test("rings again once for an approval nearing expiry, and never twice for the s
   const first = ring(decideDoorbell(facts({ approvals: [approval] }), undefined, "attach", at));
   assert.equal(first.doorbell.urgent, true, "a pending approval is always urgent");
   assert.equal(first.doorbell.approvals, 1);
+  assert.deepEqual(first.record.rungApprovalIds, ["approval-one"]);
   assert.deepEqual(first.record.warnedApprovalIds, [], "an approval far from expiry is not warned about yet");
 
   const quiet = decideDoorbell(facts({ approvals: [approval] }), first.record, "change", later(300));
@@ -118,6 +119,24 @@ test("rings again once for an approval nearing expiry, and never twice for the s
   assert.deepEqual(second.record.warnedApprovalIds, ["approval-one"]);
 
   assert.equal(decideDoorbell(facts({ approvals: [approval] }), second.record, "change", later(590)).kind, "quiet", "the same approval is warned about once");
+});
+
+test("an approval that opens rings once on its own, without any journal entry", () => {
+  const quiet = facts({ pending: 0, throughSequence: 0, counts: { completed: 0, failed: 0, cancelled: 0, blocked: 0, message: 0 } });
+  const opened = { ...quiet, approvals: [{ id: "approval-one", expiresAt: later(3_600) }] };
+  const first = ring(decideDoorbell(opened, undefined, "change", at));
+  assert.equal(first.doorbell.pending, 0);
+  assert.equal(first.doorbell.urgent, true);
+  assert.equal(first.doorbell.summary, 'Thread "Auth refactor": 1 approval pending (earliest expires 13:00Z). Call get_thread_events.');
+
+  assert.equal(decideDoorbell(opened, first.record, "change", later(10)).kind, "quiet", "the same approval does not ring twice");
+  const second = { ...quiet, approvals: [...opened.approvals, { id: "approval-two", expiresAt: later(3_600) }] };
+  const next = ring(decideDoorbell(second, first.record, "change", later(10)));
+  assert.equal(next.doorbell.approvals, 2);
+  assert.deepEqual(next.record.rungApprovalIds, ["approval-one", "approval-two"]);
+
+  const resolved = { ...quiet, approvals: [] };
+  assert.equal(decideDoorbell(resolved, next.record, "change", later(20)).kind, "quiet", "a resolved approval rings nothing");
 });
 
 test("an approval whose expiry the hub cannot read never triggers an expiry ring", () => {

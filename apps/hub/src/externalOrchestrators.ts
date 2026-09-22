@@ -369,6 +369,8 @@ export function doorbellFactsFor(state: Readonly<State>, threadId: string): Door
 export interface DoorbellRingRecord {
   rungAt: string;
   rungThroughSequence: number;
+  /** Approvals a ring has already reported, so an approval earns exactly one ring when it opens. */
+  rungApprovalIds: readonly string[];
   /** Approvals already rung because their expiry was near, so each earns exactly one such ring. */
   warnedApprovalIds: readonly string[];
 }
@@ -446,16 +448,20 @@ export function decideDoorbell(
 ): DoorbellDecision {
   if (facts.pending === 0 && facts.approvals.length === 0) return { kind: "quiet" };
   const at = readTime(now);
+  const rung = new Set(previous?.rungApprovalIds ?? []);
   const warned = new Set(previous?.warnedApprovalIds ?? []);
   const expiringSoon = at === undefined ? [] : facts.approvals.filter((approval) => {
     const expiresAt = readTime(approval.expiresAt);
     return expiresAt !== undefined && expiresAt - at <= doorbellApprovalWarningMilliseconds;
   });
   const newEvents = facts.throughSequence > (previous?.rungThroughSequence ?? 0);
+  // An approval opens no journal entry, so it is its own reason to ring, once when it opens and
+  // once more as its expiry closes in.
+  const newApprovals = facts.approvals.some((approval) => !rung.has(approval.id));
   const newlyExpiring = expiringSoon.some((approval) => !warned.has(approval.id));
   // Attaching rings the backlog at once, but only what the last ring for this attachment did not
   // already cover; an attachment that has just been rung is not rung twice for the same events.
-  if (!newEvents && !newlyExpiring) return { kind: "quiet" };
+  if (!newEvents && !newApprovals && !newlyExpiring) return { kind: "quiet" };
   if (trigger !== "attach" && previous !== undefined) {
     const since = at === undefined ? undefined : at - (readTime(previous.rungAt) ?? Number.NaN);
     // A clock the hub cannot read never shortens the window; it only ever suppresses a ring.
@@ -476,6 +482,8 @@ export function decideDoorbell(
     record: {
       rungAt: now,
       rungThroughSequence: Math.max(previous?.rungThroughSequence ?? 0, facts.throughSequence),
+      // Only approvals still pending are remembered, so the record stays as small as the backlog.
+      rungApprovalIds: [...stillPending].sort(),
       warnedApprovalIds: [...new Set([...[...warned].filter((id) => stillPending.has(id)), ...expiringSoon.map((approval) => approval.id)])].sort()
     }
   };
