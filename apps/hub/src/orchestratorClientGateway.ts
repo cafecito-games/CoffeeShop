@@ -127,7 +127,6 @@ const externalOrchestratorErrorCodes: Readonly<Record<string, OrchestratorClient
   forbidden: "forbidden",
   not_found: "not_found",
   idempotency_conflict: "conflict",
-  duplicate_task_key: "conflict",
   thread_in_use: "conflict",
   thread_inactive: "conflict",
   thread_archived: "conflict",

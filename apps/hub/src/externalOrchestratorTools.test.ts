@@ -472,9 +472,11 @@ test("every hub tool failure maps to a code the protocol declares", async () => 
     assert.equal(mapped.message, "why");
   }
   // A refusal the caller cannot fix by editing its arguments is never reported as an argument error.
-  for (const code of ["thread_inactive", "thread_archived", "thread_in_use", "task_not_ready", "invalid_transition", "mailbox_full", "update_limit", "idempotency_conflict", "duplicate_task_key"]) {
+  for (const code of ["thread_inactive", "thread_archived", "thread_in_use", "task_not_ready", "invalid_transition", "mailbox_full", "update_limit", "idempotency_conflict"]) {
     assert.equal(externalOrchestratorErrorFor(new CoordinationError(code, "why")).code, "conflict", code);
   }
+  // A malformed batch the caller can fix by editing its own arguments is never reported as a conflict.
+  assert.equal(externalOrchestratorErrorFor(new CoordinationError("duplicate_task_key", "why")).code, "invalid_arguments", "duplicate_task_key");
   const unexpected = externalOrchestratorErrorFor(new Error("a stack trace nobody should see"));
   assert.deepEqual(unexpected, { code: "hub_unavailable", message: "The hub could not complete this call" });
 });
