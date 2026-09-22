@@ -56,7 +56,10 @@ The control plane sends these JSON messages:
 
 - `dispatch`: immutable run snapshot plus the assigned agent;
 - `cancel`: run ID to terminate;
-- `ping`: request an immediate heartbeat.
+- `ping`: request an immediate heartbeat;
+- `approval.decision` (version 4): the operator or policy resolution of a pending harness permission request.
+
+Version 4 also adds an optional `execution` object to `dispatch` carrying the harness transport, task attempt, a provider session to resume, and the granted workspace lease.
 
 Barista sends:
 
@@ -65,7 +68,10 @@ Barista sends:
 - `heartbeat`: node ID, active run count, and timestamp;
 - `run.started`, `run.output`, `run.completed`, and `run.failed`: run lifecycle;
 - `run.cancelled`: acknowledgement that Barista recorded a cancellation tombstone and, for active work, terminated the harness process tree.
-- `hub.rpc.request`: a correlated, active-run-bound request made through Barista's MCP bridge.
+- `hub.rpc.request`: a correlated, active-run-bound request made through Barista's MCP bridge;
+- `harness.event` (version 4): one normalized, bounded harness event;
+- `session.binding` (version 4): the provider session a run created, resumed, idled, or replaced;
+- `workspace.lease` (version 4): provisioning, release, cleanup, or retention of a workspace lease.
 
 The hub sends `hub.rpc.response` with either a structured result or a typed error. Protocol version 3 adds these RPC messages. They are not placed in the reconnect lifecycle outbox: a disconnected call fails promptly, while mutation idempotency makes an explicit retry safe.
 
@@ -87,6 +93,12 @@ Claude Code receives the server through `--mcp-config`; Codex receives run-local
 Cancellation commands are idempotent from Barista's perspective. A cancel received before its matching dispatch prevents the process from starting and is acknowledged immediately; a cancel received during execution terminates the process tree and is acknowledged after cleanup without translating that intentional termination into `run.failed`. Tombstones survive control-plane reconnects for the lifetime of the Barista process, so a replayed dispatch cannot resurrect cancelled work. The hub persists cancellation before sending the command and remains authoritative if Barista is offline.
 
 On reconnect, protocol versions 2 and 3 send `register`, flush the lifecycle outbox, and then send `sync.complete` with any run IDs still active on Barista. The hub processes those messages in socket order and waits for the barrier before redispatching queued runs, excluding work Barista reports as active. Version 1 remains accepted during rolling upgrades so existing lifecycle events can settle, but queued-run redispatch is disabled for v1; upgrade that Barista to resume queued work safely.
+
+## Protocol versions
+
+Barista registers exactly one control protocol version per connection. The Go package defines every version the hub accepts and the capability each introduced: `replay-barrier` in 2, `hub-rpc` in 3, and `orchestration` in 4. This release still registers version 3; it will register version 4 once it consumes version-4 dispatch fields and approval decisions. The hub rejects unknown versions before dispatch and never sends a message whose capability the registered version lacks.
+
+ACP runs only between Barista and a locally installed harness adapter. Barista translates ACP updates into the normalized `harness.event` vocabulary; ACP frames and schema names never reach the hub, and MCP remains the model-facing tool protocol.
 
 The TypeScript source of truth is `packages/protocol/src/index.ts`; Go wire structs are deliberately isolated in `apps/control-agent/internal/protocol`. Changes to the wire contract must update both and should retain compatibility across rolling deployments.
 

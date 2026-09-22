@@ -6,7 +6,17 @@ import { fileURLToPath } from "node:url";
 import cors from "cors";
 import express from "express";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
-import { type Agent, type ComputeNode, type ControlAgentToHub, type HubToControlAgent, type Run } from "@coffee-shop/protocol";
+import {
+  canSendToControlAgent,
+  isControlProtocolVersion,
+  supportsControlCapability,
+  type Agent,
+  type ComputeNode,
+  type ControlAgentToHub,
+  type ControlProtocolVersion,
+  type HubToControlAgent,
+  type Run
+} from "@coffee-shop/protocol";
 import { createConfiguredAgent, markDisconnectedNodesOffline, openConnectionLookup, updateConfiguredAgent } from "./agentConfiguration.js";
 import { applyRunLifecycle, cancelPersistedRun, queuedRunsForNode, retryAsync, serializeAsync } from "./lifecycle.js";
 import { CoordinationError, createArtifact, delegateTask, taskContext } from "./coordination.js";
@@ -16,6 +26,7 @@ import { newThread, updateThreadByOperator, updateThreadForRun } from "./threads
 const app = express();
 const server = createServer(app);
 const controlAgents = new Map<string, WebSocket>();
+const controlAgentVersions = new WeakMap<WebSocket, ControlProtocolVersion>();
 const liveControlAgents = openConnectionLookup(controlAgents, WebSocket.OPEN);
 const clients = new Set<WebSocket>();
 const store = new Store();
@@ -43,6 +54,8 @@ const broadcast = () => {
 const sendToControlAgent = (nodeId: string, message: HubToControlAgent) => {
   const socket = controlAgents.get(nodeId);
   if (!socket || socket.readyState !== WebSocket.OPEN) return false;
+  const version = controlAgentVersions.get(socket);
+  if (!version || !canSendToControlAgent(message, version)) return false;
   try {
     socket.send(JSON.stringify(message));
     return true;
@@ -236,7 +249,7 @@ wss.on("connection", (socket, request) => {
   }
 
   let nodeId = "";
-  let protocolVersion: "1" | "2" | "3" = "1";
+  let protocolVersion: ControlProtocolVersion = "1";
   const dispatchQueuedRuns = async (activeRunIds: readonly string[] = []) => {
     const queued = queuedRunsForNode(store.snapshot(), nodeId, activeRunIds, protocolVersion);
     for (const run of queued) {
@@ -275,9 +288,10 @@ wss.on("connection", (socket, request) => {
     if (typeof decoded !== "object" || decoded === null || !("type" in decoded) || typeof decoded.type !== "string") return;
     const message = decoded as ControlAgentToHub;
     if (message.type === "register") {
-      if (message.protocolVersion && message.protocolVersion !== "1" && message.protocolVersion !== "2" && message.protocolVersion !== "3") return socket.close(1002, "unsupported control protocol");
+      if (message.protocolVersion !== undefined && !isControlProtocolVersion(message.protocolVersion)) return socket.close(1002, "unsupported control protocol");
       nodeId = message.node.id;
       protocolVersion = message.protocolVersion ?? "1";
+      controlAgentVersions.set(socket, protocolVersion);
       controlAgents.set(nodeId, socket);
       await store.transact((state) => {
         const index = state.nodes.findIndex((node) => node.id === nodeId);
@@ -287,13 +301,13 @@ wss.on("connection", (socket, request) => {
       });
       broadcast();
     } else if (message.type === "sync.complete") {
-      if (protocolVersion === "1" || !nodeId || message.nodeId !== nodeId || typeof message.at !== "string" || (message.activeRunIds !== undefined && (!Array.isArray(message.activeRunIds) || !message.activeRunIds.every((id) => typeof id === "string")))) return;
+      if (!supportsControlCapability(protocolVersion, "replay-barrier") || !nodeId || message.nodeId !== nodeId || typeof message.at !== "string" || (message.activeRunIds !== undefined && (!Array.isArray(message.activeRunIds) || !message.activeRunIds.every((id) => typeof id === "string")))) return;
       await dispatchQueuedRuns(message.activeRunIds ?? []);
     } else if (message.type === "heartbeat") {
       await store.transact((state) => { const node = state.nodes.find((item) => item.id === message.nodeId); if (node) { node.lastSeen = message.at; node.activeRuns = message.activeRuns; node.status = message.activeRuns ? "busy" : "online"; } });
       broadcast();
     } else if (message.type === "hub.rpc.request") {
-      if (protocolVersion !== "3" || !nodeId || typeof message.requestId !== "string" || typeof message.runId !== "string") return;
+      if (!supportsControlCapability(protocolVersion, "hub-rpc") || !nodeId || typeof message.requestId !== "string" || typeof message.runId !== "string") return;
       const source = store.getRun(message.runId);
       if (!source || source.nodeId !== nodeId || source.status !== "running") {
         respondToRpc(message.requestId, message.runId, undefined, { code: "run_not_active", message: "The calling run is not active on this node", retryable: false });
@@ -327,6 +341,9 @@ wss.on("connection", (socket, request) => {
         const failure = error instanceof CoordinationError ? error : new CoordinationError("internal_error", "The hub could not complete the tool call", true);
         respondToRpc(message.requestId, message.runId, undefined, { code: failure.code, message: failure.message, retryable: failure.retryable });
       }
+    } else if (message.type === "harness.event" || message.type === "session.binding" || message.type === "workspace.lease") {
+      // Orchestration state is not persisted yet, so these messages never change hub state.
+      return;
     } else if (message.type.startsWith("run.")) {
       const runId = message.runId;
       const current = store.getRun(runId);

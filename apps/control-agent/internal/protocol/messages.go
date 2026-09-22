@@ -5,13 +5,15 @@ import "encoding/json"
 const Version = "3"
 
 type HarnessProfile struct {
-	ID          string   `json:"id"`
-	Label       string   `json:"label"`
-	Description string   `json:"description"`
-	Binary      string   `json:"binary,omitempty"`
-	Available   bool     `json:"available"`
-	AuthMode    string   `json:"authMode"`
-	Models      []string `json:"models"`
+	ID          string                `json:"id"`
+	Label       string                `json:"label"`
+	Description string                `json:"description"`
+	Binary      string                `json:"binary,omitempty"`
+	Available   bool                  `json:"available"`
+	AuthMode    string                `json:"authMode"`
+	Models      []string              `json:"models"`
+	Transports  []string              `json:"transports,omitempty"`
+	ACP         *AcpAgentCapabilities `json:"acp,omitempty"`
 }
 
 type ComputeNode struct {
@@ -36,22 +38,29 @@ type Agent struct {
 }
 
 type Run struct {
-	ID        string `json:"id"`
-	ThreadID  string `json:"threadId,omitempty"`
-	HarnessID string `json:"harnessId"`
-	Model     string `json:"model"`
-	Workspace string `json:"workspace"`
-	Prompt    string `json:"prompt"`
+	ID               string `json:"id"`
+	ThreadID         string `json:"threadId,omitempty"`
+	HarnessID        string `json:"harnessId"`
+	Model            string `json:"model"`
+	Workspace        string `json:"workspace"`
+	Prompt           string `json:"prompt"`
+	TaskID           string `json:"taskId,omitempty"`
+	Attempt          int    `json:"attempt,omitempty"`
+	Transport        string `json:"transport,omitempty"`
+	SessionBindingID string `json:"sessionBindingId,omitempty"`
+	WorkspaceLeaseID string `json:"workspaceLeaseId,omitempty"`
 }
 
 type Inbound struct {
-	Type      string          `json:"type"`
-	RunID     string          `json:"runId,omitempty"`
-	Run       Run             `json:"run,omitempty"`
-	Agent     Agent           `json:"agent,omitempty"`
-	RequestID string          `json:"requestId,omitempty"`
-	Result    json.RawMessage `json:"result,omitempty"`
-	RPCError  *HubRPCError    `json:"error,omitempty"`
+	Type      string             `json:"type"`
+	RunID     string             `json:"runId,omitempty"`
+	Run       Run                `json:"run,omitempty"`
+	Agent     Agent              `json:"agent,omitempty"`
+	Execution *DispatchExecution `json:"execution,omitempty"`
+	Decision  *ApprovalDecision  `json:"decision,omitempty"`
+	RequestID string             `json:"requestId,omitempty"`
+	Result    json.RawMessage    `json:"result,omitempty"`
+	RPCError  *HubRPCError       `json:"error,omitempty"`
 }
 
 type HubRPCError struct {
@@ -61,20 +70,23 @@ type HubRPCError struct {
 }
 
 type Outbound struct {
-	Type            string          `json:"type"`
-	ProtocolVersion string          `json:"protocolVersion,omitempty"`
-	Node            *ComputeNode    `json:"node,omitempty"`
-	NodeID          string          `json:"nodeId,omitempty"`
-	ActiveRuns      int             `json:"activeRuns"`
-	ActiveRunIDs    []string        `json:"activeRunIds,omitempty"`
-	RunID           string          `json:"runId,omitempty"`
-	Chunk           string          `json:"chunk,omitempty"`
-	Output          string          `json:"output,omitempty"`
-	Error           string          `json:"error,omitempty"`
-	At              string          `json:"at,omitempty"`
-	RequestID       string          `json:"requestId,omitempty"`
-	Operation       string          `json:"operation,omitempty"`
-	Arguments       json.RawMessage `json:"arguments,omitempty"`
+	Type            string                `json:"type"`
+	ProtocolVersion string                `json:"protocolVersion,omitempty"`
+	Node            *ComputeNode          `json:"node,omitempty"`
+	NodeID          string                `json:"nodeId,omitempty"`
+	ActiveRuns      int                   `json:"activeRuns"`
+	ActiveRunIDs    []string              `json:"activeRunIds,omitempty"`
+	RunID           string                `json:"runId,omitempty"`
+	Chunk           string                `json:"chunk,omitempty"`
+	Output          string                `json:"output,omitempty"`
+	Error           string                `json:"error,omitempty"`
+	At              string                `json:"at,omitempty"`
+	RequestID       string                `json:"requestId,omitempty"`
+	Operation       string                `json:"operation,omitempty"`
+	Arguments       json.RawMessage       `json:"arguments,omitempty"`
+	Event           *HarnessEvent         `json:"event,omitempty"`
+	Binding         *SessionBindingUpdate `json:"binding,omitempty"`
+	Lease           *WorkspaceLeaseUpdate `json:"lease,omitempty"`
 }
 
 func DecodeInbound(data []byte) (Inbound, error) {

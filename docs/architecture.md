@@ -67,7 +67,42 @@ The shared hub token is suitable for a private single-user tailnet, not an inter
 
 The repository is polyglot by application boundary. `apps/web` and `apps/hub` participate in the pnpm workspace. `apps/control-agent` is an independent Go 1.26 module joined by the root `go.work`. Root Task targets compose builds and tests without making a compute host install the TypeScript toolchain.
 
-The hub and frontend deploy together. Barista is built and distributed separately as a native executable. Its outbound `/control-agent` WebSocket uses protocol version `3`; the TypeScript and Go representations intentionally live on opposite sides of the deployment boundary. Version 2 introduced the `sync.complete` replay barrier, and version 3 adds correlated hub RPC for the run-scoped MCP bridge. The hub accepts versions 1 and 2 during rolling upgrades. Version 1 lifecycle reporting still fail-closes queued-run redispatch because it has no safe replay barrier; version 2 retains safe lifecycle and dispatch behavior without MCP.
+The hub and frontend deploy together. Barista is built and distributed separately as a native executable. Its outbound `/control-agent` WebSocket currently registers protocol version `3`; the TypeScript and Go representations intentionally live on opposite sides of the deployment boundary. Version 2 introduced the `sync.complete` replay barrier, version 3 adds correlated hub RPC for the run-scoped MCP bridge, and version 4 adds the orchestration envelopes described below. The hub accepts versions 1 through 4 during rolling upgrades and rejects any other version before dispatch. Version 1 lifecycle reporting still fail-closes queued-run redispatch because it has no safe replay barrier; version 2 retains safe lifecycle and dispatch behavior without MCP.
+
+## Orchestration contracts (control protocol version 4)
+
+Version 4 defines the vocabulary for distributed task orchestration and ACP harness execution. `packages/protocol/src/index.ts` is the single source of truth for every enum and transition table; this section describes semantics and does not redefine those lists.
+
+### Protocol responsibilities
+
+| Boundary | Protocol | Responsibilities |
+|---|---|---|
+| PWA ↔ hub | REST plus live WebSocket snapshots | Operator commands and projections |
+| Hub ↔ Barista | Versioned Coffee Shop control protocol | Registration, inventory, dispatch, cancellation, reconciliation, structured events, approval decisions, session bindings, workspace leases |
+| Barista ↔ harness | ACP v1 over local stdio | Initialization, capability negotiation, sessions, prompts, streamed updates, permission requests, cancellation |
+| Harness ↔ Coffee Shop | MCP over authenticated loopback HTTP | Model-visible context, task submission, mailbox, artifacts, thread and task updates |
+| Agent ↔ agent | Coffee Shop task messages | Durable, authorized, auditable communication; never a direct connection |
+
+ACP is local to a compute node: it never crosses the hub↔Barista WebSocket, and MCP remains the only model-facing capability protocol. The shared protocol package does not depend on an ACP SDK; Barista translates ACP values into Coffee Shop's smaller normalized vocabulary, so the hub and PWA never see ACP schema names.
+
+### Domain mapping
+
+- **Task** — a durable, schedulable unit in a thread-owned dependency graph, with hard execution requirements, ranked preferences, dependencies, and zero or more attempts. The hub generates its identity.
+- **Run** — one immutable execution attempt of a task (or of a direct message) on a concrete agent, harness, transport, model, node, and workspace. Version-4 runs record `taskId` and a one-based `attempt`.
+- **Task message** — an immutable mailbox record ordered by a sequence scoped to its recipient. Acknowledgements are separate records, so messages never change after they are written. Sender identity comes from the authenticated source run.
+- **Harness session binding** — associates an opaque provider session with the agent, node, harness, workspace, and thread it was created for. A failed or unsupported resume marks the binding `replaced` and records the new binding instead of dropping queued context.
+- **Harness event** — a bounded, typed record normalized by Barista. Provider updates with no mapping become the `unknown` diagnostic variant, which never advances run or task state.
+- **Approval** — a harness permission request owned by the hub. Only a pending approval can be resolved, and a decision applies only to the run that raised it.
+- **Workspace lease** — exclusive use of an isolated worktree and branch by one run. `retained` keeps dirty or ambiguous workspaces for operator attention.
+
+Every status vocabulary has an explicit transition table in which terminal states have no outgoing transitions. Validators reject unknown statuses, unknown or missing discriminators, undeclared event fields, and payloads over the published byte limits; they never substitute a default state.
+
+### Compatibility policy
+
+- Each socket registers exactly one version. The hub records it and checks every outbound message against the capability that message requires, so version-4 dispatch fields, approval decisions, and other orchestration messages are never sent to version 1–3 peers.
+- Orchestration messages received on a version 1–3 connection are rejected without changing state; they are never reinterpreted as legacy output.
+- Snapshots persisted before version 4 load with empty orchestration collections. Migration never invents tasks, messages, bindings, approvals, or leases.
+- Barista advertises version 4 only once it consumes the version-4 dispatch fields, so a hub cannot request ACP execution from a Barista that would silently fall back to native behavior.
 
 ## What to build next
 
@@ -76,7 +111,7 @@ The MVP deliberately proves the seams before adding infrastructure. Recommended 
 1. Replace the JSON snapshot with PostgreSQL and append-only run/event tables.
 2. Add OIDC for users and per-Barista enrollment tokens with rotation.
 3. Add a scheduler/lease table so multiple hub replicas cannot dispatch the same run.
-4. Add approval events that can pause a harness and be resolved from the PWA.
+4. Implement the version-4 approval flow so a harness can pause and be resolved from the PWA.
 5. Move artifact content from hub-local storage to object storage with signed upload and download URLs.
 6. Add container/VM workspace providers and a policy engine before untrusted workloads.
 7. Add AG-UI as an external harness adapter while preserving the same run/event model.

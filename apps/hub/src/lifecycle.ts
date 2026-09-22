@@ -1,7 +1,9 @@
 import {
   canTransitionRun,
   isActiveRunStatus,
+  supportsControlCapability,
   type ControlAgentToHub,
+  type ControlProtocolVersion,
   type HubToControlAgent,
   type Run,
   type Snapshot
@@ -45,8 +47,8 @@ export async function retryAsync<T>(operation: () => Promise<T>, attempts = 3): 
   throw failure;
 }
 
-export function queuedRunsForNode(snapshot: Snapshot, nodeId: string, activeRunIds: readonly string[], protocolVersion: "1" | "2" | "3") {
-  if (protocolVersion === "1") return [];
+export function queuedRunsForNode(snapshot: Snapshot, nodeId: string, activeRunIds: readonly string[], protocolVersion: ControlProtocolVersion) {
+  if (!supportsControlCapability(protocolVersion, "replay-barrier")) return [];
   const active = new Set(activeRunIds);
   return snapshot.runs.filter((run) => run.nodeId === nodeId && run.status === "queued" && !active.has(run.id));
 }
