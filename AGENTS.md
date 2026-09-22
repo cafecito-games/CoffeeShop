@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-Coffee Shop is a polyglot monorepo driven by Task. `apps/web` contains the React/Vite PWA; UI code lives in `src/`, while icons and installable-app assets live in `public/`. `apps/hub` owns the Express REST API, WebSocket gateway, dispatch logic, and JSON persistence. `apps/control-agent` is the Go 1.26 Barista binary installed on compute machines. Shared TypeScript domain and wire types belong in `packages/protocol/src`; matching Go wire structs live in the control agent's internal protocol package.
+Coffee Shop is a polyglot monorepo driven by Task. `apps/web` contains the React/Vite PWA; UI code lives in `src/`, while icons and installable-app assets live in `public/`. `apps/hub` owns the Express REST API, WebSocket gateway, dispatch logic, and JSON persistence. `apps/control-agent` is the Go 1.26 Barista binary installed on compute machines. `apps/orchestrator-bridge` is the local stdio MCP server an operator's own Claude Code session launches to orchestrate a thread over the hub's `/orchestrator-client` endpoint. Shared TypeScript domain and wire types belong in `packages/protocol/src`; matching Go wire structs live in the control agent's internal protocol package.
 
 Keep functionality within its boundary: presentation in `web`, orchestration in `hub`, machine-local execution in `control-agent`, and cross-package contracts in `protocol`. Architecture and provider constraints are documented in `docs/`.
 
