@@ -115,6 +115,23 @@ async function withIdleBinding(store: Store, overrides: Partial<HarnessSessionBi
   });
 }
 
+test("a thread handed to an external orchestrator is never woken, even while it still names an owner agent", async () => {
+  const store = await idleOrchestrator();
+  await lifecycle(store, { type: "run.completed", runId: "run-task-a", output: "Parser implemented", at: later(2) });
+  await store.transact((state) => {
+    const thread = state.threads!.find((item) => item.id === "thread-one")!;
+    // The owner agent deliberately stays on the thread, so placement would succeed and the
+    // orchestrator kind is the only thing that can keep the hub from waking a second orchestrator.
+    thread.orchestrator = { kind: "external", clientId: "client-one" };
+    return true;
+  });
+
+  const result = await pass(store, later(3));
+  assert.equal(result.continuations.length, 0, "an external thread is never planned a continuation");
+  assert.deepEqual(continuationRuns(store), [], "an external thread never acquires a hub-hosted orchestrator run");
+  assert.deepEqual(inbox(store)?.wakes ?? [], [], "an external thread never acquires a wake");
+});
+
 test("a compatible idle ACP binding is resumed with the delivery-only prompt", async () => {
   const store = await idleOrchestrator({ acp: true });
   await withIdleBinding(store);
