@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import type { Agent, ComputeNode, HubToControlAgent, Run } from "@coffee-shop/protocol";
-import { applyRunLifecycle, cancelPersistedRun, cancelRunInState, coalesceAsync, queuedRunsForNode, retryAsync, serializeAsync } from "./lifecycle.js";
+import { applyRunLifecycle, cancelPersistedRun, cancelRunInState, coalesceAsync, isReportedByOwningNode, queuedRunsForNode, retryAsync, serializeAsync } from "./lifecycle.js";
 import { type State, Store } from "./store.js";
 
 const at = "2026-09-11T12:00:00.000Z";
@@ -164,6 +164,43 @@ test("late lifecycle messages and duplicate acknowledgements cannot change a can
   assert.equal(applyRunLifecycle(current, { type: "run.cancelled", runId: "run-one", at }), false);
   assert.equal(applyRunLifecycle(current, { type: "run.cancelled", runId: "run-one", at: "later" }), false);
   assert.equal(current.events.length, 0);
+});
+
+test("a native run records its provider session once from a text-free run.output", () => {
+  const current = state("running");
+  current.agents[0].currentAction = "Reading the repository";
+  assert.equal(applyRunLifecycle(current, { type: "run.output", runId: "run-one", providerSessionId: "01a0c881-6c5c-7b42-a6ca-cb1fa772c4e7", at }), true);
+  assert.equal(current.runs[0].providerSessionId, "01a0c881-6c5c-7b42-a6ca-cb1fa772c4e7");
+  assert.equal(current.runs[0].output, "");
+  assert.equal(current.agents[0].currentAction, "Reading the repository");
+
+  assert.equal(applyRunLifecycle(current, { type: "run.output", runId: "run-one", chunk: "", providerSessionId: "another-session", at }), true);
+  assert.equal(current.runs[0].providerSessionId, "01a0c881-6c5c-7b42-a6ca-cb1fa772c4e7");
+});
+
+test("only the node a run was dispatched to may report its lifecycle", () => {
+  assert.equal(isReportedByOwningNode(run("running"), "node-one"), true);
+  assert.equal(isReportedByOwningNode(run("running"), "node-two"), false);
+  assert.equal(isReportedByOwningNode(run("running"), ""), false);
+  assert.equal(isReportedByOwningNode(undefined, "node-one"), false);
+});
+
+test("a run.output with neither text nor a provider session is rejected without mutation", () => {
+  const current = state("running");
+  const before = structuredClone(current);
+  assert.equal(applyRunLifecycle(current, { type: "run.output", runId: "run-one", at }), false);
+  assert.deepEqual(current, before);
+});
+
+test("provider sessions are ignored when malformed or reported by an ACP run", () => {
+  const malformed = state("running");
+  assert.equal(applyRunLifecycle(malformed, { type: "run.output", runId: "run-one", chunk: "", providerSessionId: "id; rm -rf /", at }), true);
+  assert.equal(malformed.runs[0].providerSessionId, undefined);
+
+  const acp = state("running");
+  acp.runs[0].transport = "acp-v1";
+  assert.equal(applyRunLifecycle(acp, { type: "run.output", runId: "run-one", chunk: "", providerSessionId: "session-one", at }), true);
+  assert.equal(acp.runs[0].providerSessionId, undefined);
 });
 
 test("malformed lifecycle payloads are ignored without mutation", () => {

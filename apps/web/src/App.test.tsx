@@ -122,12 +122,32 @@ describe("durable threads", () => {
     expect(screen.getByRole("heading", { name: thread.title })).toBeInTheDocument();
     expect(screen.getAllByText("1", { selector: ".thread-card dd" })).toHaveLength(2);
     fireEvent.click(screen.getByRole("button", { name: "Continue thread" }));
-    expect(screen.getByLabelText("Thread")).toHaveValue(thread.id);
+    expect(screen.getByLabelText("Send to")).toHaveValue(thread.id);
     expect(screen.getByText("Initial work complete")).toBeInTheDocument();
     fireEvent.change(screen.getByPlaceholderText("Message Milo"), { target: { value: "Add consent text" } });
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
     await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
     expect(JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body))).toEqual({ body: "Add consent text", threadId: thread.id });
+  });
+
+  it("keeps the chat filter in step with the send target and drops a filter whose thread was archived", async () => {
+    currentSnapshot.threads = [thread];
+    currentSnapshot.runs = [{ ...testRun("completed"), threadId: thread.id, parentRunId: undefined }];
+    const { default: App } = await import("./App.js");
+    const { rerender } = render(<App />);
+    fireEvent.click(screen.getAllByRole("button", { name: "Threads" })[0]);
+    fireEvent.click(screen.getByRole("button", { name: "Continue thread" }));
+    expect(screen.getByRole("button", { name: thread.title, pressed: true })).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Send to"), { target: { value: "" } });
+    expect(screen.getByRole("button", { name: "All", pressed: true })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: thread.title }));
+    expect(screen.getByRole("button", { name: thread.title, pressed: true })).toBeInTheDocument();
+    currentSnapshot.threads = [{ ...thread, status: "archived" }];
+    rerender(<App />);
+    expect(screen.queryByRole("button", { name: thread.title })).not.toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: "Show activity from" })).not.toBeInTheDocument();
   });
 
   it("archives through the operator endpoint", async () => {

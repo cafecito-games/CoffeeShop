@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -59,7 +60,7 @@ func (driver nativeDriver) Execute(ctx context.Context, invocation Invocation) (
 		return "", err
 	}
 
-	final, readErr := readEvents(stdout, run.HarnessID, output)
+	final, readErr := readEvents(stdout, run.HarnessID, output, invocation.ProviderSession)
 	waitErr := command.Wait()
 	if readErr != nil {
 		return "", readErr
@@ -127,11 +128,18 @@ func commandFor(run protocol.Run, agent protocol.Agent, mcpConfig mcpserver.Conf
 	}
 }
 
-func readEvents(reader io.Reader, harnessID string, output func(string)) (string, error) {
+func readEvents(reader io.Reader, harnessID string, output func(string), session func(string)) (string, error) {
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	final := ""
+	sessionReported := false
 	for scanner.Scan() {
+		if !sessionReported && session != nil {
+			if identity := providerSessionIdentity(harnessID, scanner.Bytes()); identity != "" {
+				sessionReported = true
+				session(identity)
+			}
+		}
 		readable := readableEvent(harnessID, scanner.Bytes())
 		if readable == "" {
 			continue
@@ -140,6 +148,34 @@ func readEvents(reader io.Reader, harnessID string, output func(string)) (string
 		output(readable)
 	}
 	return final, scanner.Err()
+}
+
+var providerSessionPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
+
+// providerSessionIdentity extracts the vendor's session identity from one stream line: Claude
+// stamps session_id on its events, and Codex opens its stream with thread.started.
+func providerSessionIdentity(harnessID string, line []byte) string {
+	var event struct {
+		Type      string `json:"type"`
+		SessionID string `json:"session_id"`
+		ThreadID  string `json:"thread_id"`
+	}
+	if json.Unmarshal(line, &event) != nil {
+		return ""
+	}
+	identity := ""
+	switch harnessID {
+	case "claude-cli":
+		identity = event.SessionID
+	case "codex-cli":
+		if event.Type == "thread.started" {
+			identity = event.ThreadID
+		}
+	}
+	if !providerSessionPattern.MatchString(identity) {
+		return ""
+	}
+	return identity
 }
 
 func readableEvent(harnessID string, line []byte) string {

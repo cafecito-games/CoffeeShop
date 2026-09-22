@@ -14,6 +14,9 @@ import { AgentConfigurationForm, CreateAgentDialog, type AgentConfigurationPaylo
 import { CoffeeAvatar } from "./CoffeeAvatar.js";
 import { ComputeView } from "./compute/ComputeView.js";
 import { useHubConnection, type ConnectionStatus } from "./hubConnection.js";
+import { AgentTimelineItem, buildAgentTimeline, type AgentTimelineEntry } from "./orchestration/AgentWorkTimeline.js";
+import { ApprovalDialog } from "./orchestration/ApprovalsView.js";
+import { ProviderSessionCard, providerSessionForRun, providerSessionsForAgent, type ProviderSessionReference } from "./orchestration/ProviderSessions.js";
 import { OrchestrationView } from "./orchestration/OrchestrationView.js";
 import { RunActivityPanel } from "./orchestration/RunActivityPanel.js";
 import { SettingsView } from "./settings/SettingsView.js";
@@ -97,15 +100,23 @@ function EmptyAgents({ agents, onSelect, onCreate, canMutate }: { agents: Agent[
   );
 }
 
-function Chat({ agent, messages, nodes, threads, selectedThreadId, sending, inspectorOpen, onBack, onSend, onThreadChange, onInspector, onInspectRun, canMutate }: {
-  agent: Agent; messages: ChatMessage[]; nodes: ComputeNode[]; threads: Thread[]; selectedThreadId: string; sending: boolean;
-  inspectorOpen: boolean;
-  onBack: () => void; onSend: (body: string) => Promise<void>; onThreadChange: (id: string) => void; onInspector: () => void; onInspectRun: (id: string) => void; canMutate: boolean;
+function Chat({ agent, timeline, nodes, threads, viewableThreads, threadFilter, selectedThreadId, orchestratorName, sending, inspectorOpen, onBack, onSend, onThreadChange, onThreadFilterChange, onInspector, onInspectRun, onReviewApproval, canMutate }: {
+  agent: Agent; timeline: AgentTimelineEntry[]; nodes: ComputeNode[];
+  /** Threads this agent owns, which operator messages can continue. */
+  threads: Thread[];
+  /** Threads this agent owns or worked in, which the chat can be filtered to. */
+  viewableThreads: Thread[];
+  threadFilter: string; selectedThreadId: string;
+  /** Set for a worker whose task work belongs to another agent's thread. */
+  orchestratorName?: string;
+  sending: boolean; inspectorOpen: boolean;
+  onBack: () => void; onSend: (body: string) => Promise<void>; onThreadChange: (id: string) => void; onThreadFilterChange: (id: string) => void;
+  onInspector: () => void; onInspectRun: (id: string) => void; onReviewApproval: (id: string) => void; canMutate: boolean;
 }) {
   const [body, setBody] = useState("");
   const endRef = useRef<HTMLDivElement>(null);
   const node = nodes.find((item) => item.id === agent.computeNodeId);
-  useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages.length]);
+  useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [timeline.length]);
   async function submit(event: FormEvent) { event.preventDefault(); const value = body.trim(); if (!value || sending || !canMutate) return; setBody(""); await onSend(value); }
   return (
     <main className="chat">
@@ -117,14 +128,24 @@ function Chat({ agent, messages, nodes, threads, selectedThreadId, sending, insp
       </header>
       <div className="chat-scroll">
         <div className="agent-intro"><Avatar agent={agent} size="lg" /><h1>{agent.name}</h1><p>{agent.title}</p><small>{agent.summary}</small></div>
+        {viewableThreads.length > 0 && (
+          <div className="thread-filter" role="group" aria-label="Show activity from">
+            <span>Show</span>
+            <button aria-pressed={threadFilter === ""} onClick={() => onThreadFilterChange("")}>All</button>
+            {viewableThreads.map((thread) => <button key={thread.id} aria-pressed={threadFilter === thread.id} onClick={() => onThreadFilterChange(thread.id)}>{thread.title}</button>)}
+          </div>
+        )}
         <div className="messages">
-          {messages.map((message) => <Message key={message.id} message={message} agent={agent} onInspectRun={onInspectRun} />)}
+          {timeline.map((entry) => entry.kind === "chat"
+            ? <Message key={entry.id} message={entry.message} agent={agent} onInspectRun={onInspectRun} />
+            : <AgentTimelineItem key={entry.id} entry={entry} onInspectRun={onInspectRun} onReviewApproval={onReviewApproval} />)}
           {sending && <div className="message agent-message pending"><div className="message-meta"><strong>{agent.name}</strong><span>now</span></div><p><CircleNotch className="spin" size={14} /> Dispatching to {node?.name ?? agent.computeNodeId}…</p></div>}
           <div ref={endRef} />
         </div>
       </div>
       <form className="composer" onSubmit={submit}>
-        <label className="thread-picker">Thread<select aria-label="Thread" value={selectedThreadId} onChange={(event) => onThreadChange(event.target.value)} disabled={!canMutate || sending}><option value="">New thread</option>{threads.filter((thread) => thread.status !== "archived").map((thread) => <option key={thread.id} value={thread.id}>{thread.title}{thread.status === "completed" ? " · completed" : ""}</option>)}</select></label>
+        <label className="thread-picker">Send to<select aria-label="Send to" value={selectedThreadId} onChange={(event) => onThreadChange(event.target.value)} disabled={!canMutate || sending}><option value="">New thread</option>{threads.filter((thread) => thread.status !== "archived").map((thread) => <option key={thread.id} value={thread.id}>Continue: {thread.title}{thread.status === "completed" ? " · completed" : ""}</option>)}</select></label>
+        {orchestratorName && <p className="composer-hint">Messages here start a separate direct run for {agent.name}, outside its tasks. To steer task work, message {orchestratorName}.</p>}
         <div className="composer-box"><textarea value={body} onChange={(event) => setBody(event.target.value)} placeholder={canMutate ? `Message ${agent.name}` : `Reconnect to message ${agent.name}`} rows={1} disabled={!canMutate} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} /><button aria-label="Send" disabled={!canMutate || !body.trim() || sending}><PaperPlaneTilt size={17} weight="fill" /></button></div>
         <small>{agent.harnessId === "claude-cli" ? "Claude Code" : "Codex"} · {agent.model} · runs on {node?.name ?? "unassigned compute"}</small>
       </form>
@@ -144,9 +165,10 @@ function Message({ message, agent, onInspectRun }: { message: ChatMessage; agent
   );
 }
 
-function Inspector({ agent, nodes, onClose, onSave, onReconcile, canMutate }: {
+function Inspector({ agent, nodes, sessions, onClose, onSave, onReconcile, canMutate }: {
   agent: Agent;
   nodes: ComputeNode[];
+  sessions: ProviderSessionReference[];
   onClose: () => void;
   onSave: (payload: AgentConfigurationPayload) => Promise<Agent>;
   onReconcile: () => void;
@@ -181,6 +203,12 @@ function Inspector({ agent, nodes, onClose, onSave, onReconcile, canMutate }: {
                 <div><dt>Workspace</dt><dd><code>{agent.workspace}</code></dd></div>
                 <div><dt>Coordination</dt><dd>{agent.canDelegate ? "May delegate bounded tasks" : "Worker only"}</dd></div>
               </dl>
+            </section>
+            <section className="config-section">
+              <div className="section-label"><span>Sessions</span><small>resume outside Coffee Shop</small></div>
+              {sessions.length === 0
+                ? <p className="provider-session-empty">No provider sessions recorded yet.</p>
+                : sessions.map((reference) => <ProviderSessionCard key={reference.key} reference={reference} nodeName={nodes.find((item) => item.id === reference.nodeId)?.name ?? reference.nodeId} />)}
             </section>
             <section className="prompt-section"><div className="section-label"><span>Purpose</span><small>system prompt</small></div><p>{agent.systemPrompt}</p></section>
             <footer><div><i className={node?.status === "online" || node?.status === "busy" ? "online-dot" : "offline-dot"} /><span>{node?.status ?? "offline"}</span></div><small>Credentials stay on {node?.name ?? "the compute node"}</small></footer>
@@ -222,6 +250,7 @@ function RunInspector({ selectedRunId, run, runs, threads, artifacts, agents, no
   const activity = run ? runActivity.find((item) => item.runId === run.id) : undefined;
   const runApprovals = run ? approvals.filter((item) => item.runId === run.id) : [];
   const sessionBinding = run?.sessionBindingId ? sessionBindings.find((item) => item.id === run.sessionBindingId) : undefined;
+  const providerSession = run ? providerSessionForRun(run, sessionBindings) : undefined;
 
   async function cancelRun() {
     if (!run || !canMutate) return;
@@ -286,6 +315,7 @@ function RunInspector({ selectedRunId, run, runs, threads, artifacts, agents, no
           <section className="run-text" aria-live="polite"><h3>Output</h3><pre>{run.output || (isActiveRunStatus(run.status) ? "Output is not available yet." : "No output was produced.")}</pre></section>
           <section className="run-text"><h3>Error</h3><pre>{run.error ?? "No error reported."}</pre></section>
           <RunActivityPanel activity={activity} transportSelection={run.transportSelection} sessionBinding={sessionBinding} approvals={runApprovals} />
+          {providerSession && <section className="run-text"><h3>Provider session</h3><ProviderSessionCard reference={providerSession} nodeName={node?.name ?? run.nodeId} /></section>}
           {children.length > 0 && <section className="run-related"><h3>Delegated tasks</h3>{children.map((child) => <button key={child.id} onClick={() => onInspectRun(child.id)}><span>{agents.find((item) => item.id === child.agentId)?.name ?? child.agentId}</span><small>{runStatusLabels[child.status]}</small></button>)}</section>}
           {runArtifacts.length > 0 && <section className="run-related"><h3>Artifacts</h3>{runArtifacts.map((artifact) => <button key={artifact.id} onClick={() => void downloadArtifact(artifact)}><span>{artifact.title}</span><small>{artifact.kind} · {artifact.size} bytes</small></button>)}</section>}
           {notice && <p className="run-notice" role="alert">{notice}</p>}
@@ -332,11 +362,46 @@ function CoffeeShopApp() {
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [selectedRunId, setSelectedRunId] = useState<string>();
   const [selectedThreadId, setSelectedThreadId] = useState("");
+  const [threadFilter, setThreadFilter] = useState("");
   const [sending, setSending] = useState(false);
   const [creating, setCreating] = useState(false);
   const selected = snapshot.agents.find((agent) => agent.id === selectedId);
-  const selectedMessages = useMemo(() => snapshot.messages.filter((message) => message.agentId === selectedId && (!selectedThreadId || message.threadId === selectedThreadId)).sort((a, b) => a.createdAt.localeCompare(b.createdAt)), [snapshot.messages, selectedId, selectedThreadId]);
+  const [reviewingApprovalId, setReviewingApprovalId] = useState<string>();
   const selectedThreads = useMemo(() => (snapshot.threads ?? []).filter((thread) => thread.ownerAgentId === selectedId), [snapshot.threads, selectedId]);
+  const viewableThreads = useMemo(() => {
+    const workedIn = new Set(snapshot.runs.filter((run) => run.agentId === selectedId && run.threadId).map((run) => run.threadId!));
+    return (snapshot.threads ?? [])
+      .filter((thread) => thread.status !== "archived" && (thread.ownerAgentId === selectedId || workedIn.has(thread.id)))
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+  }, [snapshot.threads, snapshot.runs, selectedId]);
+  // A filtered thread that was archived or otherwise left the list falls back to showing everything.
+  const effectiveThreadFilter = viewableThreads.some((thread) => thread.id === threadFilter) ? threadFilter : "";
+  const { agents, messages, runs, tasks, threads, taskMessages, runActivity, approvals } = snapshot;
+  const selectedTimeline = useMemo(() => selectedId ? buildAgentTimeline({
+    agentId: selectedId,
+    threadId: effectiveThreadFilter || undefined,
+    agents,
+    messages,
+    runs,
+    tasks: tasks ?? [],
+    threads: threads ?? [],
+    taskMessages: taskMessages ?? [],
+    runActivity: runActivity ?? [],
+    approvals: approvals ?? []
+  }) : [], [selectedId, effectiveThreadFilter, agents, messages, runs, tasks, threads, taskMessages, runActivity, approvals]);
+  const reviewingApproval = (snapshot.approvals ?? []).find((approval) => approval.id === reviewingApprovalId);
+  const orchestratorName = useMemo(() => {
+    const ownerId = viewableThreads.find((thread) => thread.ownerAgentId !== selectedId)?.ownerAgentId;
+    return ownerId ? snapshot.agents.find((agent) => agent.id === ownerId)?.name ?? ownerId : undefined;
+  }, [viewableThreads, selectedId, snapshot.agents]);
+  function chooseSendTarget(threadId: string) {
+    setSelectedThreadId(threadId);
+    setThreadFilter(threadId);
+  }
+  function chooseThreadFilter(threadId: string) {
+    setThreadFilter(threadId);
+    if (selectedThreads.some((thread) => thread.id === threadId)) setSelectedThreadId(threadId);
+  }
   const pendingApprovalCount = useMemo(() => (snapshot.approvals ?? []).filter((approval) => approval.status === "pending").length, [snapshot.approvals]);
 
   async function send(body: string) {
@@ -349,7 +414,7 @@ function CoffeeShopApp() {
         throw new Error(failure.error ?? `Could not send message (${response.status})`);
       }
       const run = await response.json() as Run;
-      if (run.threadId) setSelectedThreadId(run.threadId);
+      if (run.threadId) { setSelectedThreadId(run.threadId); setThreadFilter(run.threadId); }
     }
     finally { setSending(false); }
   }
@@ -373,8 +438,8 @@ function CoffeeShopApp() {
     return response.json() as Promise<Agent>;
   }
 
-  function selectAgent(id: string) { setSelectedId(id); setSelectedThreadId(""); setView("agents"); setInspectorOpen(false); setSelectedRunId(undefined); }
-  function continueThread(thread: Thread) { setSelectedId(thread.ownerAgentId); setSelectedThreadId(thread.id); setView("agents"); setInspectorOpen(false); }
+  function selectAgent(id: string) { setSelectedId(id); setSelectedThreadId(""); setThreadFilter(""); setView("agents"); setInspectorOpen(false); setSelectedRunId(undefined); }
+  function continueThread(thread: Thread) { setSelectedId(thread.ownerAgentId); setSelectedThreadId(thread.id); setThreadFilter(thread.id); setView("agents"); setInspectorOpen(false); }
   function switchView(next: View) { setView(next); if (next !== "agents") setSelectedId(undefined); }
   async function createAgent(fields: AgentConfigurationPayload) {
     if (!canMutate) throw new Error("Reconnect before creating an agent");
@@ -396,7 +461,7 @@ function CoffeeShopApp() {
       <div className="workspace">
         <FreshnessNotice connection={connection} onRetry={retry} />
         {view === "agents" && !selected && <EmptyAgents agents={snapshot.agents} onSelect={selectAgent} onCreate={() => { if (canMutate) setCreating(true); }} canMutate={canMutate} />}
-        {view === "agents" && selected && <Chat agent={selected} nodes={snapshot.nodes} threads={selectedThreads} selectedThreadId={selectedThreadId} messages={selectedMessages} sending={sending} inspectorOpen={inspectorOpen} onBack={() => setSelectedId(undefined)} onSend={send} onThreadChange={setSelectedThreadId} onInspector={() => setInspectorOpen((open) => !open)} onInspectRun={setSelectedRunId} canMutate={canMutate} />}
+        {view === "agents" && selected && <Chat agent={selected} nodes={snapshot.nodes} threads={selectedThreads} viewableThreads={viewableThreads} threadFilter={effectiveThreadFilter} orchestratorName={orchestratorName} selectedThreadId={selectedThreadId} timeline={selectedTimeline} sending={sending} inspectorOpen={inspectorOpen} onBack={() => setSelectedId(undefined)} onSend={send} onThreadChange={chooseSendTarget} onThreadFilterChange={chooseThreadFilter} onInspector={() => setInspectorOpen((open) => !open)} onInspectRun={setSelectedRunId} onReviewApproval={setReviewingApprovalId} canMutate={canMutate} />}
         {view === "threads" && <ThreadsView threads={snapshot.threads ?? []} runs={snapshot.runs} artifacts={snapshot.artifacts ?? []} agents={snapshot.agents} canMutate={canMutate} onContinue={continueThread} onInspectRun={setSelectedRunId} onSetStatus={setThreadStatus} />}
         {view === "activity" && <ActivityView events={snapshot.events} agents={snapshot.agents} onInspectRun={setSelectedRunId} />}
         {view === "orchestration" && (
@@ -418,7 +483,8 @@ function CoffeeShopApp() {
         {view === "compute" && <ComputeView nodes={snapshot.nodes} />}
         {view === "settings" && <SettingsView connection={connection} nodes={snapshot.nodes} generatedAt={snapshot.generatedAt} />}
       </div>
-      {selected && inspectorOpen && <Inspector agent={selected} nodes={snapshot.nodes} onClose={() => setInspectorOpen(false)} onSave={updateAgent} onReconcile={retry} canMutate={canMutate} />}
+      {selected && inspectorOpen && <Inspector agent={selected} nodes={snapshot.nodes} sessions={providerSessionsForAgent(selected.id, snapshot.runs, snapshot.sessionBindings ?? [])} onClose={() => setInspectorOpen(false)} onSave={updateAgent} onReconcile={retry} canMutate={canMutate} />}
+      {reviewingApproval && <ApprovalDialog approval={reviewingApproval} agents={snapshot.agents} nodes={snapshot.nodes} runs={snapshot.runs} tasks={snapshot.tasks ?? []} canMutate={canMutate} onClose={() => setReviewingApprovalId(undefined)} apiFetch={apiFetch} />}
       {selectedRunId && <RunInspector selectedRunId={selectedRunId} run={snapshot.runs.find((run) => run.id === selectedRunId)} runs={snapshot.runs} threads={snapshot.threads ?? []} artifacts={snapshot.artifacts ?? []} agents={snapshot.agents} nodes={snapshot.nodes} runActivity={snapshot.runActivity ?? []} approvals={snapshot.approvals ?? []} sessionBindings={snapshot.sessionBindings ?? []} onClose={() => setSelectedRunId(undefined)} onInspectRun={setSelectedRunId} canMutate={canMutate} />}
       <nav className="desktop-nav" aria-label="Primary">
         <div className="rail-brand" aria-label="Coffee Shop"><Coffee size={21} /></div>

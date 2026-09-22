@@ -49,6 +49,9 @@ type Invocation struct {
 	// Session is called at most once by a driver that established a provider session, after the
 	// session exists and before Started.
 	Session func(EstablishedSession)
+	// ProviderSession is called at most once by the native driver with the vendor CLI's own
+	// session identity. It is reported for operator reference only and is never resumed.
+	ProviderSession func(string)
 
 	// begin is installed by Runner.Execute; drivers call it when the prompt is about to be sent.
 	begin func(transportDetails)
