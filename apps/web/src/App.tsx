@@ -1,21 +1,26 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import {
   Pulse as Activity, ArrowLeft, ArrowRight, Broadcast, Check, CircleNotch, Command,
-  Coffee, Cpu, FolderOpen, Gear, MagnifyingGlass, PaperPlaneTilt, Plus,
+  Coffee, Cpu, FolderOpen, Gear, MagnifyingGlass, PaperPlaneTilt, Plus, ShieldWarning,
   Robot, SlidersHorizontal, TerminalWindow, UsersThree, WarningCircle, X, LockKey
 } from "@phosphor-icons/react";
-import { isActiveRunStatus, type Agent, type AgentState, type Artifact, type ChatMessage, type ComputeNode, type Run, type RunStatus, type Thread, type ThreadStatus } from "@coffee-shop/protocol";
+import {
+  isActiveRunStatus, type Agent, type AgentState, type ApprovalRequest, type Artifact, type ChatMessage,
+  type ComputeNode, type HarnessSessionBinding, type Run, type RunActivity, type RunStatus, type Thread, type ThreadStatus
+} from "@coffee-shop/protocol";
 import { AccessibleDialog } from "./AccessibleDialog.js";
 import { ActivityView } from "./ActivityView.js";
 import { AgentConfigurationForm, CreateAgentDialog, type AgentConfigurationPayload } from "./AgentConfiguration.js";
 import { CoffeeAvatar } from "./CoffeeAvatar.js";
 import { ComputeView } from "./compute/ComputeView.js";
 import { useHubConnection, type ConnectionStatus } from "./hubConnection.js";
+import { OrchestrationView } from "./orchestration/OrchestrationView.js";
+import { RunActivityPanel } from "./orchestration/RunActivityPanel.js";
 import { SettingsView } from "./settings/SettingsView.js";
 import { ThreadsView } from "./ThreadsView.js";
 import { PwaInstallProvider } from "./settings/PwaInstall.js";
 
-type View = "agents" | "threads" | "activity" | "compute" | "settings";
+type View = "agents" | "threads" | "activity" | "orchestration" | "compute" | "settings";
 
 const statusLabels: Record<AgentState, string> = { idle: "Idle", thinking: "Thinking", working: "Working", waiting: "Waiting", blocked: "Blocked", done: "Done" };
 const connectionLabels: Record<ConnectionStatus, string> = {
@@ -190,7 +195,7 @@ const runStatusLabels: Record<RunStatus, string> = {
   queued: "Queued", running: "Running", completed: "Completed", failed: "Failed", cancelled: "Cancelled"
 };
 
-function RunInspector({ selectedRunId, run, runs, threads, artifacts, agents, nodes, onClose, onInspectRun, canMutate }: {
+function RunInspector({ selectedRunId, run, runs, threads, artifacts, agents, nodes, runActivity, approvals, sessionBindings, onClose, onInspectRun, canMutate }: {
   selectedRunId: string;
   run?: Run;
   runs: Run[];
@@ -198,6 +203,9 @@ function RunInspector({ selectedRunId, run, runs, threads, artifacts, agents, no
   artifacts: Artifact[];
   agents: Agent[];
   nodes: ComputeNode[];
+  runActivity: RunActivity[];
+  approvals: ApprovalRequest[];
+  sessionBindings: HarnessSessionBinding[];
   onClose: () => void;
   onInspectRun: (id: string) => void;
   canMutate: boolean;
@@ -211,6 +219,9 @@ function RunInspector({ selectedRunId, run, runs, threads, artifacts, agents, no
   const thread = run?.threadId ? threads.find((item) => item.id === run.threadId) : undefined;
   const children = run ? runs.filter((item) => item.parentRunId === run.id) : [];
   const runArtifacts = run ? artifacts.filter((item) => item.runId === run.id && item.uploaded) : [];
+  const activity = run ? runActivity.find((item) => item.runId === run.id) : undefined;
+  const runApprovals = run ? approvals.filter((item) => item.runId === run.id) : [];
+  const sessionBinding = run?.sessionBindingId ? sessionBindings.find((item) => item.id === run.sessionBindingId) : undefined;
 
   async function cancelRun() {
     if (!run || !canMutate) return;
@@ -274,6 +285,7 @@ function RunInspector({ selectedRunId, run, runs, threads, artifacts, agents, no
           <section className="run-text"><h3>Prompt</h3><pre>{run.prompt || "Prompt unavailable"}</pre></section>
           <section className="run-text" aria-live="polite"><h3>Output</h3><pre>{run.output || (isActiveRunStatus(run.status) ? "Output is not available yet." : "No output was produced.")}</pre></section>
           <section className="run-text"><h3>Error</h3><pre>{run.error ?? "No error reported."}</pre></section>
+          <RunActivityPanel activity={activity} transportSelection={run.transportSelection} sessionBinding={sessionBinding} approvals={runApprovals} />
           {children.length > 0 && <section className="run-related"><h3>Delegated tasks</h3>{children.map((child) => <button key={child.id} onClick={() => onInspectRun(child.id)}><span>{agents.find((item) => item.id === child.agentId)?.name ?? child.agentId}</span><small>{runStatusLabels[child.status]}</small></button>)}</section>}
           {runArtifacts.length > 0 && <section className="run-related"><h3>Artifacts</h3>{runArtifacts.map((artifact) => <button key={artifact.id} onClick={() => void downloadArtifact(artifact)}><span>{artifact.title}</span><small>{artifact.kind} · {artifact.size} bytes</small></button>)}</section>}
           {notice && <p className="run-notice" role="alert">{notice}</p>}
@@ -294,9 +306,18 @@ function FreshnessNotice({ connection, onRetry }: { connection: ConnectionStatus
   return <div className="freshness-notice" role="status"><WarningCircle size={15} /><span><strong>{connectionLabels[connection]}</strong>{waiting ? "Waiting for a validated live snapshot." : "Showing last known data. Changes are disabled until the live snapshot is restored."}</span>{!waiting && <button onClick={onRetry} aria-label="Retry connection">Retry</button>}</div>;
 }
 
-function BottomNav({ view, onView }: { view: View; onView: (view: View) => void }) {
-  const items: [View, typeof Robot, string][] = [["agents", Robot, "Agents"], ["threads", FolderOpen, "Threads"], ["activity", Activity, "Activity"], ["compute", Cpu, "Compute"], ["settings", Gear, "Settings"]];
-  return <nav className="bottom-nav">{items.map(([key, Icon, label]) => <button key={key} className={view === key ? "active" : ""} onClick={() => onView(key)}><Icon size={21} weight={view === key ? "fill" : "regular"} /><span>{label}</span></button>)}</nav>;
+function BottomNav({ view, onView, pendingApprovalCount }: { view: View; onView: (view: View) => void; pendingApprovalCount: number }) {
+  const items: [View, typeof Robot, string][] = [
+    ["agents", Robot, "Agents"], ["threads", FolderOpen, "Threads"], ["activity", Activity, "Activity"],
+    ["orchestration", ShieldWarning, "Orchestrate"], ["compute", Cpu, "Compute"], ["settings", Gear, "Settings"]
+  ];
+  return <nav className="bottom-nav">{items.map(([key, Icon, label]) => (
+    <button key={key} className={view === key ? "active" : ""} onClick={() => onView(key)}>
+      <Icon size={21} weight={view === key ? "fill" : "regular"} />
+      <span>{label}</span>
+      {key === "orchestration" && pendingApprovalCount > 0 && <span className="unread">{pendingApprovalCount}</span>}
+    </button>
+  ))}</nav>;
 }
 
 function LockScreen() {
@@ -316,6 +337,7 @@ function CoffeeShopApp() {
   const selected = snapshot.agents.find((agent) => agent.id === selectedId);
   const selectedMessages = useMemo(() => snapshot.messages.filter((message) => message.agentId === selectedId && (!selectedThreadId || message.threadId === selectedThreadId)).sort((a, b) => a.createdAt.localeCompare(b.createdAt)), [snapshot.messages, selectedId, selectedThreadId]);
   const selectedThreads = useMemo(() => (snapshot.threads ?? []).filter((thread) => thread.ownerAgentId === selectedId), [snapshot.threads, selectedId]);
+  const pendingApprovalCount = useMemo(() => (snapshot.approvals ?? []).filter((approval) => approval.status === "pending").length, [snapshot.approvals]);
 
   async function send(body: string) {
     if (!selected || !canMutate) return;
@@ -377,21 +399,38 @@ function CoffeeShopApp() {
         {view === "agents" && selected && <Chat agent={selected} nodes={snapshot.nodes} threads={selectedThreads} selectedThreadId={selectedThreadId} messages={selectedMessages} sending={sending} inspectorOpen={inspectorOpen} onBack={() => setSelectedId(undefined)} onSend={send} onThreadChange={setSelectedThreadId} onInspector={() => setInspectorOpen((open) => !open)} onInspectRun={setSelectedRunId} canMutate={canMutate} />}
         {view === "threads" && <ThreadsView threads={snapshot.threads ?? []} runs={snapshot.runs} artifacts={snapshot.artifacts ?? []} agents={snapshot.agents} canMutate={canMutate} onContinue={continueThread} onInspectRun={setSelectedRunId} onSetStatus={setThreadStatus} />}
         {view === "activity" && <ActivityView events={snapshot.events} agents={snapshot.agents} onInspectRun={setSelectedRunId} />}
+        {view === "orchestration" && (
+          <OrchestrationView
+            threads={snapshot.threads ?? []}
+            tasks={snapshot.tasks ?? []}
+            taskMessages={snapshot.taskMessages ?? []}
+            taskMessageAcknowledgements={snapshot.taskMessageAcknowledgements ?? []}
+            approvals={snapshot.approvals ?? []}
+            workspaceLeases={snapshot.workspaceLeases ?? []}
+            agents={snapshot.agents}
+            nodes={snapshot.nodes}
+            runs={snapshot.runs}
+            canMutate={canMutate}
+            apiFetch={apiFetch}
+            onInspectRun={setSelectedRunId}
+          />
+        )}
         {view === "compute" && <ComputeView nodes={snapshot.nodes} />}
         {view === "settings" && <SettingsView connection={connection} nodes={snapshot.nodes} generatedAt={snapshot.generatedAt} />}
       </div>
       {selected && inspectorOpen && <Inspector agent={selected} nodes={snapshot.nodes} onClose={() => setInspectorOpen(false)} onSave={updateAgent} onReconcile={retry} canMutate={canMutate} />}
-      {selectedRunId && <RunInspector selectedRunId={selectedRunId} run={snapshot.runs.find((run) => run.id === selectedRunId)} runs={snapshot.runs} threads={snapshot.threads ?? []} artifacts={snapshot.artifacts ?? []} agents={snapshot.agents} nodes={snapshot.nodes} onClose={() => setSelectedRunId(undefined)} onInspectRun={setSelectedRunId} canMutate={canMutate} />}
+      {selectedRunId && <RunInspector selectedRunId={selectedRunId} run={snapshot.runs.find((run) => run.id === selectedRunId)} runs={snapshot.runs} threads={snapshot.threads ?? []} artifacts={snapshot.artifacts ?? []} agents={snapshot.agents} nodes={snapshot.nodes} runActivity={snapshot.runActivity ?? []} approvals={snapshot.approvals ?? []} sessionBindings={snapshot.sessionBindings ?? []} onClose={() => setSelectedRunId(undefined)} onInspectRun={setSelectedRunId} canMutate={canMutate} />}
       <nav className="desktop-nav" aria-label="Primary">
         <div className="rail-brand" aria-label="Coffee Shop"><Coffee size={21} /></div>
         <button aria-label="Agents" className={view === "agents" ? "active" : ""} onClick={() => switchView("agents")}><Robot size={18} /><span>Agents</span></button>
         <button aria-label="Threads" className={view === "threads" ? "active" : ""} onClick={() => switchView("threads")}><FolderOpen size={18} /><span>Threads</span></button>
         <button aria-label="Activity" className={view === "activity" ? "active" : ""} onClick={() => switchView("activity")}><Activity size={18} /><span>Activity</span></button>
+        <button aria-label="Orchestration" className={view === "orchestration" ? "active" : ""} onClick={() => switchView("orchestration")}><ShieldWarning size={18} /><span>Orchestrate</span>{pendingApprovalCount > 0 && <span className="unread">{pendingApprovalCount}</span>}</button>
         <button aria-label="Compute" className={view === "compute" ? "active" : ""} onClick={() => switchView("compute")}><Cpu size={18} /><span>Compute</span></button>
         <button aria-label="Settings" className={view === "settings" ? "active" : ""} onClick={() => switchView("settings")}><Gear size={18} /><span>Settings</span></button>
         <div className="rail-user">CS</div>
       </nav>
-      <BottomNav view={view} onView={switchView} />
+      <BottomNav view={view} onView={switchView} pendingApprovalCount={pendingApprovalCount} />
       {creating && <CreateAgentDialog nodes={snapshot.nodes} onClose={() => setCreating(false)} onSave={createAgent} onReconcile={retry} canMutate={canMutate} />}
     </div>
   );

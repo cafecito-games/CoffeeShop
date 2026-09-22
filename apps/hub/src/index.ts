@@ -28,6 +28,7 @@ import { createHubToolHandler, hubToolError } from "./hubTools.js";
 import { TaskEventWaiters } from "./mailbox.js";
 import { forgetNodeCapabilityReport, getNodeCapabilityReport, recordNodeCapabilityReport } from "./nodeCapabilities.js";
 import { loadProjectProfilesFromFile, ProjectProfileRegistry } from "./projectProfiles.js";
+import { computeNodeProjectReadiness } from "./projectReadiness.js";
 import { retainedHarnessEvents } from "./harnessEvents.js";
 import { expireDueApprovals, receiveApprovalUndeliverable, receiveHarnessEvent, reconcileApprovals, resolveApproval } from "./harnessGateway.js";
 import { createRedactor } from "./redaction.js";
@@ -361,6 +362,26 @@ app.get("/api/artifacts/:id/content", async (req, res) => {
   } catch {
     res.status(404).json({ error: "Artifact content not found" });
   }
+});
+
+/**
+ * Read-only project readiness for the PWA (#31): evaluates one project profile against every
+ * currently known compute node using the same `computeNodeProjectReadiness` path the scheduler
+ * uses, so the UI never re-derives readiness from raw evidence. Every field returned is already
+ * fixed vocabulary, a hub-issued node id, or profile content that `validateProjectProfile`
+ * screened for secret-like values at load time, so nothing further needs redaction here.
+ * Registered ahead of the SPA fallback below so a project-readiness request is never swallowed
+ * by the catch-all that serves `index.html` for unmatched routes.
+ */
+app.get("/api/project-readiness", (req, res) => {
+  const projectId = typeof req.query.projectId === "string" ? req.query.projectId : undefined;
+  if (!projectId) return res.status(400).json({ error: "projectId is required" });
+  const profile = projectProfiles.get(projectId);
+  if (!profile) return res.status(404).json({ error: "Project profile not found" });
+  const nowIso = new Date().toISOString();
+  const readiness = store.snapshot().nodes.map((node) =>
+    computeNodeProjectReadiness(node, getNodeCapabilityReport(node.id), profile, nowIso));
+  res.json({ profile: { id: profile.id, name: profile.name }, readiness });
 });
 
 const webDist = resolve(fileURLToPath(new URL("../../web/dist", import.meta.url)));

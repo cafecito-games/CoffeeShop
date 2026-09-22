@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { harnessIds, runStatuses, type Snapshot } from "@coffee-shop/protocol";
+import {
+  approvalDeliveryStatuses, approvalOptionKinds, approvalStatuses, harnessEventStreamStatuses, harnessIds,
+  harnessTransports, placementRequirementKinds, planEntryPriorities, planEntryStatuses, runStatuses,
+  sessionBindingStatuses, taskDependencyPolicies, taskMessageKinds, taskStatuses, toolCallKinds,
+  toolCallStatuses, workspaceCleanupPolicies, workspaceIsolationPolicies, workspaceLeaseStatuses,
+  workspaceRetentionReasons, type Snapshot
+} from "@coffee-shop/protocol";
 
 export type ConnectionStatus = "connecting" | "connected" | "reconnecting" | "disconnected" | "authentication-required";
 
@@ -131,6 +137,19 @@ function isNode(value: unknown): boolean {
     && isString(value.version);
 }
 
+const isOptionalNumber = (value: unknown) => value === undefined || isNumber(value);
+const isOptionalOneOf = <T extends string>(value: unknown, options: readonly T[]) => value === undefined || isOneOf(value, options);
+
+function isRunTransportSelection(value: unknown): boolean {
+  return isObject(value)
+    && isOneOf(value.requestedTransport, harnessTransports)
+    && isOneOf(value.selectedTransport, harnessTransports)
+    && (value.fallbackReason === undefined || isString(value.fallbackReason))
+    && isOptionalString(value.harnessVersion)
+    && (value.adapter === undefined || (isObject(value.adapter) && isString(value.adapter.id) && isString(value.adapter.version) && isString(value.adapter.source)))
+    && (value.acp === undefined || isObject(value.acp));
+}
+
 function isRun(value: unknown): boolean {
   return isObject(value)
     && isString(value.id)
@@ -149,7 +168,284 @@ function isRun(value: unknown): boolean {
     && isOptionalString(value.dispatchedAt)
     && isOptionalString(value.startedAt)
     && isOptionalString(value.finishedAt)
+    && isString(value.createdAt)
+    && isOptionalString(value.taskId)
+    && isOptionalNumber(value.attempt)
+    && isOptionalOneOf(value.transport, harnessTransports)
+    && isOptionalOneOf(value.fallbackTransport, harnessTransports)
+    && (value.transportSelection === undefined || isRunTransportSelection(value.transportSelection))
+    && isOptionalString(value.sessionBindingId)
+    && isOptionalString(value.workspaceLeaseId);
+}
+
+/* Version-4 orchestration projections (#20/#22/#23/#24/#25/#29): every field is validated
+ * structurally and every enum against the shared protocol vocabulary, so a malformed or unknown
+ * value on any of these fails the whole snapshot closed rather than rendering a partial/garbled
+ * orchestration surface. */
+
+function isTaskDependency(value: unknown): boolean {
+  return isObject(value) && isString(value.taskId) && isOneOf(value.policy, taskDependencyPolicies);
+}
+
+function isExecutionRequirements(value: unknown): boolean {
+  if (!isObject(value)) return false;
+  if (value.skills !== undefined && !isArrayOf(value.skills, isString)) return false;
+  if (value.harnessIds !== undefined && !isArrayOf(value.harnessIds, (item) => isOneOf(item, harnessIds))) return false;
+  if (value.models !== undefined && !isArrayOf(value.models, isString)) return false;
+  if (value.transports !== undefined && !isArrayOf(value.transports, (item) => isOneOf(item, harnessTransports))) return false;
+  if (value.operatingSystems !== undefined && !isArrayOf(value.operatingSystems, isString)) return false;
+  if (value.architectures !== undefined && !isArrayOf(value.architectures, isString)) return false;
+  if (value.labels !== undefined && !isArrayOf(value.labels, isString)) return false;
+  if (!isOptionalNumber(value.minimumConcurrency)) return false;
+  if (!isOptionalNumber(value.minimumMemoryMegabytes)) return false;
+  if (!isOptionalString(value.projectProfileId)) return false;
+  if (value.workspace !== undefined && !(isObject(value.workspace) && isOptionalString(value.workspace.repository) && isOptionalString(value.workspace.path) && typeof value.workspace.writable === "boolean")) return false;
+  if (value.preferences !== undefined && !isObject(value.preferences)) return false;
+  return true;
+}
+
+function isUnsatisfiedRequirement(value: unknown): boolean {
+  return isObject(value)
+    && isOneOf(value.kind, placementRequirementKinds)
+    && isString(value.requirement)
+    && isOptionalString(value.nodeId)
+    && isOptionalString(value.agentId)
+    && isString(value.detail);
+}
+
+function isPlacementDiagnostic(value: unknown): boolean {
+  return isObject(value)
+    && isString(value.evaluatedAt)
+    && isArrayOf(value.eligibleNodeIds, isString)
+    && isArrayOf(value.unsatisfied, isUnsatisfiedRequirement);
+}
+
+function isTaskAssignment(value: unknown): boolean {
+  return isObject(value)
+    && isString(value.runId)
+    && isString(value.agentId)
+    && isString(value.nodeId)
+    && isOneOf(value.harnessId, harnessIds)
+    && isOneOf(value.transport, harnessTransports)
+    && isString(value.model)
+    && isOptionalString(value.workspaceLeaseId)
+    && isString(value.assignedAt);
+}
+
+function isTaskProgress(value: unknown): boolean {
+  return isObject(value)
+    && isOptionalString(value.summary)
+    && isOptionalString(value.blockedReason)
+    && (value.completion === undefined || (isObject(value.completion) && isString(value.completion.summary) && isArrayOf(value.completion.artifactIds, isString)))
+    && isString(value.runId)
+    && isString(value.updatedAt);
+}
+
+function isTask(value: unknown): boolean {
+  return isObject(value)
+    && isString(value.id)
+    && isString(value.threadId)
+    && isString(value.title)
+    && isString(value.instructions)
+    && isOneOf(value.status, taskStatuses)
+    && isExecutionRequirements(value.requirements)
+    && isArrayOf(value.dependencies, isTaskDependency)
+    && (value.placementOverride === undefined || (isObject(value.placementOverride) && isOptionalString(value.placementOverride.agentId) && isOptionalString(value.placementOverride.nodeId) && isOneOf(value.placementOverride.authorizedBy, ["operator", "policy"])))
+    && isOptionalString(value.sourceRunId)
+    && isString(value.idempotencyKey)
+    && (value.assignment === undefined || isTaskAssignment(value.assignment))
+    && (value.placement === undefined || isPlacementDiagnostic(value.placement))
+    && isArrayOf(value.attemptRunIds, isString)
+    && isOptionalString(value.result)
+    && isOptionalString(value.error)
+    && (value.progress === undefined || isTaskProgress(value.progress))
+    && isString(value.createdAt)
+    && isString(value.updatedAt)
+    && isOptionalString(value.finishedAt);
+}
+
+function isTaskMessageParticipant(value: unknown): boolean {
+  if (!isObject(value)) return false;
+  if (value.type === "task") return isString(value.taskId);
+  return value.type === "orchestrator" || value.type === "operator";
+}
+
+function isTaskMessage(value: unknown): boolean {
+  return isObject(value)
+    && isString(value.id)
+    && isString(value.threadId)
+    && isTaskMessageParticipant(value.sender)
+    && isTaskMessageParticipant(value.recipient)
+    && isNumber(value.sequence)
+    && isOneOf(value.kind, taskMessageKinds)
+    && isString(value.body)
+    && isOptionalString(value.correlationId)
+    && isOptionalString(value.inReplyToMessageId)
+    && (value.artifactIds === undefined || isArrayOf(value.artifactIds, isString))
+    && isOptionalString(value.sourceRunId)
+    && isString(value.idempotencyKey)
     && isString(value.createdAt);
+}
+
+function isTaskMessageAcknowledgement(value: unknown): boolean {
+  return isObject(value)
+    && isString(value.messageId)
+    && isString(value.threadId)
+    && isTaskMessageParticipant(value.recipient)
+    && isString(value.runId)
+    && isString(value.acknowledgedAt);
+}
+
+function isHarnessSessionBinding(value: unknown): boolean {
+  return isObject(value)
+    && isString(value.id)
+    && isString(value.threadId)
+    && isString(value.agentId)
+    && isString(value.nodeId)
+    && isOneOf(value.harnessId, harnessIds)
+    && isOneOf(value.transport, harnessTransports)
+    && isString(value.workspace)
+    && isOptionalString(value.workspaceLeaseId)
+    && isString(value.providerSessionId)
+    && isOneOf(value.status, sessionBindingStatuses)
+    && isString(value.createdByRunId)
+    && isString(value.lastRunId)
+    && isOptionalString(value.replacedByBindingId)
+    && isString(value.createdAt)
+    && isString(value.updatedAt);
+}
+
+function isApprovalOption(value: unknown): boolean {
+  return isObject(value) && isString(value.id) && isString(value.label) && isOneOf(value.kind, approvalOptionKinds);
+}
+
+function isApprovalDelivery(value: unknown): boolean {
+  return isObject(value)
+    && isOneOf(value.status, approvalDeliveryStatuses)
+    && isNumber(value.attempts)
+    && isString(value.updatedAt)
+    && isOptionalString(value.reason);
+}
+
+function isApprovalRequest(value: unknown): boolean {
+  return isObject(value)
+    && isString(value.id)
+    && isString(value.harnessApprovalId)
+    && isString(value.threadId)
+    && isOptionalString(value.taskId)
+    && isString(value.runId)
+    && isString(value.nodeId)
+    && isOptionalString(value.sessionBindingId)
+    && isOptionalString(value.toolCallId)
+    && isString(value.title)
+    && isOptionalString(value.detail)
+    && isArrayOf(value.options, isApprovalOption)
+    && isOneOf(value.status, approvalStatuses)
+    && isString(value.requestedAt)
+    && isOptionalString(value.expiresAt)
+    && isOptionalString(value.resolvedAt)
+    && (value.resolvedBy === undefined || isOneOf(value.resolvedBy, ["operator", "policy", "system"]))
+    && isOptionalString(value.selectedOptionId)
+    && isOptionalString(value.resolutionIdempotencyKey)
+    && (value.delivery === undefined || isApprovalDelivery(value.delivery));
+}
+
+function isWorkspaceLease(value: unknown): boolean {
+  return isObject(value)
+    && isString(value.id)
+    && isString(value.threadId)
+    && isString(value.taskId)
+    && isString(value.runId)
+    && isString(value.nodeId)
+    && isString(value.projectProfileId)
+    && isOneOf(value.policy, workspaceIsolationPolicies)
+    && isOneOf(value.cleanup, workspaceCleanupPolicies)
+    && isOptionalString(value.repository)
+    && isString(value.root)
+    && isString(value.sourcePath)
+    && isOptionalString(value.baseRevision)
+    && isOptionalString(value.resolvedBaseRevision)
+    && isOptionalString(value.branch)
+    && isString(value.worktreePath)
+    && isOneOf(value.status, workspaceLeaseStatuses)
+    && (value.retentionReason === undefined || isOneOf(value.retentionReason, workspaceRetentionReasons))
+    && isOptionalString(value.detail)
+    && isOptionalString(value.cleanupRequestedAt)
+    && isString(value.createdAt)
+    && isString(value.updatedAt);
+}
+
+function isBoundedText(value: unknown): boolean {
+  return isObject(value) && isString(value.text) && isNumber(value.truncatedBytes);
+}
+
+function isPlanEntryForActivity(value: unknown): boolean {
+  return isObject(value) && isString(value.content) && isOneOf(value.status, planEntryStatuses) && isOneOf(value.priority, planEntryPriorities);
+}
+
+function isRunActivityToolCall(value: unknown): boolean {
+  return isObject(value)
+    && isString(value.toolCallId)
+    && isOneOf(value.status, toolCallStatuses)
+    && isOneOf(value.kind, toolCallKinds)
+    && isString(value.title)
+    && isOptionalString(value.detail)
+    && isString(value.updatedAt);
+}
+
+function isRunActivityDiff(value: unknown): boolean {
+  return isObject(value)
+    && isOptionalString(value.toolCallId)
+    && isString(value.path)
+    && isOptionalString(value.oldText)
+    && isString(value.newText)
+    && typeof value.truncated === "boolean"
+    && isNumber(value.sequence)
+    && isString(value.at);
+}
+
+function isRunActivityTerminal(value: unknown): boolean {
+  return isObject(value)
+    && isString(value.terminalId)
+    && isBoundedText(value.stdout)
+    && isBoundedText(value.stderr)
+    && isString(value.updatedAt);
+}
+
+function isRunActivityWarning(value: unknown): boolean {
+  return isObject(value) && isString(value.code) && isString(value.message) && isNumber(value.sequence) && isString(value.at);
+}
+
+function isRunActivityUsage(value: unknown): boolean {
+  return isObject(value)
+    && isOptionalNumber(value.inputTokens)
+    && isOptionalNumber(value.outputTokens)
+    && isOptionalNumber(value.cachedInputTokens)
+    && isOptionalNumber(value.costUsd)
+    && isString(value.updatedAt);
+}
+
+function isRunActivity(value: unknown): boolean {
+  return isObject(value)
+    && isString(value.runId)
+    && isOptionalString(value.threadId)
+    && isString(value.nodeId)
+    && isOneOf(value.streamStatus, harnessEventStreamStatuses)
+    && isOptionalString(value.streamFailure)
+    && isNumber(value.lastSequence)
+    && isNumber(value.acceptedEvents)
+    && isBoundedText(value.message)
+    && isBoundedText(value.thought)
+    && isArrayOf(value.plan, isPlanEntryForActivity)
+    && isArrayOf(value.toolCalls, isRunActivityToolCall)
+    && isArrayOf(value.diffs, isRunActivityDiff)
+    && isArrayOf(value.terminals, isRunActivityTerminal)
+    && (value.usage === undefined || isRunActivityUsage(value.usage))
+    && isArrayOf(value.warnings, isRunActivityWarning)
+    && isNumber(value.unknownEvents)
+    && (isObject(value.omitted) && isNumber(value.omitted.toolCalls) && isNumber(value.omitted.diffs) && isNumber(value.omitted.terminals) && isNumber(value.omitted.warnings))
+    && isString(value.summary)
+    && isString(value.updatedAt);
 }
 
 function isEvent(value: unknown): boolean {
@@ -203,6 +499,13 @@ export function isSnapshot(value: unknown): value is Snapshot {
     && (value.threads === undefined || isArrayOf(value.threads, isThread))
     && (value.delegations === undefined || isArrayOf(value.delegations, isDelegation))
     && (value.artifacts === undefined || isArrayOf(value.artifacts, isArtifact))
+    && (value.tasks === undefined || isArrayOf(value.tasks, isTask))
+    && (value.taskMessages === undefined || isArrayOf(value.taskMessages, isTaskMessage))
+    && (value.taskMessageAcknowledgements === undefined || isArrayOf(value.taskMessageAcknowledgements, isTaskMessageAcknowledgement))
+    && (value.sessionBindings === undefined || isArrayOf(value.sessionBindings, isHarnessSessionBinding))
+    && (value.approvals === undefined || isArrayOf(value.approvals, isApprovalRequest))
+    && (value.workspaceLeases === undefined || isArrayOf(value.workspaceLeases, isWorkspaceLease))
+    && (value.runActivity === undefined || isArrayOf(value.runActivity, isRunActivity))
     && isString(value.generatedAt);
 }
 
