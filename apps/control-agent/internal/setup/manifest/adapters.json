@@ -1,0 +1,35 @@
+{
+  "manifestVersion": "1",
+  "adapters": [
+    {
+      "id": "claude-acp",
+      "harnessId": "claude-cli",
+      "provider": "anthropic",
+      "label": "Claude Code ACP adapter",
+      "version": "0.1.0",
+      "platforms": {
+        "darwin-amd64": { "kind": "manual", "executablePath": "bin/adapter" },
+        "darwin-arm64": { "kind": "manual", "executablePath": "bin/adapter" },
+        "linux-amd64": { "kind": "manual", "executablePath": "bin/adapter" },
+        "linux-arm64": { "kind": "manual", "executablePath": "bin/adapter" }
+      },
+      "launch": {},
+      "authDocsUrl": "https://code.claude.com/docs/setup"
+    },
+    {
+      "id": "codex-acp",
+      "harnessId": "codex-cli",
+      "provider": "openai",
+      "label": "Codex CLI ACP adapter",
+      "version": "0.1.0",
+      "platforms": {
+        "darwin-amd64": { "kind": "manual", "executablePath": "bin/adapter" },
+        "darwin-arm64": { "kind": "manual", "executablePath": "bin/adapter" },
+        "linux-amd64": { "kind": "manual", "executablePath": "bin/adapter" },
+        "linux-arm64": { "kind": "manual", "executablePath": "bin/adapter" }
+      },
+      "launch": {},
+      "authDocsUrl": "https://developers.openai.com/codex/"
+    }
+  ]
+}

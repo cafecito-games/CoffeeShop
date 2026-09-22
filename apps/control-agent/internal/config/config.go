@@ -411,3 +411,15 @@ func splitStrictEnv(key string) []string {
 }
 
 func Platform() string { return runtime.GOOS + " · " + runtime.GOARCH }
+
+// AdapterConfigSnippet renders the exact environment variable an operator would add to a Barista
+// invocation to register a verified, locally installed ACP adapter once a later release wires
+// setup-installed adapters into the ACP driver. It performs no file write and no runtime
+// registration itself — it is documentation output only, matching the requirement that no
+// permanent Coffee Shop server entry or harness reconfiguration happens implicitly. The harness
+// ID's kebab-case segments become an uppercase, underscore-separated environment variable name
+// segment.
+func AdapterConfigSnippet(harnessID string, adapterBinaryPath string) string {
+	environmentName := strings.ToUpper(strings.ReplaceAll(harnessID, "-", "_"))
+	return fmt.Sprintf("# %s ACP adapter (installed by `barista setup apply`)\n# ACP_ADAPTER_%s=%s\n", harnessID, environmentName, adapterBinaryPath)
+}
