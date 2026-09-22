@@ -33,7 +33,9 @@ func fakeAdapterDriver(t *testing.T, scenario string, cancelGrace time.Duration)
 	require.NoError(t, err)
 	record := filepath.Join(t.TempDir(), "frames.jsonl")
 	driver := NewACPDriver(ACPDriverOptions{
-		Adapters:            map[string]ACPAdapter{"codex-cli": {Binary: executable, Environment: acptest.Environment(scenario, record)}},
+		Adapters: map[string]ACPAdapter{"codex-cli": {Binary: executable, Environment: acptest.Environment(scenario, record)}},
+		// A policy-free provider exercises the generic driver; provider policies have their own tests.
+		Providers:           map[string]ACPProvider{"codex-cli": {}},
 		RequestTimeout:      5 * time.Second,
 		PermissionTimeout:   time.Second,
 		CancelGracePeriod:   cancelGrace,

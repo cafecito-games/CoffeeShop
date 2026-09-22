@@ -3,10 +3,12 @@ import {
   isActiveRunStatus,
   isTerminalTaskStatus,
   supportsControlCapability,
+  validateRunTransportSelection,
   type ControlAgentToHub,
   type ControlProtocolVersion,
   type HubToControlAgent,
   type Run,
+  type RunTransportSelection,
   type Snapshot
 } from "@coffee-shop/protocol";
 import { settleHarnessStateForTerminalRun } from "./harnessEvents.js";
@@ -234,6 +236,20 @@ export async function cancelPersistedTask(
   return result;
 }
 
+/**
+ * The transport selection a `run.started` reports, when it is well formed and consistent with the
+ * dispatch: it must name the run's requested transport, and may select another one only when the
+ * run permitted that fallback.
+ */
+export function acceptedTransportSelection(run: Run, reported: unknown): RunTransportSelection | undefined {
+  const validated = validateRunTransportSelection(reported);
+  if (!validated.ok) return undefined;
+  const selection = validated.value;
+  if (selection.requestedTransport !== (run.transport ?? "native-cli")) return undefined;
+  if (selection.selectedTransport !== selection.requestedTransport && run.fallbackTransport !== selection.selectedTransport) return undefined;
+  return selection;
+}
+
 export function applyRunLifecycle(state: State, message: RunLifecycleMessage) {
   if (!runLifecycleMessageTypes.has(message.type)) return false;
   const run = state.runs.find((item) => item.id === message.runId);
@@ -254,6 +270,25 @@ export function applyRunLifecycle(state: State, message: RunLifecycleMessage) {
     run.startedAt = message.at;
     agent.state = "working";
     agent.currentAction = "Working";
+    if (message.transport !== undefined) {
+      const selection = acceptedTransportSelection(run, message.transport);
+      if (selection) {
+        run.transportSelection = selection;
+        if (selection.fallbackReason) {
+          state.events.unshift(newEvent({
+            type: "status", title: `${agent.name} fell back to the native CLI`,
+            detail: `Requested ${selection.requestedTransport}; ${selection.fallbackReason} before the prompt was sent.`,
+            threadId: run.threadId, agentId: agent.id, runId: run.id
+          }));
+        }
+      } else {
+        state.events.unshift(newEvent({
+          type: "status", title: `${agent.name}'s compute reported an unexpected transport`,
+          detail: "The transport selection was malformed or not permitted by the dispatch and was not recorded.",
+          threadId: run.threadId, agentId: agent.id, runId: run.id
+        }));
+      }
+    }
   } else if (message.type === "run.output") {
     if (run.status !== "running") return false;
     run.output += message.chunk;

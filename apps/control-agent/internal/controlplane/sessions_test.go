@@ -28,6 +28,17 @@ func newSessionClient() *Client {
 	return NewClient(config.Config{Concurrency: 1}, protocol.ComputeNode{ID: "node-one"}, nil, emptyCapabilityReport)
 }
 
+// startedSession opens a session for a run that has started, discarding its run.started message so
+// tests observe only what they forward.
+func startedSession(client *Client, runID string) *runSession {
+	session := client.openSession(runID)
+	session.start(protocol.RunTransportSelection{RequestedTransport: protocol.TransportNativeCLI, SelectedTransport: protocol.TransportNativeCLI})
+	client.connectionMu.Lock()
+	client.outbox = nil
+	client.connectionMu.Unlock()
+	return session
+}
+
 func outboxObjects(t *testing.T, client *Client) []map[string]json.RawMessage {
 	t.Helper()
 	client.connectionMu.Lock()
@@ -80,7 +91,7 @@ func undeliverable(t *testing.T, client *Client) []protocol.ApprovalUndeliverabl
 
 func TestForwardedEventsUseExactEnvelopeAndBaristaSequence(t *testing.T) {
 	client := newSessionClient()
-	session := client.openSession("run-one")
+	session := startedSession(client, "run-one")
 	session.forward(messageDelta("run-one", "Hello "))
 	session.forward(messageDelta("run-one", "world"))
 	session.forward(messageDelta("run-other", "not this run"))
@@ -106,7 +117,7 @@ func keys(object map[string]json.RawMessage) []string {
 
 func TestFullOutboxDropsOrdinaryEventsWithoutASequenceGap(t *testing.T) {
 	client := newSessionClient()
-	session := client.openSession("run-one")
+	session := startedSession(client, "run-one")
 	session.forward(messageDelta("run-one", "first"))
 
 	client.connectionMu.Lock()
@@ -142,7 +153,7 @@ func eventTypes(events []protocol.HarnessEvent) []string {
 
 func TestOutboxByteBoundAppliesToOptionalEvents(t *testing.T) {
 	client := newSessionClient()
-	session := client.openSession("run-one")
+	session := startedSession(client, "run-one")
 	client.connectionMu.Lock()
 	client.outboxEventBytes = outboxEventByteLimit - 10
 	client.connectionMu.Unlock()
@@ -177,7 +188,7 @@ func receive(t *testing.T, result <-chan acp.PermissionDecision) acp.PermissionD
 
 func TestApprovalDecisionReleasesOnlyTheMatchingLiveCallback(t *testing.T) {
 	client := newSessionClient()
-	session := client.openSession("run-one")
+	session := startedSession(client, "run-one")
 	session.forward(permissionRequested("run-one", "acp-permission-1"))
 	result := decide(t, session, "acp-permission-1")
 
@@ -197,7 +208,7 @@ func TestApprovalDecisionReleasesOnlyTheMatchingLiveCallback(t *testing.T) {
 
 func TestApprovalDecisionArrivingBeforeTheCallbackIsHeld(t *testing.T) {
 	client := newSessionClient()
-	session := client.openSession("run-one")
+	session := startedSession(client, "run-one")
 	session.forward(permissionRequested("run-one", "acp-permission-1"))
 	client.applyApprovalDecision(&protocol.ApprovalDecision{ApprovalID: "acp-permission-1", RunID: "run-one", Status: "rejected", SelectedOptionID: "reject"})
 	require.Equal(t, "reject", receive(t, decide(t, session, "acp-permission-1")).OptionID)
@@ -208,7 +219,7 @@ func TestCancelledAndExpiredDecisionsNeverSelectAnOption(t *testing.T) {
 	for _, status := range []string{"cancelled", "expired"} {
 		t.Run(status, func(t *testing.T) {
 			client := newSessionClient()
-			session := client.openSession("run-one")
+			session := startedSession(client, "run-one")
 			session.forward(permissionRequested("run-one", "acp-permission-1"))
 			result := decide(t, session, "acp-permission-1")
 			client.applyApprovalDecision(&protocol.ApprovalDecision{ApprovalID: "acp-permission-1", RunID: "run-one", Status: status})
@@ -232,7 +243,7 @@ func TestRefusedDecisionsAreReportedAndLeaveTheCallbackWaiting(t *testing.T) {
 	for name, testCase := range cases {
 		t.Run(name, func(t *testing.T) {
 			client := newSessionClient()
-			session := client.openSession("run-one")
+			session := startedSession(client, "run-one")
 			session.forward(permissionRequested("run-one", "acp-permission-1"))
 			result := decide(t, session, "acp-permission-1")
 
@@ -255,14 +266,14 @@ func TestRefusedDecisionsAreReportedAndLeaveTheCallbackWaiting(t *testing.T) {
 }
 
 func TestCallbackForARequestThatWasNeverForwardedFailsClosed(t *testing.T) {
-	session := newSessionClient().openSession("run-one")
+	session := startedSession(newSessionClient(), "run-one")
 	_, err := session.permission(context.Background(), acp.PermissionRequest{RunID: "run-one", ApprovalID: "acp-permission-1"})
 	require.Error(t, err)
 }
 
 func TestClosedSessionRefusesLateDecisions(t *testing.T) {
 	client := newSessionClient()
-	session := client.openSession("run-one")
+	session := startedSession(client, "run-one")
 	session.forward(permissionRequested("run-one", "acp-permission-1"))
 	ctx, cancel := context.WithCancel(context.Background())
 	result := make(chan error, 1)
@@ -289,6 +300,7 @@ func TestACPPermissionRoundTripThroughTheControlSession(t *testing.T) {
 	t.Cleanup(func() { acptest.KillDescendants(t, record) })
 	runner := harness.NewRunner(nil).WithACP(harness.NewACPDriver(harness.ACPDriverOptions{
 		Adapters:          map[string]harness.ACPAdapter{"codex-cli": {Binary: executable, Environment: acptest.Environment("permission", record)}},
+		Providers:         map[string]harness.ACPProvider{"codex-cli": {}},
 		RequestTimeout:    5 * time.Second,
 		PermissionTimeout: 5 * time.Second,
 	}))
@@ -314,6 +326,7 @@ func TestACPPermissionRoundTripThroughTheControlSession(t *testing.T) {
 		MCP:        mcpserver.Config{},
 		Events:     session.forward,
 		Permission: session.permission,
+		Started:    session.start,
 	})
 	require.NoError(t, err)
 	require.Equal(t, "after permission", result)
@@ -348,10 +361,13 @@ func TestRejectedDispatchNeverStartsTheAdapterOrOpensASession(t *testing.T) {
 	}))
 	client := NewClient(config.Config{Concurrency: 1, WorkspaceRoots: []string{directory}}, protocol.ComputeNode{ID: "node-one"}, runner, emptyCapabilityReport)
 	run := protocol.Run{ID: "run-acp", HarnessID: "codex-cli", Transport: harness.TransportACP, Workspace: directory, Prompt: "run the tests"}
-	client.handle(context.Background(), protocol.Inbound{Type: "dispatch", Run: run, Execution: &protocol.DispatchExecution{Transport: harness.TransportACP}})
+	// The adapter is available, so acp-v1 alone is admitted; resuming a session binding is not.
+	client.handle(context.Background(), protocol.Inbound{Type: "dispatch", Run: run, Execution: &protocol.DispatchExecution{
+		Transport: harness.TransportACP, SessionBinding: &protocol.DispatchSessionBinding{ID: "binding-one", ProviderSessionID: "provider-session-one"},
+	}})
 
 	failed := waitForMessage(t, client, "run.failed")
-	require.Contains(t, failed.Error, "unsupported execution")
+	require.Equal(t, "unsupported execution: session binding resume not available on this Barista", failed.Error)
 	require.Zero(t, client.activeRuns())
 	require.Nil(t, client.session("run-acp"))
 	time.Sleep(50 * time.Millisecond)

@@ -1,5 +1,4 @@
 import {
-  harnessTransports,
   isActiveRunStatus,
   isHarnessTransport,
   resolveNodeCapability,
@@ -72,8 +71,18 @@ export interface PlacementCandidate {
   harnessId: HarnessId;
   model: string;
   transport: HarnessTransport;
+  /** `native-cli` when an `acp-v1` placement may fall back to the native CLI before its prompt. */
+  fallbackTransport?: HarnessTransport;
   workspace: string;
 }
+
+/**
+ * Transport preference among those a harness advertises and the requirements accept. Barista
+ * advertises `acp-v1` only for a harness whose verified adapter passed its startup probe, so ACP is
+ * preferred exactly when it is installed, verified, and capable; the native CLI remains the
+ * alternative, and the only possible fallback.
+ */
+export const transportPreference: readonly HarnessTransport[] = ["acp-v1", "native-cli"];
 
 export type PlacementDecision =
   | { kind: "assigned"; candidate: PlacementCandidate; diagnostic: PlacementDiagnostic }
@@ -183,9 +192,11 @@ function evaluateCandidate(task: Task, agent: Agent, profile: ProjectProfile | u
     add("model", agent.model, "the compute node's harness no longer advertises the agent's model");
   }
   const advertisedTransports = harnessAvailable ? (harness.transports ?? ["native-cli"]).filter(isHarnessTransport) : [];
-  const transport = harnessTransports.find((item) => advertisedTransports.includes(item)
+  const acceptable = (item: HarnessTransport) => advertisedTransports.includes(item)
     && (requirements.transports === undefined || requirements.transports.includes(item))
-    && (profileHard?.transports === undefined || profileHard.transports.includes(item)));
+    && (profileHard?.transports === undefined || profileHard.transports.includes(item));
+  const transport = transportPreference.find(acceptable);
+  const fallbackTransport = transport === "acp-v1" && acceptable("native-cli") ? "native-cli" as const : undefined;
   if (harnessAvailable && transport === undefined) {
     add("transport", (requirements.transports ?? profileHard?.transports ?? ["native-cli"]).join(", "), "no transport the harness reports satisfies the requirement");
   }
@@ -251,7 +262,11 @@ function evaluateCandidate(task: Task, agent: Agent, profile: ProjectProfile | u
   const missingPreferredLabels = (preferences?.labels ?? []).filter((label) => resolve(`label:${label.toLowerCase()}`).state !== "ok").length;
   return {
     unsatisfied,
-    candidate: { agentId: agent.id, nodeId: node.id, harnessId: agent.harnessId, model: agent.model, transport, workspace: requestedPath ?? agent.workspace },
+    candidate: {
+      agentId: agent.id, nodeId: node.id, harnessId: agent.harnessId, model: agent.model, transport,
+      ...(fallbackTransport ? { fallbackTransport } : {}),
+      workspace: requestedPath ?? agent.workspace
+    },
     ranks: [
       rankOf(preferences?.nodeIds, node.id),
       rankOf(preferences?.harnessIds, agent.harnessId),
@@ -346,6 +361,7 @@ export function dispatchMessageFor(run: Run, agent: Agent, agents: readonly Agen
   const dispatchAgent = { ...agent, systemPrompt: `${agent.systemPrompt}\n\nAvailable teammates: ${directory || "none"}` };
   if (run.taskId === undefined) return { type: "dispatch", run, agent: dispatchAgent };
   const execution: DispatchExecution = { transport: run.transport ?? "native-cli", taskId: run.taskId, attempt: run.attempt };
+  if (run.transport === "acp-v1" && run.fallbackTransport === "native-cli") execution.fallbackTransport = "native-cli";
   return { type: "dispatch", run, agent: dispatchAgent, execution };
 }
 
@@ -442,7 +458,8 @@ export function runSchedulingPass(state: State, context: SchedulingContext, at: 
       depth: source ? source.depth + 1 : 0,
       parentRunId: source?.id,
       createdAt: at,
-      transport: candidate.transport
+      transport: candidate.transport,
+      ...(candidate.fallbackTransport ? { fallbackTransport: candidate.fallbackTransport } : {})
     };
     assignTaskAttempt(state, task.id, run, at);
     task.placement = decision.diagnostic;

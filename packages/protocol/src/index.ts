@@ -132,6 +132,13 @@ export interface Run {
   attempt?: number;
   /** Version-4: how Barista drives the harness; absent means `native-cli`. */
   transport?: HarnessTransport;
+  /**
+   * Version-4: set to `native-cli` on an `acp-v1` run whose requirements also accept the native
+   * CLI, permitting Barista to fall back to it before the prompt when its operator enabled that.
+   */
+  fallbackTransport?: HarnessTransport;
+  /** Version-4: the transport Barista actually selected, recorded from `run.started`. */
+  transportSelection?: RunTransportSelection;
   sessionBindingId?: string;
   workspaceLeaseId?: string;
 }
@@ -269,7 +276,7 @@ export type ControlAgentToHub =
   | { type: "register"; protocolVersion?: ControlProtocolVersion; node: ComputeNode }
   | { type: "sync.complete"; nodeId: string; activeRunIds?: string[]; at: string }
   | { type: "heartbeat"; nodeId: string; activeRuns: number; at: string }
-  | { type: "run.started"; runId: string; at: string }
+  | { type: "run.started"; runId: string; at: string; transport?: RunTransportSelection }
   | { type: "run.output"; runId: string; chunk: string; at: string }
   | { type: "run.completed"; runId: string; output: string; at: string }
   | { type: "run.failed"; runId: string; error: string; at: string }
@@ -365,7 +372,7 @@ export const canAcceptFromControlAgent = (message: ControlAgentToHub, version: C
   return capability === undefined || supportsControlCapability(version, capability);
 };
 
-const version4RunFields = ["taskId", "attempt", "transport", "sessionBindingId", "workspaceLeaseId"] as const;
+const version4RunFields = ["taskId", "attempt", "transport", "fallbackTransport", "sessionBindingId", "workspaceLeaseId"] as const;
 const hasVersion4RunFields = (run: Run) => version4RunFields.some((field) => run[field] !== undefined);
 
 /*
@@ -387,6 +394,38 @@ export interface AcpAgentCapabilities {
   mcp: { http: boolean; sse: boolean };
   adapterName?: string;
   adapterVersion?: string;
+}
+
+/** Bound on the adapter name Barista reports from an ACP initialize handshake. */
+export const acpAdapterNameMaximumBytes = 128;
+
+/**
+ * Why an `acp-v1` run fell back to the native CLI. Each is detected before the ACP prompt was sent;
+ * a failure after that point fails the attempt and is never replayed through another transport.
+ */
+export const transportFallbackReasons = ["acp-adapter-unavailable", "acp-protocol-incompatible", "acp-capability-missing", "acp-mcp-unavailable"] as const;
+export type TransportFallbackReason = typeof transportFallbackReasons[number];
+export const isTransportFallbackReason = isOneOf(transportFallbackReasons);
+
+/** How Barista verified an ACP adapter executable. */
+export const acpAdapterSources = ["setup-ledger", "administrator-override"] as const;
+export type AcpAdapterSource = typeof acpAdapterSources[number];
+
+/** The harness warning code Barista emits when a run falls back to the native CLI. */
+export const transportNativeFallbackWarning = "transport-native-fallback";
+
+/** The transport decision Barista reports once, on `run.started`. */
+export interface RunTransportSelection {
+  requestedTransport: HarnessTransport;
+  selectedTransport: HarnessTransport;
+  /** Present exactly when `selectedTransport` differs from `requestedTransport`. */
+  fallbackReason?: TransportFallbackReason;
+  /** Normalized version of the native CLI, when the native CLI was selected and reports one. */
+  harnessVersion?: string;
+  /** The verified adapter an ACP run used or attempted. */
+  adapter?: { id: string; version: string; source: AcpAdapterSource };
+  /** Capabilities negotiated for this run, when ACP was selected. */
+  acp?: AcpAgentCapabilities;
 }
 
 /*
@@ -960,6 +999,8 @@ export interface DispatchExecution {
   transport: HarnessTransport;
   taskId?: string;
   attempt?: number;
+  /** `native-cli` permits an `acp-v1` run to fall back before its prompt; see `Run.fallbackTransport`. */
+  fallbackTransport?: HarnessTransport;
   /** Present when Barista should resume an existing provider session. */
   sessionBinding?: { id: string; providerSessionId: string };
   workspaceLease?: WorkspaceLeaseGrant;
@@ -1081,6 +1122,40 @@ export function validateSessionBindingUpdate(value: unknown): Validation<Harness
   if (!isOptional(value.bindingId, isIdentifier) || !isIdentifier(value.providerSessionId)) return reject("session binding is missing identity");
   if (!isHarnessId(value.harnessId) || !isHarnessTransport(value.transport) || !isSessionBindingStatus(value.status)) return reject("session binding has an unknown harness, transport, or status");
   return accept(value as unknown as HarnessSessionBindingUpdate);
+}
+
+const isAcpAdapterSource = isOneOf(acpAdapterSources);
+
+export const isAcpAgentCapabilities = (value: unknown): value is AcpAgentCapabilities =>
+  isRecord(value)
+  && hasOnlyKeys(value, ["protocolVersion", "loadSession", "resumeSession", "prompt", "mcp", "adapterName", "adapterVersion"])
+  && value.protocolVersion === 1
+  && typeof value.loadSession === "boolean"
+  && typeof value.resumeSession === "boolean"
+  && isRecord(value.prompt) && hasOnlyKeys(value.prompt, ["image", "audio", "embeddedContext"])
+  && typeof value.prompt.image === "boolean" && typeof value.prompt.audio === "boolean" && typeof value.prompt.embeddedContext === "boolean"
+  && isRecord(value.mcp) && hasOnlyKeys(value.mcp, ["http", "sse"]) && typeof value.mcp.http === "boolean" && typeof value.mcp.sse === "boolean"
+  && isOptional(value.adapterName, (name) => isBoundedString(name, acpAdapterNameMaximumBytes) && !containsSecretLikeValue(name))
+  && isOptional(value.adapterVersion, isNormalizedVersion);
+
+const isAdapterProvenance = (value: unknown) =>
+  isRecord(value) && hasOnlyKeys(value, ["id", "version", "source"])
+  && typeof value.id === "string" && byteLength(value.id) <= labelOrAcceleratorMaximumBytes && labelOrAcceleratorPattern.test(value.id)
+  && isNormalizedVersion(value.version) && isAcpAdapterSource(value.source);
+
+/** Validates a Barista-reported transport selection; mirrors Go `RunTransportSelection.Validate`. */
+export function validateRunTransportSelection(value: unknown): Validation<RunTransportSelection> {
+  if (!isRecord(value) || !hasOnlyKeys(value, ["requestedTransport", "selectedTransport", "fallbackReason", "harnessVersion", "adapter", "acp"])) return reject("transport selection must contain only declared fields");
+  if (!isHarnessTransport(value.requestedTransport) || !isHarnessTransport(value.selectedTransport)) return reject("transport selection names an unknown transport");
+  if (value.selectedTransport === value.requestedTransport) {
+    if (value.fallbackReason !== undefined) return reject("transport selection has a fallback reason without a fallback");
+  } else if (value.requestedTransport !== "acp-v1" || value.selectedTransport !== "native-cli" || !isTransportFallbackReason(value.fallbackReason)) {
+    return reject("transport selection falls back other than from acp-v1 to native-cli for a known reason");
+  }
+  if (!isOptional(value.harnessVersion, isNormalizedVersion)) return reject("transport selection harness version is not a normalized version");
+  if (!isOptional(value.adapter, isAdapterProvenance)) return reject("transport selection adapter provenance is malformed");
+  if (value.acp !== undefined && (value.selectedTransport !== "acp-v1" || !isAcpAgentCapabilities(value.acp))) return reject("transport selection ACP capabilities are malformed or belong to a native run");
+  return accept(value as unknown as RunTransportSelection);
 }
 
 export function validateWorkspaceLeaseUpdate(value: unknown): Validation<WorkspaceLeaseUpdate> {

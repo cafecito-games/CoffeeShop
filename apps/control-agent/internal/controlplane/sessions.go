@@ -19,6 +19,10 @@ import (
 const (
 	outboxEventLimit     = 2048
 	outboxEventByteLimit = 8 * 1024 * 1024
+	// heldEventLimit bounds events produced before a run started, such as an ACP adapter's session
+	// setup notifications. The hub accepts events only for a running run, so they wait for
+	// run.started; any beyond this bound are dropped and reported like outbox drops.
+	heldEventLimit = 256
 )
 
 // WarningEventsDropped reports harness events Barista could not queue for the hub.
@@ -41,6 +45,8 @@ type runSession struct {
 
 	mu           sync.Mutex
 	closed       bool
+	started      bool
+	held         []protocol.HarnessEvent
 	nextSequence int64
 	dropped      int
 	approvals    map[string]*liveApproval
@@ -80,13 +86,49 @@ func (client *Client) session(runID string) *runSession {
 	return client.sessions[runID]
 }
 
-// forward sends one normalized event to the hub in the order the driver produced it.
+// start sends run.started with the run's transport selection and then forwards, in order, every
+// event held while the run had not started. It only acts once.
+func (session *runSession) start(selection protocol.RunTransportSelection) {
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	if session.closed || session.started {
+		return
+	}
+	session.started = true
+	message := protocol.Outbound{Type: "run.started", RunID: session.runID, At: now()}
+	if err := selection.Validate(); err != nil {
+		log.Printf("omit invalid transport selection for run %s: %v", session.runID, err)
+	} else {
+		message.Transport = &selection
+	}
+	session.client.send(message)
+	held := session.held
+	session.held = nil
+	for _, event := range held {
+		session.forwardLocked(event)
+	}
+}
+
+// forward sends one normalized event to the hub in the order the driver produced it. Before the
+// run has started the event is held for start to forward.
 func (session *runSession) forward(event protocol.HarnessEvent) {
 	session.mu.Lock()
 	defer session.mu.Unlock()
 	if session.closed || event.RunID != session.runID {
 		return
 	}
+	if !session.started {
+		if len(session.held) >= heldEventLimit {
+			session.dropped++
+			return
+		}
+		session.held = append(session.held, event)
+		return
+	}
+	session.forwardLocked(event)
+}
+
+func (session *runSession) forwardLocked(event protocol.HarnessEvent) {
 	if session.dropped > 0 {
 		warning := protocol.HarnessEvent{
 			Type: "warning", RunID: session.runID, At: now(), Code: WarningEventsDropped,

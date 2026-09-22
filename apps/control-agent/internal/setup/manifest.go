@@ -74,10 +74,10 @@ type Manifest struct {
 	Adapters        []AdapterManifestEntry `json:"adapters"`
 }
 
-// checksumPattern is the exact grammar of a pinned SHA-256 in the manifest: 64 lowercase hex
-// characters. An uppercase or short digest is rejected outright rather than normalized, because a
+// ChecksumPattern is the exact grammar of a pinned SHA-256, in the manifest and wherever else
+// Barista pins a digest: 64 lowercase hex characters. An uppercase or short digest is rejected outright rather than normalized, because a
 // half-remembered digest must never be trimmed into something that passes.
-var checksumPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+var ChecksumPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 // platformKeyPattern reuses the protocol kebab-case grammar: a GOOS-GOARCH key such as
 // "darwin-arm64" is exactly two lowercase alphanumeric segments joined by one dash, so the single
@@ -197,7 +197,7 @@ func validatePlatformDistribution(distribution PlatformDistribution) error {
 		if !strings.HasPrefix(distribution.URL, "https://") {
 			return fmt.Errorf("archive platform distribution url must use https")
 		}
-		if !checksumPattern.MatchString(distribution.SHA256) {
+		if !ChecksumPattern.MatchString(distribution.SHA256) {
 			return fmt.Errorf("archive platform distribution sha256 must be 64 lowercase hex characters")
 		}
 		if distribution.SizeBytes <= 0 {

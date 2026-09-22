@@ -108,11 +108,15 @@ type WorkspaceLeaseGrant struct {
 }
 
 type DispatchExecution struct {
-	Transport      string                  `json:"transport"`
-	TaskID         string                  `json:"taskId,omitempty"`
-	Attempt        int                     `json:"attempt,omitempty"`
-	SessionBinding *DispatchSessionBinding `json:"sessionBinding,omitempty"`
-	WorkspaceLease *WorkspaceLeaseGrant    `json:"workspaceLease,omitempty"`
+	Transport string `json:"transport"`
+	// FallbackTransport, when "native-cli", permits Barista to run an acp-v1 dispatch through the
+	// native CLI instead, but only for a pre-prompt fallback reason and only when the operator
+	// enabled native fallback for the harness.
+	FallbackTransport string                  `json:"fallbackTransport,omitempty"`
+	TaskID            string                  `json:"taskId,omitempty"`
+	Attempt           int                     `json:"attempt,omitempty"`
+	SessionBinding    *DispatchSessionBinding `json:"sessionBinding,omitempty"`
+	WorkspaceLease    *WorkspaceLeaseGrant    `json:"workspaceLease,omitempty"`
 }
 
 type ApprovalDecision struct {

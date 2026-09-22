@@ -54,6 +54,7 @@ func (driver nativeDriver) Execute(ctx context.Context, invocation Invocation) (
 	}
 	var stderr bytes.Buffer
 	command.Stderr = &stderr
+	invocation.announce(transportDetails{})
 	if err := command.Start(); err != nil {
 		return "", err
 	}

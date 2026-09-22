@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/acp"
 	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/mcpserver"
@@ -11,8 +14,8 @@ import (
 )
 
 const (
-	TransportNative = "native-cli"
-	TransportACP    = "acp-v1"
+	TransportNative = protocol.TransportNativeCLI
+	TransportACP    = protocol.TransportACP
 )
 
 // ErrDriverUnavailable reports that the requested transport cannot run this harness on this node.
@@ -33,6 +36,26 @@ type Invocation struct {
 	// Events receives normalized harness events, when the driver produces them.
 	Events     func(protocol.HarnessEvent)
 	Permission PermissionHandler
+	// FallbackTransport is the dispatch's permission for an acp-v1 run to fall back to the native
+	// CLI: "native-cli" permits it, "" forbids it. The Runner also requires operator opt-in.
+	FallbackTransport string
+	// Started is called at most once, immediately before the harness receives the prompt, with
+	// the transport the run actually uses. A run whose Started was never called did not start.
+	Started func(protocol.RunTransportSelection)
+
+	// begin is installed by Runner.Execute; drivers call it when the prompt is about to be sent.
+	begin func(transportDetails)
+}
+
+// transportDetails is what a driver knows about the transport it is about to start.
+type transportDetails struct {
+	capabilities *protocol.AcpAgentCapabilities
+}
+
+func (invocation Invocation) announce(details transportDetails) {
+	if invocation.begin != nil {
+		invocation.begin(details)
+	}
 }
 
 // Driver executes an invocation and returns exactly one terminal result.
@@ -42,20 +65,33 @@ type Driver interface {
 
 // Runner selects the driver for a run's transport. The native CLI driver is always registered.
 type Runner struct {
-	profiles []protocol.HarnessProfile
-	native   Driver
-	acp      Driver
+	profiles       []protocol.HarnessProfile
+	native         Driver
+	acp            *ACPDriver
+	nativeFallback map[string]bool
+	now            func() time.Time
 }
 
 func NewRunner(profiles []protocol.HarnessProfile) *Runner {
-	runner := &Runner{profiles: profiles}
+	runner := &Runner{profiles: profiles, nativeFallback: map[string]bool{}, now: time.Now}
 	runner.native = nativeDriver{runner: runner}
 	return runner
 }
 
 // WithACP registers the ACP driver used for runs whose transport is acp-v1.
-func (r *Runner) WithACP(driver Driver) *Runner {
+func (r *Runner) WithACP(driver *ACPDriver) *Runner {
 	r.acp = driver
+	return r
+}
+
+// WithNativeFallback records the operator's opt-in to native fallback for the given harnesses. An
+// acp-v1 run of such a harness may run through the native CLI instead only when its dispatch also
+// permits it, the native CLI is installed, and ACP failed for a reason FallbackReason recognizes
+// before the prompt was sent.
+func (r *Runner) WithNativeFallback(harnessIDs ...string) *Runner {
+	for _, harnessID := range harnessIDs {
+		r.nativeFallback[harnessID] = true
+	}
 	return r
 }
 
@@ -64,28 +100,116 @@ func (r *Runner) Run(ctx context.Context, run protocol.Run, agent protocol.Agent
 	return r.Execute(ctx, Invocation{Run: run, Agent: agent, Workspace: cwd, MCP: mcpConfig, Output: output})
 }
 
+// Admit reports whether this Barista can honor a dispatch of the harness over transport, directly
+// or through a permitted native fallback. It performs no execution and is safe to call before a
+// run is accepted.
+func (r *Runner) Admit(harnessID, transport, fallbackTransport string) error {
+	switch transport {
+	case "", TransportNative:
+		return nil
+	case TransportACP:
+		err := r.acpAvailable(harnessID)
+		if err == nil || r.fallbackPermitted(harnessID, fallbackTransport) {
+			return nil
+		}
+		return err
+	default:
+		return fmt.Errorf("%w: unknown harness transport", ErrDriverUnavailable)
+	}
+}
+
 // Execute dispatches the invocation to the driver for its transport.
 func (r *Runner) Execute(ctx context.Context, invocation Invocation) (string, error) {
-	driver, err := r.driverFor(invocation.Run.Transport)
-	if err != nil {
-		return "", err
-	}
 	if invocation.Output == nil {
 		invocation.Output = func(string) {}
 	}
-	return driver.Execute(ctx, invocation)
+	switch invocation.Run.Transport {
+	case "", TransportNative:
+		return r.native.Execute(ctx, r.beginning(invocation, protocol.RunTransportSelection{RequestedTransport: TransportNative, SelectedTransport: TransportNative}, nil))
+	case TransportACP:
+		return r.executeACP(ctx, invocation)
+	default:
+		return "", fmt.Errorf("%w: unknown harness transport", ErrDriverUnavailable)
+	}
 }
 
-func (r *Runner) driverFor(transport string) (Driver, error) {
-	switch transport {
-	case "", TransportNative:
-		return r.native, nil
-	case TransportACP:
-		if r.acp == nil {
-			return nil, fmt.Errorf("%w: no ACP adapter is configured on this Barista", ErrDriverUnavailable)
+func (r *Runner) executeACP(ctx context.Context, invocation Invocation) (string, error) {
+	harnessID := invocation.Run.HarnessID
+	permitted := r.fallbackPermitted(harnessID, invocation.FallbackTransport)
+	if err := r.acpAvailable(harnessID); err != nil {
+		if permitted {
+			return r.fallBack(ctx, invocation, protocol.FallbackACPAdapterUnavailable)
 		}
-		return r.acp, nil
-	default:
-		return nil, fmt.Errorf("%w: unknown harness transport %q", ErrDriverUnavailable, transport)
+		return "", err
 	}
+	var started atomic.Bool
+	selection := protocol.RunTransportSelection{RequestedTransport: TransportACP, SelectedTransport: TransportACP, Adapter: r.acp.provenance(harnessID)}
+	result, err := r.acp.Execute(ctx, r.beginning(invocation, selection, &started))
+	if err == nil || started.Load() || !permitted || ctx.Err() != nil {
+		return result, err
+	}
+	reason := FallbackReason(err)
+	if reason == "" {
+		return "", err
+	}
+	return r.fallBack(ctx, invocation, reason)
+}
+
+// fallBack runs an acp-v1 invocation through the native CLI and makes the decision visible: a
+// warning event precedes the native run, and the selection reported to Started names the reason.
+func (r *Runner) fallBack(ctx context.Context, invocation Invocation, reason string) (string, error) {
+	if invocation.Events != nil {
+		invocation.Events(protocol.HarnessEvent{
+			Type: "warning", RunID: invocation.Run.ID, At: r.now().UTC().Format(time.RFC3339Nano),
+			Code:    protocol.WarningTransportNativeFallback,
+			Message: "ACP transport was not usable before the prompt was sent (" + reason + "); running through the native CLI as the dispatch and operator permit",
+		})
+	}
+	selection := protocol.RunTransportSelection{RequestedTransport: TransportACP, SelectedTransport: TransportNative, FallbackReason: reason}
+	if r.acp != nil {
+		selection.Adapter = r.acp.provenance(invocation.Run.HarnessID)
+	}
+	return r.native.Execute(ctx, r.beginning(invocation, selection, nil))
+}
+
+// beginning installs the begin hook that reports selection to Started exactly once, records that
+// the run started, and adds what the driver learned about the transport.
+func (r *Runner) beginning(invocation Invocation, selection protocol.RunTransportSelection, started *atomic.Bool) Invocation {
+	if selection.SelectedTransport == TransportNative {
+		if profile, available := r.profile(invocation.Run.HarnessID); available {
+			selection.HarnessVersion = normalizedHarnessVersion(profile.Description)
+		}
+	}
+	var once sync.Once
+	report := invocation.Started
+	invocation.begin = func(details transportDetails) {
+		once.Do(func() {
+			if started != nil {
+				started.Store(true)
+			}
+			if details.capabilities != nil {
+				capabilities := *details.capabilities
+				selection.ACP = &capabilities
+			}
+			if report != nil {
+				report(selection)
+			}
+		})
+	}
+	return invocation
+}
+
+func (r *Runner) acpAvailable(harnessID string) error {
+	if r.acp == nil {
+		return fmt.Errorf("%w: no ACP adapter is configured on this Barista", ErrDriverUnavailable)
+	}
+	return r.acp.Available(harnessID)
+}
+
+func (r *Runner) fallbackPermitted(harnessID, fallbackTransport string) bool {
+	if fallbackTransport != TransportNative || !r.nativeFallback[harnessID] {
+		return false
+	}
+	_, available := r.profile(harnessID)
+	return available
 }

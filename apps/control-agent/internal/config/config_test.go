@@ -432,31 +432,10 @@ func TestParseTreatsExplicitZeroMemoryAsUnset(t *testing.T) {
 	require.Zero(t, cfg.MemoryMegabytes)
 }
 
-func TestAdapterConfigSnippet(t *testing.T) {
-	tests := []struct {
-		name      string
-		harnessID string
-		binary    string
-		expected  string
-	}{
-		{
-			name:      "kebab harness id becomes an underscore environment segment",
-			harnessID: "claude-cli",
-			binary:    "/srv/barista/adapters/claude-cli/claude-acp/0.1.0/bin/adapter",
-			expected:  "# claude-cli ACP adapter (installed by `barista setup apply`)\n# ACP_ADAPTER_CLAUDE_CLI=/srv/barista/adapters/claude-cli/claude-acp/0.1.0/bin/adapter\n",
-		},
-		{
-			name:      "single-segment harness id stays uppercase",
-			harnessID: "codex",
-			binary:    "/srv/adapter",
-			expected:  "# codex ACP adapter (installed by `barista setup apply`)\n# ACP_ADAPTER_CODEX=/srv/adapter\n",
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			require.Equal(t, test.expected, AdapterConfigSnippet(test.harnessID, test.binary))
-		})
-	}
+func TestAdapterConfigSnippetSaysSetupInstallsAreLoadedAutomatically(t *testing.T) {
+	snippet := AdapterConfigSnippet("codex-cli", "/srv/barista/adapters/codex-cli/codex-acp/1.12.0/bin/codex-acp")
+	require.Equal(t, "# codex-cli ACP adapter (installed by `barista setup apply`) at /srv/barista/adapters/codex-cli/codex-acp/1.12.0/bin/codex-acp\n"+
+		"# Barista loads it at startup from the same --data-root (BARISTA_DATA_ROOT); no other configuration is required.\n", snippet)
 }
 
 func TestParseRejectsNegativeMemory(t *testing.T) {

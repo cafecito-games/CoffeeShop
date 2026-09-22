@@ -200,8 +200,8 @@ func TestDispatchWithNativeCliExecutionIsNotRejectedByTheExecutionGuard(t *testi
 	// A nil transport (plain dispatch) and an explicit "native-cli" transport with neither a
 	// session binding nor a workspace lease are both fully supported today; neither should ever
 	// produce the unsupported-execution run.failed message.
-	require.Equal(t, "", unsupportedExecutionReason(protocol.Run{}, nil))
-	require.Equal(t, "", unsupportedExecutionReason(protocol.Run{Transport: "native-cli"}, &protocol.DispatchExecution{Transport: "native-cli"}))
+	require.Equal(t, "", unsupportedExecutionReason(protocol.Run{}, nil, nil))
+	require.Equal(t, "", unsupportedExecutionReason(protocol.Run{Transport: "native-cli"}, &protocol.DispatchExecution{Transport: "native-cli"}, nil))
 }
 
 func TestDispatchRejectsUnsupportedTransportOnTheRunWithNoExecutionObject(t *testing.T) {

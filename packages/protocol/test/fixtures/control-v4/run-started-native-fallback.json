@@ -1,0 +1,1 @@
+{"type":"run.started","runId":"run-one","at":"2026-09-21T12:00:00Z","transport":{"requestedTransport":"acp-v1","selectedTransport":"native-cli","fallbackReason":"acp-mcp-unavailable","harnessVersion":"0.154.0","adapter":{"id":"codex-acp","version":"1.12.0","source":"administrator-override"}}}
