@@ -10,9 +10,17 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"unicode/utf8"
 )
+
+// CurrentPlatform is the single definition of this node's platform key ("GOOS-GOARCH"), used both
+// to build a plan and, in Apply, to verify a supplied plan was built for the node it is being
+// applied on rather than trusting whatever platform value the plan file itself claims.
+func CurrentPlatform() string {
+	return runtime.GOOS + "-" + runtime.GOARCH
+}
 
 type OperationKind string
 

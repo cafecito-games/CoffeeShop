@@ -16,6 +16,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"slices"
 	"strings"
@@ -48,19 +49,26 @@ type ApplyResult struct {
 
 // Apply never executes the operations recorded in the supplied plan. Instead it re-derives the
 // plan from the verified manifest and the currently observed filesystem/ledger state — exactly
-// what BuildPlan would produce right now — and requires the supplied plan's digest to match that
-// freshly derived one exactly. Only the derived operations are ever executed; the supplied plan
-// file exists solely to confirm the operator's intent still matches reality; it is never a source
-// of what gets installed. A plan whose Operations, sources, checksums, or targets were hand-edited
-// (even if the editor also recomputed a self-consistent Digest for the tampered content) is
-// rejected here, because the derived plan's digest — computed independently from the manifest and
-// live state — will not match unless the tampered plan happens to already equal what re-deriving
-// would produce.
+// what BuildPlan would produce right now — and requires the supplied plan to equal that freshly
+// derived one exactly, field by field, including every operation. Only the derived operations are
+// ever executed; the supplied plan file exists solely to confirm the operator's intent still
+// matches reality; it is never a source of what gets installed.
 //
-// plan.Platform selects which of the manifest's per-platform distributions to derive operations
-// from; it is the only field of the supplied plan Apply actually consults before deriving, and it
-// only ever selects among the manifest's own declared platforms, so it cannot smuggle in an
-// operation the manifest does not declare.
+// Two independent checks gate this, deliberately not collapsed into a single digest comparison:
+//
+//  1. The supplied plan's own Digest must equal ComputePlanDigest(plan) — the digest recomputed
+//     from the plan's own other fields. This catches a plan whose Digest field was copied from
+//     some other, legitimately-generated plan (for example one with no operations at all, or with
+//     a different data root) without being recomputed for its own actual content: such a plan is
+//     not self-consistent and is rejected before its Digest is ever compared to anything else.
+//  2. The supplied, now known-self-consistent plan must equal the derived plan field by field
+//     (compared directly, not merely by digest equality), which is what actually establishes that
+//     the plan matches the manifest and the live node state right now.
+//
+// plan.Platform is never trusted either: Apply always derives operations for CurrentPlatform(),
+// this node's own runtime.GOOS-runtime.GOARCH, and rejects a plan built for any other platform —
+// a plan for platform X cannot be replayed against a node running platform Y just because some
+// past state of platform Y's manifest entries happened to produce the same operations.
 //
 // On the first operation failure, Apply stops and returns the error together with an ApplyResult
 // describing every operation completed before the failure (partial success is reported, never
@@ -68,18 +76,22 @@ type ApplyResult struct {
 // a discarded write.
 func Apply(ctx context.Context, plan Plan, manifestBytes []byte, ledger OwnershipLedger, dataRoot string, options ApplyOptions) (ApplyResult, error) {
 	result := ApplyResult{}
+	if ComputePlanDigest(plan) != plan.Digest {
+		return result, errors.New("supplied plan digest does not match its own contents")
+	}
 	manifest, err := ParseManifest(manifestBytes)
 	if err != nil {
 		return result, fmt.Errorf("apply manifest: %w", err)
 	}
-	if !platformKeyPattern.MatchString(plan.Platform) {
-		return result, errors.New("plan platform is malformed")
+	nodePlatform := CurrentPlatform()
+	if plan.Platform != nodePlatform {
+		return result, fmt.Errorf("plan was built for platform %s, this node is %s; run setup plan again on this node", plan.Platform, nodePlatform)
 	}
-	derivedPlan, _, err := BuildPlan(manifestBytes, manifest, plan.Platform, dataRoot, ledger)
+	derivedPlan, _, err := BuildPlan(manifestBytes, manifest, nodePlatform, dataRoot, ledger)
 	if err != nil {
 		return result, fmt.Errorf("derive plan from manifest and current state: %w", err)
 	}
-	if derivedPlan.Digest != plan.Digest {
+	if !plansEqual(plan, derivedPlan) {
 		return result, errors.New("supplied plan does not match the manifest and current node state; run setup plan again")
 	}
 	for _, operation := range derivedPlan.Operations {
@@ -101,6 +113,14 @@ func Apply(ctx context.Context, plan Plan, manifestBytes []byte, ledger Ownershi
 		result.Applied = append(result.Applied, operation)
 	}
 	return result, nil
+}
+
+// plansEqual compares two plans field by field, including every operation, rather than trusting
+// digest equality alone to imply content equality. Both plans are expected to already be
+// self-consistent (their own Digest already verified against ComputePlanDigest), so this checks
+// the property digest comparison is meant to guarantee, directly.
+func plansEqual(a Plan, b Plan) bool {
+	return reflect.DeepEqual(a, b)
 }
 
 func installOperation(ctx context.Context, operation Operation, dataRoot string, options ApplyOptions) (OwnershipRecord, error) {
@@ -175,7 +195,7 @@ func installManualArtifact(operation Operation, dataRoot string, options ApplyOp
 }
 
 // stageAndInstall reads reader exactly once, hashing while writing it into a temporary file
-// created directly inside operation's target directory, and only renames that temporary file onto
+// created directly inside operation's target directory, and only publishes that temporary file at
 // operation.TargetPath after every check below passes:
 //
 //  1. the target directory chain from dataRoot down to the target's parent is walked component by
@@ -183,12 +203,21 @@ func installManualArtifact(operation Operation, dataRoot string, options ApplyOp
 //     following or replacing one, immediately before the temporary file is created;
 //  2. the copied content's digest matches expectedChecksum, when one is given;
 //  3. the directory chain is re-verified a second time, and the exact target path is re-confirmed
-//     absent, immediately before the rename — closing the window between the first verification
+//     absent, immediately before publishing — closing the window between the first verification
 //     and the mutation, not just checking once up front.
+//
+// Publishing itself is a hard link (os.Link), not a rename: a rename silently replaces whatever
+// already sits at the destination, which would still let a file created in the instant between
+// check 3's Lstat and the mutation itself be overwritten. os.Link instead fails atomically with
+// ErrExist when anything — file, directory, or symlink — already occupies the target path, so the
+// no-replacement guarantee holds even against that exact race, not just against the state observed
+// a moment earlier. The temporary file is removed after a successful link (the target is now a
+// second, independent hard link to the same durable content) or on any failure path via the defer
+// below.
 //
 // An install operation only ever reaches this function when planning observed the target absent
 // (ExpectedOwnedMatch operations are skipped before installOperation is called), so any file found
-// at the target — owned by this tool or not — at rename time is refused rather than replaced.
+// at the target — owned by this tool or not — is refused rather than replaced.
 func stageAndInstall(dataRoot string, operation Operation, reader io.Reader, expectedChecksum string) (OwnershipRecord, error) {
 	targetDirectory := filepath.Dir(operation.TargetPath)
 	resolvedDirectory, err := ensureDirectoryWithinRoot(dataRoot, targetDirectory)
@@ -200,12 +229,12 @@ func stageAndInstall(dataRoot string, operation Operation, reader io.Reader, exp
 		return OwnershipRecord{}, fmt.Errorf("adapter %s could not stage a temporary file: %w", operation.AdapterID, err)
 	}
 	tempPath := tempFile.Name()
-	renamed := false
+	// The temporary file is always removed by this defer, on every path: once published via
+	// os.Link, the target holds its own independent hard link to the same content, so the
+	// temporary name is no longer needed either way.
 	defer func() {
 		tempFile.Close()
-		if !renamed {
-			os.Remove(tempPath)
-		}
+		os.Remove(tempPath)
 	}()
 
 	digest := sha256.New()
@@ -229,9 +258,10 @@ func stageAndInstall(dataRoot string, operation Operation, reader io.Reader, exp
 		return OwnershipRecord{}, fmt.Errorf("adapter %s artifact could not be finalized: %w", operation.AdapterID, err)
 	}
 
-	// Re-verify immediately before the rename: a symlink or foreign file planted anywhere in the
+	// Re-verify immediately before publishing: a symlink or foreign file planted anywhere in the
 	// chain (or at the exact target) during staging is still caught here, not just at the check
-	// that ran before staging began.
+	// that ran before staging began. os.Link below is what makes the final step itself atomic
+	// against anything that appears in the instant after this check.
 	if _, err := ensureDirectoryWithinRoot(dataRoot, targetDirectory); err != nil {
 		return OwnershipRecord{}, fmt.Errorf("adapter %s install directory changed unsafely during install: %w", operation.AdapterID, err)
 	}
@@ -240,10 +270,15 @@ func stageAndInstall(dataRoot string, operation Operation, reader io.Reader, exp
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return OwnershipRecord{}, fmt.Errorf("adapter %s target could not be inspected: %w", operation.AdapterID, err)
 	}
-	if err := os.Rename(tempPath, operation.TargetPath); err != nil {
-		return OwnershipRecord{}, fmt.Errorf("adapter %s artifact could not be installed: %w", operation.AdapterID, err)
+	if err := os.Link(tempPath, operation.TargetPath); err != nil {
+		if errors.Is(err, fs.ErrExist) {
+			return OwnershipRecord{}, fmt.Errorf("adapter %s target %s appeared unexpectedly during install", operation.AdapterID, operation.TargetPath)
+		}
+		// A filesystem that cannot hard-link here (for example a cross-device data root, or one
+		// that disallows hard links entirely) fails closed rather than falling back to a replacing
+		// rename, which would reopen exactly the race this function exists to close.
+		return OwnershipRecord{}, fmt.Errorf("adapter %s could not be installed without replacement: %w", operation.AdapterID, err)
 	}
-	renamed = true
 	return OwnershipRecord{
 		Path:           operation.TargetPath,
 		AdapterID:      operation.AdapterID,

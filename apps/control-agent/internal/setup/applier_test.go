@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io/fs"
 	"net/http"
@@ -15,8 +16,18 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 )
+
+// testPlatform is this test binary's own runtime platform key. Apply now independently derives
+// and enforces CurrentPlatform() against a supplied plan (fix for trusting plan.Platform), so
+// every fixture manifest below declares its platform distribution under this exact key, and every
+// BuildPlan call that feeds into an Apply call in this file uses it too — a plan built for a
+// hardcoded, possibly different platform would otherwise be rejected regardless of what else the
+// test is trying to exercise.
+var testPlatform = CurrentPlatform()
 
 func sha256Hex(data []byte) string {
 	summed := sha256.Sum256(data)
@@ -83,15 +94,15 @@ func archiveManifestFixture(t *testing.T, serverURL string, alphaChecksum string
 			{
 				"id": "alpha-acp", "harnessId": "alpha-cli", "provider": "alpha-vendor",
 				"label": "Alpha ACP adapter", "version": "1.0.0",
-				"platforms": {"darwin-arm64": {"kind": "archive", "url": "%s/alpha/adapter.tar.gz", "sha256": "%s", "sizeBytes": %d, "executablePath": "bin/adapter"}}
+				"platforms": {"%s": {"kind": "archive", "url": "%s/alpha/adapter.tar.gz", "sha256": "%s", "sizeBytes": %d, "executablePath": "bin/adapter"}}
 			},
 			{
 				"id": "beta-acp", "harnessId": "beta-cli", "provider": "beta-vendor",
 				"label": "Beta ACP adapter", "version": "2.0.0",
-				"platforms": {"darwin-arm64": {"kind": "archive", "url": "%s/beta/adapter.zip", "sha256": "%s", "sizeBytes": %d, "executablePath": "bin/adapter"}}
+				"platforms": {"%s": {"kind": "archive", "url": "%s/beta/adapter.zip", "sha256": "%s", "sizeBytes": %d, "executablePath": "bin/adapter"}}
 			}
 		]
-	}`, serverURL, alphaChecksum, alphaSize, serverURL, betaChecksum, betaSize)
+	}`, testPlatform, serverURL, alphaChecksum, alphaSize, testPlatform, serverURL, betaChecksum, betaSize)
 	manifestBytes := []byte(manifestJSON)
 	manifest, err := ParseManifest(manifestBytes)
 	if err != nil {
@@ -102,16 +113,16 @@ func archiveManifestFixture(t *testing.T, serverURL string, alphaChecksum string
 
 func manualManifestFixture(t *testing.T) ([]byte, Manifest) {
 	t.Helper()
-	manifestJSON := []byte(`{
+	manifestJSON := []byte(fmt.Sprintf(`{
 		"manifestVersion": "1",
 		"adapters": [
 			{
 				"id": "manual-acp", "harnessId": "manual-cli", "provider": "manual-vendor",
 				"label": "Manual ACP adapter", "version": "0.4.0",
-				"platforms": {"darwin-arm64": {"kind": "manual", "executablePath": "bin/adapter"}}
+				"platforms": {"%s": {"kind": "manual", "executablePath": "bin/adapter"}}
 			}
 		]
-	}`)
+	}`, testPlatform))
 	manifest, err := ParseManifest(manifestJSON)
 	if err != nil {
 		t.Fatalf("ParseManifest() error = %v", err)
@@ -171,7 +182,7 @@ func TestApplyInstallsTarGzipAndZipArchives(t *testing.T) {
 	server := archiveServerFixture(t, alphaArchive, betaArchive)
 	manifestBytes, manifest := archiveManifestFixture(t, server.URL, sha256Hex(alphaArchive), sha256Hex(betaArchive), len(alphaArchive), len(betaArchive))
 	dataRoot := t.TempDir()
-	plan, skipped, err := BuildPlan(manifestBytes, manifest, "darwin-arm64", dataRoot, OwnershipLedger{})
+	plan, skipped, err := BuildPlan(manifestBytes, manifest, testPlatform, dataRoot, OwnershipLedger{})
 	if err != nil {
 		t.Fatalf("BuildPlan() error = %v", err)
 	}
@@ -206,7 +217,7 @@ func TestApplyInstallsTarGzipAndZipArchives(t *testing.T) {
 	}
 
 	// Re-planning against the installed state and re-applying must be a pure no-op.
-	replanned, _, err := BuildPlan(manifestBytes, manifest, "darwin-arm64", dataRoot, ledger)
+	replanned, _, err := BuildPlan(manifestBytes, manifest, testPlatform, dataRoot, ledger)
 	if err != nil {
 		t.Fatalf("BuildPlan() error = %v", err)
 	}
@@ -219,22 +230,25 @@ func TestApplyInstallsTarGzipAndZipArchives(t *testing.T) {
 	}
 }
 
-func TestApplyRejectsStalePlan(t *testing.T) {
+// TestApplyRejectsHandEditedPlanWithStaleDigest proves the first half of the fix-1 property: a
+// plan hand-edited without recomputing its Digest for the new content is not self-consistent, and
+// Apply catches that before it ever compares the plan to derived state at all.
+func TestApplyRejectsHandEditedPlanWithStaleDigest(t *testing.T) {
 	alphaArchive := buildTarGzipArchive(t, "bin/adapter", []byte("alpha"))
 	server := archiveServerFixture(t, alphaArchive, nil)
 	manifestBytes, manifest := archiveManifestFixture(t, server.URL, sha256Hex(alphaArchive), strings.Repeat("0", 64), len(alphaArchive), 1)
 	dataRoot := t.TempDir()
-	plan, _, err := BuildPlan(manifestBytes, manifest, "darwin-arm64", dataRoot, OwnershipLedger{})
+	plan, _, err := BuildPlan(manifestBytes, manifest, testPlatform, dataRoot, OwnershipLedger{})
 	if err != nil {
 		t.Fatalf("BuildPlan() error = %v", err)
 	}
-	plan.Platform = "linux-amd64"
+	plan.Platform = "some-other-platform" // edited without recomputing Digest
 	result, err := Apply(context.Background(), plan, manifestBytes, OwnershipLedger{}, dataRoot, applyOptions(server))
 	if err == nil {
-		t.Fatal("Apply() accepted a hand-edited plan, want rejection")
+		t.Fatal("Apply() accepted a hand-edited plan with a stale digest, want rejection")
 	}
-	if !strings.Contains(err.Error(), "does not match the manifest and current node state") {
-		t.Fatalf("Apply() error = %v, want it to name the plan/state mismatch", err)
+	if !strings.Contains(err.Error(), "digest does not match its own contents") {
+		t.Fatalf("Apply() error = %v, want it to name the self-consistency failure", err)
 	}
 	if len(result.Applied) != 0 {
 		t.Fatalf("Apply() applied %d operations from a stale plan", len(result.Applied))
@@ -244,12 +258,108 @@ func TestApplyRejectsStalePlan(t *testing.T) {
 	}
 }
 
+// TestApplyRejectsPlanWithNoOperationsButCopiedDigest is the fix-1 regression the review asked for
+// directly: a plan whose Digest was copied verbatim from a different, legitimately-generated plan
+// (rather than recomputed for this plan's own, tampered content) must be rejected by the
+// self-consistency check alone, before Apply ever gets to comparing it against derived state.
+func TestApplyRejectsPlanWithNoOperationsButCopiedDigest(t *testing.T) {
+	manifestBytes, manifest := manualManifestFixture(t)
+	dataRoot := t.TempDir()
+	legitimate, _, err := BuildPlan(manifestBytes, manifest, testPlatform, dataRoot, OwnershipLedger{})
+	if err != nil {
+		t.Fatalf("BuildPlan() error = %v", err)
+	}
+	if len(legitimate.Operations) == 0 {
+		t.Fatal("test fixture error: legitimate plan has no operations to strip")
+	}
+
+	forged := legitimate
+	forged.Operations = nil
+	forged.Postconditions = nil
+	// The forged plan's Digest is the legitimate plan's own digest, copied verbatim rather than
+	// recomputed for the now-empty Operations.
+	forged.Digest = legitimate.Digest
+
+	result, err := Apply(context.Background(), forged, manifestBytes, OwnershipLedger{}, dataRoot, ApplyOptions{
+		ManualArtifactSources: map[string]string{"manual-acp": "/nonexistent/source"},
+		ManualChecksums:       map[string]string{"manual-acp": strings.Repeat("0", 64)},
+	})
+	if err == nil {
+		t.Fatal("Apply() accepted a plan with no operations but a copied valid digest, want rejection")
+	}
+	if !strings.Contains(err.Error(), "digest does not match its own contents") {
+		t.Fatalf("Apply() error = %v, want it to name the self-consistency failure", err)
+	}
+	if len(result.Applied) != 0 {
+		t.Fatalf("Apply() applied %d operations from a forged plan", len(result.Applied))
+	}
+	if _, err := os.Stat(filepath.Join(dataRoot, "adapters")); !os.IsNotExist(err) {
+		t.Fatalf("forged apply mutated the data root: %v", err)
+	}
+}
+
+// TestApplyRejectsPlanBuiltForAnotherPlatform proves the fix-2 property: even a fully
+// self-consistent plan (its Digest genuinely matches its own content) is rejected when that
+// content was built for a platform other than this node's own runtime.GOOS-runtime.GOARCH — Apply
+// never trusts plan.Platform, it always derives operations for CurrentPlatform() and compares
+// against that.
+func TestApplyRejectsPlanBuiltForAnotherPlatform(t *testing.T) {
+	otherPlatform := "some-other-platform"
+	if otherPlatform == testPlatform {
+		t.Fatal("test fixture error: otherPlatform collides with testPlatform")
+	}
+	manifestJSON := []byte(fmt.Sprintf(`{
+		"manifestVersion": "1",
+		"adapters": [
+			{
+				"id": "manual-acp", "harnessId": "manual-cli", "provider": "manual-vendor",
+				"label": "Manual ACP adapter", "version": "0.4.0",
+				"platforms": {
+					"%s": {"kind": "manual", "executablePath": "bin/adapter"},
+					"%s": {"kind": "manual", "executablePath": "bin/adapter"}
+				}
+			}
+		]
+	}`, testPlatform, otherPlatform))
+	manifest, err := ParseManifest(manifestJSON)
+	if err != nil {
+		t.Fatalf("ParseManifest() error = %v", err)
+	}
+	dataRoot := t.TempDir()
+	// Built honestly, for otherPlatform, with a correctly self-consistent digest — nothing about
+	// this plan is tampered except that it targets a platform other than this test binary's own.
+	planForOtherPlatform, _, err := BuildPlan(manifestJSON, manifest, otherPlatform, dataRoot, OwnershipLedger{})
+	if err != nil {
+		t.Fatalf("BuildPlan() error = %v", err)
+	}
+	if ComputePlanDigest(planForOtherPlatform) != planForOtherPlatform.Digest {
+		t.Fatal("test fixture error: plan built for another platform is not self-consistent")
+	}
+
+	result, err := Apply(context.Background(), planForOtherPlatform, manifestJSON, OwnershipLedger{}, dataRoot, ApplyOptions{
+		ManualArtifactSources: map[string]string{"manual-acp": "/nonexistent/source"},
+		ManualChecksums:       map[string]string{"manual-acp": strings.Repeat("0", 64)},
+	})
+	if err == nil {
+		t.Fatal("Apply() accepted a plan built for a different platform, want rejection")
+	}
+	if !strings.Contains(err.Error(), "this node is "+testPlatform) {
+		t.Fatalf("Apply() error = %v, want it to name this node's platform", err)
+	}
+	if len(result.Applied) != 0 {
+		t.Fatalf("Apply() applied %d operations from a cross-platform plan", len(result.Applied))
+	}
+	if _, err := os.Stat(filepath.Join(dataRoot, "adapters")); !os.IsNotExist(err) {
+		t.Fatalf("cross-platform apply mutated the data root: %v", err)
+	}
+}
+
 func TestApplyRejectsChangedManifestBytes(t *testing.T) {
 	alphaArchive := buildTarGzipArchive(t, "bin/adapter", []byte("alpha"))
 	server := archiveServerFixture(t, alphaArchive, nil)
 	manifestBytes, manifest := archiveManifestFixture(t, server.URL, sha256Hex(alphaArchive), strings.Repeat("0", 64), len(alphaArchive), 1)
 	dataRoot := t.TempDir()
-	plan, _, err := BuildPlan(manifestBytes, manifest, "darwin-arm64", dataRoot, OwnershipLedger{})
+	plan, _, err := BuildPlan(manifestBytes, manifest, testPlatform, dataRoot, OwnershipLedger{})
 	if err != nil {
 		t.Fatalf("BuildPlan() error = %v", err)
 	}
@@ -275,7 +385,7 @@ func TestApplyRejectsConflictingState(t *testing.T) {
 	server := archiveServerFixture(t, alphaArchive, betaArchive)
 	manifestBytes, manifest := archiveManifestFixture(t, server.URL, sha256Hex(alphaArchive), sha256Hex(betaArchive), len(alphaArchive), len(betaArchive))
 	dataRoot := t.TempDir()
-	plan, _, err := BuildPlan(manifestBytes, manifest, "darwin-arm64", dataRoot, OwnershipLedger{})
+	plan, _, err := BuildPlan(manifestBytes, manifest, testPlatform, dataRoot, OwnershipLedger{})
 	if err != nil {
 		t.Fatalf("BuildPlan() error = %v", err)
 	}
@@ -308,7 +418,7 @@ func TestApplyRejectsArchiveChecksumMismatch(t *testing.T) {
 	server := archiveServerFixture(t, alphaArchive, nil)
 	manifestBytes, manifest := archiveManifestFixture(t, server.URL, strings.Repeat("0", 64), strings.Repeat("0", 64), len(alphaArchive), 1)
 	dataRoot := t.TempDir()
-	plan, _, err := BuildPlan(manifestBytes, manifest, "darwin-arm64", dataRoot, OwnershipLedger{})
+	plan, _, err := BuildPlan(manifestBytes, manifest, testPlatform, dataRoot, OwnershipLedger{})
 	if err != nil {
 		t.Fatalf("BuildPlan() error = %v", err)
 	}
@@ -338,17 +448,17 @@ func TestApplyRejectsUnsupportedArchiveExtension(t *testing.T) {
 			{
 				"id": "alpha-acp", "harnessId": "alpha-cli", "provider": "alpha-vendor",
 				"label": "Alpha ACP adapter", "version": "1.0.0",
-				"platforms": {"darwin-arm64": {"kind": "archive", "url": "%s/alpha/adapter.bin", "sha256": "%s", "sizeBytes": 10, "executablePath": "bin/adapter"}}
+				"platforms": {"%s": {"kind": "archive", "url": "%s/alpha/adapter.bin", "sha256": "%s", "sizeBytes": 10, "executablePath": "bin/adapter"}}
 			}
 		]
-	}`, server.URL, sha256Hex([]byte("raw binary")))
+	}`, testPlatform, server.URL, sha256Hex([]byte("raw binary")))
 	manifestBytes := []byte(manifestJSON)
 	manifest, err := ParseManifest(manifestBytes)
 	if err != nil {
 		t.Fatalf("ParseManifest() error = %v", err)
 	}
 	dataRoot := t.TempDir()
-	plan, _, err := BuildPlan(manifestBytes, manifest, "darwin-arm64", dataRoot, OwnershipLedger{})
+	plan, _, err := BuildPlan(manifestBytes, manifest, testPlatform, dataRoot, OwnershipLedger{})
 	if err != nil {
 		t.Fatalf("BuildPlan() error = %v", err)
 	}
@@ -370,7 +480,7 @@ func TestApplyManualPlacementCheck(t *testing.T) {
 	if err := os.WriteFile(source, artifactContent, 0o755); err != nil {
 		t.Fatalf("write manual source: %v", err)
 	}
-	plan, _, err := BuildPlan(manifestBytes, manifest, "darwin-arm64", dataRoot, OwnershipLedger{})
+	plan, _, err := BuildPlan(manifestBytes, manifest, testPlatform, dataRoot, OwnershipLedger{})
 	if err != nil {
 		t.Fatalf("BuildPlan() error = %v", err)
 	}
@@ -404,7 +514,7 @@ func TestApplyManualPlacementCheck(t *testing.T) {
 
 	t.Run("missing checksum fails naming only the adapter", func(t *testing.T) {
 		dataRoot := t.TempDir()
-		plan, _, err := BuildPlan(manifestBytes, manifest, "darwin-arm64", dataRoot, OwnershipLedger{})
+		plan, _, err := BuildPlan(manifestBytes, manifest, testPlatform, dataRoot, OwnershipLedger{})
 		if err != nil {
 			t.Fatalf("BuildPlan() error = %v", err)
 		}
@@ -427,7 +537,7 @@ func TestApplyManualPlacementCheck(t *testing.T) {
 
 	t.Run("checksum mismatch fails without copying", func(t *testing.T) {
 		dataRoot := t.TempDir()
-		plan, _, err := BuildPlan(manifestBytes, manifest, "darwin-arm64", dataRoot, OwnershipLedger{})
+		plan, _, err := BuildPlan(manifestBytes, manifest, testPlatform, dataRoot, OwnershipLedger{})
 		if err != nil {
 			t.Fatalf("BuildPlan() error = %v", err)
 		}
@@ -457,7 +567,7 @@ func TestApplyManualPlacementCheck(t *testing.T) {
 func TestApplyRejectsTargetOutsideDataRoot(t *testing.T) {
 	manifestBytes, manifest := manualManifestFixture(t)
 	dataRoot := t.TempDir()
-	plan, _, err := BuildPlan(manifestBytes, manifest, "darwin-arm64", dataRoot, OwnershipLedger{})
+	plan, _, err := BuildPlan(manifestBytes, manifest, testPlatform, dataRoot, OwnershipLedger{})
 	if err != nil {
 		t.Fatalf("BuildPlan() error = %v", err)
 	}
@@ -494,7 +604,7 @@ func TestApplyRejectsForgedPlanWithRecomputedDigest(t *testing.T) {
 
 	manifestBytes, manifest := manualManifestFixture(t)
 	dataRoot := t.TempDir()
-	plan, _, err := BuildPlan(manifestBytes, manifest, "darwin-arm64", dataRoot, OwnershipLedger{})
+	plan, _, err := BuildPlan(manifestBytes, manifest, testPlatform, dataRoot, OwnershipLedger{})
 	if err != nil {
 		t.Fatalf("BuildPlan() error = %v", err)
 	}
@@ -538,7 +648,7 @@ func TestApplyRejectsForgedPlanWithRecomputedDigest(t *testing.T) {
 func TestApplyRejectsSymlinkAtTarget(t *testing.T) {
 	manifestBytes, manifest := manualManifestFixture(t)
 	dataRoot := t.TempDir()
-	plan, _, err := BuildPlan(manifestBytes, manifest, "darwin-arm64", dataRoot, OwnershipLedger{})
+	plan, _, err := BuildPlan(manifestBytes, manifest, testPlatform, dataRoot, OwnershipLedger{})
 	if err != nil {
 		t.Fatalf("BuildPlan() error = %v", err)
 	}
@@ -577,7 +687,7 @@ func TestApplyPartialFailurePersistsCompletedOperations(t *testing.T) {
 	// second fails its checksum verification.
 	manifestBytes, manifest := archiveManifestFixture(t, server.URL, sha256Hex(alphaArchive), strings.Repeat("0", 64), len(alphaArchive), len(betaArchive))
 	dataRoot := t.TempDir()
-	plan, _, err := BuildPlan(manifestBytes, manifest, "darwin-arm64", dataRoot, OwnershipLedger{})
+	plan, _, err := BuildPlan(manifestBytes, manifest, testPlatform, dataRoot, OwnershipLedger{})
 	if err != nil {
 		t.Fatalf("BuildPlan() error = %v", err)
 	}
@@ -638,7 +748,7 @@ func TestApplyRejectsManualArtifactChangedAfterChecksumWasAsserted(t *testing.T)
 		t.Fatalf("swap manual source: %v", err)
 	}
 
-	plan, _, err := BuildPlan(manifestBytes, manifest, "darwin-arm64", dataRoot, OwnershipLedger{})
+	plan, _, err := BuildPlan(manifestBytes, manifest, testPlatform, dataRoot, OwnershipLedger{})
 	if err != nil {
 		t.Fatalf("BuildPlan() error = %v", err)
 	}
@@ -676,7 +786,7 @@ func TestApplyRejectsAncestorSymlinkReplacement(t *testing.T) {
 		t.Fatalf("write manual source: %v", err)
 	}
 
-	plan, _, err := BuildPlan(manifestBytes, manifest, "darwin-arm64", dataRoot, OwnershipLedger{})
+	plan, _, err := BuildPlan(manifestBytes, manifest, testPlatform, dataRoot, OwnershipLedger{})
 	if err != nil {
 		t.Fatalf("BuildPlan() error = %v", err)
 	}
@@ -709,5 +819,90 @@ func TestApplyRejectsAncestorSymlinkReplacement(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Fatalf("install wrote through the ancestor symlink into %s: %v", outsideTarget, entries)
+	}
+}
+
+// TestApplyNeverOverwritesTargetThatAppearsDuringInstall proves the fix-3 property: publishing an
+// installed file uses os.Link, which fails atomically with ErrExist when anything already
+// occupies the target path, rather than os.Rename, which would silently replace it. A background
+// goroutine races to create the target with O_CREATE|O_EXCL (itself never replacing anything,
+// exactly like a genuine concurrent actor) throughout the whole install; regardless of which of
+// the two ever wins the exact race, the target's content afterward must belong entirely to
+// whichever one actually won — Apply reporting success must mean its own content landed, and Apply
+// reporting failure must mean the racer's content was left completely untouched. Content silently
+// mixed or replaced would be the exact bug this test exists to catch.
+func TestApplyNeverOverwritesTargetThatAppearsDuringInstall(t *testing.T) {
+	manifestBytes, manifest := manualManifestFixture(t)
+	dataRoot := t.TempDir()
+	sourceDirectory := t.TempDir()
+	installedContent := []byte("#!/bin/sh\necho installed\n")
+	source := filepath.Join(sourceDirectory, "operator-placed-adapter")
+	if err := os.WriteFile(source, installedContent, 0o755); err != nil {
+		t.Fatalf("write manual source: %v", err)
+	}
+
+	plan, _, err := BuildPlan(manifestBytes, manifest, testPlatform, dataRoot, OwnershipLedger{})
+	if err != nil {
+		t.Fatalf("BuildPlan() error = %v", err)
+	}
+	targetPath := plan.Operations[0].TargetPath
+	if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
+		t.Fatalf("pre-create target directory for the racer: %v", err)
+	}
+
+	foreignContent := []byte("foreign content planted by a concurrent actor")
+	var racerWon atomic.Bool
+	stop := make(chan struct{})
+	var wait sync.WaitGroup
+	wait.Add(1)
+	go func() {
+		defer wait.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			file, err := os.OpenFile(targetPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+			if err == nil {
+				file.Write(foreignContent)
+				file.Close()
+				racerWon.Store(true)
+				return
+			}
+			if !errors.Is(err, fs.ErrExist) {
+				return
+			}
+		}
+	}()
+
+	applyErr := func() error {
+		defer func() {
+			close(stop)
+			wait.Wait()
+		}()
+		_, err := Apply(context.Background(), plan, manifestBytes, OwnershipLedger{}, dataRoot, ApplyOptions{
+			ManualArtifactSources: map[string]string{"manual-acp": source},
+			ManualChecksums:       map[string]string{"manual-acp": sha256Hex(installedContent)},
+		})
+		return err
+	}()
+
+	if !racerWon.Load() {
+		t.Skip("racer never won the timing window on this run; cannot exercise the race deterministically")
+	}
+
+	finalContent, err := os.ReadFile(targetPath)
+	if err != nil {
+		t.Fatalf("read target after race: %v", err)
+	}
+	if applyErr == nil {
+		if !bytes.Equal(finalContent, installedContent) {
+			t.Fatalf("Apply() reported success but target content = %q, want the installed content", finalContent)
+		}
+	} else {
+		if !bytes.Equal(finalContent, foreignContent) {
+			t.Fatalf("Apply() reported failure (%v) but target content = %q, want the racer's untouched content — Apply overwrote a file that appeared during install", applyErr, finalContent)
+		}
 	}
 }

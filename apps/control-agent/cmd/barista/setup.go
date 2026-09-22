@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"runtime"
 	"strings"
 	"time"
 
@@ -100,9 +99,12 @@ func loadSetupManifest(manifestPath string) ([]byte, setup.Manifest, error) {
 	return manifestBytes, manifest, nil
 }
 
-// currentPlatform is the GOOS-GOARCH key the manifest and planner use for this node.
+// currentPlatform is the GOOS-GOARCH key the manifest and planner use for this node. It delegates
+// to setup.CurrentPlatform so there is exactly one definition: Apply independently derives and
+// enforces this same value against a supplied plan, and a second local definition here could drift
+// from it.
 func currentPlatform() string {
-	return runtime.GOOS + "-" + runtime.GOARCH
+	return setup.CurrentPlatform()
 }
 
 func runSetupPlan(args []string) int {
@@ -352,14 +354,28 @@ func dialHubEndpoint(ctx context.Context, endpoint string) error {
 
 // hostPortFromEndpoint derives a dialable host:port from a control endpoint URL the same way
 // config.WebSocketEndpoint parses it, defaulting the port by scheme when the URL carries none.
+// Every error here is a fixed, structural message naming only what was wrong (empty, unparseable,
+// no host) — never the raw endpoint or anything derived from it. An endpoint routinely carries
+// userinfo (a plain "user:password@" as well as a token-shaped credential) or a query-string
+// secret, and protocol.LooksSecretLike's narrow denylist does not recognize ordinary
+// "user:password@" userinfo as secret-like at all, so this path does not rely on that screen —
+// it simply never interpolates the value in the first place.
 func hostPortFromEndpoint(raw string) (string, error) {
 	value := strings.TrimSpace(raw)
-	if !strings.Contains(value, "://") {
-		value = "https://" + value
+	if value == "" {
+		return "", errors.New("control endpoint is empty")
 	}
-	parsed, err := url.Parse(value)
-	if err != nil || parsed.Host == "" {
-		return "", fmt.Errorf("control endpoint %q is not a valid URL", raw)
+	parseable := value
+	if !strings.Contains(parseable, "://") {
+		parseable = "https://" + parseable
+	}
+	parsed, err := url.Parse(parseable)
+	if err != nil {
+		return "", errors.New("control endpoint could not be parsed as a URL")
+	}
+	hostname := parsed.Hostname()
+	if hostname == "" {
+		return "", errors.New("control endpoint has no host")
 	}
 	port := parsed.Port()
 	if port == "" {
@@ -370,5 +386,5 @@ func hostPortFromEndpoint(raw string) (string, error) {
 			port = "443"
 		}
 	}
-	return net.JoinHostPort(parsed.Hostname(), port), nil
+	return net.JoinHostPort(hostname, port), nil
 }
