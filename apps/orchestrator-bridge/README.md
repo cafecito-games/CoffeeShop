@@ -8,11 +8,40 @@ session as Claude Code channel events.
 The bridge is stateless apart from the threads this process has attached. The hub owns every
 identity and decision; the bridge never receives provider credentials.
 
-## Build
+## Install as a Claude Code plugin
+
+The supported operator installation is the bundled plugin in
+`plugins/coffeeshop-orchestrator`. From a published Coffee Shop checkout:
 
 ```sh
-task orchestrator-bridge:build   # produces apps/orchestrator-bridge/dist/index.js
+claude plugin marketplace add cafecito-games/CoffeeShop --sparse .claude-plugin plugins/coffeeshop-orchestrator
+claude plugin install coffeeshop-orchestrator@cafecito-games
+claude plugin enable coffeeshop-orchestrator@cafecito-games
 ```
+
+Start a normal Claude Code session and enter:
+
+```text
+/plugin configure coffeeshop-orchestrator@cafecito-games
+```
+
+The prompt asks for the hub URL, client id, and secret. The plugin marks the secret as sensitive
+Claude Code configuration. It requires Node.js 18 or newer.
+
+Start Claude Code with the custom channel selected:
+
+```sh
+claude --dangerously-load-development-channels plugin:coffeeshop-orchestrator@cafecito-games
+```
+
+## Build from source
+
+```sh
+task orchestrator-bridge:build
+```
+
+The task produces `apps/orchestrator-bridge/dist/index.js` for repository development and the
+self-contained `plugins/coffeeshop-orchestrator/server/index.mjs` distributed by the marketplace.
 
 ## Configure
 
@@ -43,7 +72,7 @@ Add it to `.mcp.json` in the repository you orchestrate from:
 }
 ```
 
-## Launch with channels
+## Launch a source checkout with channels
 
 Channels are a research preview. A server that is not on the Anthropic plugin allowlist has to be
 loaded explicitly:

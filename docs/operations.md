@@ -188,43 +188,35 @@ Failure handling: a range already delivered but never acknowledged is redelivere
 
 ## Connecting Claude Code as an orchestrator
 
-A Claude Code session on your own machine can orchestrate a thread while the hub keeps dispatching the workers. The session reaches the hub through `apps/orchestrator-bridge`, a local stdio MCP server it launches itself.
+A Claude Code session on your own machine can orchestrate a thread while the hub keeps dispatching the workers. Install the Coffee Shop plugin, which carries a bundled copy of `apps/orchestrator-bridge` and registers it as both an MCP server and a channel. Node.js 18 or newer is required on the machine running Claude Code.
 
-Build the bridge on the machine that will run Claude Code:
+Add the Coffee Shop marketplace, install the plugin, and enable it:
 
 ```sh
-task orchestrator-bridge:build   # produces apps/orchestrator-bridge/dist/index.js
+claude plugin marketplace add cafecito-games/CoffeeShop --sparse .claude-plugin plugins/coffeeshop-orchestrator
+claude plugin install coffeeshop-orchestrator@cafecito-games
+claude plugin enable coffeeshop-orchestrator@cafecito-games
 ```
 
-Mint a credential in the PWA: **Settings → Connected clients → Connect a Claude Code orchestrator**. Name the machine or session, and tick **Let this orchestrator approve worker actions** only if that session should be allowed to answer worker permission requests on your behalf — that grants the `resolve-approvals` scope, and without it the approval tools are not even offered. The dialog then shows the client secret, a ready-made `.mcp.json`, and the launch command, each with a copy button. **The secret is shown once**; Coffee Shop keeps only a hash of it, so if you lose it, revoke the credential and connect again.
+The sparse checkout downloads only the marketplace catalog and plugin rather than the Coffee Shop monorepo. The plugin installs disabled because it connects to an external service. After enabling it, start a normal Claude Code session and configure it interactively:
 
-Add the copied entry to `.mcp.json` in the repository you orchestrate from, pointing `args` at the bridge you just built:
-
-```json
-{
-  "mcpServers": {
-    "coffeeshop": {
-      "command": "node",
-      "args": ["/absolute/path/to/CoffeeShop/apps/orchestrator-bridge/dist/index.js"],
-      "env": {
-        "COFFEE_SHOP_HUB_URL": "wss://hub.example.com/orchestrator-client",
-        "COFFEE_SHOP_CLIENT_ID": "orchestrator-client-…",
-        "COFFEE_SHOP_CLIENT_SECRET": "csoc_…"
-      }
-    }
-  }
-}
+```text
+/plugin configure coffeeshop-orchestrator@cafecito-games
 ```
 
-The PWA fills `COFFEE_SHOP_HUB_URL` from the origin it was served from, so a hub reached over `https://` yields `wss://…/orchestrator-client`. All three variables are required, and the bridge refuses to start — with a message on stderr, a non-zero exit code, and nothing written to the MCP stream — when one is missing, when the URL is not `ws://` or `wss://`, or when the credential does not satisfy the handshake contract. The secret never appears in the bridge's output.
+Mint a credential in the PWA: **Settings → Connected clients → Connect a Claude Code orchestrator**. Name the machine or session, and tick **Let this orchestrator approve worker actions** only if that session should be allowed to answer worker permission requests on your behalf — that grants the `resolve-approvals` scope, and without it the approval tools are not even offered. The dialog shows the hub URL, client id, one-time secret, install commands, configuration slash command, and launch command. Paste the three connection values into the plugin prompt. Run the same slash command again whenever an existing installation needs a new credential.
+
+**The secret is shown once.** Coffee Shop keeps only a hash of it, and the plugin declares it as sensitive configuration so Claude Code masks the prompt and keeps it out of ordinary settings. Do not pass it with `claude plugin install --config`; that would expose it through shell history and process arguments. If you lose it, revoke the credential and connect again.
+
+The PWA derives the hub URL from the origin it was served from, so a hub reached over `https://` yields `wss://…/orchestrator-client`. All three values are required, and the bridge refuses to start — with a message on stderr, a non-zero exit code, and nothing written to the MCP stream — when one is missing, when the URL is not `ws://` or `wss://`, or when the credential does not satisfy the handshake contract. The secret never appears in the bridge's output.
 
 Start Claude Code with the bridge loaded as a channel, which is what lets Coffee Shop wake an idle session:
 
 ```sh
-claude --dangerously-load-development-channels server:coffeeshop
+claude --dangerously-load-development-channels plugin:coffeeshop-orchestrator@cafecito-games
 ```
 
-Channels are a research preview, so a server that is not on the Anthropic plugin allowlist has to be named at launch like this. They require Anthropic authentication (claude.ai or a Console API key) and are unavailable on Bedrock, Google Cloud Agent Platform, and Microsoft Foundry. Pro and Max users without an organization need nothing beyond the flag; **claude.ai Team and Enterprise owners must enable `channelsEnabled` for the organization first**, or the session will silently receive no doorbells.
+Channels are a research preview, so a custom marketplace plugin that is not on the effective channel allowlist has to be named at launch like this. They require Anthropic authentication (claude.ai or a Console API key) and are unavailable on Bedrock, Google Cloud Agent Platform, and Microsoft Foundry. Pro and Max users without an organization need nothing beyond the flag. **Claude.ai Team and Enterprise owners must enable `channelsEnabled` and add `{ "marketplace": "cafecito-games", "plugin": "coffeeshop-orchestrator" }` to `allowedChannelPlugins`**; an allowlisted installation can launch with `--channels plugin:coffeeshop-orchestrator@cafecito-games` instead.
 
 ### Without channels
 
@@ -240,12 +232,12 @@ Threads are unaffected: workers keep running, events accumulate, and approvals s
 
 | Symptom | Cause and fix |
 |---|---|
-| No doorbells reach the session | The bridge was not loaded as a channel (`--dangerously-load-development-channels server:coffeeshop`), or `channelsEnabled` is off for a Team/Enterprise organization. Confirm with `get_thread_context`: `"channels": "unknown"` means none has been delivered yet. Meanwhile poll `get_thread_events` with `waitMilliseconds`. |
+| No doorbells reach the session | The plugin was not selected as a channel (`--dangerously-load-development-channels plugin:coffeeshop-orchestrator@cafecito-games`), or the Team/Enterprise channel policy does not allow it. Confirm with `get_thread_context`: `"channels": "unknown"` means none has been delivered yet. Meanwhile poll `get_thread_events` with `waitMilliseconds`. |
 | Doorbells stop after a while | At most one ring per thread per 2 seconds, and only for events newer than the last ring; an already-rung backlog is not rung again. Acknowledge with a cursor and the next event rings again. |
 | `not_attached` | This connection holds no attachment on that thread — it was replaced by another session, released when the socket dropped, or expired after 45 seconds without a heartbeat. Call `attach_thread` with the thread id. |
 | A "taken over by another session" notice, or `attachment.replaced` | Another session attached the same thread; a thread has exactly one attachment. Stop the other session, or re-attach here to take it back. |
 | `hub_unavailable` | The bridge is not connected; it reconnects on its own with capped backoff (1 s to 30 s) and never queues calls. Check the hub URL, TLS termination, and the hub's reachability, then retry the call. |
-| `revoked` | The credential was revoked in the PWA. Mint a new one and update `.mcp.json`; the bridge will not reconnect until it is restarted with the new credential. |
+| `revoked` | The credential was revoked in the PWA. Mint a new one, reconfigure the plugin through `/plugin`, and restart the bridge; it will not reconnect with the revoked credential. |
 | `forbidden` on `resolve_approval` | The credential lacks `resolve-approvals`. Grant it with **Edit scopes**; the bridge re-lists its tools when the scope change is observed on reconnect. |
 | The thread shows "Detached since …" in the PWA | No session is attached. Workers continue; attach again to resume orchestrating. |
 | The bridge exits immediately | A missing or malformed `COFFEE_SHOP_HUB_URL`, `COFFEE_SHOP_CLIENT_ID`, or `COFFEE_SHOP_CLIENT_SECRET`. The reason is on stderr and names the variable, never its value. |

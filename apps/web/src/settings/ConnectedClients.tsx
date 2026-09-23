@@ -12,23 +12,14 @@ function bridgeHubUrl(): string {
   return `${origin.replace(/^http/, "ws")}/orchestrator-client`;
 }
 
-function mcpConfiguration(clientId: string, secret: string): string {
-  return JSON.stringify({
-    mcpServers: {
-      coffeeshop: {
-        command: "node",
-        args: ["/absolute/path/to/CoffeeShop/apps/orchestrator-bridge/dist/index.js"],
-        env: {
-          COFFEE_SHOP_HUB_URL: bridgeHubUrl(),
-          COFFEE_SHOP_CLIENT_ID: clientId,
-          COFFEE_SHOP_CLIENT_SECRET: secret
-        }
-      }
-    }
-  }, undefined, 2);
-}
+const pluginInstallCommands = [
+  "claude plugin marketplace add cafecito-games/CoffeeShop --sparse .claude-plugin plugins/coffeeshop-orchestrator",
+  "claude plugin install coffeeshop-orchestrator@cafecito-games",
+  "claude plugin enable coffeeshop-orchestrator@cafecito-games"
+].join("\n");
 
-const launchCommand = "claude --dangerously-load-development-channels server:coffeeshop";
+const pluginConfigureCommand = "/plugin configure coffeeshop-orchestrator@cafecito-games";
+const launchCommand = "claude --dangerously-load-development-channels plugin:coffeeshop-orchestrator@cafecito-games";
 
 function CopyableBlock({ label, value, description }: { label: string; value: string; description?: string }) {
   const [state, setState] = useState<"idle" | "copied" | "failed">("idle");
@@ -96,8 +87,11 @@ function ConnectOrchestratorDialog({ canMutate, apiFetch, onClose }: { canMutate
         <>
           <p className="experience-lede">This secret is shown once. Coffee Shop keeps only a hash of it, so if you lose it you revoke this credential and connect again.</p>
           <CopyableBlock label="Client secret" value={minted.secret} description={`Credential ${minted.client.name} · ${minted.client.id}`} />
-          <CopyableBlock label=".mcp.json" value={mcpConfiguration(minted.client.id, minted.secret)} description="Add this to the repository you orchestrate from, then point args at your built bridge." />
-          <CopyableBlock label="Launch command" value={launchCommand} description="Start Claude Code with the bridge loaded as a channel server." />
+          <CopyableBlock label="Hub URL" value={bridgeHubUrl()} description="Paste this into the plugin's Coffee Shop hub URL field." />
+          <CopyableBlock label="Client ID" value={minted.client.id} description="Paste this and the secret above into the remaining plugin fields." />
+          <CopyableBlock label="Install plugin" value={pluginInstallCommands} description="Run these once in a terminal. Claude Code reports that the three required options still need to be configured." />
+          <CopyableBlock label="Configure plugin" value={pluginConfigureCommand} description="Start a normal Claude Code session, run this slash command, and paste the hub URL, client ID, and secret shown above into the secure prompt." />
+          <CopyableBlock label="Launch with doorbells" value={launchCommand} description="Start Claude Code with this custom channel selected. The tools still work without this flag, but worker events must then be polled." />
           <footer className="connect-client-footer">
             <button className="create-button" onClick={onClose} data-dialog-initial-focus>Done — I have copied the secret</button>
           </footer>

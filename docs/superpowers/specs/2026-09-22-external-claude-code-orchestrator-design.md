@@ -26,7 +26,7 @@ Source: https://code.claude.com/docs/en/channels and https://code.claude.com/doc
 - Events wake an idle session; events that arrive mid-turn queue and are delivered together on the next turn.
 - Delivery is fire-and-forget. If the server is not enabled as a channel, Claude Code silently drops events. `meta` keys must be identifiers (letters, digits, underscore); others are dropped.
 - The same server may expose ordinary MCP tools.
-- A channel must be named at launch. During the preview, a server that is not on the Anthropic plugin allowlist needs `claude --dangerously-load-development-channels server:coffeeshop`. Pro and Max users without an organization need nothing else; claude.ai Team and Enterprise owners must enable `channelsEnabled`.
+- A channel must be named at launch. During the preview, a server that is not on the effective channel allowlist needs `claude --dangerously-load-development-channels`; the source checkout is selected as `server:coffeeshop` and the packaged install as `plugin:coffeeshop-orchestrator@cafecito-games`. Pro and Max users without an organization need nothing else; claude.ai Team and Enterprise owners must enable `channelsEnabled` and allowlist the plugin.
 - Claude Code does not register a channel server that negotiates MCP protocol revision `2026-07-28`, so the bridge must negotiate an earlier revision.
 - Channels require Anthropic authentication (claude.ai or Console API key); they are unavailable on Bedrock, Google Cloud Agent Platform, and Microsoft Foundry.
 
@@ -131,5 +131,7 @@ A session may attach to several threads at once; every tool call and doorbell na
 ## Follow-ups
 
 - `post_artifact` from the operator's machine, restricted to the Claude Code working directory, reusing the 10 MiB cap and existing artifact kinds — for shipping specs and similar files to workers.
-- Packaging the bridge as a Claude Code plugin so it can be allowlisted for `--channels plugin:…`.
 - Launching a hub-hosted orchestrator from Claude Code.
+
+The bridge was subsequently packaged as `coffeeshop-orchestrator@cafecito-games`, with sensitive
+Claude Code user configuration and a self-contained server bundle.
