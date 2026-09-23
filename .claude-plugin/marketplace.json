@@ -1,0 +1,16 @@
+{
+  "name": "cafecito-games",
+  "owner": {
+    "name": "Cafecito Games"
+  },
+  "metadata": {
+    "description": "Claude Code integrations from Cafecito Games"
+  },
+  "plugins": [
+    {
+      "name": "coffeeshop-orchestrator",
+      "source": "./plugins/coffeeshop-orchestrator",
+      "description": "Orchestrate Coffee Shop agents from a local Claude Code session"
+    }
+  ]
+}

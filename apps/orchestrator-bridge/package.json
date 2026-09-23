@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && pnpm run build:plugin",
+    "build:plugin": "esbuild src/index.ts --bundle --minify --platform=node --format=esm --target=node18 --banner:js='import { createRequire } from \"node:module\"; const require = createRequire(import.meta.url);' --outfile=../../plugins/coffeeshop-orchestrator/server/index.mjs",
     "start": "node dist/index.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "tsx --test src/**/*.test.ts"
@@ -17,6 +18,7 @@
   "devDependencies": {
     "@types/node": "^24.3.1",
     "@types/ws": "^8.18.1",
+    "esbuild": "^0.28.2",
     "tsx": "^4.20.5"
   }
 }

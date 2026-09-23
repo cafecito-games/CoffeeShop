@@ -1,0 +1,37 @@
+{
+  "name": "coffeeshop-orchestrator",
+  "version": "0.1.0",
+  "description": "Orchestrate Coffee Shop agents from a local Claude Code session",
+  "author": {
+    "name": "Cafecito Games"
+  },
+  "homepage": "https://github.com/cafecito-games/CoffeeShop",
+  "repository": "https://github.com/cafecito-games/CoffeeShop",
+  "defaultEnabled": false,
+  "userConfig": {
+    "hub_url": {
+      "type": "string",
+      "title": "Coffee Shop hub URL",
+      "description": "The ws:// or wss:// URL ending in /orchestrator-client",
+      "required": true
+    },
+    "client_id": {
+      "type": "string",
+      "title": "Orchestrator client ID",
+      "description": "The client ID shown by Coffee Shop when this connection was created",
+      "required": true
+    },
+    "client_secret": {
+      "type": "string",
+      "title": "Orchestrator client secret",
+      "description": "The one-time secret shown by Coffee Shop",
+      "required": true,
+      "sensitive": true
+    }
+  },
+  "channels": [
+    {
+      "server": "coffeeshop"
+    }
+  ]
+}

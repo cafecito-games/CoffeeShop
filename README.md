@@ -9,6 +9,9 @@ This repository contains four deployable applications:
 - `apps/control-agent`: **Barista**, a Go 1.26 system agent for every compute machine;
 - `apps/orchestrator-bridge`: the local stdio MCP server that lets your own Claude Code session orchestrate a thread.
 
+Operators install the orchestrator bridge from the repository's Claude Code marketplace with
+`claude plugin marketplace add cafecito-games/CoffeeShop --sparse .claude-plugin plugins/coffeeshop-orchestrator`.
+
 Barista is a single binary. It discovers installed Claude Code and Codex CLIs, keeps their credentials on the compute machine, connects outbound to Coffee Shop, enforces workspace allowlists, and runs dispatched work. A compute host does not need Node, pnpm, a repository clone, or an inbound port.
 
 ## Develop locally
@@ -106,6 +109,7 @@ apps/web                  React PWA and responsive operator interface
 apps/hub                  REST API, WebSocket gateway, scheduler, persistence
 apps/control-agent        Go Barista daemon and harness adapters
 apps/orchestrator-bridge  Stdio MCP bridge for an external Claude Code orchestrator
+plugins/coffeeshop-orchestrator Installable Claude Code plugin carrying the bundled bridge
 packages/protocol         Shared TypeScript domain and wire contracts
 docs                      Architecture, operations, security, and provider notes
 Taskfile.yml              Language-neutral development and CI entry points

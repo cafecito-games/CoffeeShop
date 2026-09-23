@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "coffeeshop": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/server/index.mjs"],
+      "env": {
+        "COFFEE_SHOP_HUB_URL": "${user_config.hub_url}",
+        "COFFEE_SHOP_CLIENT_ID": "${user_config.client_id}",
+        "COFFEE_SHOP_CLIENT_SECRET": "${user_config.client_secret}"
+      }
+    }
+  }
+}

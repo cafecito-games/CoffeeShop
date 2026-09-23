@@ -86,12 +86,10 @@ describe("connected clients", () => {
 
       expect(await screen.findByText(secret)).toBeInTheDocument();
       expect(screen.getByText(/This secret is shown once/)).toBeInTheDocument();
-      const configuration = screen.getByText(/mcpServers/).textContent ?? "";
-      expect(JSON.parse(configuration).mcpServers.coffeeshop.env).toMatchObject({
-        COFFEE_SHOP_CLIENT_ID: "orchestrator-client-1",
-        COFFEE_SHOP_CLIENT_SECRET: secret
-      });
-      expect(screen.getByText("claude --dangerously-load-development-channels server:coffeeshop")).toBeInTheDocument();
+      expect(screen.getAllByText("orchestrator-client-1")).not.toHaveLength(0);
+      expect(screen.getByText(/claude plugin marketplace add cafecito-games\/CoffeeShop/)).toBeInTheDocument();
+      expect(screen.getByText("/plugin configure coffeeshop-orchestrator@cafecito-games")).toBeInTheDocument();
+      expect(screen.getByText("claude --dangerously-load-development-channels plugin:coffeeshop-orchestrator@cafecito-games")).toBeInTheDocument();
       await userEvent.click(screen.getByRole("button", { name: /Copy Client secret/ }));
       expect(navigator.clipboard.writeText).toHaveBeenCalledWith(secret);
 
