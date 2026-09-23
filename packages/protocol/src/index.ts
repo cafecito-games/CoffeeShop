@@ -237,6 +237,8 @@ export interface Snapshot {
   orchestratorAttachments?: OrchestratorAttachment[];
   approvals?: ApprovalRequest[];
   workspaceLeases?: WorkspaceLease[];
+  /** Hub-managed project definitions used for readiness checks and isolated workspace leases. */
+  projectProfiles?: ProjectProfile[];
   /** Version-4: bounded projections of accepted structured harness events, one per run. */
   runActivity?: RunActivity[];
   generatedAt: string;

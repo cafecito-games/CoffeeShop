@@ -1,5 +1,6 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import {
   agentAvatarColors,
@@ -15,9 +16,11 @@ import {
   isOrchestratorAttachmentStatus,
   isOrchestratorClientScope,
   orchestrationCollections,
+  validateProjectProfile,
   withOrchestrationDefaults,
   type ChatMessage,
   type OrchestratorClient,
+  type ProjectProfile,
   type Snapshot,
   type Thread,
   type TimelineEvent
@@ -72,6 +75,8 @@ interface HubOnlyState {
   taskEventStreams?: TaskEventStream[];
   harnessEventStreams?: HarnessEventStream[];
   harnessEvents?: StoredHarnessEvent[];
+  /** Prevents a deliberately emptied catalog from re-importing the legacy profiles file. */
+  projectProfilesImported?: boolean;
 }
 
 /** The persisted state. `orchestratorClients` holds the stored records, secret hash included. */
@@ -97,7 +102,8 @@ const emptyState = (): State => withOrchestrationDefaults({
   harnessEvents: [],
   orchestratorInboxes: [],
   orchestratorClients: [],
-  orchestratorAttachments: []
+  orchestratorAttachments: [],
+  projectProfiles: []
 });
 
 export function addOrchestrationDefaults(state: State) {
@@ -117,6 +123,17 @@ export function addOrchestrationDefaults(state: State) {
   state.orchestratorClients ??= [];
   state.orchestratorAttachments ??= [];
   return changed;
+}
+
+/** Rejects malformed or duplicate persisted profiles before they can affect scheduling. */
+export function assertPersistedProjectProfiles(state: State) {
+  const ids = new Set<string>();
+  for (const [index, profile] of (state.projectProfiles ?? []).entries()) {
+    const validated = validateProjectProfile(profile);
+    if (!validated.ok) throw new Error(`Persisted project profile ${index} is invalid: ${validated.reason}`);
+    if (ids.has(validated.value.id)) throw new Error(`Persisted project profile ${index} repeats project id ${validated.value.id}`);
+    ids.add(validated.value.id);
+  }
 }
 
 /**
@@ -460,24 +477,61 @@ export const publicOrchestratorClient = (client: StoredOrchestratorClient): Orch
   ...(client.revokedAt === undefined ? {} : { revokedAt: client.revokedAt })
 });
 
+export interface SqliteStoreOptions {
+  databasePath: string;
+  /** A legacy JSON snapshot imported only when the database has no state yet. */
+  legacyJsonPath?: string;
+}
+
 export class Store {
   private state: State = emptyState();
   private readonly path: string;
+  private readonly legacyJsonPath?: string;
+  private readonly sqlite: boolean;
+  private database?: DatabaseSync;
   private transactionQueue: Promise<void> = Promise.resolve();
   private readonly commitListeners = new Set<(state: Readonly<State>) => void>();
 
-  constructor(path = process.env.COFFEE_SHOP_DATA ?? fileURLToPath(new URL("../../../data/state.json", import.meta.url))) {
-    this.path = resolve(path);
+  constructor(location?: string | SqliteStoreOptions) {
+    if (typeof location === "string") {
+      // Kept for fixture compatibility; production uses the default SQLite configuration below.
+      this.path = resolve(location);
+      this.sqlite = false;
+      return;
+    }
+    const defaultLegacyPath = process.env.COFFEE_SHOP_DATA
+      ?? fileURLToPath(new URL("../../../data/state.json", import.meta.url));
+    this.legacyJsonPath = resolve(location?.legacyJsonPath ?? defaultLegacyPath);
+    this.path = resolve(location?.databasePath ?? process.env.COFFEE_SHOP_DATABASE
+      ?? resolve(dirname(this.legacyJsonPath), "coffee-shop.sqlite"));
+    this.sqlite = true;
   }
 
   async load() {
     let loaded: State;
-    try {
-      loaded = JSON.parse(await readFile(this.path, "utf8")) as State;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      await this.save();
-      return;
+    if (this.sqlite) {
+      await mkdir(dirname(this.path), { recursive: true });
+      this.database = new DatabaseSync(this.path);
+      this.database.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;");
+      this.database.exec(`CREATE TABLE IF NOT EXISTS hub_state (
+        singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+        state_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )`);
+      const row = this.database.prepare("SELECT state_json FROM hub_state WHERE singleton = 1").get() as { state_json: string } | undefined;
+      if (row) {
+        loaded = JSON.parse(row.state_json) as State;
+      } else {
+        loaded = await this.readLegacyState() ?? emptyState();
+      }
+    } else {
+      try {
+        loaded = JSON.parse(await readFile(this.path, "utf8")) as State;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        await this.save();
+        return;
+      }
     }
     const removedDemoRecords = removeLegacyDemoRecords(loaded);
     const addedAgentAvatars = addMissingAgentAvatars(loaded);
@@ -485,22 +539,34 @@ export class Store {
     const addedThreadOrchestrators = addThreadOrchestratorDefaults(loaded);
     const addedThreads = addThreadDefaults(loaded);
     const addedOrchestration = addOrchestrationDefaults(loaded);
+    if (this.sqlite) loaded.projectProfiles ??= [];
     const addedApprovalResolvers = addApprovalResolverDefaults(loaded);
     assertPersistedTaskState(loaded);
     assertPersistedHarnessState(loaded);
     assertPersistedWorkspaceLeaseState(loaded);
     assertPersistedSessionState(loaded);
     assertPersistedOrchestratorClientState(loaded);
-    if (removedDemoRecords || addedAgentAvatars || addedCoordination || addedThreads || addedOrchestration
+    assertPersistedProjectProfiles(loaded);
+    if (this.sqlite || removedDemoRecords || addedAgentAvatars || addedCoordination || addedThreads || addedOrchestration
       || addedThreadOrchestrators || addedApprovalResolvers) await this.save(loaded);
     this.state = loaded;
+  }
+
+  private async readLegacyState(): Promise<State | undefined> {
+    if (!this.legacyJsonPath) return undefined;
+    try {
+      return JSON.parse(await readFile(this.legacyJsonPath, "utf8")) as State;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw error;
+    }
   }
 
   snapshot(): Snapshot {
     const {
       taskSubmissions: _taskSubmissions, taskUpdates: _taskUpdates, taskEventJournal: _taskEventJournal, taskEventStreams: _taskEventStreams,
       harnessEventStreams: _harnessEventStreams, harnessEvents: _harnessEvents,
-      orchestratorClients, ...published
+      projectProfilesImported: _projectProfilesImported, orchestratorClients, ...published
     } = this.state;
     return structuredClone({
       ...published,
@@ -561,6 +627,14 @@ export class Store {
 
   private async save(state = this.state) {
     await mkdir(dirname(this.path), { recursive: true });
+    if (this.sqlite) {
+      if (!this.database) throw new Error("SQLite store has not been loaded");
+      this.database.prepare(`INSERT INTO hub_state (singleton, state_json, updated_at)
+        VALUES (1, ?, ?)
+        ON CONFLICT(singleton) DO UPDATE SET state_json = excluded.state_json, updated_at = excluded.updated_at`)
+        .run(JSON.stringify(state), new Date().toISOString());
+      return;
+    }
     const temporary = `${this.path}.${process.pid}.tmp`;
     await writeFile(temporary, JSON.stringify(state, null, 2));
     await rename(temporary, this.path);

@@ -739,6 +739,59 @@ button:disabled, textarea:disabled, fieldset:disabled button { cursor: not-allow
 .external-thread-note { display: flex; align-items: center; gap: 6px; margin: 0; color: var(--muted); font-size: 8px; }
 .approval-orchestrator-resolution { color: var(--accent); }
 
+.projects-view { position: relative; }
+.projects-lede { max-width: 680px; margin: 0 0 24px; color: var(--muted); font-size: 10px; line-height: 1.7; }
+.projects-empty { min-height: 220px; border: 1px dashed var(--line); border-radius: 10px; display: grid; place-content: center; justify-items: center; gap: 8px; color: var(--muted); text-align: center; }
+.projects-empty strong { color: var(--text); font-size: 12px; }
+.projects-empty p { max-width: 360px; margin: 0 0 8px; font-size: 9px; line-height: 1.6; }
+.project-list { display: grid; gap: 1px; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--line); }
+.project-row { position: relative; min-height: 104px; padding: 16px; display: grid; grid-template-columns: 38px minmax(0,1fr) auto; align-items: start; gap: 13px; background: var(--surface); }
+.project-icon { width: 38px; height: 38px; border: 1px solid rgba(223,163,76,.25); border-radius: 8px; display: grid; place-items: center; color: var(--accent); background: var(--accent-soft); }
+.project-main { min-width: 0; }
+.project-main > div:first-child { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; }
+.project-main strong { font-size: 11px; }
+.project-main code { color: var(--faint); font-size: 8px; }
+.project-main p { margin: 6px 0 10px; overflow: hidden; color: var(--muted); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+.project-tags { display: flex !important; flex-wrap: wrap; gap: 5px !important; }
+.project-tags span { padding: 3px 6px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); font: 7px "DM Mono", monospace; }
+.project-tags span.ready { border-color: rgba(126,165,138,.35); color: var(--success); }
+.project-actions { display: flex; gap: 5px; }
+.project-actions button { width: 30px; height: 30px; padding: 0; border: 1px solid var(--line); border-radius: 6px; display: grid; place-items: center; color: var(--muted); background: var(--surface-2); cursor: pointer; }
+.project-actions button:hover { border-color: var(--line-strong); color: var(--text); }
+.project-actions button.danger:hover { border-color: rgba(200,121,110,.4); color: var(--danger); }
+.project-actions button:disabled { opacity: .45; cursor: default; }
+.project-confirm { grid-column: 2 / -1; padding: 10px; border: 1px solid rgba(200,121,110,.25); border-radius: 7px; display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 7px; background: rgba(200,121,110,.06); }
+.project-confirm span { margin-right: auto; color: var(--secondary); font-size: 8px; }
+.project-confirm button, .project-editor footer button { min-height: 32px; padding: 0 10px; border: 1px solid var(--line); border-radius: 6px; color: var(--secondary); background: transparent; font-size: 8px; cursor: pointer; }
+.project-confirm button.danger { border-color: rgba(200,121,110,.4); color: var(--danger); }
+.project-editor-shell { position: absolute; z-index: 10; inset: 0; padding: 24px max(24px,calc((100% - 760px) / 2)); overflow-y: auto; background: rgba(9,11,10,.88); backdrop-filter: blur(12px); }
+.project-editor { max-width: 760px; margin: auto; padding: 22px; border: 1px solid var(--line-strong); border-radius: 12px; display: grid; gap: 18px; background: var(--bg); box-shadow: 0 20px 60px rgba(0,0,0,.42); }
+.project-editor > header { padding-bottom: 16px; border-bottom: 1px solid var(--line); display: flex; align-items: flex-start; justify-content: space-between; }
+.project-editor > header small { color: var(--accent); font: 500 8px "DM Mono", monospace; letter-spacing: .08em; text-transform: uppercase; }
+.project-editor > header h2 { margin: 5px 0 0; font-size: 18px; letter-spacing: -.03em; }
+.project-fields { display: grid; gap: 12px; }
+.project-fields.two-columns { grid-template-columns: repeat(2,minmax(0,1fr)); }
+.project-fields label, .project-field { min-width: 0; display: grid; gap: 6px; color: var(--muted); font-size: 8px; }
+.project-fields input, .project-field input, .project-field textarea { width: 100%; min-height: 38px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 7px; outline: 0; color: var(--text); background: var(--surface); font: 9px "Manrope", sans-serif; }
+.project-field textarea { resize: vertical; font-family: "DM Mono", monospace; line-height: 1.6; }
+.project-fields input:focus, .project-field input:focus, .project-field textarea:focus { border-color: rgba(223,163,76,.55); }
+.project-fields input:disabled { color: var(--faint); background: var(--surface-2); }
+.project-fields small, .project-field small { color: var(--faint); font-size: 7px; line-height: 1.5; }
+.project-editor fieldset { margin: 0; padding: 0; border: 0; }
+.project-editor legend { margin-bottom: 7px; color: var(--muted); font-size: 8px; }
+.choice-row { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 7px; }
+.choice-row button { min-height: 38px; padding: 0 10px; border: 1px solid var(--line); border-radius: 7px; display: flex; align-items: center; justify-content: center; gap: 6px; color: var(--muted); background: var(--surface); font-size: 8px; cursor: pointer; }
+.choice-row button.selected { border-color: rgba(223,163,76,.52); color: var(--accent); background: var(--accent-soft); }
+.choice-row.compact { max-width: 360px; }
+.check-row { padding: 11px; border: 1px solid var(--line); border-radius: 7px; display: flex; align-items: flex-start; gap: 10px; background: var(--surface); }
+.check-row > span { display: grid; gap: 4px; }
+.check-row strong { color: var(--secondary); font-size: 9px; }
+.check-row small { color: var(--faint); font-size: 8px; }
+.project-error { display: flex; align-items: center; gap: 7px; margin: 0; color: var(--danger); font-size: 8px; }
+.project-editor footer { padding-top: 16px; border-top: 1px solid var(--line); display: flex; justify-content: flex-end; gap: 8px; }
+.project-editor footer .save-project { border-color: var(--accent); color: #171209; background: var(--accent); font-weight: 700; }
+.project-editor footer button:disabled { opacity: .45; cursor: default; }
+
 @keyframes fade-in { from { opacity: 0; } }
 @keyframes dialog-in { from { opacity: 0; transform: translateY(8px) scale(.985); } }
 @keyframes inspector-in { from { opacity: 0; transform: translateX(18px); } }
@@ -755,7 +808,7 @@ button:disabled, textarea:disabled, fieldset:disabled button { cursor: not-allow
   .app-shell { display: block; height: 100dvh; padding-bottom: calc(64px + env(safe-area-inset-bottom)); }
   .workspace { height: 100%; }
   .roster, .desktop-nav { display: none; }
-  .bottom-nav { position: fixed; z-index: 30; left: 0; right: 0; bottom: 0; height: calc(64px + env(safe-area-inset-bottom)); padding: 5px 6px env(safe-area-inset-bottom); border-top: 1px solid var(--line); display: grid; grid-template-columns: repeat(6,1fr); background: rgba(9,11,10,.96); backdrop-filter: blur(18px); }
+  .bottom-nav { position: fixed; z-index: 30; left: 0; right: 0; bottom: 0; height: calc(64px + env(safe-area-inset-bottom)); padding: 5px 6px env(safe-area-inset-bottom); border-top: 1px solid var(--line); display: grid; grid-template-columns: repeat(7,1fr); background: rgba(9,11,10,.96); backdrop-filter: blur(18px); }
   .bottom-nav button { position: relative; border: 0; border-radius: 7px; display: grid; place-content: center; justify-items: center; gap: 3px; color: var(--faint); background: transparent; font-size: 7px; }
   .bottom-nav button.active { color: var(--accent); }
   .bottom-nav button .unread { position: absolute; top: 2px; right: calc(50% - 22px); }
@@ -788,6 +841,11 @@ button:disabled, textarea:disabled, fieldset:disabled button { cursor: not-allow
   .setup-steps, .onboarding-fields { grid-template-columns: 1fr; }
   .command-preview { grid-template-columns: 1fr; }
   .command-preview button { justify-content: center; }
+  .project-fields.two-columns, .choice-row { grid-template-columns: 1fr; }
+  .project-editor-shell { position: fixed; padding: 12px; }
+  .project-editor { padding: 18px; }
+  .project-row { grid-template-columns: 38px minmax(0,1fr); }
+  .project-actions { grid-column: 2; }
 }
 
 @media (max-width: 520px) {

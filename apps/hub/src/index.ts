@@ -10,9 +10,11 @@ import {
   canSendToControlAgent,
   isControlProtocolVersion,
   isTerminalTaskStatus,
+  isTerminalWorkspaceLeaseStatus,
   orchestratorClientHeartbeatSeconds,
   supportsControlCapability,
   threadOrchestrator,
+  validateProjectProfile,
   validateNodeCapabilityReport,
   validateOrchestrationControlAgentMessage,
   type Agent,
@@ -33,7 +35,7 @@ import { forgetNodeCapabilityReport, getNodeCapabilityReport, recordNodeCapabili
 import { registeredComputeNode } from "./nodeRegistration.js";
 import { createOrchestratorClientRevocations, operatorCredentialGuard, registerOrchestratorClientRoutes } from "./orchestratorClients.js";
 import { createOrchestratorClientGateway, orchestratorClientCloseCode } from "./orchestratorClientGateway.js";
-import { loadProjectProfilesFromFile, ProjectProfileRegistry } from "./projectProfiles.js";
+import { loadProjectProfilesFromFile } from "./projectProfiles.js";
 import { computeNodeProjectReadiness } from "./projectReadiness.js";
 import { retainedHarnessEvents } from "./harnessEvents.js";
 import { expireDueApprovals, receiveApprovalUndeliverable, receiveHarnessEvent, reconcileApprovals, resolveApproval } from "./harnessGateway.js";
@@ -139,7 +141,7 @@ const scheduleReadyTasks = coalesceAsync(async () => {
     const context: SchedulingContext = {
       connection: schedulingConnection,
       capabilityReport: getNodeCapabilityReport,
-      projectProfile: (projectId) => projectProfiles.get(projectId),
+      projectProfile: (projectId) => state.projectProfiles?.find((profile) => profile.id === projectId),
       canDeliver: (nodeId, message) => {
         const connection = message.type === "dispatch" ? deliveryConnection(nodeId, message) : undefined;
         if (connection && message.type === "dispatch") approved.set(message.run.id, connection);
@@ -430,10 +432,78 @@ app.get("/api/artifacts/:id/content", async (req, res) => {
  * Registered ahead of the SPA fallback below so a project-readiness request is never swallowed
  * by the catch-all that serves `index.html` for unmatched routes.
  */
+const projectProfileInUse = (state: Readonly<import("./store.js").State>, projectId: string) =>
+  state.tasks?.some((task) => task.requirements.projectProfileId === projectId && !isTerminalTaskStatus(task.status))
+  || state.workspaceLeases?.some((lease) => lease.projectProfileId === projectId && !isTerminalWorkspaceLeaseStatus(lease.status));
+
+app.get("/api/project-profiles", (_req, res) => {
+  res.json(store.read((state) => structuredClone(state.projectProfiles ?? [])));
+});
+
+app.post("/api/project-profiles", async (req, res) => {
+  const validated = validateProjectProfile(req.body);
+  if (!validated.ok) return res.status(400).json({ error: validated.reason });
+  let exists = false;
+  await store.transact((state) => {
+    if (state.projectProfiles?.some((profile) => profile.id === validated.value.id)) {
+      exists = true;
+      return false;
+    }
+    (state.projectProfiles ??= []).push(validated.value);
+    state.projectProfilesImported = true;
+  });
+  if (exists) return res.status(409).json({ error: "A project profile with this id already exists" });
+  broadcast();
+  requestScheduling();
+  res.status(201).json(validated.value);
+});
+
+app.put("/api/project-profiles/:id", async (req, res) => {
+  const id = String(req.params.id);
+  const validated = validateProjectProfile(req.body);
+  if (!validated.ok) return res.status(400).json({ error: validated.reason });
+  if (validated.value.id !== id) return res.status(400).json({ error: "Project profile id cannot be changed" });
+  let result: "updated" | "not-found" | "in-use" = "not-found";
+  await store.transact((state) => {
+    const index = state.projectProfiles!.findIndex((profile) => profile.id === id);
+    if (index < 0) return false;
+    if (projectProfileInUse(state, id)) {
+      result = "in-use";
+      return false;
+    }
+    state.projectProfiles![index] = validated.value;
+    result = "updated";
+  });
+  if (result === "not-found") return res.status(404).json({ error: "Project profile not found" });
+  if (result === "in-use") return res.status(409).json({ error: "Project profile is in use by active work" });
+  broadcast();
+  requestScheduling();
+  res.json(validated.value);
+});
+
+app.delete("/api/project-profiles/:id", async (req, res) => {
+  const id = String(req.params.id);
+  let result: "deleted" | "not-found" | "in-use" = "not-found";
+  await store.transact((state) => {
+    if (!state.projectProfiles?.some((profile) => profile.id === id)) return false;
+    if (projectProfileInUse(state, id)) {
+      result = "in-use";
+      return false;
+    }
+    state.projectProfiles = state.projectProfiles.filter((profile) => profile.id !== id);
+    result = "deleted";
+  });
+  if (result === "not-found") return res.status(404).json({ error: "Project profile not found" });
+  if (result === "in-use") return res.status(409).json({ error: "Project profile is in use by active work" });
+  broadcast();
+  requestScheduling();
+  res.status(204).end();
+});
+
 app.get("/api/project-readiness", (req, res) => {
   const projectId = typeof req.query.projectId === "string" ? req.query.projectId : undefined;
   if (!projectId) return res.status(400).json({ error: "projectId is required" });
-  const profile = projectProfiles.get(projectId);
+  const profile = store.read((state) => state.projectProfiles?.find((item) => item.id === projectId));
   if (!profile) return res.status(404).json({ error: "Project profile not found" });
   const nowIso = new Date().toISOString();
   const readiness = store.snapshot().nodes.map((node) =>
@@ -680,20 +750,24 @@ wss.on("connection", (socket, request) => {
   });
 });
 
-const defaultProjectProfilesPath = fileURLToPath(new URL("../../../config/project-profiles.json", import.meta.url));
-const projectProfilesPath = process.env.PROJECT_PROFILES_PATH ?? defaultProjectProfilesPath;
-const projectProfilesResult = await loadProjectProfilesFromFile(projectProfilesPath);
-if (!projectProfilesResult.ok) {
-  if (projectProfilesResult.kind === "not-found" && !process.env.PROJECT_PROFILES_PATH) {
-    console.log("no project profiles configured; set PROJECT_PROFILES_PATH to enable project readiness");
+await store.load();
+// Compatibility bridge: import the old file exactly once, then manage profiles in SQLite/UI.
+if (store.read((state) => !state.projectProfilesImported && (state.projectProfiles ?? []).length === 0)) {
+  const defaultProjectProfilesPath = fileURLToPath(new URL("../../../config/project-profiles.json", import.meta.url));
+  const projectProfilesPath = process.env.PROJECT_PROFILES_PATH ?? defaultProjectProfilesPath;
+  const projectProfilesResult = await loadProjectProfilesFromFile(projectProfilesPath);
+  if (!projectProfilesResult.ok) {
+    if (projectProfilesResult.kind !== "not-found" || process.env.PROJECT_PROFILES_PATH) {
+      throw new Error(`project profiles failed to import: ${projectProfilesResult.error}`);
+    }
   } else {
-    throw new Error(`project profiles failed to load: ${projectProfilesResult.error}`);
+    await store.transact((state) => {
+      state.projectProfiles = projectProfilesResult.profiles;
+      state.projectProfilesImported = true;
+    });
+    console.log(`imported ${projectProfilesResult.profiles.length} project profile(s) from ${projectProfilesPath}`);
   }
 }
-const projectProfiles = new ProjectProfileRegistry(projectProfilesResult.ok ? projectProfilesResult.profiles : []);
-if (projectProfilesResult.ok) console.log(`loaded ${projectProfilesResult.profiles.length} project profile(s) from ${projectProfilesPath}`);
-
-await store.load();
 await store.transact((state) => markDisconnectedNodesOffline(state, liveControlAgents) || false);
 // No bridge connection survives a restart, so no attachment persisted by the previous process may.
 await store.transact((state) => detachEveryAttachmentInState(state, new Date().toISOString()).length > 0);

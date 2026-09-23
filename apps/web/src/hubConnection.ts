@@ -4,7 +4,7 @@ import {
   harnessTransports, placementRequirementKinds, planEntryPriorities, planEntryStatuses, runStatuses,
   sessionBindingStatuses, taskDependencyPolicies, taskMessageKinds, taskStatuses, toolCallKinds,
   toolCallStatuses, workspaceCleanupPolicies, workspaceIsolationPolicies, workspaceLeaseStatuses,
-  workspaceRetentionReasons, orchestratorAttachmentStatuses, orchestratorClientScopes, type Snapshot
+  workspaceRetentionReasons, orchestratorAttachmentStatuses, orchestratorClientScopes, validateProjectProfile, type Snapshot
 } from "@coffee-shop/protocol";
 
 export type ConnectionStatus = "connecting" | "connected" | "reconnecting" | "disconnected" | "authentication-required";
@@ -544,6 +544,7 @@ export function isSnapshot(value: unknown): value is Snapshot {
     && (value.orchestratorAttachments === undefined || isArrayOf(value.orchestratorAttachments, isOrchestratorAttachment))
     && (value.approvals === undefined || isArrayOf(value.approvals, isApprovalRequest))
     && (value.workspaceLeases === undefined || isArrayOf(value.workspaceLeases, isWorkspaceLease))
+    && (value.projectProfiles === undefined || isArrayOf(value.projectProfiles, (profile) => validateProjectProfile(profile).ok))
     && (value.runActivity === undefined || isArrayOf(value.runActivity, isRunActivity))
     && isString(value.generatedAt);
 }

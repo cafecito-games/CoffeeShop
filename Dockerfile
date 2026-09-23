@@ -13,7 +13,7 @@ RUN pnpm --filter @coffee-shop/protocol build \
 FROM node:24-slim
 RUN corepack enable
 WORKDIR /app
-ENV NODE_ENV=production PORT=8787 COFFEE_SHOP_DATA=/data/state.json
+ENV NODE_ENV=production PORT=8787 COFFEE_SHOP_DATABASE=/data/coffee-shop.sqlite COFFEE_SHOP_DATA=/data/state.json
 COPY --from=build /app/package.json /app/pnpm-workspace.yaml /app/pnpm-lock.yaml* ./
 COPY --from=build /app/apps/hub/package.json ./apps/hub/package.json
 COPY --from=build /app/apps/hub/dist ./apps/hub/dist

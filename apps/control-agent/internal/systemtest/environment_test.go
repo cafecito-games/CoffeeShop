@@ -423,7 +423,7 @@ var listeningPattern = regexp.MustCompile(`Coffee Shop hub listening on http://l
 func (environment *environment) startHub(clockOffset bool) *hubProcess {
 	t := environment.t
 	t.Helper()
-	hub := &hubProcess{environment: environment, dataPath: filepath.Join(environment.root, "hub", "state.json"), profiles: filepath.Join(environment.root, "hub", "project-profiles.json")}
+	hub := &hubProcess{environment: environment, dataPath: filepath.Join(environment.root, "hub", "coffee-shop.sqlite"), profiles: filepath.Join(environment.root, "hub", "project-profiles.json")}
 	if clockOffset {
 		hub.clock = filepath.Join(environment.root, "hub", "clock-offset")
 	}
@@ -449,7 +449,9 @@ func (hub *hubProcess) start() {
 	environmentVariables := []string{
 		"PATH=" + os.Getenv("PATH"), "HOME=" + filepath.Join(hub.environment.root, "hub"),
 		"NODE_ENV=production", "PORT=0", "COFFEE_SHOP_TOKEN=" + enrollmentToken,
-		"COFFEE_SHOP_DATA=" + hub.dataPath, "PROJECT_PROFILES_PATH=" + hub.profiles,
+		"COFFEE_SHOP_DATABASE=" + hub.dataPath,
+		"COFFEE_SHOP_DATA=" + filepath.Join(filepath.Dir(hub.dataPath), "state.json"),
+		"PROJECT_PROFILES_PATH=" + hub.profiles,
 	}
 	if hub.clock != "" {
 		arguments = append(arguments, "--import", "file://"+filepath.Join(repositoryRoot, "apps", "control-agent", "internal", "systemtest", "testdata", "hub-clock.mjs"))

@@ -30,6 +30,38 @@ test("starts empty, persists state atomically, and loads it again", async () => 
   assert.equal(second.snapshot().events[0].title, "Saved event");
 });
 
+test("persists production state in SQLite and imports a legacy JSON snapshot once", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "coffee-shop-sqlite-store-"));
+  const legacyPath = join(directory, "state.json");
+  const databasePath = join(directory, "coffee-shop.sqlite");
+  await writeFile(legacyPath, JSON.stringify({
+    agents: [], nodes: [], runs: [], events: [], messages: [],
+    projectProfiles: [{
+      schemaVersion: 1,
+      id: "uzir",
+      name: "Uzir",
+      repository: { url: "https://github.com/cafecito-games/uzir", defaultBranch: "main" },
+      workspacePolicy: { requireWritable: true, isolation: "git-worktree", cleanup: "when-unchanged" },
+      requirements: { hard: {} }
+    }]
+  }));
+
+  const first = new Store({ databasePath, legacyJsonPath: legacyPath });
+  await first.load();
+  assert.equal(first.snapshot().projectProfiles?.[0].id, "uzir");
+  await first.transact((state) => {
+    state.events.push(newEvent({ type: "status", title: "Stored in SQLite", detail: "Persistence check" }));
+  });
+
+  // A later change to the legacy file cannot replace state already committed to the database.
+  await writeFile(legacyPath, JSON.stringify({ agents: [], nodes: [], runs: [], events: [], messages: [] }));
+  const second = new Store({ databasePath, legacyJsonPath: legacyPath });
+  await second.load();
+  assert.equal(second.snapshot().events[0].title, "Stored in SQLite");
+  assert.equal(second.snapshot().projectProfiles?.[0].id, "uzir");
+  assert.match((await readFile(databasePath)).subarray(0, 16).toString(), /^SQLite format 3/);
+});
+
 test("removes legacy demo records without removing user-created data", async () => {
   const directory = await mkdtemp(join(tmpdir(), "coffee-shop-store-"));
   const path = join(directory, "state.json");

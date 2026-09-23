@@ -5,6 +5,7 @@ dist
 .DS_Store
 .env
 data/*.json
+data/*.sqlite*
 !data/.gitkeep
 *.log
 *.tsbuildinfo

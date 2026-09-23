@@ -2,7 +2,7 @@
 
 This runbook is for the operator of a Coffee Shop deployment: the person who deploys the hub, installs Barista on compute machines, and answers when something stops working. Three kinds of process are involved:
 
-- the **hub** (`apps/hub`): REST API, WebSocket gateway, scheduler, and durable JSON store;
+- the **hub** (`apps/hub`): REST API, WebSocket gateway, scheduler, and durable SQLite store;
 - **Barista** (`apps/control-agent`): one Go binary per compute node, connecting outbound to the hub;
 - **provider harnesses**: the Claude Code and Codex CLIs and their ACP adapters, installed and authenticated on each compute node.
 
@@ -17,14 +17,15 @@ Environment variables:
 | `COFFEE_SHOP_TOKEN` | Shared bearer secret. Required when `NODE_ENV=production` (the hub refuses to start without it); authenticates every `/api/*` route except `/api/health`, the `/control-agent` WebSocket, and (as `?token=`) the `/events` WebSocket. | unset (development accepts unauthenticated traffic) |
 | `PORT` | HTTP listen port. `0` asks the OS for a free port; the startup log names the port actually bound. | `8787` |
 | `NODE_ENV` | Set to `production` to enforce token authentication. | unset |
-| `COFFEE_SHOP_DATA` | Absolute path of the JSON state file. | `<repo>/data/state.json` (the container sets `/data/state.json`) |
-| `PROJECT_PROFILES_PATH` | Path to the project profiles JSON file. | `<repo>/config/project-profiles.json`; when that file does not exist and the variable is unset, the hub logs `no project profiles configured; set PROJECT_PROFILES_PATH to enable project readiness` and runs without profiles |
+| `COFFEE_SHOP_DATABASE` | Absolute path of the SQLite database. | Next to `COFFEE_SHOP_DATA` as `coffee-shop.sqlite` (the container sets `/data/coffee-shop.sqlite`) |
+| `COFFEE_SHOP_DATA` | Legacy JSON snapshot to import when a new SQLite database has no state. It is never rewritten after import. | `<repo>/data/state.json` (the container keeps `/data/state.json` as the migration source) |
+| `PROJECT_PROFILES_PATH` | Legacy project-profile JSON to import once when the database has no profiles. New deployments should manage projects in the PWA. | `<repo>/config/project-profiles.json` |
 
-Durable state is the JSON state file plus an `artifacts` directory created **next to** the state file (`<dirname>/artifacts/`). Both must be on a persistent volume. Writes are atomic (temporary file plus rename), and the hub reloads full state from the file at startup.
+Durable state is the SQLite database plus an `artifacts` directory created **next to** it (`<dirname>/artifacts/`). Both must be on a persistent volume. SQLite runs in WAL mode with full synchronous commits; Coffee Shop supports one active hub process per database. On first startup with an empty database, the hub imports `COFFEE_SHOP_DATA` if it exists. The old JSON file remains untouched as a rollback artifact.
 
 Build and run the container with `task container:build` and `docker compose up`; `compose.yaml` requires `COFFEE_SHOP_TOKEN` and mounts the `coffee-shop-data` volume at `/data`. Terminate TLS in front of the hub. The startup log line is `Coffee Shop hub listening on http://localhost:<port>`.
 
-Health check: `GET /api/health` returns `{ ok, service, controlAgents }` and is never token-gated. Back up the state file and the artifacts directory before every upgrade; never commit `data/*.json` or a real token.
+Health check: `GET /api/health` returns `{ ok, service, controlAgents }` and is never token-gated. Before an upgrade, stop the hub and back up `coffee-shop.sqlite` together with the artifacts directory (or snapshot the whole persistent volume); never commit the database, `data/*.json`, or a real token.
 
 ## Bootstrapping a compute node
 
@@ -110,7 +111,9 @@ To disable ACP on a node: remove the `--acp-adapter` override (`BARISTA_ACP_ADAP
 
 ## Project profiles and readiness
 
-Set `PROJECT_PROFILES_PATH` to a non-secret JSON file describing what each project needs from a node. Schema fields follow `config/project-profiles.example.json`: `schemaVersion`, `id`, `name`, `repository` (`url`, `defaultBranch`), `workspacePolicy` (`requireWritable`, `allowedRepositories`, `isolation`, `cleanup`), and `requirements.hard` / `requirements.preferred` (operating systems, architectures, labels, accelerators, toolchains with `versionConstraint`, harness ids, transports, memory, CPU minimums). A profile that looks like it contains a secret is rejected at load time. The hub logs `loaded N project profile(s) from <path>` on success; a malformed configured file stops startup.
+Manage projects from the PWA's **Projects** view. Profiles are validated by the hub and stored in SQLite, so adding or changing a project takes effect immediately and does not require editing a deployment file. A profile defines its repository, workspace isolation and cleanup policy, and hard/preferred compute requirements. A profile that looks like it contains a secret is rejected. Editing or deleting a profile that has an active task or unsettled workspace lease is refused with `409`.
+
+The authenticated API is `GET /api/project-profiles`, `POST /api/project-profiles`, `PUT /api/project-profiles/:id`, and `DELETE /api/project-profiles/:id`. `config/project-profiles.example.json` remains a schema example and migration source: `PROJECT_PROFILES_PATH` imports it only when the database has never managed a project catalog.
 
 Check readiness with `GET /api/project-readiness?projectId=<id>` (400 without `projectId`, 404 for an unknown profile). It evaluates the profile against every known node using the same path the scheduler uses, and reports per-node unmet hard requirements and unmet preferences.
 
@@ -129,7 +132,7 @@ When a `ready` task cannot be placed, `task.placement.unsatisfied` records every
 | `operating-system` / `architecture` | Worker-reported value does not match | Point the task at a matching node |
 | `label` / `memory` | Evidence missing, stale, ambiguous, or below minimum | Declare labels (`--label`) or memory (`--memory-megabytes`) on the node; wait for fresh evidence |
 | `concurrency` | Node reports lower concurrency than required | Raise `--concurrency` on the node |
-| `project-profile` | Profile not loaded, or an unmet hard profile requirement | Fix `PROJECT_PROFILES_PATH` or the node's evidence |
+| `project-profile` | Profile not configured, or an unmet hard profile requirement | Update the project in the Projects view or fix the node's evidence |
 | `workspace` | Workspace not beneath an advertised root, not writable, lease not provisionable, or repository not authorized | Enroll the root, check writability evidence, or authorize the repository in the profile |
 | `node-offline` | Node never registered, not connected, or not past its reconnect barrier | Restore the Barista connection |
 | `inventory-stale` | Evidence is older than the TTL or future-dated | Wait for the node's periodic capability report, or check node clock skew |

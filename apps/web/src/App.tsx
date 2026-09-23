@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import {
   Pulse as Activity, ArrowLeft, ArrowRight, Broadcast, Check, CircleNotch, Command,
-  Coffee, Cpu, FolderOpen, Gear, MagnifyingGlass, PaperPlaneTilt, Plus, ShieldWarning,
+  Coffee, Cpu, FolderOpen, Gear, GitBranch, MagnifyingGlass, PaperPlaneTilt, Plus, ShieldWarning,
   Robot, SlidersHorizontal, TerminalWindow, UsersThree, WarningCircle, X, LockKey
 } from "@phosphor-icons/react";
 import {
@@ -22,10 +22,11 @@ import { ProviderSessionCard, providerSessionForRun, providerSessionsForAgent, t
 import { OrchestrationView } from "./orchestration/OrchestrationView.js";
 import { RunActivityPanel } from "./orchestration/RunActivityPanel.js";
 import { SettingsView } from "./settings/SettingsView.js";
+import { ProjectsView } from "./ProjectsView.js";
 import { ThreadsView } from "./ThreadsView.js";
 import { PwaInstallProvider } from "./settings/PwaInstall.js";
 
-type View = "agents" | "threads" | "activity" | "orchestration" | "compute" | "settings";
+type View = "agents" | "threads" | "activity" | "orchestration" | "projects" | "compute" | "settings";
 
 const statusLabels: Record<AgentState, string> = { idle: "Idle", thinking: "Thinking", working: "Working", waiting: "Waiting", blocked: "Blocked", done: "Done" };
 const connectionLabels: Record<ConnectionStatus, string> = {
@@ -341,7 +342,7 @@ function FreshnessNotice({ connection, onRetry }: { connection: ConnectionStatus
 function BottomNav({ view, onView, pendingApprovalCount }: { view: View; onView: (view: View) => void; pendingApprovalCount: number }) {
   const items: [View, typeof Robot, string][] = [
     ["agents", Robot, "Agents"], ["threads", FolderOpen, "Threads"], ["activity", Activity, "Activity"],
-    ["orchestration", ShieldWarning, "Orchestrate"], ["compute", Cpu, "Compute"], ["settings", Gear, "Settings"]
+    ["orchestration", ShieldWarning, "Orchestrate"], ["projects", GitBranch, "Projects"], ["compute", Cpu, "Compute"], ["settings", Gear, "Settings"]
   ];
   return <nav className="bottom-nav">{items.map(([key, Icon, label]) => (
     <button key={key} className={view === key ? "active" : ""} onClick={() => onView(key)}>
@@ -499,6 +500,7 @@ function CoffeeShopApp() {
           />
         )}
         {view === "compute" && <ComputeView nodes={snapshot.nodes} />}
+        {view === "projects" && <ProjectsView profiles={snapshot.projectProfiles ?? []} canMutate={canMutate} apiFetch={apiFetch} />}
         {view === "settings" && <SettingsView connection={connection} nodes={snapshot.nodes} generatedAt={snapshot.generatedAt} orchestratorClients={orchestratorClients} canMutate={canMutate} apiFetch={apiFetch} />}
       </div>
       {selected && inspectorOpen && <Inspector agent={selected} nodes={snapshot.nodes} sessions={providerSessionsForAgent(selected.id, snapshot.runs, snapshot.sessionBindings ?? [])} onClose={() => setInspectorOpen(false)} onSave={updateAgent} onReconcile={retry} canMutate={canMutate} />}
@@ -512,6 +514,7 @@ function CoffeeShopApp() {
         <button aria-label="Activity" className={view === "activity" ? "active" : ""} onClick={() => switchView("activity")}><Activity size={18} /><span>Activity</span></button>
         <button aria-label="Orchestration" className={view === "orchestration" ? "active" : ""} onClick={() => switchView("orchestration")}><ShieldWarning size={18} /><span>Orchestrate</span>{pendingApprovalCount > 0 && <span className="unread">{pendingApprovalCount}</span>}</button>
         <button aria-label="Compute" className={view === "compute" ? "active" : ""} onClick={() => switchView("compute")}><Cpu size={18} /><span>Compute</span></button>
+        <button aria-label="Projects" className={view === "projects" ? "active" : ""} onClick={() => switchView("projects")}><GitBranch size={18} /><span>Projects</span></button>
         <button aria-label="Settings" className={view === "settings" ? "active" : ""} onClick={() => switchView("settings")}><Gear size={18} /><span>Settings</span></button>
         <div className="rail-user">CS</div>
       </nav>
