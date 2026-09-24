@@ -9,6 +9,7 @@ import {
   type ComputeNode, type HarnessSessionBinding, type Run, type RunActivity, type RunStatus, type Thread, type ThreadStatus
 } from "@coffee-shop/protocol";
 import { AccessibleDialog } from "./AccessibleDialog.js";
+import { useKeyboardInset } from "./useKeyboardInset.js";
 import { ActivityView } from "./ActivityView.js";
 import { AgentConfigurationForm, CreateAgentDialog, type AgentConfigurationPayload } from "./AgentConfiguration.js";
 import { CoffeeAvatar } from "./CoffeeAvatar.js";
@@ -120,6 +121,14 @@ function Chat({ agent, timeline, nodes, threads, viewableThreads, threadFilter, 
   const endRef = useRef<HTMLDivElement>(null);
   const node = nodes.find((item) => item.id === agent.computeNodeId);
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [timeline.length]);
+  // Keep the newest entry visible when the on-screen keyboard opens and shrinks the viewport.
+  useEffect(() => {
+    const viewport = window.visualViewport;
+    if (!viewport) return;
+    const pinToLatest = () => endRef.current?.scrollIntoView({ block: "end" });
+    viewport.addEventListener("resize", pinToLatest);
+    return () => viewport.removeEventListener("resize", pinToLatest);
+  }, []);
   async function submit(event: FormEvent) { event.preventDefault(); const value = body.trim(); if (!value || sending || !canMutate) return; setBody(""); await onSend(value); }
   return (
     <main className="chat">
@@ -359,6 +368,7 @@ function LockScreen() {
 }
 
 function CoffeeShopApp() {
+  useKeyboardInset();
   const { snapshot, status: connection, canMutate, retry } = useHubConnection(accessToken);
   const [view, setView] = useState<View>("agents");
   const [selectedId, setSelectedId] = useState<string>();
