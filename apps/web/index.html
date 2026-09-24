@@ -6,7 +6,12 @@
     <meta name="theme-color" content="#0b0c0e" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
-    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <!--
+      No apple-mobile-web-app-status-bar-style: the "black-translucent" value moves the page origin
+      under the status bar without growing the viewport, so the viewport ends one status-bar inset
+      above the screen and anything anchored to its bottom floats. viewport-fit=cover already gives
+      the full-screen web view and real safe-area insets.
+    -->
     <link rel="icon" href="/icon.svg" />
     <title>Coffee Shop</title>
   </head>
