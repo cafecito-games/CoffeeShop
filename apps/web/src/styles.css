@@ -29,8 +29,6 @@
   --font-size-17: 17px;
   --font-size-18: 18px;
   --font-size-20: 20px;
-  /* Height of the on-screen keyboard overlay, maintained by useKeyboardInset. */
-  --keyboard-inset: 0px;
 }
 
 * { box-sizing: border-box; }
@@ -41,7 +39,8 @@ button, a { -webkit-tap-highlight-color: transparent; }
 button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 code, time { font-family: "DM Mono", monospace; font-variant-numeric: tabular-nums; }
 
-.app-shell { position: relative; display: grid; grid-template-columns: 72px 272px minmax(0, 1fr); height: 100dvh; background: var(--surface); }
+/* Sized to the region the browser leaves visible, which 100dvh overstates while a keyboard is up. */
+.app-shell { position: relative; display: grid; grid-template-columns: 72px 272px minmax(0, 1fr); height: var(--viewport-height, 100dvh); background: var(--surface); }
 .workspace { position: relative; grid-column: 3; min-width: 0; height: 100%; overflow: hidden; }
 button:disabled, textarea:disabled, fieldset:disabled button { cursor: not-allowed; opacity: .52; }
 .freshness-notice { position: absolute; z-index: 12; top: 10px; left: 50%; width: min(560px, calc(100% - 24px)); min-height: 38px; padding: 8px 9px 8px 11px; border: 1px solid rgba(200,121,110,.32); border-radius: 8px; display: grid; grid-template-columns: auto minmax(0,1fr) auto; align-items: center; gap: 9px; color: var(--danger); background: rgba(29,20,19,.94); box-shadow: 0 8px 28px rgba(0,0,0,.28); transform: translateX(-50%); backdrop-filter: blur(14px); }
@@ -843,8 +842,8 @@ button:disabled, textarea:disabled, fieldset:disabled button { cursor: not-allow
   .mobile-header, .chat-header, .bottom-nav, .utility-header, button { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
   .message p, .timeline-mailbox p, .timeline-live > p, .timeline-assignment details p, code { -webkit-user-select: text; user-select: text; -webkit-touch-callout: default; }
   .icon-btn, .back-btn, .context-btn, .filter-btn, .archive-toggle, .edit-agent-button { min-width: 44px; min-height: 44px; }
-  .app-shell { display: block; height: 100dvh; padding-bottom: calc(64px + env(safe-area-inset-bottom)); }
-  :root[data-keyboard-open] .app-shell { padding-bottom: var(--keyboard-inset); }
+  .app-shell { display: block; padding-bottom: calc(64px + env(safe-area-inset-bottom)); }
+  :root[data-keyboard-open] .app-shell { padding-bottom: 0; }
   :root[data-keyboard-open] .bottom-nav { display: none; }
   .workspace { height: 100%; }
   .roster, .desktop-nav { display: none; }

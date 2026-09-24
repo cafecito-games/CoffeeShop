@@ -9,7 +9,7 @@ import {
   type ComputeNode, type HarnessSessionBinding, type Run, type RunActivity, type RunStatus, type Thread, type ThreadStatus
 } from "@coffee-shop/protocol";
 import { AccessibleDialog } from "./AccessibleDialog.js";
-import { useKeyboardInset } from "./useKeyboardInset.js";
+import { useViewportMetrics } from "./useViewportMetrics.js";
 import { ActivityView } from "./ActivityView.js";
 import { AgentConfigurationForm, CreateAgentDialog, type AgentConfigurationPayload } from "./AgentConfiguration.js";
 import { CoffeeAvatar } from "./CoffeeAvatar.js";
@@ -368,7 +368,7 @@ function LockScreen() {
 }
 
 function CoffeeShopApp() {
-  useKeyboardInset();
+  useViewportMetrics();
   const { snapshot, status: connection, canMutate, retry } = useHubConnection(accessToken);
   const [view, setView] = useState<View>("agents");
   const [selectedId, setSelectedId] = useState<string>();
