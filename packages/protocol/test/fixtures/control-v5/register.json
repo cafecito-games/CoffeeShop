@@ -1,0 +1,32 @@
+{
+  "type": "register",
+  "protocolVersion": "5",
+  "node": {
+    "id": "node-one",
+    "name": "Build Mac",
+    "kind": "local",
+    "platform": "darwin/arm64",
+    "status": "online",
+    "lastSeen": "2026-09-24T12:00:00Z",
+    "activeRuns": 0,
+    "concurrency": 2,
+    "instanceCapacity": 4,
+    "activeInstances": 1,
+    "workspaceRoots": [
+      "/workspace"
+    ],
+    "harnesses": [
+      {
+        "id": "claude-cli",
+        "label": "Claude",
+        "description": "Local account",
+        "available": true,
+        "authMode": "local-subscription",
+        "models": [
+          "fable"
+        ]
+      }
+    ],
+    "version": "0.1.0"
+  }
+}

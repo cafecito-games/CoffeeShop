@@ -62,8 +62,8 @@ const reachesTerminalStatus = (statuses, expectedTransitions, terminals) => (fro
 };
 
 test("orchestration vocabularies keep their exact contents and order", () => {
-  assert.deepEqual(controlProtocolVersions, ["1", "2", "3", "4"]);
-  assert.deepEqual(controlProtocolCapabilities, ["replay-barrier", "hub-rpc", "orchestration"]);
+  assert.deepEqual(controlProtocolVersions, ["1", "2", "3", "4", "5"]);
+  assert.deepEqual(controlProtocolCapabilities, ["replay-barrier", "hub-rpc", "orchestration", "instances"]);
   assert.deepEqual(harnessTransports, ["native-cli", "acp-v1"]);
   assert.deepEqual(taskStatuses, ["pending", "ready", "assigned", "running", "completed", "failed", "cancelled", "blocked"]);
   assert.deepEqual(terminalTaskStatuses, ["completed", "failed", "cancelled", "blocked"]);
@@ -257,18 +257,19 @@ test("dependency outcomes cover every policy for every task status", () => {
 
 test("capabilities are supported exactly from the version that introduced them", () => {
   const expectedSupport = {
-    "1": { "replay-barrier": false, "hub-rpc": false, orchestration: false },
-    "2": { "replay-barrier": true, "hub-rpc": false, orchestration: false },
-    "3": { "replay-barrier": true, "hub-rpc": true, orchestration: false },
-    "4": { "replay-barrier": true, "hub-rpc": true, orchestration: true }
+    "1": { "replay-barrier": false, "hub-rpc": false, orchestration: false, instances: false },
+    "2": { "replay-barrier": true, "hub-rpc": false, orchestration: false, instances: false },
+    "3": { "replay-barrier": true, "hub-rpc": true, orchestration: false, instances: false },
+    "4": { "replay-barrier": true, "hub-rpc": true, orchestration: true, instances: false },
+    "5": { "replay-barrier": true, "hub-rpc": true, orchestration: true, instances: true }
   };
-  for (const version of versions) {
+  for (const version of controlProtocolVersions) {
     for (const capability of controlProtocolCapabilities) {
       assert.equal(supportsControlCapability(version, capability), expectedSupport[version][capability], `${version} x ${capability}`);
     }
   }
   for (const accepted of versions) assert.equal(isControlProtocolVersion(accepted), true);
-  for (const rejected of ["5", "", 4, undefined]) assert.equal(isControlProtocolVersion(rejected), false);
+  for (const rejected of ["6", "", 4, undefined]) assert.equal(isControlProtocolVersion(rejected), false);
 });
 
 const agent = () => ({

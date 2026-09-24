@@ -1,6 +1,9 @@
 package protocol
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
+)
 
 // Version is the control protocol version Barista registers. Barista honors version-4 dispatch
 // execution for the native-cli and acp-v1 transports, for the workspace lease policies it can
@@ -24,17 +27,19 @@ type HarnessProfile struct {
 }
 
 type ComputeNode struct {
-	ID             string           `json:"id"`
-	Name           string           `json:"name"`
-	Kind           string           `json:"kind"`
-	Platform       string           `json:"platform"`
-	Status         string           `json:"status"`
-	LastSeen       string           `json:"lastSeen"`
-	ActiveRuns     int              `json:"activeRuns"`
-	Concurrency    int              `json:"concurrency"`
-	WorkspaceRoots []string         `json:"workspaceRoots"`
-	Harnesses      []HarnessProfile `json:"harnesses"`
-	Version        string           `json:"version"`
+	ID               string           `json:"id"`
+	Name             string           `json:"name"`
+	Kind             string           `json:"kind"`
+	Platform         string           `json:"platform"`
+	Status           string           `json:"status"`
+	LastSeen         string           `json:"lastSeen"`
+	ActiveRuns       int              `json:"activeRuns"`
+	Concurrency      int              `json:"concurrency"`
+	InstanceCapacity *int             `json:"instanceCapacity,omitempty"`
+	ActiveInstances  *int             `json:"activeInstances,omitempty"`
+	WorkspaceRoots   []string         `json:"workspaceRoots"`
+	Harnesses        []HarnessProfile `json:"harnesses"`
+	Version          string           `json:"version"`
 }
 
 type Agent struct {
@@ -89,19 +94,21 @@ type Outbound struct {
 	// ActiveRunIDs is a pointer so sync.complete can encode an explicitly empty array
 	// ("activeRunIds":[]) when no runs survived the reconnect, while every other message type
 	// omits the field entirely by leaving the pointer nil.
-	ActiveRunIDs *[]string             `json:"activeRunIds,omitempty"`
-	RunID        string                `json:"runId,omitempty"`
-	Chunk        string                `json:"chunk,omitempty"`
-	Output       string                `json:"output,omitempty"`
-	Error        string                `json:"error,omitempty"`
-	At           string                `json:"at,omitempty"`
-	RequestID    string                `json:"requestId,omitempty"`
-	Operation    string                `json:"operation,omitempty"`
-	Arguments    json.RawMessage       `json:"arguments,omitempty"`
-	Event        *HarnessEvent         `json:"event,omitempty"`
-	Binding      *SessionBindingUpdate `json:"binding,omitempty"`
-	Lease        *WorkspaceLeaseUpdate `json:"lease,omitempty"`
-	Report       *NodeCapabilityReport `json:"report,omitempty"`
+	ActiveRunIDs      *[]string             `json:"activeRunIds,omitempty"`
+	ActiveInstanceIDs *[]string             `json:"activeInstanceIds,omitempty"`
+	ActiveInstances   *int                  `json:"activeInstances,omitempty"`
+	RunID             string                `json:"runId,omitempty"`
+	Chunk             string                `json:"chunk,omitempty"`
+	Output            string                `json:"output,omitempty"`
+	Error             string                `json:"error,omitempty"`
+	At                string                `json:"at,omitempty"`
+	RequestID         string                `json:"requestId,omitempty"`
+	Operation         string                `json:"operation,omitempty"`
+	Arguments         json.RawMessage       `json:"arguments,omitempty"`
+	Event             *HarnessEvent         `json:"event,omitempty"`
+	Binding           *SessionBindingUpdate `json:"binding,omitempty"`
+	Lease             *WorkspaceLeaseUpdate `json:"lease,omitempty"`
+	Report            *NodeCapabilityReport `json:"report,omitempty"`
 	// Transport is the version-4 transport selection reported once on run.started.
 	Transport *RunTransportSelection `json:"transport,omitempty"`
 	// ProviderSessionID is the vendor's own session identity, reported at most once on a native
@@ -110,6 +117,33 @@ type Outbound struct {
 }
 
 func DecodeInbound(data []byte) (Inbound, error) {
+	// This is the deployed legacy decoder. Never discard v5 identity and reinterpret the
+	// remaining run as a legacy dispatch. Migrated callers must use DecodeInstanceHubMessage.
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		return Inbound{}, err
+	}
+	var kind string
+	if err := json.Unmarshal(envelope["type"], &kind); err != nil {
+		return Inbound{}, err
+	}
+	if kind == "instance.provision" || kind == "instance.release" {
+		return Inbound{}, fmt.Errorf("instance message requires the v5 decoder")
+	}
+	if kind == "dispatch" {
+		var run map[string]json.RawMessage
+		if err := json.Unmarshal(envelope["run"], &run); err != nil {
+			return Inbound{}, err
+		}
+		for _, key := range []string{"instance", "allocation", "instanceId", "allocationId"} {
+			if _, found := envelope[key]; found {
+				return Inbound{}, fmt.Errorf("instance dispatch requires the v5 decoder")
+			}
+			if _, found := run[key]; found {
+				return Inbound{}, fmt.Errorf("instance run requires the v5 decoder")
+			}
+		}
+	}
 	var message Inbound
 	err := json.Unmarshal(data, &message)
 	return message, err

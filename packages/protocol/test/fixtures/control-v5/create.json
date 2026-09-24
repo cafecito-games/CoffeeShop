@@ -1,0 +1,27 @@
+{
+  "operation": "create",
+  "threadId": "thread-one",
+  "idempotency": {
+    "caller": {
+      "kind": "operator",
+      "operatorId": "operator-one"
+    },
+    "key": "create-one"
+  },
+  "purpose": {
+    "name": "Issue 73 Developer",
+    "instructions": "Implement the shared contracts."
+  },
+  "requirements": {
+    "harnessIds": [
+      "claude-cli"
+    ],
+    "operatingSystems": [
+      "darwin"
+    ]
+  },
+  "initialTask": {
+    "title": "Contracts",
+    "instructions": "Implement the shared contracts."
+  }
+}

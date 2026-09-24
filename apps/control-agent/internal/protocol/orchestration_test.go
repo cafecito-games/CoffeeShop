@@ -157,9 +157,11 @@ func TestSupportsCapabilityAcrossVersions(t *testing.T) {
 		{"4", CapabilityReplayBarrier, true},
 		{"4", CapabilityHubRPC, true},
 		{"4", CapabilityOrchestration, true},
-		{"5", CapabilityReplayBarrier, false},
-		{"5", CapabilityHubRPC, false},
-		{"5", CapabilityOrchestration, false},
+		{"5", CapabilityReplayBarrier, true},
+		{"5", CapabilityHubRPC, true},
+		{"5", CapabilityOrchestration, true},
+		{"5", CapabilityInstances, true},
+		{"4", CapabilityInstances, false},
 		{"", CapabilityReplayBarrier, false},
 		{"", CapabilityHubRPC, false},
 		{"", CapabilityOrchestration, false},
@@ -170,8 +172,9 @@ func TestSupportsCapabilityAcrossVersions(t *testing.T) {
 			"version %q capability %q", testCase.version, testCase.capability)
 	}
 	require.True(t, IsSupportedVersion("4"))
-	require.False(t, IsSupportedVersion("5"))
-	require.Equal(t, "4", LatestVersion)
+	require.True(t, IsSupportedVersion("5"))
+	require.False(t, IsSupportedVersion("6"))
+	require.Equal(t, "5", LatestVersion)
 }
 
 func TestValidatorsRejectMalformedVersionFourPayloads(t *testing.T) {

@@ -1,0 +1,122 @@
+{
+  "instanceStatuses": [
+    "requested",
+    "provisioning",
+    "ready",
+    "busy",
+    "idle",
+    "draining",
+    "released",
+    "failed"
+  ],
+  "allocationStatuses": [
+    "reserved",
+    "provisioning",
+    "active",
+    "lost",
+    "released",
+    "failed"
+  ],
+  "instanceReleaseModes": [
+    "drain",
+    "cancel"
+  ],
+  "instanceCreatorKinds": [
+    "operator",
+    "run",
+    "orchestrator-client"
+  ],
+  "instanceLifecycleOperations": [
+    "create",
+    "release",
+    "renew"
+  ],
+  "instanceHubMessageTypes": [
+    "instance.provision",
+    "instance.release",
+    "dispatch"
+  ],
+  "instanceControlMessageTypes": [
+    "instance.ready",
+    "instance.failed",
+    "instance.released",
+    "register",
+    "heartbeat",
+    "sync.complete"
+  ],
+  "instanceTransitions": {
+    "requested": [
+      "provisioning",
+      "draining",
+      "failed"
+    ],
+    "provisioning": [
+      "ready",
+      "draining",
+      "failed"
+    ],
+    "ready": [
+      "busy",
+      "idle",
+      "provisioning",
+      "draining",
+      "failed"
+    ],
+    "busy": [
+      "idle",
+      "provisioning",
+      "draining",
+      "failed"
+    ],
+    "idle": [
+      "busy",
+      "provisioning",
+      "draining",
+      "failed"
+    ],
+    "draining": [
+      "released",
+      "failed"
+    ],
+    "released": [],
+    "failed": []
+  },
+  "allocationTransitions": {
+    "reserved": [
+      "provisioning",
+      "released",
+      "failed"
+    ],
+    "provisioning": [
+      "active",
+      "lost",
+      "released",
+      "failed"
+    ],
+    "active": [
+      "lost",
+      "released",
+      "failed"
+    ],
+    "lost": [
+      "released",
+      "failed"
+    ],
+    "released": [],
+    "failed": []
+  },
+  "instanceLimits": {
+    "identifierBytes": 256,
+    "nameBytes": 256,
+    "summaryBytes": 2000,
+    "instructionsBytes": 65536,
+    "idempotencyKeyBytes": 128,
+    "workspaceBytes": 4096,
+    "collectionEntries": 1024,
+    "requirementEntries": 64,
+    "count": 65535,
+    "minimumIdleTimeoutSeconds": 60,
+    "defaultIdleTimeoutSeconds": 1800,
+    "maximumIdleTimeoutSeconds": 86400
+  }
+}

@@ -1,8 +1,10 @@
 package protocol
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"slices"
 	"strconv"
 	"time"
@@ -10,21 +12,23 @@ import (
 )
 
 // LatestVersion mirrors the TypeScript source of truth.
-const LatestVersion = "4"
+const LatestVersion = "5"
 
 // SupportedVersions lists every control protocol version accepted during rolling upgrades.
-var SupportedVersions = []string{"1", "2", "3", "4"}
+var SupportedVersions = []string{"1", "2", "3", "4", "5"}
 
 const (
 	CapabilityReplayBarrier = "replay-barrier"
 	CapabilityHubRPC        = "hub-rpc"
 	CapabilityOrchestration = "orchestration"
+	CapabilityInstances     = "instances"
 )
 
 var capabilityIntroducedIn = map[string]int{
 	CapabilityReplayBarrier: 2,
 	CapabilityHubRPC:        3,
 	CapabilityOrchestration: 4,
+	CapabilityInstances:     5,
 }
 
 func IsSupportedVersion(version string) bool {
@@ -495,4 +499,591 @@ func truncateDiagnostic(value string) string {
 		cut--
 	}
 	return value[:cut]
+}
+
+// Instance contracts mirror packages/protocol/src/index.ts. Version stays 4 until resident
+// supervision is implemented: LatestVersion describes the contract, not deployed behavior.
+var InstanceStatuses = []string{"requested", "provisioning", "ready", "busy", "idle", "draining", "released", "failed"}
+var AllocationStatuses = []string{"reserved", "provisioning", "active", "lost", "released", "failed"}
+var InstanceReleaseModes = []string{"drain", "cancel"}
+var InstanceCreatorKinds = []string{"operator", "run", "orchestrator-client"}
+var InstanceLifecycleOperations = []string{"create", "release", "renew"}
+var InstanceHubMessageTypes = []string{"instance.provision", "instance.release", "dispatch"}
+var InstanceControlMessageTypes = []string{"instance.ready", "instance.failed", "instance.released", "register", "heartbeat", "sync.complete"}
+var instanceTransitions = map[string][]string{
+	"requested":    {"provisioning", "draining", "failed"},
+	"provisioning": {"ready", "draining", "failed"},
+	"ready":        {"busy", "idle", "provisioning", "draining", "failed"},
+	"busy":         {"idle", "provisioning", "draining", "failed"},
+	"idle":         {"busy", "provisioning", "draining", "failed"},
+	"draining":     {"released", "failed"}, "released": {}, "failed": {},
+}
+var allocationTransitions = map[string][]string{
+	"reserved":     {"provisioning", "released", "failed"},
+	"provisioning": {"active", "lost", "released", "failed"},
+	"active":       {"lost", "released", "failed"}, "lost": {"released", "failed"}, "released": {}, "failed": {},
+}
+
+func CanTransitionInstance(from, to string) bool {
+	return slices.Contains(instanceTransitions[from], to)
+}
+func CanTransitionAllocation(from, to string) bool {
+	return slices.Contains(allocationTransitions[from], to)
+}
+
+const (
+	MinimumInstanceIdleTimeoutSeconds = 60
+	DefaultInstanceIdleTimeoutSeconds = 1800
+	MaximumInstanceIdleTimeoutSeconds = 86400
+	InstanceNameBytes                 = 256
+	InstanceSummaryBytes              = 2000
+	InstanceInstructionsBytes         = 65536
+	InstanceIdempotencyKeyBytes       = 128
+	InstanceWorkspaceBytes            = 4096
+	InstanceCollectionEntries         = 1024
+	InstanceRequirementEntries        = 64
+	InstanceCountMaximum              = 65535
+)
+
+type InstancePurpose struct {
+	Name         *string `json:"name,omitempty"`
+	Title        *string `json:"title,omitempty"`
+	Summary      *string `json:"summary,omitempty"`
+	Instructions *string `json:"instructions,omitempty"`
+}
+
+// Identity is derived by the hub from authentication, never from a model's authority claim.
+type InstanceCreator struct {
+	Kind       string `json:"kind"`
+	OperatorID string `json:"operatorId,omitempty"`
+	RunID      string `json:"runId,omitempty"`
+	InstanceID string `json:"instanceId,omitempty"`
+	ClientID   string `json:"clientId,omitempty"`
+}
+type InstanceDelegationPolicy struct {
+	CanDelegate bool `json:"canDelegate"`
+}
+type InstanceLease struct {
+	IdleTimeoutSeconds int    `json:"idleTimeoutSeconds"`
+	ExpiresAt          string `json:"expiresAt"`
+}
+type InstanceExecutionPreferences struct {
+	NodeIDs    *[]string `json:"nodeIds,omitempty"`
+	HarnessIDs *[]string `json:"harnessIds,omitempty"`
+	Models     *[]string `json:"models,omitempty"`
+	Labels     *[]string `json:"labels,omitempty"`
+}
+type InstanceWorkspaceRequirements struct {
+	Repository *string `json:"repository,omitempty"`
+	Path       *string `json:"path,omitempty"`
+	Writable   bool    `json:"writable"`
+}
+type InstanceExecutionRequirements struct {
+	Skills                 *[]string                      `json:"skills,omitempty"`
+	HarnessIDs             *[]string                      `json:"harnessIds,omitempty"`
+	Models                 *[]string                      `json:"models,omitempty"`
+	Transports             *[]string                      `json:"transports,omitempty"`
+	OperatingSystems       *[]string                      `json:"operatingSystems,omitempty"`
+	Architectures          *[]string                      `json:"architectures,omitempty"`
+	Labels                 *[]string                      `json:"labels,omitempty"`
+	MinimumConcurrency     *int                           `json:"minimumConcurrency,omitempty"`
+	MinimumMemoryMegabytes *int64                         `json:"minimumMemoryMegabytes,omitempty"`
+	ProjectProfileID       *string                        `json:"projectProfileId,omitempty"`
+	Workspace              *InstanceWorkspaceRequirements `json:"workspace,omitempty"`
+	Preferences            *InstanceExecutionPreferences  `json:"preferences,omitempty"`
+}
+type AgentInstance struct {
+	ID           string                        `json:"id"`
+	ThreadID     string                        `json:"threadId"`
+	Creator      InstanceCreator               `json:"creator"`
+	Purpose      *InstancePurpose              `json:"purpose,omitempty"`
+	Delegation   InstanceDelegationPolicy      `json:"delegation"`
+	Requirements InstanceExecutionRequirements `json:"requirements"`
+	Lease        InstanceLease                 `json:"lease"`
+	Status       string                        `json:"status"`
+	CreatedAt    string                        `json:"createdAt"`
+	UpdatedAt    string                        `json:"updatedAt"`
+}
+
+// Resolved identity/placement is immutable for this ID. Replacement requires a new ID.
+type InstanceAllocation struct {
+	ID         string        `json:"id"`
+	InstanceID string        `json:"instanceId"`
+	NodeID     string        `json:"nodeId"`
+	HarnessID  string        `json:"harnessId"`
+	Model      string        `json:"model"`
+	Transport  string        `json:"transport"`
+	Workspace  string        `json:"workspace"`
+	Lease      InstanceLease `json:"lease"`
+	Status     string        `json:"status"`
+	CreatedAt  string        `json:"createdAt"`
+	UpdatedAt  string        `json:"updatedAt"`
+}
+type AgentTemplate struct {
+	ID           string                         `json:"id"`
+	Name         string                         `json:"name"`
+	Purpose      *InstancePurpose               `json:"purpose,omitempty"`
+	Glyph        *string                        `json:"glyph,omitempty"`
+	AvatarShape  *string                        `json:"avatarShape,omitempty"`
+	AvatarColor  *string                        `json:"avatarColor,omitempty"`
+	Instructions *string                        `json:"instructions,omitempty"`
+	Skills       *[]string                      `json:"skills,omitempty"`
+	Tags         *[]string                      `json:"tags,omitempty"`
+	Requirements *InstanceExecutionRequirements `json:"requirements,omitempty"`
+	Preferences  *InstanceExecutionPreferences  `json:"preferences,omitempty"`
+}
+type InstanceActor struct {
+	InstanceID   string `json:"instanceId"`
+	AllocationID string `json:"allocationId"`
+}
+
+// InstanceRun is the complete v5 wire record; legacy Run remains the deployed v1-v4 subset.
+type InstanceRun struct {
+	ID                 string                 `json:"id"`
+	ThreadID           string                 `json:"threadId"`
+	InstanceID         string                 `json:"instanceId"`
+	AllocationID       string                 `json:"allocationId"`
+	NodeID             string                 `json:"nodeId"`
+	HarnessID          string                 `json:"harnessId"`
+	Model              string                 `json:"model"`
+	Workspace          string                 `json:"workspace"`
+	Prompt             string                 `json:"prompt"`
+	Status             string                 `json:"status"`
+	Output             string                 `json:"output"`
+	Error              *string                `json:"error,omitempty"`
+	Depth              int                    `json:"depth"`
+	ParentRunID        *string                `json:"parentRunId,omitempty"`
+	DispatchedAt       *string                `json:"dispatchedAt,omitempty"`
+	StartedAt          *string                `json:"startedAt,omitempty"`
+	FinishedAt         *string                `json:"finishedAt,omitempty"`
+	CreatedAt          string                 `json:"createdAt"`
+	TaskID             *string                `json:"taskId,omitempty"`
+	Attempt            *int                   `json:"attempt,omitempty"`
+	Transport          string                 `json:"transport"`
+	FallbackTransport  *string                `json:"fallbackTransport,omitempty"`
+	TransportSelection *RunTransportSelection `json:"transportSelection,omitempty"`
+	SessionBindingID   *string                `json:"sessionBindingId,omitempty"`
+	WorkspaceLeaseID   *string                `json:"workspaceLeaseId,omitempty"`
+	ProviderSessionID  *string                `json:"providerSessionId,omitempty"`
+}
+type InstanceHubMessage struct {
+	Type         string              `json:"type"`
+	Instance     *AgentInstance      `json:"instance,omitempty"`
+	Allocation   *InstanceAllocation `json:"allocation,omitempty"`
+	Run          *InstanceRun        `json:"run,omitempty"`
+	InstanceID   string              `json:"instanceId,omitempty"`
+	AllocationID string              `json:"allocationId,omitempty"`
+	Mode         string              `json:"mode,omitempty"`
+}
+type InstanceControlMessage struct {
+	Type              string       `json:"type"`
+	ProtocolVersion   string       `json:"protocolVersion,omitempty"`
+	Node              *ComputeNode `json:"node,omitempty"`
+	NodeID            string       `json:"nodeId,omitempty"`
+	InstanceID        string       `json:"instanceId,omitempty"`
+	AllocationID      string       `json:"allocationId,omitempty"`
+	ActiveRuns        *int         `json:"activeRuns,omitempty"`
+	ActiveInstances   *int         `json:"activeInstances,omitempty"`
+	ActiveRunIDs      *[]string    `json:"activeRunIds,omitempty"`
+	ActiveInstanceIDs *[]string    `json:"activeInstanceIds,omitempty"`
+	At                string       `json:"at,omitempty"`
+	Error             *string      `json:"error,omitempty"`
+}
+
+func (message InstanceControlMessage) HasAuthoritativeInstanceEvidence() bool {
+	return message.ActiveInstanceIDs != nil && v5IDs(v5Array(*message.ActiveInstanceIDs))
+}
+
+type InstanceIdempotency struct {
+	Caller InstanceCreator `json:"caller"`
+	Key    string          `json:"key"`
+}
+type InstanceInitialTask struct {
+	Title        string `json:"title"`
+	Instructions string `json:"instructions"`
+}
+type InstanceLifecycleRequest struct {
+	Operation          string                         `json:"operation"`
+	ThreadID           string                         `json:"threadId"`
+	InstanceID         string                         `json:"instanceId,omitempty"`
+	Idempotency        InstanceIdempotency            `json:"idempotency"`
+	Purpose            *InstancePurpose               `json:"purpose,omitempty"`
+	Requirements       *InstanceExecutionRequirements `json:"requirements,omitempty"`
+	IdleTimeoutSeconds *int                           `json:"idleTimeoutSeconds,omitempty"`
+	InitialTask        *InstanceInitialTask           `json:"initialTask,omitempty"`
+	Mode               string                         `json:"mode,omitempty"`
+}
+type InstanceLifecycleResult struct {
+	Instance      AgentInstance       `json:"instance"`
+	Allocation    *InstanceAllocation `json:"allocation,omitempty"`
+	InitialTaskID *string             `json:"initialTaskId,omitempty"`
+	Replayed      bool                `json:"replayed"`
+}
+
+// A closed JSON rule validates required fields before decoding into structs, so absent, null,
+// false, zero, unknown, and an explicit empty array never collapse into the same input.
+type v5Rule func(any) bool
+
+func v5Object(required, optional map[string]v5Rule) v5Rule {
+	return func(value any) bool {
+		object, ok := value.(map[string]any)
+		if !ok {
+			return false
+		}
+		for key, rule := range required {
+			child, found := object[key]
+			if !found || !rule(child) {
+				return false
+			}
+		}
+		for key, child := range object {
+			if _, found := required[key]; found {
+				continue
+			}
+			rule, found := optional[key]
+			if !found || !rule(child) {
+				return false
+			}
+		}
+		return true
+	}
+}
+func v5String(minimum, maximum int) v5Rule {
+	return func(value any) bool {
+		s, ok := value.(string)
+		return ok && utf8.ValidString(s) && len(s) >= minimum && len(s) <= maximum
+	}
+}
+func v5Enum(values []string) v5Rule {
+	return func(value any) bool { s, ok := value.(string); return ok && slices.Contains(values, s) }
+}
+func v5Integer(minimum, maximum int64) v5Rule {
+	return func(value any) bool {
+		n, ok := value.(json.Number)
+		if !ok {
+			return false
+		}
+		f, err := n.Float64()
+		return err == nil && f >= float64(minimum) && f <= float64(maximum) && f == float64(int64(f))
+	}
+}
+func v5Boolean(value any) bool { _, ok := value.(bool); return ok }
+
+var instanceIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]*$`)
+var instancePathPattern = regexp.MustCompile(`^(/|[A-Za-z]:[\\/])`)
+
+func v5ID(value any) bool {
+	s, ok := value.(string)
+	return ok && v5String(1, identifierBytes)(s) && instanceIDPattern.MatchString(s)
+}
+func v5Time(value any) bool { s, ok := value.(string); return ok && isTimestamp(s) }
+func v5Path(value any) bool {
+	s, ok := value.(string)
+	if !ok || !v5String(1, InstanceWorkspaceBytes)(s) || !instancePathPattern.MatchString(s) {
+		return false
+	}
+	for _, ch := range s {
+		if ch < 32 {
+			return false
+		}
+	}
+	return true
+}
+func v5Strings(limit int, rule v5Rule) v5Rule {
+	return func(value any) bool {
+		items, ok := value.([]any)
+		if !ok || len(items) > limit {
+			return false
+		}
+		seen := map[string]bool{}
+		for _, item := range items {
+			s, ok := item.(string)
+			if !ok || !rule(item) || seen[s] {
+				return false
+			}
+			seen[s] = true
+		}
+		return true
+	}
+}
+func v5Array(values []string) []any {
+	result := make([]any, len(values))
+	for i, value := range values {
+		result[i] = value
+	}
+	return result
+}
+
+var v5IDs = v5Strings(InstanceCollectionEntries, v5ID)
+var v5Names = v5Strings(InstanceRequirementEntries, v5String(1, identifierBytes))
+var v5Count = v5Integer(0, InstanceCountMaximum)
+var v5Idle = v5Integer(MinimumInstanceIdleTimeoutSeconds, MaximumInstanceIdleTimeoutSeconds)
+var v5Purpose = v5Object(nil, map[string]v5Rule{"name": v5String(0, InstanceNameBytes), "title": v5String(0, InstanceNameBytes), "summary": v5String(0, InstanceSummaryBytes), "instructions": v5String(0, InstanceInstructionsBytes)})
+
+func v5Creator(value any) bool {
+	object, ok := value.(map[string]any)
+	if !ok {
+		return false
+	}
+	switch object["kind"] {
+	case "operator":
+		return v5Object(map[string]v5Rule{"kind": v5Enum([]string{"operator"}), "operatorId": v5ID}, nil)(value)
+	case "run":
+		return v5Object(map[string]v5Rule{"kind": v5Enum([]string{"run"}), "runId": v5ID, "instanceId": v5ID}, nil)(value)
+	case "orchestrator-client":
+		return v5Object(map[string]v5Rule{"kind": v5Enum([]string{"orchestrator-client"}), "clientId": v5ID}, nil)(value)
+	default:
+		return false
+	}
+}
+
+var v5Lease = v5Object(map[string]v5Rule{"idleTimeoutSeconds": v5Idle, "expiresAt": v5Time}, nil)
+var v5Preferences = v5Object(nil, map[string]v5Rule{"nodeIds": v5Names, "harnessIds": v5Strings(InstanceRequirementEntries, v5Enum(HarnessIDs)), "models": v5Names, "labels": v5Names})
+var v5Requirements = v5Object(nil, map[string]v5Rule{
+	"skills": v5Names, "harnessIds": v5Strings(InstanceRequirementEntries, v5Enum(HarnessIDs)), "models": v5Names,
+	"transports": v5Strings(InstanceRequirementEntries, v5Enum(HarnessTransports)), "operatingSystems": v5Names, "architectures": v5Names, "labels": v5Names,
+	"minimumConcurrency": v5Count, "minimumMemoryMegabytes": v5Integer(0, 4294967295), "projectProfileId": v5ID, "preferences": v5Preferences,
+	"workspace": v5Object(map[string]v5Rule{"writable": v5Boolean}, map[string]v5Rule{"repository": v5String(0, InstanceWorkspaceBytes), "path": v5Path}),
+})
+var v5Instance = v5Object(map[string]v5Rule{
+	"id": v5ID, "threadId": v5ID, "creator": v5Creator, "delegation": v5Object(map[string]v5Rule{"canDelegate": v5Boolean}, nil),
+	"requirements": v5Requirements, "lease": v5Lease, "status": v5Enum(InstanceStatuses), "createdAt": v5Time, "updatedAt": v5Time,
+}, map[string]v5Rule{"purpose": v5Purpose})
+var v5Allocation = v5Object(map[string]v5Rule{
+	"id": v5ID, "instanceId": v5ID, "nodeId": v5ID, "harnessId": v5Enum(HarnessIDs), "model": v5String(1, identifierBytes),
+	"transport": v5Enum(HarnessTransports), "workspace": v5Path, "lease": v5Lease, "status": v5Enum(AllocationStatuses), "createdAt": v5Time, "updatedAt": v5Time,
+}, nil)
+var v5Template = v5Object(map[string]v5Rule{"id": v5ID, "name": v5String(1, InstanceNameBytes)}, map[string]v5Rule{
+	"purpose": v5Purpose, "glyph": v5String(1, identifierBytes), "avatarShape": v5Enum([]string{"cup", "bean", "moka", "kettle", "grinder", "pour-over"}),
+	"avatarColor": v5Enum([]string{"amber", "sage", "clay", "sky", "plum", "rose"}), "instructions": v5String(0, InstanceInstructionsBytes),
+	"skills": v5Names, "tags": v5Names, "requirements": v5Requirements, "preferences": v5Preferences,
+})
+var v5Run = v5Object(map[string]v5Rule{
+	"id": v5ID, "threadId": v5ID, "instanceId": v5ID, "allocationId": v5ID, "nodeId": v5ID, "harnessId": v5Enum(HarnessIDs),
+	"model": v5String(1, identifierBytes), "workspace": v5Path, "prompt": v5String(0, InstanceInstructionsBytes),
+	"status": v5Enum([]string{"queued", "running", "completed", "failed", "cancelled"}), "output": v5String(0, InstanceInstructionsBytes),
+	"depth": v5Count, "createdAt": v5Time, "transport": v5Enum(HarnessTransports),
+}, map[string]v5Rule{
+	"error": v5String(0, diagnosticBytes), "parentRunId": v5ID, "taskId": v5ID, "attempt": v5Integer(1, InstanceCountMaximum),
+	"dispatchedAt": v5Time, "startedAt": v5Time, "finishedAt": v5Time, "fallbackTransport": v5Enum([]string{"native-cli"}),
+	"sessionBindingId": v5ID, "workspaceLeaseId": v5ID, "providerSessionId": v5ID,
+	"transportSelection": func(value any) bool {
+		if !v5Object(map[string]v5Rule{"requestedTransport": v5Enum(HarnessTransports), "selectedTransport": v5Enum(HarnessTransports)}, map[string]v5Rule{
+			"fallbackReason": v5Enum(TransportFallbackReasons), "harnessVersion": v5NormalizedVersion,
+			"approvalPolicy": v5Enum(ApprovalPolicies), "acp": v5ACP,
+			"adapter": v5Object(map[string]v5Rule{
+				"id": func(value any) bool {
+					s, ok := value.(string)
+					return ok && len(s) <= LabelOrAcceleratorMaximumBytes && LabelOrAcceleratorPattern.MatchString(s)
+				},
+				"version": v5NormalizedVersion, "source": v5Enum(ACPAdapterSources),
+			}, nil),
+		})(value) {
+			return false
+		}
+		data, err := json.Marshal(value)
+		if err != nil {
+			return false
+		}
+		var selection RunTransportSelection
+		return json.Unmarshal(data, &selection) == nil && selection.Validate() == nil
+	},
+})
+
+func decodeInstanceValue(data []byte, rule v5Rule, target any) error {
+	if !utf8.Valid(data) {
+		return fmt.Errorf("invalid instance UTF-8")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return err
+	}
+	if !rule(value) {
+		return fmt.Errorf("invalid or unknown instance fields")
+	}
+	// Unmarshal rejects trailing JSON, while the rule rejects null and unknown fields recursively.
+	return json.Unmarshal(data, target)
+}
+func DecodeAgentInstance(data []byte) (AgentInstance, error) {
+	var result AgentInstance
+	err := decodeInstanceValue(data, v5Instance, &result)
+	return result, err
+}
+func DecodeInstanceAllocation(data []byte) (InstanceAllocation, error) {
+	var result InstanceAllocation
+	err := decodeInstanceValue(data, v5Allocation, &result)
+	return result, err
+}
+func DecodeAgentTemplate(data []byte) (AgentTemplate, error) {
+	var result AgentTemplate
+	err := decodeInstanceValue(data, v5Template, &result)
+	return result, err
+}
+func DecodeInstanceHubMessage(data []byte, version string) (InstanceHubMessage, error) {
+	var message InstanceHubMessage
+	if !SupportsCapability(version, CapabilityInstances) {
+		return message, fmt.Errorf("instances require protocol v5")
+	}
+	rule := func(value any) bool {
+		object, ok := value.(map[string]any)
+		if !ok {
+			return false
+		}
+		switch object["type"] {
+		case "instance.release":
+			return v5Object(map[string]v5Rule{"type": v5Enum([]string{"instance.release"}), "instanceId": v5ID, "allocationId": v5ID, "mode": v5Enum(InstanceReleaseModes)}, nil)(value)
+		case "instance.provision":
+			return v5Object(map[string]v5Rule{"type": v5Enum([]string{"instance.provision"}), "instance": v5Instance, "allocation": v5Allocation}, nil)(value)
+		case "dispatch":
+			return v5Object(map[string]v5Rule{"type": v5Enum([]string{"dispatch"}), "instance": v5Instance, "allocation": v5Allocation, "run": v5Run}, nil)(value)
+		default:
+			return false
+		}
+	}
+	if err := decodeInstanceValue(data, rule, &message); err != nil {
+		return message, err
+	}
+	if message.Type == "instance.release" {
+		return message, nil
+	}
+	i, a := message.Instance, message.Allocation
+	if i.ID != a.InstanceID || i.Lease != a.Lease {
+		return message, fmt.Errorf("instance allocation identity or lease mismatch")
+	}
+	if message.Type == "instance.provision" {
+		if i.Status != "provisioning" || !slices.Contains([]string{"reserved", "provisioning"}, a.Status) {
+			return message, fmt.Errorf("invalid provision state")
+		}
+	} else {
+		r := message.Run
+		if r.InstanceID != i.ID || r.AllocationID != a.ID || r.ThreadID != i.ThreadID || r.NodeID != a.NodeID || r.HarnessID != a.HarnessID || r.Model != a.Model || r.Transport != a.Transport || r.Workspace != a.Workspace || r.Status != "queued" || a.Status != "active" || !slices.Contains([]string{"ready", "busy", "idle"}, i.Status) || (r.FallbackTransport != nil && r.Transport != "acp-v1") {
+			return message, fmt.Errorf("invalid dispatch identity, state, or placement")
+		}
+	}
+	return message, nil
+}
+
+func v5NormalizedVersion(value any) bool {
+	s, ok := value.(string)
+	return ok && IsNormalizedVersion(s)
+}
+
+var v5ACP = v5Object(map[string]v5Rule{
+	"protocolVersion": v5Integer(1, 1), "loadSession": v5Boolean, "resumeSession": v5Boolean,
+	"prompt": v5Object(map[string]v5Rule{"image": v5Boolean, "audio": v5Boolean, "embeddedContext": v5Boolean}, nil),
+	"mcp":    v5Object(map[string]v5Rule{"http": v5Boolean, "sse": v5Boolean}, nil),
+}, map[string]v5Rule{
+	"adapterName": func(value any) bool {
+		s, ok := value.(string)
+		return ok && v5String(0, ACPAdapterNameMaximumBytes)(s) && !LooksSecretLike(s)
+	},
+	"adapterVersion": v5NormalizedVersion,
+})
+var v5Harness = v5Object(map[string]v5Rule{
+	"id": v5Enum(HarnessIDs), "label": v5String(1, identifierBytes), "description": v5String(0, diagnosticBytes), "available": v5Boolean,
+	"authMode": v5Enum([]string{"local-subscription", "local-account", "api", "none"}), "models": v5Names,
+}, map[string]v5Rule{"binary": v5String(0, InstanceWorkspaceBytes), "transports": v5Strings(InstanceRequirementEntries, v5Enum(HarnessTransports)), "acp": v5ACP, "approvalPolicy": v5Enum([]string{"manual", "auto", "bypass"})})
+var v5Node = v5Object(map[string]v5Rule{
+	"id": v5ID, "name": v5String(1, identifierBytes), "kind": v5Enum([]string{"local", "home-server", "cloud"}),
+	"platform": v5String(1, identifierBytes), "status": v5Enum([]string{"online", "offline", "busy"}), "lastSeen": v5Time,
+	"activeRuns": v5Count, "concurrency": v5Count, "workspaceRoots": v5Strings(InstanceRequirementEntries, v5Path), "version": v5String(1, identifierBytes),
+	"harnesses": func(value any) bool {
+		items, ok := value.([]any)
+		if !ok || len(items) > InstanceRequirementEntries {
+			return false
+		}
+		seen := map[any]bool{}
+		for _, item := range items {
+			if !v5Harness(item) {
+				return false
+			}
+			id := item.(map[string]any)["id"]
+			if seen[id] {
+				return false
+			}
+			seen[id] = true
+		}
+		return true
+	},
+}, map[string]v5Rule{"instanceCapacity": v5Count, "activeInstances": v5Count})
+
+func DecodeInstanceControlMessage(data []byte, version string) (InstanceControlMessage, error) {
+	var message InstanceControlMessage
+	if !SupportsCapability(version, CapabilityInstances) {
+		return message, fmt.Errorf("instances require protocol v5")
+	}
+	rule := func(value any) bool {
+		object, ok := value.(map[string]any)
+		if !ok {
+			return false
+		}
+		required := map[string]v5Rule{"type": v5Enum(InstanceControlMessageTypes)}
+		optional := map[string]v5Rule{}
+		switch object["type"] {
+		case "register":
+			required["protocolVersion"] = v5Enum([]string{version})
+			required["node"] = v5Node
+		case "heartbeat":
+			required["nodeId"] = v5ID
+			required["at"] = v5Time
+			required["activeRuns"] = v5Count
+			optional["activeInstances"] = v5Count
+		case "sync.complete":
+			required["nodeId"] = v5ID
+			required["at"] = v5Time
+			optional["activeRuns"] = v5Count
+			optional["activeRunIds"] = v5IDs
+			optional["activeInstanceIds"] = v5IDs
+		case "instance.ready", "instance.failed", "instance.released":
+			required["nodeId"] = v5ID
+			required["at"] = v5Time
+			required["instanceId"] = v5ID
+			required["allocationId"] = v5ID
+			if object["type"] == "instance.failed" {
+				required["error"] = v5String(0, diagnosticBytes)
+			}
+		default:
+			return false
+		}
+		return v5Object(required, optional)(value)
+	}
+	if err := decodeInstanceValue(data, rule, &message); err != nil {
+		return message, err
+	}
+	if node := message.Node; node != nil && node.InstanceCapacity != nil && node.ActiveInstances != nil && *node.ActiveInstances > *node.InstanceCapacity {
+		return message, fmt.Errorf("resident count exceeds capacity")
+	}
+	return message, nil
+}
+func DecodeInstanceLifecycleRequest(data []byte) (InstanceLifecycleRequest, error) {
+	var request InstanceLifecycleRequest
+	rule := func(value any) bool {
+		object, ok := value.(map[string]any)
+		if !ok {
+			return false
+		}
+		required := map[string]v5Rule{"operation": v5Enum(InstanceLifecycleOperations), "threadId": v5ID,
+			"idempotency": v5Object(map[string]v5Rule{"caller": v5Creator, "key": v5String(1, InstanceIdempotencyKeyBytes)}, nil)}
+		optional := map[string]v5Rule{}
+		switch object["operation"] {
+		case "create":
+			required["requirements"] = v5Requirements
+			optional["purpose"] = v5Purpose
+			optional["idleTimeoutSeconds"] = v5Idle
+			optional["initialTask"] = v5Object(map[string]v5Rule{"title": v5String(1, identifierBytes), "instructions": v5String(0, InstanceInstructionsBytes)}, nil)
+		case "release":
+			required["instanceId"] = v5ID
+			required["mode"] = v5Enum(InstanceReleaseModes)
+		case "renew":
+			required["instanceId"] = v5ID
+			optional["idleTimeoutSeconds"] = v5Idle
+		default:
+			return false
+		}
+		return v5Object(required, optional)(value)
+	}
+	err := decodeInstanceValue(data, rule, &request)
+	return request, err
 }

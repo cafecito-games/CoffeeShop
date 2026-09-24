@@ -1,0 +1,17 @@
+{
+  "id": "template-one",
+  "name": "Developer",
+  "purpose": {
+    "name": "Issue 73 Developer",
+    "instructions": "Implement the shared contracts."
+  },
+  "skills": [],
+  "requirements": {
+    "harnessIds": [
+      "claude-cli"
+    ],
+    "operatingSystems": [
+      "darwin"
+    ]
+  }
+}
