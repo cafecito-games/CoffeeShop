@@ -1,0 +1,6 @@
+{
+  "type": "instance.release",
+  "instanceId": "instance-one",
+  "allocationId": "allocation-one",
+  "mode": "drain"
+}

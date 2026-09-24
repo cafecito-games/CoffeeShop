@@ -1,0 +1,7 @@
+{
+  "type": "instance.ready",
+  "nodeId": "node-one",
+  "instanceId": "instance-one",
+  "allocationId": "allocation-one",
+  "at": "2026-09-24T12:00:00Z"
+}

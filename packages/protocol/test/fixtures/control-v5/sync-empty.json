@@ -1,0 +1,6 @@
+{
+  "type": "sync.complete",
+  "nodeId": "node-one",
+  "activeInstanceIds": [],
+  "at": "2026-09-24T12:00:00Z"
+}

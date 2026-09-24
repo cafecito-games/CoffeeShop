@@ -54,11 +54,16 @@ export interface ComputeNode {
   lastSeen: string;
   activeRuns: number;
   concurrency: number;
+  /** Version-5 resident capacity, independent of active-run concurrency; absent means incapable. */
+  instanceCapacity?: number;
+  /** Absent is unknown, whereas zero is explicit resident evidence. */
+  activeInstances?: number;
   workspaceRoots: string[];
   harnesses: HarnessProfile[];
   version: string;
 }
 
+/** Compatibility-only persisted agent. New reusable defaults use AgentTemplate. */
 export interface Agent {
   id: string;
   name: string;
@@ -115,6 +120,7 @@ export interface Artifact {
   createdAt: string;
 }
 
+/** Compatibility-only agent run. New output uses InstanceRun. */
 export interface Run {
   id: string;
   threadId?: string;
@@ -190,14 +196,18 @@ export type ThreadStatus = typeof threadStatuses[number];
  * `ownerAgentId` has always described. An `external` thread is orchestrated by an operator's own
  * Claude Code session through an orchestrator client, and has no owner agent.
  */
-export const threadOrchestratorKinds = ["agent", "external"] as const;
+export const threadOrchestratorKinds = ["agent", "external", "instance"] as const;
 export type ThreadOrchestratorKind = typeof threadOrchestratorKinds[number];
 
 export type ThreadOrchestrator =
+  | { kind: "instance"; instanceId: string }
+  /** Compatibility-only persisted input. */
   | { kind: "agent"; agentId: string }
   | { kind: "external"; clientId: string };
 
-export interface Thread {
+/** Existing consumers remain explicitly legacy until their instance migration. */
+export type LegacyThreadOrchestrator = Exclude<ThreadOrchestrator, { kind: "instance" }>;
+export interface Thread<Orchestrator extends ThreadOrchestrator = LegacyThreadOrchestrator> {
   id: string;
   title: string;
   objective: string;
@@ -209,7 +219,7 @@ export interface Thread {
    */
   ownerAgentId?: string;
   /** Absent only in a snapshot persisted before external orchestrators existed. */
-  orchestrator?: ThreadOrchestrator;
+  orchestrator?: Orchestrator;
   createdBy: "user" | "agent";
   createdAt: string;
   updatedAt: string;
@@ -218,6 +228,9 @@ export interface Thread {
 }
 
 export interface Snapshot {
+  instances?: AgentInstance[];
+  allocations?: InstanceAllocation[];
+  templates?: AgentTemplate[];
   agents: Agent[];
   nodes: ComputeNode[];
   runs: Run[];
@@ -313,8 +326,8 @@ export type HubToControlAgent =
 
 export type ControlAgentToHub =
   | { type: "register"; protocolVersion?: ControlProtocolVersion; node: ComputeNode }
-  | { type: "sync.complete"; nodeId: string; activeRunIds?: string[]; at: string }
-  | { type: "heartbeat"; nodeId: string; activeRuns: number; at: string }
+  | { type: "sync.complete"; nodeId: string; activeRunIds?: string[]; activeInstanceIds?: string[]; at: string }
+  | { type: "heartbeat"; nodeId: string; activeRuns: number; activeInstances?: number; at: string }
   | { type: "run.started"; runId: string; at: string; transport?: RunTransportSelection }
   /**
    * Carries a text `chunk`, a `providerSessionId`, or both. `providerSessionId` is sent at most once,
@@ -344,17 +357,18 @@ export type WorkerToHub = ControlAgentToHub;
  * upgrades, but a message may only be sent to a peer whose version supports the capability that
  * message requires. Unknown versions are rejected before any dispatch.
  */
-export const controlProtocolVersions = ["1", "2", "3", "4"] as const;
+export const controlProtocolVersions = ["1", "2", "3", "4", "5"] as const;
 export type ControlProtocolVersion = typeof controlProtocolVersions[number];
-export const latestControlProtocolVersion: ControlProtocolVersion = "4";
+export const latestControlProtocolVersion: ControlProtocolVersion = "5";
 
-export const controlProtocolCapabilities = ["replay-barrier", "hub-rpc", "orchestration"] as const;
+export const controlProtocolCapabilities = ["replay-barrier", "hub-rpc", "orchestration", "instances"] as const;
 export type ControlProtocolCapability = typeof controlProtocolCapabilities[number];
 
 const capabilityIntroducedIn: Readonly<Record<ControlProtocolCapability, ControlProtocolVersion>> = {
   "replay-barrier": "2",
   "hub-rpc": "3",
-  orchestration: "4"
+  orchestration: "4",
+  instances: "5"
 };
 
 const isOneOf = <T extends string>(values: readonly T[]) => (value: unknown): value is T =>
@@ -368,9 +382,13 @@ export const supportsControlCapability = (version: ControlProtocolVersion, capab
   && controlProtocolVersions.indexOf(version) >= controlProtocolVersions.indexOf(capabilityIntroducedIn[capability]);
 
 /** The capability a hub→Barista message needs, or undefined when every version accepts it. */
-export function requiredCapabilityForHubMessage(message: HubToControlAgent): ControlProtocolCapability | undefined {
+export function requiredCapabilityForHubMessage(message: HubToControlAgent | InstanceHubMessage): ControlProtocolCapability | undefined {
   switch (message.type) {
+    case "instance.provision":
+    case "instance.release":
+      return "instances";
     case "dispatch":
+      if ("instance" in message || "instanceId" in message.run || "allocationId" in message.run) return "instances";
       return message.execution !== undefined || hasVersion4RunFields(message.run) ? "orchestration" : undefined;
     case "approval.decision":
     case "workspace.cleanup":
@@ -385,10 +403,14 @@ export function requiredCapabilityForHubMessage(message: HubToControlAgent): Con
 }
 
 /** The capability a Barista→hub message needs, or undefined when every version may send it. */
-export function requiredCapabilityForControlAgentMessage(message: ControlAgentToHub): ControlProtocolCapability | undefined {
+export function requiredCapabilityForControlAgentMessage(message: ControlAgentToHub | InstanceControlMessage): ControlProtocolCapability | undefined {
   switch (message.type) {
+    case "instance.ready":
+    case "instance.failed":
+    case "instance.released":
+      return "instances";
     case "sync.complete":
-      return "replay-barrier";
+      return message.activeInstanceIds !== undefined ? "instances" : "replay-barrier";
     case "hub.rpc.request":
       return "hub-rpc";
     case "harness.event":
@@ -398,7 +420,9 @@ export function requiredCapabilityForControlAgentMessage(message: ControlAgentTo
     case "approval.undeliverable":
       return "orchestration";
     case "register":
+      return message.node.instanceCapacity !== undefined || message.node.activeInstances !== undefined ? "instances" : undefined;
     case "heartbeat":
+      return message.activeInstances !== undefined ? "instances" : undefined;
     case "run.started":
     case "run.output":
     case "run.completed":
@@ -408,18 +432,32 @@ export function requiredCapabilityForControlAgentMessage(message: ControlAgentTo
   }
 }
 
-export const canSendToControlAgent = (message: HubToControlAgent, version: ControlProtocolVersion) => {
+/*
+ * The transport only ever carries a type named by one of these unions. An unknown discriminator is
+ * refused before any capability is resolved, so a message shape this build does not know is never
+ * forwarded on the strength of its remaining fields.
+ */
+const hubToControlAgentMessageTypes = ["dispatch", "cancel", "hub.rpc.response", "approval.decision", "workspace.cleanup", "workspace.lease.confirmed", "ping"] as const;
+const controlAgentToHubMessageTypes = ["register", "sync.complete", "heartbeat", "run.started", "run.output", "run.completed", "run.failed", "run.cancelled", "hub.rpc.request", "harness.event", "session.binding", "workspace.lease", "capability.report", "approval.undeliverable"] as const;
+const knownMessageType = (type: string, legacy: readonly string[], instance: readonly string[]) =>
+  legacy.includes(type) || instance.includes(type);
+
+export const canSendToControlAgent = (message: HubToControlAgent | InstanceHubMessage, version: ControlProtocolVersion) => {
+  if (!knownMessageType(message.type, hubToControlAgentMessageTypes, instanceHubMessageTypes)) return false;
   const capability = requiredCapabilityForHubMessage(message);
-  return capability === undefined || supportsControlCapability(version, capability);
+  if (capability === "instances") return validateInstanceHubMessage(message, version).ok;
+  return isControlProtocolVersion(version) && (capability === undefined || supportsControlCapability(version, capability));
 };
 
-export const canAcceptFromControlAgent = (message: ControlAgentToHub, version: ControlProtocolVersion) => {
+export const canAcceptFromControlAgent = (message: ControlAgentToHub | InstanceControlMessage, version: ControlProtocolVersion) => {
+  if (!knownMessageType(message.type, controlAgentToHubMessageTypes, instanceControlMessageTypes)) return false;
   const capability = requiredCapabilityForControlAgentMessage(message);
-  return capability === undefined || supportsControlCapability(version, capability);
+  if (capability === "instances") return validateInstanceControlMessage(message, version).ok;
+  return isControlProtocolVersion(version) && (capability === undefined || supportsControlCapability(version, capability));
 };
 
 const version4RunFields = ["taskId", "attempt", "transport", "fallbackTransport", "sessionBindingId", "workspaceLeaseId"] as const;
-const hasVersion4RunFields = (run: Run) => version4RunFields.some((field) => run[field] !== undefined);
+const hasVersion4RunFields = (run: Run | InstanceRun) => version4RunFields.some((field) => run[field] !== undefined);
 
 /*
  * Harness transports.
@@ -2307,7 +2345,7 @@ export interface OrchestratorAttachment {
 }
 
 /** Resolves a thread's orchestrator, deriving it from `ownerAgentId` for a pre-migration thread. */
-export function threadOrchestrator(thread: Pick<Thread, "orchestrator" | "ownerAgentId">): ThreadOrchestrator | undefined {
+export function threadOrchestrator<T extends ThreadOrchestrator = LegacyThreadOrchestrator>(thread: { orchestrator?: T; ownerAgentId?: string }): T | { kind: "agent"; agentId: string } | undefined {
   if (thread.orchestrator !== undefined) return thread.orchestrator;
   return thread.ownerAgentId === undefined ? undefined : { kind: "agent", agentId: thread.ownerAgentId };
 }
@@ -2505,4 +2543,354 @@ export function validateOrchestratorHubMessage(value: unknown): Validation<Orche
   if (!hasOnlyKeys(value, ["type", ...orchestratorHubPayloadKeys[value.type]])) return reject(`${value.type} contains undeclared fields`);
   if (!orchestratorHubPayloadValidators[value.type](value)) return reject(`${value.type} payload is malformed or exceeds its bounds`);
   return accept(value as unknown as OrchestratorHubToClient);
+}
+
+/*
+ * Ephemeral instances (v5). These exports are contracts only: no legacy record is silently
+ * migrated and a deployed v4 Barista must not advertise v5 until it implements supervision.
+ * Instance identity survives allocation loss; a replacement always has a new allocation ID.
+ */
+export const instanceStatuses = ["requested", "provisioning", "ready", "busy", "idle", "draining", "released", "failed"] as const;
+export type InstanceStatus = typeof instanceStatuses[number];
+export const allocationStatuses = ["reserved", "provisioning", "active", "lost", "released", "failed"] as const;
+export type AllocationStatus = typeof allocationStatuses[number];
+export const instanceReleaseModes = ["drain", "cancel"] as const;
+export type InstanceReleaseMode = typeof instanceReleaseModes[number];
+export const instanceCreatorKinds = ["operator", "run", "orchestrator-client"] as const;
+export const isInstanceStatus = isOneOf(instanceStatuses);
+export const isAllocationStatus = isOneOf(allocationStatuses);
+export const isInstanceReleaseMode = isOneOf(instanceReleaseModes);
+export const instanceTransitions: Readonly<Record<InstanceStatus, readonly InstanceStatus[]>> = {
+  requested: ["provisioning", "draining", "failed"],
+  provisioning: ["ready", "draining", "failed"],
+  ready: ["busy", "idle", "provisioning", "draining", "failed"],
+  busy: ["idle", "provisioning", "draining", "failed"],
+  idle: ["busy", "provisioning", "draining", "failed"],
+  draining: ["released", "failed"],
+  released: [],
+  failed: []
+};
+export const allocationTransitions: Readonly<Record<AllocationStatus, readonly AllocationStatus[]>> = {
+  reserved: ["provisioning", "released", "failed"],
+  provisioning: ["active", "lost", "released", "failed"],
+  active: ["lost", "released", "failed"],
+  lost: ["released", "failed"],
+  released: [],
+  failed: []
+};
+export const canTransitionInstance = (from: InstanceStatus, to: InstanceStatus) =>
+  isInstanceStatus(from) && isInstanceStatus(to) && instanceTransitions[from].includes(to);
+export const canTransitionAllocation = (from: AllocationStatus, to: AllocationStatus) =>
+  isAllocationStatus(from) && isAllocationStatus(to) && allocationTransitions[from].includes(to);
+
+/** All string limits are UTF-8 bytes; counts are bounded integers, never floating point. */
+export const instanceLimits = {
+  identifierBytes: 256, nameBytes: 256, summaryBytes: 2_000, instructionsBytes: 65_536,
+  idempotencyKeyBytes: 128, workspaceBytes: 4_096, collectionEntries: 1_024,
+  requirementEntries: 64, count: 65_535, minimumIdleTimeoutSeconds: 60,
+  defaultIdleTimeoutSeconds: 1_800, maximumIdleTimeoutSeconds: 86_400
+} as const;
+export const minimumInstanceIdleTimeoutSeconds = instanceLimits.minimumIdleTimeoutSeconds;
+export const defaultInstanceIdleTimeoutSeconds = instanceLimits.defaultIdleTimeoutSeconds;
+export const maximumInstanceIdleTimeoutSeconds = instanceLimits.maximumIdleTimeoutSeconds;
+
+/** Display and instructions only. Purpose never supplies implicit placement requirements. */
+export interface InstancePurpose { name?: string; title?: string; summary?: string; instructions?: string }
+/** Derived from authenticated caller context, never accepted as an authority claim by a route. */
+export type InstanceCreator =
+  | { kind: "operator"; operatorId: string }
+  | { kind: "run"; runId: string; instanceId: string }
+  | { kind: "orchestrator-client"; clientId: string };
+/** Hub-granted policy; models cannot self-elevate this field. */
+export interface InstanceDelegationPolicy { canDelegate: boolean }
+/** Accepted work or an authorized renewal refreshes expiry; expiry initiates drain. */
+export interface InstanceLease { idleTimeoutSeconds: number; expiresAt: string }
+export interface AgentInstance {
+  readonly id: string;
+  readonly threadId: string;
+  readonly creator: InstanceCreator;
+  purpose?: InstancePurpose;
+  delegation: InstanceDelegationPolicy;
+  /** Original hard requirements, retained unchanged when replacing a lost allocation. */
+  readonly requirements: ExecutionRequirements;
+  lease: InstanceLease;
+  status: InstanceStatus;
+  createdAt: string;
+  updatedAt: string;
+}
+export interface InstanceAllocation {
+  readonly id: string;
+  readonly instanceId: string;
+  readonly nodeId: string;
+  readonly harnessId: HarnessId;
+  readonly model: string;
+  readonly transport: HarnessTransport;
+  /** Canonical absolute path authorized by Barista against WORKSPACE_ROOTS. */
+  readonly workspace: string;
+  lease: InstanceLease;
+  status: AllocationStatus;
+  createdAt: string;
+  updatedAt: string;
+}
+/** Reusable defaults only: no runtime identity, node binding, session, inbox, or capacity. */
+export interface AgentTemplate {
+  id: string;
+  name: string;
+  purpose?: InstancePurpose;
+  glyph?: string;
+  avatarShape?: AgentAvatarShape;
+  avatarColor?: AgentAvatarColor;
+  instructions?: string;
+  skills?: string[];
+  tags?: string[];
+  requirements?: ExecutionRequirements;
+  preferences?: ExecutionPreferences;
+}
+/** New actor attribution always names both logical identity and the exact allocation. */
+export interface InstanceActor { instanceId: string; allocationId: string }
+export type RuntimeActor = ({ kind: "instance" } & InstanceActor) | { kind: "agent"; agentId: string };
+type InstanceRecord<T> = Omit<T, "agentId" | "fromAgentId" | "toAgentId"> & InstanceActor & { agentId?: never };
+export type InstanceRun = InstanceRecord<Run> & { threadId: string; transport: HarnessTransport };
+export type InstanceTaskAssignment = InstanceRecord<TaskAssignment>;
+export type InstanceSessionBinding = InstanceRecord<HarnessSessionBinding>;
+export type InstanceChatMessage = InstanceRecord<ChatMessage>;
+export type InstanceTimelineEvent = InstanceRecord<TimelineEvent> & { from?: InstanceActor; to?: InstanceActor };
+export type InstanceArtifact = InstanceRecord<Artifact>;
+export type InstanceApprovalRequest = ApprovalRequest & InstanceActor;
+export type InstanceHarnessEvent = HarnessEvent & InstanceActor;
+export type InstanceDelegation = Omit<Delegation, "fromAgentId" | "toAgentId"> & { from: InstanceActor; to: InstanceActor };
+export type InstanceSessionBindingUpdate = HarnessSessionBindingUpdate & InstanceActor;
+export type InstanceTaskMessage = TaskMessage & { actor: InstanceActor };
+/** Decoding unions are compatibility inputs, never permission to emit legacy data as v5. */
+export type RuntimeRun = Run | InstanceRun;
+export type RuntimeThread = Thread<ThreadOrchestrator>;
+export type RuntimeSnapshot = Omit<Snapshot, "runs" | "artifacts" | "messages" | "events" | "sessionBindings" | "approvals" | "tasks" | "threads"> & {
+  threads?: RuntimeThread[];
+  runs: RuntimeRun[];
+  artifacts?: (Artifact | InstanceArtifact)[];
+  messages: (ChatMessage | InstanceChatMessage)[];
+  events: (TimelineEvent | InstanceTimelineEvent)[];
+  sessionBindings?: (HarnessSessionBinding | InstanceSessionBinding)[];
+  approvals?: (ApprovalRequest | InstanceApprovalRequest)[];
+  tasks?: (Omit<Task, "assignment"> & { assignment?: TaskAssignment | InstanceTaskAssignment })[];
+};
+
+export const instanceHubMessageTypes = ["instance.provision", "instance.release", "dispatch"] as const;
+export const instanceControlMessageTypes = ["instance.ready", "instance.failed", "instance.released", "register", "heartbeat", "sync.complete"] as const;
+export type InstanceHubMessage =
+  | { type: "instance.provision"; instance: AgentInstance; allocation: InstanceAllocation }
+  | ({ type: "instance.release"; mode: InstanceReleaseMode } & InstanceActor)
+  | { type: "dispatch"; instance: AgentInstance; allocation: InstanceAllocation; run: InstanceRun };
+export type InstanceControlMessage =
+  | ({ type: "instance.ready" | "instance.released"; nodeId: string; at: string } & InstanceActor)
+  | ({ type: "instance.failed"; nodeId: string; at: string; error: string } & InstanceActor)
+  | Extract<ControlAgentToHub, { type: "register" | "heartbeat" | "sync.complete" }>;
+/** Use these unions at migrated transport boundaries; old handlers retain their v1-v4 shapes. */
+export type VersionedHubToControlAgent = HubToControlAgent | InstanceHubMessage;
+export type VersionedControlAgentToHub = ControlAgentToHub | InstanceControlMessage;
+
+/** Caller scope comes from authentication. The key identifies one semantic operation in that scope. */
+export interface InstanceIdempotency { caller: InstanceCreator; key: string }
+export interface InstanceInitialTask { title: string; instructions: string }
+export const instanceLifecycleOperations = ["create", "release", "renew"] as const;
+export type InstanceLifecycleRequest =
+  | { operation: "create"; threadId: string; idempotency: InstanceIdempotency; purpose?: InstancePurpose;
+      requirements: ExecutionRequirements; idleTimeoutSeconds?: number; initialTask?: InstanceInitialTask }
+  | { operation: "release"; threadId: string; instanceId: string; idempotency: InstanceIdempotency; mode: InstanceReleaseMode }
+  | { operation: "renew"; threadId: string; instanceId: string; idempotency: InstanceIdempotency; idleTimeoutSeconds?: number };
+/** Same shapes for REST, run-scoped MCP, and the external orchestrator bridge. */
+export interface InstanceLifecycleResult {
+  instance: AgentInstance;
+  allocation?: InstanceAllocation;
+  initialTaskId?: string;
+  replayed: boolean;
+}
+export interface ListInstancesRequest { threadId: string; includeTerminal?: boolean }
+export interface ListInstancesResult { instances: AgentInstance[]; allocations: InstanceAllocation[] }
+export interface GetInstanceRequest { threadId: string; instanceId: string }
+
+const instanceID = (value: unknown): value is string =>
+  isBoundedString(value, instanceLimits.identifierBytes) && /^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(value);
+const instanceCount = (value: unknown): value is number => isNonNegativeInteger(value) && value <= instanceLimits.count;
+const instanceText = (value: unknown) => isBoundedString(value, instanceLimits.instructionsBytes);
+const instanceIDs = (value: unknown): value is string[] =>
+  Array.isArray(value) && value.length <= instanceLimits.collectionEntries && value.every(instanceID) && new Set(value).size === value.length;
+const instanceStrings = (value: unknown, check: (value: unknown) => boolean = (item) => isIdentifier(item)): value is string[] =>
+  Array.isArray(value) && value.length <= instanceLimits.requirementEntries && value.every(check) && new Set(value).size === value.length;
+const idleTimeout = (value: unknown) => isNonNegativeInteger(value)
+  && value >= minimumInstanceIdleTimeoutSeconds && value <= maximumInstanceIdleTimeoutSeconds;
+const instanceLease = (value: unknown): value is InstanceLease => isRecord(value)
+  && hasOnlyKeys(value, ["idleTimeoutSeconds", "expiresAt"]) && idleTimeout(value.idleTimeoutSeconds) && isTimestamp(value.expiresAt);
+const instancePurpose = (value: unknown): value is InstancePurpose => isRecord(value)
+  && hasOnlyKeys(value, ["name", "title", "summary", "instructions"])
+  && ["name", "title"].every((key) => isOptional(value[key], (item) => isBoundedString(item, instanceLimits.nameBytes)))
+  && isOptional(value.summary, (item) => isBoundedString(item, instanceLimits.summaryBytes))
+  && isOptional(value.instructions, instanceText);
+const instanceCreator = (value: unknown): value is InstanceCreator => {
+  if (!isRecord(value)) return false;
+  switch (value.kind) {
+    case "operator": return hasOnlyKeys(value, ["kind", "operatorId"]) && instanceID(value.operatorId);
+    case "run": return hasOnlyKeys(value, ["kind", "runId", "instanceId"]) && instanceID(value.runId) && instanceID(value.instanceId);
+    case "orchestrator-client": return hasOnlyKeys(value, ["kind", "clientId"]) && instanceID(value.clientId);
+    default: return false;
+  }
+};
+const executionPreferences = (value: unknown): value is ExecutionPreferences => isRecord(value)
+  && hasOnlyKeys(value, ["nodeIds", "harnessIds", "models", "labels"])
+  && ["nodeIds", "models", "labels"].every((key) => isOptional(value[key], instanceStrings))
+  && isOptional(value.harnessIds, (items) => instanceStrings(items, isHarnessId));
+const absoluteInstancePath = (value: unknown): value is string => isBoundedString(value, instanceLimits.workspaceBytes)
+  && !/[\u0000-\u001f]/.test(value) && (/^\//.test(value) || /^[A-Za-z]:[\\/]/.test(value));
+export function validateInstanceRequirements(value: unknown): Validation<ExecutionRequirements> {
+  if (!isRecord(value) || !hasOnlyKeys(value, ["skills", "harnessIds", "models", "transports", "operatingSystems", "architectures", "labels", "minimumConcurrency", "minimumMemoryMegabytes", "projectProfileId", "workspace", "preferences"])
+    || !["skills", "models", "operatingSystems", "architectures", "labels"].every((key) => isOptional(value[key], instanceStrings))
+    || !isOptional(value.harnessIds, (items) => instanceStrings(items, isHarnessId))
+    || !isOptional(value.transports, (items) => instanceStrings(items, isHarnessTransport))
+    || !isOptional(value.minimumConcurrency, instanceCount) || !isOptional(value.minimumMemoryMegabytes, (megabytes) => isNonNegativeInteger(megabytes) && megabytes <= 2 ** 32 - 1)
+    || !isOptional(value.projectProfileId, instanceID) || !isOptional(value.preferences, executionPreferences)) return reject("invalid instance requirements");
+  if (value.workspace !== undefined && (!isRecord(value.workspace) || !hasOnlyKeys(value.workspace, ["repository", "path", "writable"])
+    || typeof value.workspace.writable !== "boolean" || !isOptional(value.workspace.path, absoluteInstancePath)
+    || !isOptional(value.workspace.repository, (item) => isBoundedString(item, instanceLimits.workspaceBytes)))) return reject("invalid instance workspace requirements");
+  return accept(value as ExecutionRequirements);
+}
+export function validateAgentInstance(value: unknown): Validation<AgentInstance> {
+  if (!isRecord(value) || !hasOnlyKeys(value, ["id", "threadId", "creator", "purpose", "delegation", "requirements", "lease", "status", "createdAt", "updatedAt"])
+    || !instanceID(value.id) || !instanceID(value.threadId) || !instanceCreator(value.creator) || !isOptional(value.purpose, instancePurpose)
+    || !isRecord(value.delegation) || !hasOnlyKeys(value.delegation, ["canDelegate"]) || typeof value.delegation.canDelegate !== "boolean"
+    || !validateInstanceRequirements(value.requirements).ok || !instanceLease(value.lease) || !isInstanceStatus(value.status)
+    || !isTimestamp(value.createdAt) || !isTimestamp(value.updatedAt)) return reject("invalid agent instance");
+  return accept(value as unknown as AgentInstance);
+}
+export function validateInstanceAllocation(value: unknown): Validation<InstanceAllocation> {
+  if (!isRecord(value) || !hasOnlyKeys(value, ["id", "instanceId", "nodeId", "harnessId", "model", "transport", "workspace", "lease", "status", "createdAt", "updatedAt"])
+    || !["id", "instanceId", "nodeId"].every((key) => instanceID(value[key])) || !isHarnessId(value.harnessId)
+    || !isIdentifier(value.model) || !isHarnessTransport(value.transport) || !absoluteInstancePath(value.workspace)
+    || !instanceLease(value.lease) || !isAllocationStatus(value.status) || !isTimestamp(value.createdAt) || !isTimestamp(value.updatedAt)) return reject("invalid instance allocation");
+  return accept(value as unknown as InstanceAllocation);
+}
+export function validateAgentTemplate(value: unknown): Validation<AgentTemplate> {
+  if (!isRecord(value) || !hasOnlyKeys(value, ["id", "name", "purpose", "glyph", "avatarShape", "avatarColor", "instructions", "skills", "tags", "requirements", "preferences"])
+    || !instanceID(value.id) || !isIdentifier(value.name) || !isOptional(value.purpose, instancePurpose) || !isOptional(value.glyph, isIdentifier)
+    || !isOptional(value.avatarShape, isOneOf(agentAvatarShapes)) || !isOptional(value.avatarColor, isOneOf(agentAvatarColors))
+    || !isOptional(value.instructions, instanceText) || !isOptional(value.skills, instanceStrings) || !isOptional(value.tags, instanceStrings)
+    || !isOptional(value.requirements, (item) => validateInstanceRequirements(item).ok) || !isOptional(value.preferences, executionPreferences)) return reject("invalid agent template");
+  // Preferences may rank concrete nodes; a template never fixes a node binding.
+  return accept(value as unknown as AgentTemplate);
+}
+export function validateRuntimeActor(value: unknown): Validation<RuntimeActor> {
+  if (!isRecord(value)) return reject("invalid actor");
+  if (value.kind === "agent" && hasOnlyKeys(value, ["kind", "agentId"]) && instanceID(value.agentId)) return accept(value as unknown as RuntimeActor);
+  if (value.kind === "instance" && hasOnlyKeys(value, ["kind", "instanceId", "allocationId"]) && instanceID(value.instanceId) && instanceID(value.allocationId)) return accept(value as unknown as RuntimeActor);
+  return reject("invalid or ambiguous actor");
+}
+export function validateInstanceHarnessEvent(value: unknown): Validation<InstanceHarnessEvent> {
+  if (!isRecord(value) || !instanceID(value.instanceId) || !instanceID(value.allocationId)) return reject("missing instance event identity");
+  const { instanceId, allocationId, ...event } = value;
+  if (!validateHarnessEvent(event).ok) return reject("invalid instance event");
+  return accept(value as unknown as InstanceHarnessEvent);
+}
+export function validateInstanceRun(value: unknown): Validation<InstanceRun> {
+  if (!isRecord(value) || !hasOnlyKeys(value, ["id", "threadId", "instanceId", "allocationId", "nodeId", "harnessId", "model", "workspace", "prompt", "status", "output", "error", "depth", "parentRunId", "dispatchedAt", "startedAt", "finishedAt", "createdAt", "taskId", "attempt", "transport", "fallbackTransport", "transportSelection", "sessionBindingId", "workspaceLeaseId", "providerSessionId"])
+    || !["id", "threadId", "instanceId", "allocationId", "nodeId"].every((key) => instanceID(value[key]))
+    || !isHarnessId(value.harnessId) || !isIdentifier(value.model) || !absoluteInstancePath(value.workspace)
+    || !instanceText(value.prompt) || !instanceText(value.output) || !isOptional(value.error, isDiagnostic)
+    || !isOneOf(runStatuses)(value.status) || !instanceCount(value.depth) || !isTimestamp(value.createdAt) || !isHarnessTransport(value.transport)
+    || !["parentRunId", "taskId", "sessionBindingId", "workspaceLeaseId", "providerSessionId"].every((key) => isOptional(value[key], instanceID))
+    || !["dispatchedAt", "startedAt", "finishedAt"].every((key) => isOptional(value[key], isTimestamp))
+    || !isOptional(value.attempt, (attempt) => instanceCount(attempt) && attempt > 0)
+    || !isOptional(value.fallbackTransport, (item) => value.transport === "acp-v1" && item === "native-cli")
+    || !isOptional(value.transportSelection, (item) => validateRunTransportSelection(item).ok)) return reject("invalid instance run");
+  return accept(value as unknown as InstanceRun);
+}
+export function validateInstanceHubMessage(value: unknown, version: ControlProtocolVersion): Validation<InstanceHubMessage> {
+  if (!supportsControlCapability(version, "instances") || !isRecord(value)) return reject("instances require protocol v5");
+  if (value.type === "instance.release") {
+    if (!hasOnlyKeys(value, ["type", "instanceId", "allocationId", "mode"]) || !instanceID(value.instanceId) || !instanceID(value.allocationId) || !isInstanceReleaseMode(value.mode)) return reject("invalid instance release");
+    return accept(value as unknown as InstanceHubMessage);
+  }
+  if ((value.type !== "instance.provision" && value.type !== "dispatch") || !hasOnlyKeys(value, value.type === "dispatch" ? ["type", "instance", "allocation", "run"] : ["type", "instance", "allocation"])) return reject("unknown instance message or field");
+  const instance = validateAgentInstance(value.instance);
+  const allocation = validateInstanceAllocation(value.allocation);
+  if (!instance.ok || !allocation.ok || instance.value.id !== allocation.value.instanceId
+    || instance.value.lease.idleTimeoutSeconds !== allocation.value.lease.idleTimeoutSeconds
+    || instance.value.lease.expiresAt !== allocation.value.lease.expiresAt) return reject("instance and allocation identity or lease mismatch");
+  if (value.type === "instance.provision") {
+    if (instance.value.status !== "provisioning" || !["reserved", "provisioning"].includes(allocation.value.status)) return reject("invalid provision state");
+  } else {
+    const run = validateInstanceRun(value.run);
+    if (!run.ok || run.value.instanceId !== instance.value.id || run.value.allocationId !== allocation.value.id
+      || run.value.threadId !== instance.value.threadId || run.value.status !== "queued"
+      || !["ready", "busy", "idle"].includes(instance.value.status) || allocation.value.status !== "active"
+      || !(["nodeId", "harnessId", "model", "transport", "workspace"] as const).every((key) => run.value[key] === allocation.value[key])) return reject("invalid dispatch identity, state, or resolved placement");
+  }
+  return accept(value as unknown as InstanceHubMessage);
+}
+/** Missing evidence is non-authoritative even on v5. Null/malformed is rejected, never empty. */
+export const hasAuthoritativeInstanceEvidence = (value: unknown): value is { activeInstanceIds: string[] } =>
+  isRecord(value) && instanceIDs(value.activeInstanceIds);
+export function validateInstanceControlMessage(value: unknown, version: ControlProtocolVersion): Validation<InstanceControlMessage> {
+  if (!supportsControlCapability(version, "instances") || !isRecord(value)) return reject("instances require protocol v5");
+  if (value.type === "register") {
+    const node = value.node;
+    if (!hasOnlyKeys(value, ["type", "protocolVersion", "node"]) || value.protocolVersion !== version || !isRecord(node)
+      || !hasOnlyKeys(node, ["id", "name", "kind", "platform", "status", "lastSeen", "activeRuns", "concurrency", "instanceCapacity", "activeInstances", "workspaceRoots", "harnesses", "version"])
+      || !instanceID(node.id) || !isIdentifier(node.name) || !isOneOf(nodeKinds)(node.kind) || !isIdentifier(node.platform)
+      || !isOneOf(["online", "offline", "busy"])(node.status) || !isTimestamp(node.lastSeen) || !isIdentifier(node.version)
+      || !instanceCount(node.activeRuns) || !instanceCount(node.concurrency) || !isOptional(node.instanceCapacity, instanceCount) || !isOptional(node.activeInstances, instanceCount)
+      || (typeof node.activeInstances === "number" && typeof node.instanceCapacity === "number" && node.activeInstances > node.instanceCapacity)
+      || !instanceStrings(node.workspaceRoots, absoluteInstancePath) || !Array.isArray(node.harnesses) || node.harnesses.length > instanceLimits.requirementEntries
+      || !node.harnesses.every(instanceHarnessProfile) || new Set(node.harnesses.map((harness) => harness.id)).size !== node.harnesses.length) return reject("invalid v5 registration");
+  } else if (value.type === "heartbeat") {
+    if (!hasOnlyKeys(value, ["type", "nodeId", "activeRuns", "activeInstances", "at"]) || !instanceID(value.nodeId) || !isTimestamp(value.at)
+      || !instanceCount(value.activeRuns) || !isOptional(value.activeInstances, instanceCount)) return reject("invalid v5 heartbeat");
+  } else if (value.type === "sync.complete") {
+    if (!hasOnlyKeys(value, ["type", "nodeId", "activeRuns", "activeRunIds", "activeInstanceIds", "at"]) || !instanceID(value.nodeId) || !isTimestamp(value.at)
+      || !isOptional(value.activeRuns, instanceCount) || !isOptional(value.activeRunIds, instanceIDs) || !isOptional(value.activeInstanceIds, instanceIDs)) return reject("invalid v5 reconciliation evidence");
+  } else {
+    if (!["instance.ready", "instance.failed", "instance.released"].includes(value.type as string)
+      || !hasOnlyKeys(value, value.type === "instance.failed" ? ["type", "nodeId", "instanceId", "allocationId", "at", "error"] : ["type", "nodeId", "instanceId", "allocationId", "at"])
+      || !["nodeId", "instanceId", "allocationId"].every((key) => instanceID(value[key])) || !isTimestamp(value.at)
+      || (value.type === "instance.failed" && !isDiagnostic(value.error))) return reject("invalid instance lifecycle evidence");
+  }
+  return accept(value as unknown as InstanceControlMessage);
+}
+const instanceHarnessProfile = (value: unknown): value is HarnessProfile => isRecord(value)
+  && hasOnlyKeys(value, ["id", "label", "description", "binary", "available", "authMode", "models", "transports", "acp", "approvalPolicy"])
+  && isHarnessId(value.id) && isIdentifier(value.label) && isDiagnostic(value.description) && typeof value.available === "boolean"
+  && isOneOf(["local-subscription", "local-account", "api", "none"])(value.authMode)
+  && instanceStrings(value.models) && isOptional(value.binary, (item) => isBoundedString(item, instanceLimits.workspaceBytes))
+  && isOptional(value.transports, (items) => instanceStrings(items, isHarnessTransport)) && isOptional(value.approvalPolicy, isApprovalPolicy)
+  && isOptional(value.acp, (item) => isAcpAgentCapabilities(item));
+export function validateInstanceLifecycleRequest(value: unknown): Validation<InstanceLifecycleRequest> {
+  if (!isRecord(value) || !instanceID(value.threadId) || !isRecord(value.idempotency)
+    || !hasOnlyKeys(value.idempotency, ["caller", "key"]) || !instanceCreator(value.idempotency.caller)
+    || !isBoundedString(value.idempotency.key, instanceLimits.idempotencyKeyBytes) || value.idempotency.key.length === 0) return reject("invalid lifecycle identity");
+  if (value.operation === "create") {
+    if (!hasOnlyKeys(value, ["operation", "threadId", "idempotency", "purpose", "requirements", "idleTimeoutSeconds", "initialTask"])
+      || !isOptional(value.purpose, instancePurpose) || !validateInstanceRequirements(value.requirements).ok || !isOptional(value.idleTimeoutSeconds, idleTimeout)
+      || !isOptional(value.initialTask, (task) => isRecord(task) && hasOnlyKeys(task, ["title", "instructions"]) && isIdentifier(task.title) && instanceText(task.instructions))) return reject("invalid create instance request");
+  } else if (value.operation === "release") {
+    if (!hasOnlyKeys(value, ["operation", "threadId", "instanceId", "idempotency", "mode"]) || !instanceID(value.instanceId) || !isInstanceReleaseMode(value.mode)) return reject("invalid release instance request");
+  } else if (value.operation === "renew") {
+    if (!hasOnlyKeys(value, ["operation", "threadId", "instanceId", "idempotency", "idleTimeoutSeconds"]) || !instanceID(value.instanceId) || !isOptional(value.idleTimeoutSeconds, idleTimeout)) return reject("invalid renew instance request");
+  } else return reject("unknown instance lifecycle operation");
+  return accept(value as unknown as InstanceLifecycleRequest);
+}
+/** Stable semantic digest input; caller and target identities participate, timestamps do not.
+ * Requirement arrays are sets; preference arrays preserve ranking. Hashing/storage belongs to hub.
+ */
+export function instanceLifecycleDigestInput(request: InstanceLifecycleRequest): Validation<string> {
+  const valid = validateInstanceLifecycleRequest(request);
+  if (!valid.ok) return valid;
+  const normalized = { ...request, idempotency: { caller: request.idempotency.caller },
+    ...((request.operation === "create" || request.operation === "renew") ? { idleTimeoutSeconds: request.idleTimeoutSeconds ?? defaultInstanceIdleTimeoutSeconds } : {}) };
+  const canonical = (item: unknown, key = ""): unknown => {
+    if (Array.isArray(item)) return key === "preferences" ? item : [...item];
+    if (!isRecord(item)) return item;
+    return Object.fromEntries(Object.keys(item).sort().filter((field) => item[field] !== undefined).map((field) => {
+      const child = item[field];
+      return [field, Array.isArray(child) && key === "requirements" ? [...child].sort() : canonical(child, field)];
+    }));
+  };
+  return accept(JSON.stringify(canonical(normalized)));
 }

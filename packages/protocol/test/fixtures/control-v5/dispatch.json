@@ -1,0 +1,65 @@
+{
+  "type": "dispatch",
+  "instance": {
+    "id": "instance-one",
+    "threadId": "thread-one",
+    "creator": {
+      "kind": "operator",
+      "operatorId": "operator-one"
+    },
+    "purpose": {
+      "name": "Issue 73 Developer",
+      "instructions": "Implement the shared contracts."
+    },
+    "delegation": {
+      "canDelegate": false
+    },
+    "requirements": {
+      "harnessIds": [
+        "claude-cli"
+      ],
+      "operatingSystems": [
+        "darwin"
+      ]
+    },
+    "lease": {
+      "idleTimeoutSeconds": 1800,
+      "expiresAt": "2026-09-24T12:30:00Z"
+    },
+    "status": "ready",
+    "createdAt": "2026-09-24T12:00:00Z",
+    "updatedAt": "2026-09-24T12:00:00Z"
+  },
+  "allocation": {
+    "id": "allocation-one",
+    "instanceId": "instance-one",
+    "nodeId": "node-one",
+    "harnessId": "claude-cli",
+    "model": "fable",
+    "transport": "native-cli",
+    "workspace": "/workspace",
+    "lease": {
+      "idleTimeoutSeconds": 1800,
+      "expiresAt": "2026-09-24T12:30:00Z"
+    },
+    "status": "active",
+    "createdAt": "2026-09-24T12:00:00Z",
+    "updatedAt": "2026-09-24T12:00:00Z"
+  },
+  "run": {
+    "id": "run-one",
+    "threadId": "thread-one",
+    "instanceId": "instance-one",
+    "allocationId": "allocation-one",
+    "nodeId": "node-one",
+    "harnessId": "claude-cli",
+    "model": "fable",
+    "workspace": "/workspace",
+    "prompt": "Implement the shared contracts.",
+    "status": "queued",
+    "output": "",
+    "depth": 0,
+    "createdAt": "2026-09-24T12:00:00Z",
+    "transport": "native-cli"
+  }
+}
