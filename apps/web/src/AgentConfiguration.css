@@ -1,27 +1,26 @@
 .agent-configuration-dialog { width: min(100%, 560px); max-height: calc(100dvh - 40px); padding: 20px; border: 1px solid var(--line-strong); border-radius: 10px; overflow-y: auto; background: #111412; box-shadow: 0 20px 60px rgba(0,0,0,.42); animation: dialog-in 220ms cubic-bezier(.25,1,.5,1) both; }
 .agent-configuration-dialog > header { display: flex; align-items: flex-start; justify-content: space-between; }
-.agent-configuration-dialog header small { color: var(--accent); font: 500 8px "DM Mono", monospace; letter-spacing: .08em; text-transform: uppercase; }
-.agent-configuration-dialog h2 { margin: 5px 0 0; font-size: 20px; letter-spacing: -.035em; }
-.agent-configuration-dialog > p { margin: 10px 0 20px; color: var(--muted); font-size: 9px; line-height: 1.6; }
+.agent-configuration-dialog header small { color: var(--accent); font: 500 var(--font-size-8) "DM Mono", monospace; letter-spacing: .08em; text-transform: uppercase; }
+.agent-configuration-dialog h2 { margin: 5px 0 0; font-size: var(--font-size-20); letter-spacing: -.035em; }
+.agent-configuration-dialog > p { margin: 10px 0 20px; color: var(--muted); font-size: var(--font-size-9); line-height: 1.6; }
 .agent-configuration-form > fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
-.agent-configuration-form label { margin-bottom: 12px; display: grid; gap: 6px; color: var(--muted); font-size: 8px; }
-.agent-configuration-form input, .agent-configuration-form select, .agent-configuration-form textarea { width: 100%; min-height: 40px; padding: 9px 10px; border: 1px solid var(--line); border-radius: 7px; outline: 0; resize: vertical; color: var(--text); background: var(--surface); font-size: 10px; }
+.agent-configuration-form label { margin-bottom: 12px; display: grid; gap: 6px; color: var(--muted); font-size: var(--font-size-8); }
+.agent-configuration-form input, .agent-configuration-form select, .agent-configuration-form textarea { width: 100%; min-height: 40px; padding: 9px 10px; border: 1px solid var(--line); border-radius: 7px; outline: 0; resize: vertical; color: var(--text); background: var(--surface); font-size: var(--font-size-10); }
 .agent-configuration-form select { appearance: auto; }
 .agent-configuration-form input:focus, .agent-configuration-form select:focus, .agent-configuration-form textarea:focus { border-color: rgba(223,163,76,.50); }
 .agent-configuration-form .coordination-toggle { display: flex; align-items: center; gap: 9px; color: var(--secondary); }
 .agent-configuration-form .coordination-toggle input { width: 15px; min-height: 15px; margin: 0; accent-color: var(--accent); }
 .configuration-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 10px; }
-.workspace-hint { display: block; margin: -4px 0 12px; overflow-wrap: anywhere; color: var(--faint); font-size: 8px; }
-.configuration-error, .configuration-notice { margin: 10px 0 0; color: var(--danger); font-size: 8px; line-height: 1.5; }
+.workspace-hint { display: block; margin: -4px 0 12px; overflow-wrap: anywhere; color: var(--faint); font-size: var(--font-size-8); }
+.configuration-error, .configuration-notice { margin: 10px 0 0; color: var(--danger); font-size: var(--font-size-8); line-height: 1.5; }
 .configuration-notice { color: var(--accent); }
 .agent-configuration-form > footer { margin-top: 20px; display: flex; justify-content: flex-end; gap: 8px; }
-.agent-configuration-form > footer button { height: 36px; padding: 0 12px; border: 1px solid var(--line); border-radius: 7px; color: var(--secondary); background: transparent; font-size: 9px; cursor: pointer; }
+.agent-configuration-form > footer button { height: 36px; padding: 0 12px; border: 1px solid var(--line); border-radius: 7px; color: var(--secondary); background: transparent; font-size: var(--font-size-9); cursor: pointer; }
 .agent-configuration-form > footer .save-configuration { border-color: var(--accent); color: #171209; background: var(--accent); font-weight: 700; }
 .agent-configuration-form > footer .save-configuration:disabled { opacity: .45; cursor: default; }
 .mode-edit { padding: 16px; }
 .mode-edit .avatar-picker { margin-bottom: 16px; }
 
 @media (max-width: 520px) {
-  .agent-configuration-dialog { max-height: calc(100dvh - 24px); padding: 18px; padding-bottom: calc(18px + env(safe-area-inset-bottom)); }
   .configuration-grid { grid-template-columns: 1fr; }
 }
