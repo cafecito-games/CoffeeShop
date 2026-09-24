@@ -432,15 +432,25 @@ export function requiredCapabilityForControlAgentMessage(message: ControlAgentTo
   }
 }
 
+/*
+ * The transport only ever carries a type named by one of these unions. An unknown discriminator is
+ * refused before any capability is resolved, so a message shape this build does not know is never
+ * forwarded on the strength of its remaining fields.
+ */
+const hubToControlAgentMessageTypes = ["dispatch", "cancel", "hub.rpc.response", "approval.decision", "workspace.cleanup", "workspace.lease.confirmed", "ping"] as const;
+const controlAgentToHubMessageTypes = ["register", "sync.complete", "heartbeat", "run.started", "run.output", "run.completed", "run.failed", "run.cancelled", "hub.rpc.request", "harness.event", "session.binding", "workspace.lease", "capability.report", "approval.undeliverable"] as const;
+const knownMessageType = (type: string, legacy: readonly string[], instance: readonly string[]) =>
+  legacy.includes(type) || instance.includes(type);
+
 export const canSendToControlAgent = (message: HubToControlAgent | InstanceHubMessage, version: ControlProtocolVersion) => {
-  if (!["dispatch", "cancel", "hub.rpc.response", "approval.decision", "workspace.cleanup", "workspace.lease.confirmed", "ping", "instance.provision", "instance.release"].includes(message.type)) return false;
+  if (!knownMessageType(message.type, hubToControlAgentMessageTypes, instanceHubMessageTypes)) return false;
   const capability = requiredCapabilityForHubMessage(message);
   if (capability === "instances") return validateInstanceHubMessage(message, version).ok;
   return isControlProtocolVersion(version) && (capability === undefined || supportsControlCapability(version, capability));
 };
 
 export const canAcceptFromControlAgent = (message: ControlAgentToHub | InstanceControlMessage, version: ControlProtocolVersion) => {
-  if (!["register", "sync.complete", "heartbeat", "run.started", "run.output", "run.completed", "run.failed", "run.cancelled", "hub.rpc.request", "harness.event", "session.binding", "workspace.lease", "capability.report", "approval.undeliverable", "instance.ready", "instance.failed", "instance.released"].includes(message.type)) return false;
+  if (!knownMessageType(message.type, controlAgentToHubMessageTypes, instanceControlMessageTypes)) return false;
   const capability = requiredCapabilityForControlAgentMessage(message);
   if (capability === "instances") return validateInstanceControlMessage(message, version).ok;
   return isControlProtocolVersion(version) && (capability === undefined || supportsControlCapability(version, capability));
@@ -2736,7 +2746,7 @@ export function validateInstanceRequirements(value: unknown): Validation<Executi
     || !["skills", "models", "operatingSystems", "architectures", "labels"].every((key) => isOptional(value[key], instanceStrings))
     || !isOptional(value.harnessIds, (items) => instanceStrings(items, isHarnessId))
     || !isOptional(value.transports, (items) => instanceStrings(items, isHarnessTransport))
-    || !isOptional(value.minimumConcurrency, instanceCount) || !isOptional(value.minimumMemoryMegabytes, (n) => isNonNegativeInteger(n) && n <= 2 ** 32 - 1)
+    || !isOptional(value.minimumConcurrency, instanceCount) || !isOptional(value.minimumMemoryMegabytes, (megabytes) => isNonNegativeInteger(megabytes) && megabytes <= 2 ** 32 - 1)
     || !isOptional(value.projectProfileId, instanceID) || !isOptional(value.preferences, executionPreferences)) return reject("invalid instance requirements");
   if (value.workspace !== undefined && (!isRecord(value.workspace) || !hasOnlyKeys(value.workspace, ["repository", "path", "writable"])
     || typeof value.workspace.writable !== "boolean" || !isOptional(value.workspace.path, absoluteInstancePath)
@@ -2787,7 +2797,7 @@ export function validateInstanceRun(value: unknown): Validation<InstanceRun> {
     || !isOneOf(runStatuses)(value.status) || !instanceCount(value.depth) || !isTimestamp(value.createdAt) || !isHarnessTransport(value.transport)
     || !["parentRunId", "taskId", "sessionBindingId", "workspaceLeaseId", "providerSessionId"].every((key) => isOptional(value[key], instanceID))
     || !["dispatchedAt", "startedAt", "finishedAt"].every((key) => isOptional(value[key], isTimestamp))
-    || !isOptional(value.attempt, (n) => instanceCount(n) && n > 0)
+    || !isOptional(value.attempt, (attempt) => instanceCount(attempt) && attempt > 0)
     || !isOptional(value.fallbackTransport, (item) => value.transport === "acp-v1" && item === "native-cli")
     || !isOptional(value.transportSelection, (item) => validateRunTransportSelection(item).ok)) return reject("invalid instance run");
   return accept(value as unknown as InstanceRun);
@@ -2829,7 +2839,7 @@ export function validateInstanceControlMessage(value: unknown, version: ControlP
       || !instanceCount(node.activeRuns) || !instanceCount(node.concurrency) || !isOptional(node.instanceCapacity, instanceCount) || !isOptional(node.activeInstances, instanceCount)
       || (typeof node.activeInstances === "number" && typeof node.instanceCapacity === "number" && node.activeInstances > node.instanceCapacity)
       || !instanceStrings(node.workspaceRoots, absoluteInstancePath) || !Array.isArray(node.harnesses) || node.harnesses.length > instanceLimits.requirementEntries
-      || !node.harnesses.every(instanceHarnessProfile) || new Set(node.harnesses.map((h) => h.id)).size !== node.harnesses.length) return reject("invalid v5 registration");
+      || !node.harnesses.every(instanceHarnessProfile) || new Set(node.harnesses.map((harness) => harness.id)).size !== node.harnesses.length) return reject("invalid v5 registration");
   } else if (value.type === "heartbeat") {
     if (!hasOnlyKeys(value, ["type", "nodeId", "activeRuns", "activeInstances", "at"]) || !instanceID(value.nodeId) || !isTimestamp(value.at)
       || !instanceCount(value.activeRuns) || !isOptional(value.activeInstances, instanceCount)) return reject("invalid v5 heartbeat");

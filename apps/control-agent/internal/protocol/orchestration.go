@@ -750,21 +750,21 @@ func v5Object(required, optional map[string]v5Rule) v5Rule {
 }
 func v5String(minimum, maximum int) v5Rule {
 	return func(value any) bool {
-		s, ok := value.(string)
-		return ok && utf8.ValidString(s) && len(s) >= minimum && len(s) <= maximum
+		text, ok := value.(string)
+		return ok && utf8.ValidString(text) && len(text) >= minimum && len(text) <= maximum
 	}
 }
 func v5Enum(values []string) v5Rule {
-	return func(value any) bool { s, ok := value.(string); return ok && slices.Contains(values, s) }
+	return func(value any) bool { text, ok := value.(string); return ok && slices.Contains(values, text) }
 }
 func v5Integer(minimum, maximum int64) v5Rule {
 	return func(value any) bool {
-		n, ok := value.(json.Number)
+		number, ok := value.(json.Number)
 		if !ok {
 			return false
 		}
-		f, err := n.Float64()
-		return err == nil && f >= float64(minimum) && f <= float64(maximum) && f == float64(int64(f))
+		numeric, err := number.Float64()
+		return err == nil && numeric >= float64(minimum) && numeric <= float64(maximum) && numeric == float64(int64(numeric))
 	}
 }
 func v5Boolean(value any) bool { _, ok := value.(bool); return ok }
@@ -773,17 +773,17 @@ var instanceIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]*$`)
 var instancePathPattern = regexp.MustCompile(`^(/|[A-Za-z]:[\\/])`)
 
 func v5ID(value any) bool {
-	s, ok := value.(string)
-	return ok && v5String(1, identifierBytes)(s) && instanceIDPattern.MatchString(s)
+	text, ok := value.(string)
+	return ok && v5String(1, identifierBytes)(text) && instanceIDPattern.MatchString(text)
 }
-func v5Time(value any) bool { s, ok := value.(string); return ok && isTimestamp(s) }
+func v5Time(value any) bool { text, ok := value.(string); return ok && isTimestamp(text) }
 func v5Path(value any) bool {
-	s, ok := value.(string)
-	if !ok || !v5String(1, InstanceWorkspaceBytes)(s) || !instancePathPattern.MatchString(s) {
+	text, ok := value.(string)
+	if !ok || !v5String(1, InstanceWorkspaceBytes)(text) || !instancePathPattern.MatchString(text) {
 		return false
 	}
-	for _, ch := range s {
-		if ch < 32 {
+	for _, character := range text {
+		if character < 32 {
 			return false
 		}
 	}
@@ -797,19 +797,19 @@ func v5Strings(limit int, rule v5Rule) v5Rule {
 		}
 		seen := map[string]bool{}
 		for _, item := range items {
-			s, ok := item.(string)
-			if !ok || !rule(item) || seen[s] {
+			text, ok := item.(string)
+			if !ok || !rule(item) || seen[text] {
 				return false
 			}
-			seen[s] = true
+			seen[text] = true
 		}
 		return true
 	}
 }
 func v5Array(values []string) []any {
 	result := make([]any, len(values))
-	for i, value := range values {
-		result[i] = value
+	for index, value := range values {
+		result[index] = value
 	}
 	return result
 }
@@ -873,8 +873,8 @@ var v5Run = v5Object(map[string]v5Rule{
 			"approvalPolicy": v5Enum(ApprovalPolicies), "acp": v5ACP,
 			"adapter": v5Object(map[string]v5Rule{
 				"id": func(value any) bool {
-					s, ok := value.(string)
-					return ok && len(s) <= LabelOrAcceleratorMaximumBytes && LabelOrAcceleratorPattern.MatchString(s)
+					text, ok := value.(string)
+					return ok && len(text) <= LabelOrAcceleratorMaximumBytes && LabelOrAcceleratorPattern.MatchString(text)
 				},
 				"version": v5NormalizedVersion, "source": v5Enum(ACPAdapterSources),
 			}, nil),
@@ -948,26 +948,31 @@ func DecodeInstanceHubMessage(data []byte, version string) (InstanceHubMessage, 
 	if message.Type == "instance.release" {
 		return message, nil
 	}
-	i, a := message.Instance, message.Allocation
-	if i.ID != a.InstanceID || i.Lease != a.Lease {
+	instance, allocation := message.Instance, message.Allocation
+	if instance.ID != allocation.InstanceID || instance.Lease != allocation.Lease {
 		return message, fmt.Errorf("instance allocation identity or lease mismatch")
 	}
 	if message.Type == "instance.provision" {
-		if i.Status != "provisioning" || !slices.Contains([]string{"reserved", "provisioning"}, a.Status) {
+		if instance.Status != "provisioning" || !slices.Contains([]string{"reserved", "provisioning"}, allocation.Status) {
 			return message, fmt.Errorf("invalid provision state")
 		}
-	} else {
-		r := message.Run
-		if r.InstanceID != i.ID || r.AllocationID != a.ID || r.ThreadID != i.ThreadID || r.NodeID != a.NodeID || r.HarnessID != a.HarnessID || r.Model != a.Model || r.Transport != a.Transport || r.Workspace != a.Workspace || r.Status != "queued" || a.Status != "active" || !slices.Contains([]string{"ready", "busy", "idle"}, i.Status) || (r.FallbackTransport != nil && r.Transport != "acp-v1") {
-			return message, fmt.Errorf("invalid dispatch identity, state, or placement")
-		}
+		return message, nil
+	}
+	run := message.Run
+	identityMatches := run.InstanceID == instance.ID && run.AllocationID == allocation.ID && run.ThreadID == instance.ThreadID
+	placementMatches := run.NodeID == allocation.NodeID && run.HarnessID == allocation.HarnessID && run.Model == allocation.Model &&
+		run.Transport == allocation.Transport && run.Workspace == allocation.Workspace
+	stateAllowsDispatch := run.Status == "queued" && allocation.Status == "active" &&
+		slices.Contains([]string{"ready", "busy", "idle"}, instance.Status)
+	if !identityMatches || !placementMatches || !stateAllowsDispatch || (run.FallbackTransport != nil && run.Transport != "acp-v1") {
+		return message, fmt.Errorf("invalid dispatch identity, state, or placement")
 	}
 	return message, nil
 }
 
 func v5NormalizedVersion(value any) bool {
-	s, ok := value.(string)
-	return ok && IsNormalizedVersion(s)
+	text, ok := value.(string)
+	return ok && IsNormalizedVersion(text)
 }
 
 var v5ACP = v5Object(map[string]v5Rule{
@@ -976,15 +981,15 @@ var v5ACP = v5Object(map[string]v5Rule{
 	"mcp":    v5Object(map[string]v5Rule{"http": v5Boolean, "sse": v5Boolean}, nil),
 }, map[string]v5Rule{
 	"adapterName": func(value any) bool {
-		s, ok := value.(string)
-		return ok && v5String(0, ACPAdapterNameMaximumBytes)(s) && !LooksSecretLike(s)
+		text, ok := value.(string)
+		return ok && v5String(0, ACPAdapterNameMaximumBytes)(text) && !LooksSecretLike(text)
 	},
 	"adapterVersion": v5NormalizedVersion,
 })
 var v5Harness = v5Object(map[string]v5Rule{
 	"id": v5Enum(HarnessIDs), "label": v5String(1, identifierBytes), "description": v5String(0, diagnosticBytes), "available": v5Boolean,
 	"authMode": v5Enum([]string{"local-subscription", "local-account", "api", "none"}), "models": v5Names,
-}, map[string]v5Rule{"binary": v5String(0, InstanceWorkspaceBytes), "transports": v5Strings(InstanceRequirementEntries, v5Enum(HarnessTransports)), "acp": v5ACP, "approvalPolicy": v5Enum([]string{"manual", "auto", "bypass"})})
+}, map[string]v5Rule{"binary": v5String(0, InstanceWorkspaceBytes), "transports": v5Strings(InstanceRequirementEntries, v5Enum(HarnessTransports)), "acp": v5ACP, "approvalPolicy": v5Enum(ApprovalPolicies)})
 var v5Node = v5Object(map[string]v5Rule{
 	"id": v5ID, "name": v5String(1, identifierBytes), "kind": v5Enum([]string{"local", "home-server", "cloud"}),
 	"platform": v5String(1, identifierBytes), "status": v5Enum([]string{"online", "offline", "busy"}), "lastSeen": v5Time,
