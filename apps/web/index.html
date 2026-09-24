@@ -2,16 +2,19 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <!--
+      The viewport deliberately does not opt into the display cutout, and there is no status bar
+      style. Under either one an installed iOS web app paints from the top of the screen but reports
+      a viewport one status-bar inset shorter than it: on a 956pt phone every height measure reads
+      894 while the page still starts at y=0, and the remaining 62pt are clipped rather than merely
+      unstyled -- an element placed there does not render. Nothing anchored to the bottom of the
+      viewport can then reach the bottom of the screen. Letting iOS inset the web view itself costs
+      the edge-to-edge status bar and gives back a viewport whose bottom is the real one.
+    -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#0b0c0e" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
-    <!--
-      No apple-mobile-web-app-status-bar-style: the "black-translucent" value moves the page origin
-      under the status bar without growing the viewport, so the viewport ends one status-bar inset
-      above the screen and anything anchored to its bottom floats. viewport-fit=cover already gives
-      the full-screen web view and real safe-area insets.
-    -->
     <link rel="icon" href="/icon.svg" />
     <title>Coffee Shop</title>
   </head>
