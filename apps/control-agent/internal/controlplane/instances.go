@@ -177,43 +177,78 @@ func (client *Client) provisionRejection(allocation protocol.InstanceAllocation)
 	return ""
 }
 
+// provisionReplayOutcomeLocked answers a provision for an allocation this Barista has already
+// settled — hosted, draining, held by a failed cleanup, or released — from its recorded outcome
+// without re-adjudicating local prerequisites, and reports settled. An exact replay may carry
+// refreshed hub-side bookkeeping — a renewed lease, new status or timestamps — which the hosted
+// records adopt without touching identity or placement; a conflicting replay is refused without
+// replacing the resident. settled is false only when the allocation is unknown here and the caller
+// must validate prerequisites and admit it. The caller must hold the resident lock and send any
+// message only after releasing it.
+func (supervisor *residentSupervisor) provisionReplayOutcomeLocked(instance protocol.AgentInstance, allocation protocol.InstanceAllocation) (failure string, settled bool) {
+	existing, hosted := supervisor.residentsTable[allocation.ID]
+	if !hosted {
+		if _, released := supervisor.releasedOutcomes[allocation.ID]; released {
+			return "this allocation was already released", true
+		}
+		return "", false
+	}
+	if !existing.matches(instance, allocation) {
+		return "a different resident is already hosted for this allocation", true
+	}
+	existing.instance, existing.allocation = instance, allocation
+	switch existing.state {
+	case residentReady:
+		return "", true
+	case residentDraining:
+		return "the resident for this allocation is draining a release and is closed to new dispatch", true
+	case residentCleanupFailed:
+		return "the resident for this allocation is held by a failed release cleanup", true
+	default:
+		// A state added later must fail closed rather than fall through as ready: instance.ready
+		// advertises capacity the hub may dispatch to, and only a ready resident can accept work.
+		return "the resident for this allocation is closed to new dispatch", true
+	}
+}
+
+// reportProvisionOutcome reports a settled provision outcome; an empty failure is acknowledged
+// ready.
+func (client *Client) reportProvisionOutcome(allocationID, instanceID, failure string) {
+	if failure == "" {
+		client.reportInstanceReady(allocationID, instanceID)
+		return
+	}
+	client.reportInstanceFailure(allocationID, instanceID, failure)
+}
+
 func (client *Client) provisionInstance(message protocol.InstanceHubMessage) {
 	instance, allocation := *message.Instance, *message.Allocation
+	// Identity resolution comes before prerequisite validation: an allocation this Barista already
+	// settled is answered from its recorded admission, so an exact replay stays harmless even when a
+	// local prerequisite drifted after admission — re-adjudicating it would report instance.failed
+	// for a lifecycle whose ready resident still occupies its slot. This order is safe only because
+	// dispatch re-authorizes the workspace before granting MCP or starting the provider (dispatchRun
+	// in client.go), so answering a replay from its recorded outcome cannot bypass WORKSPACE_ROOTS.
+	client.residents.mu.Lock()
+	failure, settled := client.residents.provisionReplayOutcomeLocked(instance, allocation)
+	client.residents.mu.Unlock()
+	if settled {
+		client.reportProvisionOutcome(allocation.ID, instance.ID, failure)
+		return
+	}
+	// Prerequisite validation runs outside the resident lock because a transport admission may
+	// re-verify an adapter executable's digest on the filesystem.
 	if reason := client.provisionRejection(allocation); reason != "" {
 		client.reportInstanceFailure(allocation.ID, instance.ID, reason)
 		return
 	}
 	client.residents.mu.Lock()
-	if existing, hosted := client.residents.residentsTable[allocation.ID]; hosted {
-		exactReplay := existing.matches(instance, allocation)
-		state := existing.state
-		if exactReplay {
-			// An exact replay may carry refreshed hub-side bookkeeping — a renewed lease, new status
-			// or timestamps — which the hosted records adopt without touching identity or placement.
-			existing.instance, existing.allocation = instance, allocation
-		}
+	// A concurrent provision of the same allocation may have been admitted while the lock was
+	// released for validation; it is answered as the replay it has now become.
+	failure, settled = client.residents.provisionReplayOutcomeLocked(instance, allocation)
+	if settled {
 		client.residents.mu.Unlock()
-		if !exactReplay {
-			client.reportInstanceFailure(allocation.ID, instance.ID, "a different resident is already hosted for this allocation")
-			return
-		}
-		switch state {
-		case residentReady:
-			client.reportInstanceReady(allocation.ID, instance.ID)
-		case residentDraining:
-			client.reportInstanceFailure(allocation.ID, instance.ID, "the resident for this allocation is draining a release and is closed to new dispatch")
-		case residentCleanupFailed:
-			client.reportInstanceFailure(allocation.ID, instance.ID, "the resident for this allocation is held by a failed release cleanup")
-		default:
-			// A state added later must fail closed rather than fall through as ready: instance.ready
-			// advertises capacity the hub may dispatch to, and only a ready resident can accept work.
-			client.reportInstanceFailure(allocation.ID, instance.ID, "the resident for this allocation is closed to new dispatch")
-		}
-		return
-	}
-	if _, released := client.residents.releasedOutcomes[allocation.ID]; released {
-		client.residents.mu.Unlock()
-		client.reportInstanceFailure(allocation.ID, instance.ID, "this allocation was already released")
+		client.reportProvisionOutcome(allocation.ID, instance.ID, failure)
 		return
 	}
 	if client.residents.capacity <= 0 {
@@ -258,8 +293,26 @@ func (client *Client) releaseInstance(ctx context.Context, message protocol.Inst
 		return
 	}
 	if resident.state == residentDraining {
+		if message.Mode != "cancel" {
+			client.residents.mu.Unlock()
+			log.Printf("ignore duplicate release while allocation %s is draining", message.AllocationID)
+			return
+		}
+		// A delivered drain escalates monotonically to a cancel: the runs the waiting drain is
+		// letting settle on their own are terminated now, instead of the release waiting them out
+		// indefinitely. The waiting release stays the sole owner of the outcome — this path never
+		// changes the resident's state, deletes it, frees its slot, or reports — so both releases
+		// converge on exactly one instance.released.
+		runIDs := make([]string, 0, len(resident.runs))
+		for runID := range resident.runs {
+			runIDs = append(runIDs, runID)
+		}
+		cancels := client.markResidentRunsCancelled(runIDs)
 		client.residents.mu.Unlock()
-		log.Printf("ignore duplicate release while allocation %s is draining", message.AllocationID)
+		for _, cancel := range cancels {
+			cancel()
+		}
+		log.Printf("escalated the draining allocation %s to cancel its active runs", message.AllocationID)
 		return
 	}
 	resident.state = residentDraining
@@ -276,17 +329,10 @@ func (client *Client) releaseInstance(ctx context.Context, message protocol.Inst
 	// Cancel decisions and cancel functions are gathered under runsMu (always nested inside the
 	// resident lock, never the reverse) but invoked only after both locks are released. A drain
 	// gathers nothing: it lets its runs settle on their own.
-	client.runsMu.Lock()
 	var cancels []context.CancelFunc
 	if message.Mode == "cancel" {
-		for _, runID := range runIDs {
-			client.cancelled[runID] = struct{}{}
-			if cancel := client.runs[runID]; cancel != nil {
-				cancels = append(cancels, cancel)
-			}
-		}
+		cancels = client.markResidentRunsCancelled(runIDs)
 	}
-	client.runsMu.Unlock()
 	client.residents.mu.Unlock()
 
 	for _, cancel := range cancels {
@@ -325,6 +371,23 @@ func (client *Client) releaseInstance(ctx context.Context, message protocol.Inst
 	client.residents.recordReleasedLocked(message.AllocationID)
 	client.residents.mu.Unlock()
 	client.reportInstanceReleased(message.AllocationID, message.InstanceID)
+}
+
+// markResidentRunsCancelled tombstones the given runs and collects their cancel functions without
+// invoking them. The caller must hold the resident lock; runsMu is acquired and released inside
+// (always after the resident lock, never the reverse), and the returned functions must be invoked
+// only after the resident lock is released, because cancelling a run stops a harness process.
+func (client *Client) markResidentRunsCancelled(runIDs []string) []context.CancelFunc {
+	client.runsMu.Lock()
+	defer client.runsMu.Unlock()
+	cancels := make([]context.CancelFunc, 0, len(runIDs))
+	for _, runID := range runIDs {
+		client.cancelled[runID] = struct{}{}
+		if cancel := client.runs[runID]; cancel != nil {
+			cancels = append(cancels, cancel)
+		}
+	}
+	return cancels
 }
 
 // finishResidentRun removes a settled run's membership exactly once and completes a drain whose

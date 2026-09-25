@@ -281,6 +281,99 @@ func TestProvisionReplayIsExactAndConflictsAreRefused(t *testing.T) {
 	require.NotNil(t, waitForMessage(t, client, "run.completed"), "the original resident still dispatches")
 }
 
+// An allocation that was already accepted replays exactly while a local prerequisite has drifted.
+// The recorded admission owns the answer; re-adjudicating the prerequisite would report
+// instance.failed for a lifecycle whose ready resident still occupies its slot.
+func TestExactProvisionReplayIsAnsweredBeforePrerequisiteRevalidation(t *testing.T) {
+	directory := t.TempDir()
+	client := instanceTestClient(t, quickHarnessBinary(t, directory), directory, 2, 1, nil)
+	instance, allocation := testInstanceAndAllocation(directory)
+	provisionReady(t, client, instance, allocation)
+
+	// A local prerequisite drifts after admission: the resident's workspace is no longer inside any
+	// configured root.
+	client.config.WorkspaceRoots = []string{filepath.Join(directory, "gone")}
+
+	client.handleInstanceMessage(context.Background(), testProvisionMessage(instance, allocation))
+	waitForInstanceMessageCount(t, client, "instance.ready", allocation.ID, 2)
+	require.Equal(t, 1, client.activeInstanceCount(), "an exact replay must neither reserve nor free a slot")
+
+	conflictingInstance, conflictingAllocation := instance, allocation
+	conflictingInstance.ID = "instance-other"
+	conflictingAllocation.InstanceID = "instance-other"
+	client.handleInstanceMessage(context.Background(), testProvisionMessage(conflictingInstance, conflictingAllocation))
+	waitForInstanceReason(t, client, "instance.failed", allocation.ID, "a different resident is already hosted for this allocation")
+	require.Equal(t, 1, client.activeInstanceCount(), "a conflicting replay must not replace the resident")
+
+	// The drift is still enforced where it is a security boundary: dispatch re-authorizes the
+	// workspace before granting MCP or starting the provider, so the run is refused, not degraded.
+	client.handleInstanceMessage(context.Background(), testDispatchMessage(instance, allocation, "run-one"))
+	failed := waitForRunFailure(t, client, "run-one")
+	require.Contains(t, failed.Error, "outside this Barista's allowed roots")
+	require.Zero(t, client.activeRuns())
+}
+
+// A delivered drain escalates to a cancel while the drain is still waiting: its active runs are
+// terminated instead of being left to settle on their own, and the waiting drain remains the only
+// release that completes, so exactly one instance.released is reported.
+func TestCancelEscalatesAWaitingDrainIntoTerminatingActiveRuns(t *testing.T) {
+	directory := t.TempDir()
+	client := instanceTestClient(t, slowHarnessBinary(t, directory), directory, 2, 1, nil)
+	instance, allocation := testInstanceAndAllocation(directory)
+	provisionReady(t, client, instance, allocation)
+	client.handleInstanceMessage(context.Background(), testDispatchMessage(instance, allocation, "run-one"))
+	waitForMessage(t, client, "run.started")
+
+	client.handleInstanceMessage(context.Background(), testReleaseMessage(allocation, "drain"))
+	require.Eventually(t, func() bool {
+		client.residents.mu.Lock()
+		defer client.residents.mu.Unlock()
+		resident := client.residents.residentsTable[allocation.ID]
+		return resident != nil && resident.state == residentDraining
+	}, 5*time.Second, 5*time.Millisecond, "the drain must be visibly waiting before the cancel arrives")
+
+	client.handleInstanceMessage(context.Background(), testReleaseMessage(allocation, "cancel"))
+	require.NotNil(t, waitForMessage(t, client, "run.cancelled"), "a cancel must escalate a waiting drain and terminate its active runs")
+	require.NotNil(t, waitForInstanceMessage(t, client, "instance.released", allocation.ID))
+	released := 0
+	for _, message := range instanceControlMessages(t, client) {
+		if message.Type == "instance.released" && message.AllocationID == allocation.ID {
+			released++
+		}
+	}
+	require.Equal(t, 1, released, "the waiting drain and the escalating cancel converge on exactly one instance.released")
+	require.Zero(t, client.activeRuns())
+	require.Zero(t, client.activeInstanceCount())
+}
+
+// A drain and a subsequent cancel race freely against an active run. Whichever order the two
+// release goroutines take the resident lock in, the run is terminated, the release completes exactly
+// once, and the slot is freed. The verification suite also runs this under -race.
+func TestConcurrentDrainAndCancelConvergeOnOneReleasedOutcome(t *testing.T) {
+	directory := t.TempDir()
+	client := instanceTestClient(t, slowHarnessBinary(t, directory), directory, 4, 1, nil)
+	instance, allocation := testInstanceAndAllocation(directory)
+	provisionReady(t, client, instance, allocation)
+	client.handleInstanceMessage(context.Background(), testDispatchMessage(instance, allocation, "run-one"))
+	waitForMessage(t, client, "run.started")
+
+	client.handleInstanceMessage(context.Background(), testReleaseMessage(allocation, "drain"))
+	client.handleInstanceMessage(context.Background(), testReleaseMessage(allocation, "cancel"))
+
+	require.NotNil(t, waitForMessage(t, client, "run.cancelled"), "the run must be terminated whether the cancel escalates a waiting drain or takes the resident first")
+	require.NotNil(t, waitForInstanceMessage(t, client, "instance.released", allocation.ID))
+	time.Sleep(100 * time.Millisecond)
+	released := 0
+	for _, message := range instanceControlMessages(t, client) {
+		if message.Type == "instance.released" && message.AllocationID == allocation.ID {
+			released++
+		}
+	}
+	require.Equal(t, 1, released, "drain then cancel must converge on exactly one instance.released")
+	require.Zero(t, client.activeRuns())
+	require.Zero(t, client.activeInstanceCount())
+}
+
 func TestProvisionReplayConflictsOnEveryImmutableInstanceField(t *testing.T) {
 	directory := t.TempDir()
 	client := instanceTestClient(t, quickHarnessBinary(t, directory), directory, 2, 2, nil)
