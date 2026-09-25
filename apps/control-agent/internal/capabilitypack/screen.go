@@ -30,10 +30,22 @@ var (
 	// punctuation. The home-relative "~/" form is rejected for the same reason an absolute path is: it
 	// names a location on one machine's filesystem.
 	//
-	// The Windows rules cover all three forms a Windows path takes: drive-absolute ("C:\dir"),
-	// drive-relative ("C:dir\file" — still a location on one machine), and a UNC share
-	// ("\\\\host\\share\\file"). Drive-relative requires a following separator so that ordinary prose
-	// with a colon ("Step A:Done") is not mistaken for a path.
+	// The Windows rules cover drive-absolute ("C:\dir"), drive-relative ("C:dir\file" — still a
+	// location on one machine), and backslash UNC ("\\\\host\\share\\file"). Drive-relative requires a
+	// following separator so ordinary prose with a colon ("Step A:Done") is not mistaken for a path.
+	//
+	// Known residuals, accepted rather than unnoticed. This screen is a heuristic over prose, so it is
+	// tuned to catch the forms an author would actually write:
+	//   - forward-slash UNC ("//host/share/file") and environment-variable indirections
+	//     ("%USERPROFILE%\x", "$HOME/x") are not matched;
+	//   - the drive-relative rule has one false-positive shape — a single letter at a word boundary,
+	//     then a colon, then an unspaced name, then a slash ("see A:B/C"). Multi-letter labels such as
+	//     "TODO:fix/this" or "git:refs/heads/main" cannot match, because the boundary character must
+	//     sit immediately before the drive letter;
+	//   - the general POSIX rule matches a JSON pointer ("/items/ref").
+	// Every residual of the second and third kinds fails loudly at build and seal time, on content the
+	// author is editing at that moment, and none can reach activation: an installed pack's bytes passed
+	// this screen by construction before they were ever packaged.
 	absolutePathPattern = regexp.MustCompile(
 		`(?:^|[^A-Za-z0-9._~/-])(?:` +
 			`(?:/[A-Za-z0-9._-]+){2,}` +
