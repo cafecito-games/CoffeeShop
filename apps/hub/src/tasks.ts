@@ -500,7 +500,7 @@ export async function submitTaskBatchForSource(
  * The key space of a task the hub derives for an instance lifecycle request. No caller-supplied
  * batch can enter it, so a derived key and a caller-chosen key of the same string never meet.
  */
-const initialTaskOrigin = "instance-lifecycle" as const;
+export const initialTaskOrigin = "instance-lifecycle" as const;
 
 /** The seed for the atomic initial task created with an instance, in the instance lifecycle transaction. */
 export interface InitialTaskSeed {

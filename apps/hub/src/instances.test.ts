@@ -32,6 +32,7 @@ import {
   reconcileNodeInstancesInState,
   reserveInstanceAllocation,
   residentInstanceUsage,
+  terminalInstanceStatuses,
   operatorInstanceCreator
 } from "./instances.js";
 import { Store, type State } from "./store.js";
@@ -272,7 +273,8 @@ test("an authoritative resident record supersedes the reported scalar, which is 
     { instanceId: "b", nodeId: "node-one", status: "active" },
     { instanceId: "c", nodeId: "node-one", status: "lost" },
     { instanceId: "d", nodeId: "node-one", status: "released" },
-    { instanceId: "e", nodeId: "node-two", status: "active" }
+    { instanceId: "e", nodeId: "node-two", status: "active" },
+    { instanceId: "f", nodeId: "node-one", status: "failed" }
   ].map((entry) => entry as never);
   /*
    * With no record of its own the node has named nothing, so its count cannot be reconciled with the
@@ -295,9 +297,15 @@ test("an authoritative resident record supersedes the reported scalar, which is 
   // An identity in both sets is counted once; an unowned one adds a slot of its own.
   assert.deepEqual(residentInstanceUsage(node, allocations, residency(["a", "b"])), { capacity: 8, used: 2 });
   assert.deepEqual(residentInstanceUsage(node, allocations, residency(["a", "foreign"])), { capacity: 8, used: 3 });
-  // A resident whose allocation the node itself settled holds no slot, however stale the record is.
+  // A resident whose release the node acknowledged holds no slot, however stale the record is.
   assert.deepEqual(residentInstanceUsage(node, allocations, residency(["d"])), { capacity: 8, used: 2 });
-  // A lost allocation is not settled evidence: where that identity went is unknown, so it still counts.
+  /*
+   * A failed allocation is not that proof. Barista retains the resident when release cleanup fails and
+   * reports `instance.failed` afterwards, so an identity the record still names keeps its slot. This
+   * replaces an assertion that a failed allocation was discounted exactly like a released one.
+   */
+  assert.deepEqual(residentInstanceUsage(node, allocations, residency(["f"])), { capacity: 8, used: 3 });
+  // A lost allocation is not vacancy evidence either: where that identity went is unknown.
   assert.deepEqual(residentInstanceUsage(node, allocations, residency(["c"])), { capacity: 8, used: 3 });
   // Another node's record never decides this node's usage, so the unnamed count still bounds it.
   assert.deepEqual(residentInstanceUsage(node, allocations, { nodeId: "node-two", instanceIds: [], observedAt: at(2) }), { capacity: 8, used: 5 });
@@ -367,9 +375,18 @@ test("a released resident stops occupying its slot without waiting for another s
   });
 });
 
-test("an acknowledged failure also frees the slot its residency record still names", async () => {
-  // The same coverage question for the other terminal acknowledgement: the reader discounts any
-  // settled allocation, so failure needs no writer of its own.
+/*
+ * This replaces a test named "an acknowledged failure also frees the slot its residency record still
+ * names", which asserted `used: 0` and a successful replacement reservation after `instance.failed`.
+ * That assertion was wrong about the producer: merged Barista retains the resident in its table when
+ * release cleanup fails and only then reports `instance.failed`
+ * (apps/control-agent/internal/controlplane/instances.go), so a failed allocation is not proof the
+ * slot is free and discounting it overbooks a capacity-1 node. The replacement keeps everything the
+ * old test covered - the acknowledgement is accepted, the record still names the resident, and the
+ * slot does eventually free for a replacement - and adds what the old one asserted backwards: the
+ * slot stays occupied until the node's own snapshot stops naming the identity.
+ */
+test("an acknowledged failure keeps its slot until the node stops naming the resident", async () => {
   const store = await hubStore((state) => { seedThread(state); seedNode(state, { instanceCapacity: 1 }); });
   const { created, reservation } = await provisionInstance(store);
   await store.transact((state) => { reconcileNodeInstancesInState(state, "node-one", [created.instance.id], at(3)); return true; });
@@ -378,10 +395,35 @@ test("an acknowledged failure also frees the slot its residency record still nam
     idempotency: { caller: operatorCaller, key: "create-two" }
   }), at(5));
   store.read((state) => {
+    assert.equal(state.allocations?.find((allocation) => allocation.id === reservation.allocation.id)?.status, "failed");
     assert.deepEqual(nodeResidencyInState(state, "node-one")?.instanceIds, [created.instance.id]);
+    // A release-cleanup failure leaves the resident in Barista's table, so the identity still occupies.
+    assert.deepEqual(residentInstanceUsage(state.nodes[0], state.allocations ?? [], nodeResidencyInState(state, "node-one")), { capacity: 1, used: 1 });
+  });
+  const refused = await reserveInstanceAllocation(store, replacement.instance.id, candidate("/work/two"), at(6));
+  assert.equal(refused.kind, "capacity", JSON.stringify(refused));
+
+  /*
+   * The failed allocation no longer occupies, so the node's next snapshot does not expect the
+   * identity: the hub asks the node to evict the resident it retained, through the remote release
+   * outbox that addresses a resident the hub owns no allocation for.
+   */
+  await store.transact((state) => { reconcileNodeInstancesInState(state, "node-one", [created.instance.id], at(7)); return true; });
+  store.read((state) => {
+    assert.deepEqual(state.remoteReleaseRequests?.map((request) => request.instanceId), [created.instance.id]);
+    assert.deepEqual(residentInstanceUsage(state.nodes[0], state.allocations ?? [], nodeResidencyInState(state, "node-one")), { capacity: 1, used: 1 });
+  });
+  const sent: string[] = [];
+  await flushPendingInstanceDeliveries(store, (_nodeId, message) => { sent.push(message.type); return true; });
+  assert.deepEqual(sent, ["instance.release"]);
+
+  // Only the node's own snapshot dropping the identity frees the slot.
+  await store.transact((state) => { reconcileNodeInstancesInState(state, "node-one", [], at(8)); return true; });
+  store.read((state) => {
+    assert.deepEqual(state.remoteReleaseRequests, []);
     assert.deepEqual(residentInstanceUsage(state.nodes[0], state.allocations ?? [], nodeResidencyInState(state, "node-one")), { capacity: 1, used: 0 });
   });
-  assert.equal((await reserveInstanceAllocation(store, replacement.instance.id, candidate("/work/two"), at(6))).kind, "reserved");
+  assert.equal((await reserveInstanceAllocation(store, replacement.instance.id, candidate("/work/two"), at(9))).kind, "reserved");
 });
 
 test("reservation occupies capacity atomically and never overbooks across transactions", async () => {
@@ -763,7 +805,141 @@ test("terminal audit records are retained under explicit pruning bounds", async 
     assert.ok(state.instanceLifecycleReceipts!.every((receipt) => instanceIds.has(receipt.instanceId)));
     assert.ok((state.instanceLifecycleReceipts?.length ?? 0) <= instanceIds.size * instanceAuditLimits.retainedReceiptsPerInstance);
     assert.ok(state.instanceReleaseIntents!.every((intent) => instanceIds.has(intent.instanceId)));
+    /*
+     * Every record derived from a pruned one is retired with its source, in either direction: no
+     * allocation or command outlives its instance, and no lifecycle-origin task submission outlives
+     * the receipt that derived it.
+     */
+    assert.ok((state.allocations ?? []).every((allocation) => instanceIds.has(allocation.instanceId)));
+    assert.ok((state.instanceDeliveries ?? []).every((record) => (state.allocations ?? []).some((allocation) => allocation.id === record.allocationId)));
+    assert.ok((state.remoteReleaseRequests ?? []).every((request) => nodeResidencyInState(state, request.nodeId)?.instanceIds.includes(request.instanceId) === true));
+    assert.ok((state.taskSubmissions ?? []).every((submission) => submission.origin !== "instance-lifecycle"
+      || state.instanceLifecycleReceipts!.some((receipt) => submission.tasks.some((entry) => entry.taskId === receipt.initialTaskId))));
   });
+});
+
+test("pruning never drops an identity the node's residency record still names", async () => {
+  /*
+   * Finding 2: pruning must not destroy the evidence the capacity derivation depends on. Once a
+   * settled allocation is gone the node's unchanged record still names its identity, and nothing is
+   * left to discount it, so the slot reads as occupied. Barista sends identity snapshots on connection
+   * attachment rather than on heartbeats, so a node that stays connected never refreshes the record and
+   * that phantom occupancy would be permanent rather than temporary.
+   */
+  const store = await hubStore((state) => { seedThread(state); seedNode(state, { instanceCapacity: 1 }); });
+  const { created, reservation } = await provisionInstance(store);
+  await store.transact((state) => { reconcileNodeInstancesInState(state, "node-one", [created.instance.id], at(3)); return true; });
+  assert.equal((await receiveInstanceLifecycleReport(store, "node-one", readyReport(created.instance.id, reservation.allocation.id), at(4))).kind, "accepted");
+  await applyInstanceLifecycle(store, operatorCaller, releaseRequest(created.instance.id, "release-one", "drain"), at(5));
+  assert.equal((await receiveInstanceLifecycleReport(store, "node-one", releasedReport(created.instance.id, reservation.allocation.id), at(6))).kind, "accepted");
+  const usage = () => store.read((state) => residentInstanceUsage(state.nodes[0], state.allocations ?? [], nodeResidencyInState(state, "node-one")));
+  assert.deepEqual(usage(), { capacity: 1, used: 0 }, "the acknowledged release freed the slot");
+
+  // Enough later terminal instances to push the released one past the retention bound; every filler
+  // settles after it, so it is the oldest and would be the first record pruning drops.
+  const beyond = instanceAuditLimits.retainedTerminalInstances + 5;
+  for (let index = 0; index < beyond; index += 1) {
+    const filler = await applyInstanceLifecycle(store, operatorCaller, createRequest("thread-one", {
+      idempotency: { caller: operatorCaller, key: `filler-${index}` }
+    }), at(100 + index));
+    await applyInstanceLifecycle(store, operatorCaller, releaseRequest(filler.instance.id, `filler-release-${index}`, "drain"), at(100 + index));
+  }
+  await maintainInstanceLifecycle(store, at(1000));
+  store.read((state) => {
+    assert.ok(state.instances!.some((instance) => instance.id === created.instance.id), "the pinned identity survives");
+    assert.ok(state.allocations!.some((allocation) => allocation.id === reservation.allocation.id), "so does the allocation that discounts it");
+    assert.equal(state.instances!.length, instanceAuditLimits.retainedTerminalInstances + 1, "the pin costs exactly the identities the node names");
+  });
+  assert.deepEqual(usage(), { capacity: 1, used: 0 }, "the slot stays free rather than becoming phantom occupancy");
+  const replacement = await applyInstanceLifecycle(store, operatorCaller, createRequest("thread-one", {
+    idempotency: { caller: operatorCaller, key: "create-replacement" }
+  }), at(1001));
+  assert.equal((await reserveInstanceAllocation(store, replacement.instance.id, candidate("/work/two"), at(1002))).kind, "reserved");
+
+  // The node's own next snapshot releases the pin, and only then may the record be pruned.
+  await store.transact((state) => { reconcileNodeInstancesInState(state, "node-one", [replacement.instance.id], at(1003)); return true; });
+  await maintainInstanceLifecycle(store, at(1004));
+  store.read((state) => {
+    assert.equal(state.instances!.some((instance) => instance.id === created.instance.id), false, "an unpinned identity is pruned normally");
+    assert.equal(state.instances!.filter((instance) => terminalInstanceStatuses.includes(instance.status)).length, instanceAuditLimits.retainedTerminalInstances);
+  });
+});
+
+test("pruning retires the task submission a create receipt derived, not just the receipt", async () => {
+  /*
+   * Finding 3: retention has to be symmetric. The submission is what answers a replay of the derived
+   * key, so a create receipt pruned without it leaves a new instance whose `initialTaskId` names the
+   * previous instance's task, with no initial task scheduled for the new one.
+   */
+  const store = await hubStore((state) => { seedThread(state); });
+  const created = await applyInstanceLifecycle(store, operatorCaller, createRequest("thread-one", {
+    initialTask: { title: "First chore", instructions: "Be careful." }
+  }), at(1));
+  assert.notEqual(created.initialTaskId, undefined);
+  await applyInstanceLifecycle(store, operatorCaller, releaseRequest(created.instance.id, "release-one", "drain"), at(1));
+  const beyond = instanceAuditLimits.retainedTerminalInstances + 5;
+  for (let index = 0; index < beyond; index += 1) {
+    const filler = await applyInstanceLifecycle(store, operatorCaller, createRequest("thread-one", {
+      idempotency: { caller: operatorCaller, key: `filler-${index}` }
+    }), at(100 + index));
+    await applyInstanceLifecycle(store, operatorCaller, releaseRequest(filler.instance.id, `filler-release-${index}`, "drain"), at(100 + index));
+  }
+  await maintainInstanceLifecycle(store, at(1000));
+  store.read((state) => {
+    assert.equal(state.instances!.some((instance) => instance.id === created.instance.id), false);
+    assert.equal(state.instanceLifecycleReceipts!.some((receipt) => receipt.instanceId === created.instance.id), false);
+    assert.equal(state.taskSubmissions!.some((submission) => submission.origin === "instance-lifecycle"), false, "the derived submission is retired with its receipt");
+    // The task is thread work that may already have run; only the idempotency record is retired.
+    assert.ok(state.tasks!.some((task) => task.id === created.initialTaskId));
+  });
+
+  const reused = await applyInstanceLifecycle(store, operatorCaller, createRequest("thread-one", {
+    initialTask: { title: "First chore", instructions: "Be careful." }
+  }), at(2000));
+  assert.equal(reused.replayed, false);
+  assert.notEqual(reused.instance.id, created.instance.id);
+  assert.notEqual(reused.initialTaskId, created.initialTaskId, "a new instance never inherits the pruned instance's task");
+  store.read((state) => {
+    assert.equal(state.tasks!.filter((task) => task.title === "First chore").length, 2, "the new instance got an initial task of its own");
+    assert.equal(state.tasks!.find((task) => task.id === reused.initialTaskId)!.threadId, "thread-one");
+  });
+});
+
+test("a remote release the node's residency record does not support is retired instead of sent", async () => {
+  /*
+   * Finding 4: absent evidence is not permission. The maintenance path treated a missing residency
+   * record as permission to order an eviction, so a persisted request with nothing behind it could put
+   * a cancel on the wire.
+   */
+  const store = await hubStore((state) => { seedThread(state); seedNode(state); });
+  await store.transact((state) => {
+    state.remoteReleaseRequests = [{ nodeId: "node-one", instanceId: "unsupported", requestedAt: at(1) }];
+    return true;
+  });
+  const sent: string[] = [];
+  await flushPendingInstanceDeliveries(store, (_nodeId, message) => { sent.push(message.type); return true; });
+  // A copy is compared so the deep-equal assertion does not narrow `sent` for the stanzas below.
+  assert.deepEqual([...sent], [], "no residency record is not permission to send a cancel");
+  store.read((state) => assert.deepEqual(state.remoteReleaseRequests, []));
+
+  // A record that exists but names other residents is the same failure with more to go on.
+  await store.transact((state) => {
+    state.nodeInstanceResidency = [{ nodeId: "node-one", instanceIds: ["resident-one"], observedAt: at(2) }];
+    state.remoteReleaseRequests = [{ nodeId: "node-one", instanceId: "resident-two", requestedAt: at(2) }];
+    return true;
+  });
+  await flushPendingInstanceDeliveries(store, (_nodeId, message) => { sent.push(message.type); return true; });
+  assert.deepEqual([...sent], []);
+  store.read((state) => assert.deepEqual(state.remoteReleaseRequests, []));
+
+  // Supported evidence still sends, so the rule refuses only what no record reports.
+  await store.transact((state) => {
+    state.remoteReleaseRequests = [{ nodeId: "node-one", instanceId: "resident-one", requestedAt: at(3) }];
+    return true;
+  });
+  await flushPendingInstanceDeliveries(store, (_nodeId, message) => { sent.push(message.type); return true; });
+  assert.deepEqual(sent, ["instance.release"]);
+  store.read((state) => assert.equal(state.remoteReleaseRequests?.[0].deliveredAt !== undefined, true));
 });
 
 test("pending remote release requests are retained until delivered, beyond any audit bound", async () => {
@@ -895,11 +1071,20 @@ test("store load rejects malformed or duplicated instance state", async () => {
     state.remoteReleaseRequests = [{ nodeId: "node-one", instanceId: "resident-two", requestedAt: at(1) }];
   }, /names a resident node node-one no longer reports/);
   await rejects((state) => {
+    state.nodeInstanceResidency = [{ nodeId: "node-one", instanceIds: ["resident-one"], observedAt: at(1) }];
     state.remoteReleaseRequests = [
       { nodeId: "node-one", instanceId: "resident-one", requestedAt: at(1) },
       { nodeId: "node-one", instanceId: "resident-one", requestedAt: at(2) }
     ];
   }, /repeats its node and instance/);
+  /*
+   * Absent evidence is not permission. A request with no residency record behind it at all is the same
+   * failure as a mismatching one, with less to go on: reconciliation writes the node's record before it
+   * writes any request against that node, so a request no record supports never came from evidence.
+   */
+  await rejects((state) => {
+    state.remoteReleaseRequests = [{ nodeId: "node-one", instanceId: "resident-one", requestedAt: at(1) }];
+  }, /has no residency record from node node-one to support it/);
 });
 
 const allocationFor = (instance: AgentInstance, allocationId: string) => ({

@@ -33,7 +33,7 @@ import {
 } from "@coffee-shop/protocol";
 import { CoordinationError } from "./coordinationError.js";
 import { newEvent, newId, type State, type Store } from "./store.js";
-import { appendInitialTaskInState } from "./tasks.js";
+import { appendInitialTaskInState, initialTaskOrigin } from "./tasks.js";
 
 /*
  * Ephemeral instance lifecycle authority.
@@ -52,13 +52,19 @@ import { appendInitialTaskInState } from "./tasks.js";
 /** The resident-intent statuses: an allocation in one of these holds a node slot. */
 export const occupyingAllocationStatuses: readonly AllocationStatus[] = ["reserved", "provisioning", "active"];
 /**
- * The allocation statuses a node's own evidence has settled: the peer has acknowledged the instance
- * released or failed, so the identity is gone from the node and can never occupy a slot again. Only
- * an acknowledgement from the allocation's own node, or the hub settling an instance that holds no
- * occupying allocation at all, reaches one of these, which is why they may be discounted against a
- * residency snapshot that still names the identity.
+ * The one allocation status that is the node's own proof the resident slot is free, and therefore the
+ * only status that may be discounted against a residency snapshot still naming the identity.
+ *
+ * Barista deletes the resident from its own table *before* it reports `instance.released`, and on a
+ * release-cleanup failure it *retains* the resident and then reports `instance.failed`
+ * (`apps/control-agent/internal/controlplane/instances.go`). So `released` is proof and `failed` is
+ * not: a failed allocation keeps occupying its slot until the node's own next authoritative snapshot
+ * stops naming the identity. A provisioning failure, where the node never added the resident at all,
+ * keeps occupying on the same rule — the `instance.failed` frame carries only a free-text `error`
+ * diagnostic, nothing that distinguishes the two, and deferring a placement is the safe direction
+ * where overbooking is not.
  */
-export const settledAllocationStatuses: readonly AllocationStatus[] = ["released", "failed"];
+export const vacatedAllocationStatuses: readonly AllocationStatus[] = ["released"];
 /** Statuses from which an instance may still be placed, replaced, or released. */
 export const nonTerminalInstanceStatuses: readonly InstanceStatus[] = ["requested", "provisioning", "ready", "busy", "idle"];
 export const terminalInstanceStatuses: readonly InstanceStatus[] = ["released", "failed"];
@@ -262,13 +268,14 @@ export interface ResidentInstanceUsage {
  *   node's own complete resident set. Usage is the union, by identity, of the occupying allocations
  *   this hub persists for the node — whether or not the node has reported them yet, so reconnect lag
  *   cannot overbook — and the identities the record names that the hub does not own. An overlap is
- *   counted once. An identity whose allocation on this node is already settled is discounted: the
- *   node itself acknowledged that instance released or failed, so the record naming it is older than
- *   that acknowledgement and the slot is free. Discounting in the reader rather than editing the
- *   record covers every way an identity stops occupying a slot — acknowledged release, acknowledged
- *   failure, and terminal settlement alike — instead of only the transition a single writer happened
- *   to be taught about, and it keeps the record a faithful copy of what the node reported, which is
- *   what the release outbox and its load validation depend on.
+ *   counted once. An identity whose allocation on this node is `released` is discounted, and only
+ *   that one status: an acknowledged release is the node's own proof it deleted the resident, so the
+ *   record naming it is older than that proof and the slot is free. An acknowledged *failure* is not
+ *   such proof — Barista retains the resident when release cleanup fails — so a failed allocation
+ *   keeps its slot until the node's next authoritative snapshot stops naming the identity; see
+ *   `vacatedAllocationStatuses`. Discounting in the reader rather than editing the record keeps the
+ *   record a faithful copy of what the node reported, which is what the release outbox and its load
+ *   validation depend on.
  * - **An authoritative record exists and is empty.** The union is the hub's own occupying
  *   allocations, so an empty record means zero unowned residency, authoritatively, however stale the
  *   scalar count is.
@@ -294,10 +301,10 @@ export function residentInstanceUsage(
     .filter((allocation) => occupyingAllocationStatuses.includes(allocation.status))
     .map((allocation) => allocation.instanceId));
   if (residency !== undefined && residency.nodeId === node.id) {
-    const settled = new Set(onNode
-      .filter((allocation) => settledAllocationStatuses.includes(allocation.status))
+    const vacated = new Set(onNode
+      .filter((allocation) => vacatedAllocationStatuses.includes(allocation.status))
       .map((allocation) => allocation.instanceId));
-    const unowned = new Set(residency.instanceIds.filter((instanceId) => !owned.has(instanceId) && !settled.has(instanceId)));
+    const unowned = new Set(residency.instanceIds.filter((instanceId) => !owned.has(instanceId) && !vacated.has(instanceId)));
     return { capacity, used: owned.size + unowned.size };
   }
   const unnamedResidents = Number.isSafeInteger(node.activeInstances) && node.activeInstances! > 0 ? node.activeInstances! : 0;
@@ -1105,8 +1112,10 @@ export async function flushPendingInstanceDeliveries(
    * A remote release names no allocation the hub owns, so the instance identity addresses it. The
    * accepted write records only that a send happened: it does not retire the request and it does not
    * free a slot, because the resident stays in the node's authoritative residency record until the node
-   * itself stops reporting it. That record is the authority here too — a request whose resident the
-   * node no longer reports has nothing to act on and is retired instead of being sent.
+   * itself stops reporting it. That record is the sole authority for sending too, and absence of it is
+   * not permission: a request the node's own residency evidence does not support — whether the record
+   * names other residents or the node has produced no record at all — has nothing to act on and is
+   * retired instead of being sent.
    */
   const remote = store.read((state) => (state.remoteReleaseRequests ?? [])
     .filter((request) => request.deliveredAt === undefined)
@@ -1116,7 +1125,7 @@ export async function flushPendingInstanceDeliveries(
       const target = (state.remoteReleaseRequests ?? []).find((item) => item.nodeId === request.nodeId && item.instanceId === request.instanceId && item.deliveredAt === undefined);
       if (!target) return false;
       const residency = nodeResidencyInState(state, target.nodeId);
-      if (residency !== undefined && !residency.instanceIds.includes(target.instanceId)) {
+      if (residency === undefined || !residency.instanceIds.includes(target.instanceId)) {
         state.remoteReleaseRequests = (state.remoteReleaseRequests ?? []).filter((item) => item !== target);
         changed = true;
         return true;
@@ -1152,33 +1161,55 @@ export function listThreadInstances(state: Readonly<State>, threadId: string, in
 }
 
 /**
- * Prunes terminal audit records beyond their bounds, oldest first, together with the receipts,
- * intents, and delivery records that reference them. Live records are never touched, and an
- * actionable outbox entry — an undelivered provision, release, or remote release request — is
- * never pruned; only a successful delivery removes it.
+ * Prunes terminal audit records beyond their bounds, oldest first, together with the intents,
+ * delivery records, receipts, and receipt-derived task submissions that reference them. Live records
+ * are never touched, and an actionable outbox entry — an undelivered provision, release, or remote
+ * release request — is never pruned; only a successful delivery removes it.
+ *
+ * An identity a node's authoritative residency record still names is pinned and never pruned,
+ * whatever its status. The record is the node's own snapshot and the hub never edits it, so the
+ * identity's allocation is the only evidence that says whether the named identity still occupies a
+ * slot; pruning it would leave the record naming an identity with nothing left to discount it, which
+ * counts as occupancy for as long as the record stands. That is not self-healing: Barista sends
+ * identity snapshots on connection attachment, not on heartbeats, so a node that stays connected
+ * never refreshes the record and the phantom occupancy would be permanent. The pin therefore lasts
+ * exactly as long as the node keeps naming the identity, and the node's next snapshot releases it.
  */
 export function pruneInstanceAuditRecords(state: State): boolean {
   let changed = false;
+  const pinned = residencyPinnedInstanceIds(state);
   const terminal = (state.instances ?? [])
-    .filter((instance) => terminalInstanceStatuses.includes(instance.status))
+    .filter((instance) => terminalInstanceStatuses.includes(instance.status) && !pinned.has(instance.id))
     .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   if (terminal.length > instanceAuditLimits.retainedTerminalInstances) {
     const dropped = new Set(terminal.slice(instanceAuditLimits.retainedTerminalInstances).map((instance) => instance.id));
     state.instances = (state.instances ?? []).filter((instance) => !dropped.has(instance.id));
     state.allocations = (state.allocations ?? []).filter((allocation) => !dropped.has(allocation.instanceId));
-    state.instanceLifecycleReceipts = (state.instanceLifecycleReceipts ?? []).filter((receipt) => !dropped.has(receipt.instanceId));
     state.instanceReleaseIntents = (state.instanceReleaseIntents ?? []).filter((intent) => !dropped.has(intent.instanceId));
     state.instanceDeliveries = (state.instanceDeliveries ?? []).filter((record) => !dropped.has(commandInstanceId(record.message)));
     changed = true;
   }
+  // Receipts and the submissions derived from them are retired in one place, keyed off the instances
+  // that survived above, so a receipt can never outlive its instance by one prune path or the other.
   if (pruneLifecycleReceipts(state)) changed = true;
   if (retireSettledDeliveries(state)) changed = true;
   return changed;
 }
 
+/** Every instance identity some node's authoritative residency record still names. */
+const residencyPinnedInstanceIds = (state: Readonly<State>): ReadonlySet<string> =>
+  new Set((state.nodeInstanceResidency ?? []).flatMap((record) => record.instanceIds));
+
 /**
  * Retires receipts that can no longer answer anything: a receipt whose instance the hub has stopped
- * retaining has no result to replay, because a replay resolves the instance it names.
+ * retaining has no result to replay, because a replay resolves the instance it names. The task
+ * submission a create receipt derived is retired in the same step, because retention has to be
+ * symmetric: the submission is what answers a replay of the derived key, so keeping it after its
+ * receipt is gone would let the same create idempotency key mint a *new* instance while
+ * `appendInitialTaskInState` answered with the previous instance's task — a caller handed a new
+ * instance whose `initialTaskId` names another instance's work, with no initial task scheduled. The
+ * task itself is thread work that may already have run and is never dropped; only the idempotency
+ * record derived from the receipt is.
  *
  * Nothing else is dropped. A receipt of a retained instance is the record that an idempotency key was
  * accepted with a given digest, and dropping one would silently invalidate that key — an exact replay
@@ -1192,7 +1223,14 @@ function pruneLifecycleReceipts(state: State): boolean {
   const instanceIds = new Set((state.instances ?? []).map((instance) => instance.id));
   const retained = receipts.filter((receipt) => instanceIds.has(receipt.instanceId));
   if (retained.length === receipts.length) return false;
+  const retiredInitialTaskIds = new Set(receipts
+    .filter((receipt) => !instanceIds.has(receipt.instanceId))
+    .flatMap((receipt) => (receipt.initialTaskId === undefined ? [] : [receipt.initialTaskId])));
   state.instanceLifecycleReceipts = retained;
+  if (retiredInitialTaskIds.size > 0) {
+    state.taskSubmissions = (state.taskSubmissions ?? []).filter((submission) =>
+      submission.origin !== initialTaskOrigin || !submission.tasks.some((entry) => retiredInitialTaskIds.has(entry.taskId)));
+  }
   return true;
 }
 
@@ -1204,6 +1242,12 @@ function pruneLifecycleReceipts(state: State): boolean {
  * the superseded mode can never be sent again. An unacknowledged, unsuperseded record is never retired
  * here, so replay stays possible; at most one provision and one live release command are held per
  * allocation, which bounds the outbox by the allocations the hub retains.
+ *
+ * Retiring a release whose allocation has gone `failed` discards no eviction. A failed allocation is
+ * not an occupying one, so it is absent from the expected set of the node's next authoritative
+ * snapshot; an identity that snapshot still reports is therefore written as a remote release request
+ * and cancelled through that outbox instead — which is the correct addressing for a resident the hub
+ * no longer owns an allocation for, and the same path a release-cleanup failure leaves behind.
  */
 function retireSettledDeliveries(state: State): boolean {
   const records = state.instanceDeliveries ?? [];
@@ -1371,10 +1415,16 @@ export function assertPersistedInstanceState(state: State) {
      * it: a request survives exactly while its node's authoritative residency record still reports the
      * resident. A request naming a resident that record does not report would be a command with
      * nothing to act on, and — before residency was unified — was how a delivered release came to free
-     * a slot that was still occupied.
+     * a slot that was still occupied. A missing record is not a weaker version of that mismatch but
+     * the same failure with no evidence at all, so it is rejected rather than admitted: reconciliation
+     * writes the node's residency record before it writes any request against that node, so a request
+     * with no record behind it cannot have come from evidence.
      */
     const residency = residencyByNode.get(request.nodeId);
-    if (residency !== undefined && !residency.has(request.instanceId)) {
+    if (residency === undefined) {
+      throw new Error(`${context} has no residency record from node ${request.nodeId} to support it`);
+    }
+    if (!residency.has(request.instanceId)) {
       throw new Error(`${context} names a resident node ${request.nodeId} no longer reports`);
     }
   }
