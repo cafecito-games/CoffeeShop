@@ -276,15 +276,32 @@ func (client *Client) provisionInstance(message protocol.InstanceHubMessage) {
 // open, and a replay retries the cleanup.
 func (client *Client) releaseInstance(ctx context.Context, message protocol.InstanceHubMessage) {
 	client.residents.mu.Lock()
-	resident, hosted := client.residents.residentsTable[message.AllocationID]
-	if !hosted {
-		_, released := client.residents.releasedOutcomes[message.AllocationID]
-		if !released {
-			client.residents.recordReleasedLocked(message.AllocationID)
+	resident := client.residents.residentsTable[message.AllocationID]
+	allocationID := message.AllocationID
+	if resident == nil {
+		// A hub that does not own a resident's allocation knows only its instance ID — the identity
+		// sync.complete reports — so its release substitutes the instance ID for the allocation ID.
+		// The resident is matched by instance ID before the allocation is answered already-released,
+		// and the release proceeds under the resident's real allocation key so the table, the slot,
+		// and the acknowledgement all stay consistent.
+		matched, matchedAllocationID, ambiguous := client.residents.residentByInstanceIDLocked(message.InstanceID)
+		switch {
+		case ambiguous:
+			instanceID := message.InstanceID
+			client.residents.mu.Unlock()
+			client.reportInstanceFailure(message.AllocationID, instanceID, "the release names an instance hosted by multiple resident allocations")
+			return
+		case matched != nil:
+			resident, allocationID = matched, matchedAllocationID
+		default:
+			_, released := client.residents.releasedOutcomes[message.AllocationID]
+			if !released {
+				client.residents.recordReleasedLocked(message.AllocationID)
+			}
+			client.residents.mu.Unlock()
+			client.reportInstanceReleased(message.AllocationID, message.InstanceID)
+			return
 		}
-		client.residents.mu.Unlock()
-		client.reportInstanceReleased(message.AllocationID, message.InstanceID)
-		return
 	}
 	if resident.instance.ID != message.InstanceID {
 		residentInstanceID := resident.instance.ID
@@ -295,7 +312,7 @@ func (client *Client) releaseInstance(ctx context.Context, message protocol.Inst
 	if resident.state == residentDraining {
 		if message.Mode != "cancel" {
 			client.residents.mu.Unlock()
-			log.Printf("ignore duplicate release while allocation %s is draining", message.AllocationID)
+			log.Printf("ignore duplicate release while allocation %s is draining", allocationID)
 			return
 		}
 		// A delivered drain escalates monotonically to a cancel: the runs the waiting drain is
@@ -312,7 +329,7 @@ func (client *Client) releaseInstance(ctx context.Context, message protocol.Inst
 		for _, cancel := range cancels {
 			cancel()
 		}
-		log.Printf("escalated the draining allocation %s to cancel its active runs", message.AllocationID)
+		log.Printf("escalated the draining allocation %s to cancel its active runs", allocationID)
 		return
 	}
 	resident.state = residentDraining
@@ -342,7 +359,7 @@ func (client *Client) releaseInstance(ctx context.Context, message protocol.Inst
 	select {
 	case <-resident.settled:
 	case <-ctx.Done():
-		log.Printf("release of allocation %s stopped before its runs settled; the resident stays closed to dispatch and its capacity stays occupied", message.AllocationID)
+		log.Printf("release of allocation %s stopped before its runs settled; the resident stays closed to dispatch and its capacity stays occupied", allocationID)
 		return
 	}
 
@@ -363,14 +380,33 @@ func (client *Client) releaseInstance(ctx context.Context, message protocol.Inst
 		client.residents.mu.Lock()
 		resident.state = residentCleanupFailed
 		client.residents.mu.Unlock()
-		client.reportInstanceFailure(message.AllocationID, message.InstanceID, "release cleanup failed: "+cleanupFailure.Error())
+		client.reportInstanceFailure(allocationID, message.InstanceID, "release cleanup failed: "+cleanupFailure.Error())
 		return
 	}
 	client.residents.mu.Lock()
-	delete(client.residents.residentsTable, message.AllocationID)
-	client.residents.recordReleasedLocked(message.AllocationID)
+	delete(client.residents.residentsTable, allocationID)
+	client.residents.recordReleasedLocked(allocationID)
 	client.residents.mu.Unlock()
-	client.reportInstanceReleased(message.AllocationID, message.InstanceID)
+	client.reportInstanceReleased(allocationID, message.InstanceID)
+}
+
+// residentByInstanceIDLocked resolves the single resident hosting instanceID. The table is keyed by
+// allocation ID and does not structurally guarantee one allocation per instance, so a match that is
+// not unique is reported as ambiguous for the caller to refuse rather than guess. The caller must
+// hold the resident lock.
+func (supervisor *residentSupervisor) residentByInstanceIDLocked(instanceID string) (resident *residentInstance, allocationID string, ambiguous bool) {
+	var match *residentInstance
+	var matchAllocationID string
+	for key, candidate := range supervisor.residentsTable {
+		if candidate.instance.ID != instanceID {
+			continue
+		}
+		if match != nil {
+			return nil, "", true
+		}
+		match, matchAllocationID = candidate, key
+	}
+	return match, matchAllocationID, false
 }
 
 // markResidentRunsCancelled tombstones the given runs and collects their cancel functions without

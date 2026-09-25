@@ -832,6 +832,58 @@ func TestReleaseWithWrongInstanceIDIsRefused(t *testing.T) {
 	require.Equal(t, 1, client.activeInstanceCount(), "the resident is retained")
 }
 
+// A hub that does not own a resident's allocation knows only its instance ID — the identity
+// sync.complete reports — so its release substitutes the instance ID for the allocation ID. Such a
+// release must still evict the real resident, close its session resources, free the slot exactly
+// once, and acknowledge under the resident's true allocation ID.
+func TestReleaseNamingAnInstanceWhoseAllocationIsUnknownEvictsTheResident(t *testing.T) {
+	directory := t.TempDir()
+	client := instanceTestClient(t, slowHarnessBinary(t, directory), directory, 2, 1, nil)
+	instance, allocation := testInstanceAndAllocation(directory)
+	provisionReady(t, client, instance, allocation)
+	client.handleInstanceMessage(context.Background(), testDispatchMessage(instance, allocation, "run-one"))
+	waitForMessage(t, client, "run.started")
+
+	cleanups := 0
+	client.registerResidentCleanup(allocation.ID, "session-resource", func() error {
+		cleanups++
+		return nil
+	})
+
+	substitute := testReleaseMessage(allocation, "cancel")
+	substitute.AllocationID = "allocation-substituted"
+	client.handleInstanceMessage(context.Background(), substitute)
+
+	require.NotNil(t, waitForMessage(t, client, "run.cancelled"), "the eviction must terminate the resident's active runs")
+	released := waitForInstanceMessage(t, client, "instance.released", allocation.ID)
+	require.NotNil(t, released, "the eviction must be acknowledged under the resident's true allocation ID")
+	require.Zero(t, client.activeRuns())
+	require.Zero(t, client.activeInstanceCount())
+	require.Equal(t, 1, cleanups, "the resident's session resources are closed exactly once")
+
+	client.handleInstanceMessage(context.Background(), substitute)
+	acknowledged := waitForInstanceMessage(t, client, "instance.released", "allocation-substituted")
+	require.NotNil(t, acknowledged, "a replay of the substituted release is acknowledged already-released")
+	require.Equal(t, 1, cleanups, "the replay must not run the resident's cleanup again")
+}
+
+func TestAmbiguousInstanceMatchOnAnUnknownAllocationReleaseIsRefused(t *testing.T) {
+	directory := t.TempDir()
+	client := instanceTestClient(t, quickHarnessBinary(t, directory), directory, 2, 2, nil)
+	firstInstance, firstAllocation := testInstanceAndAllocationFor("instance-shared", "allocation-one", directory)
+	provisionReady(t, client, firstInstance, firstAllocation)
+	secondInstance, secondAllocation := testInstanceAndAllocationFor("instance-shared", "allocation-two", directory)
+	provisionReady(t, client, secondInstance, secondAllocation)
+
+	message := testReleaseMessage(firstAllocation, "drain")
+	message.AllocationID = "allocation-unknown"
+	client.handleInstanceMessage(context.Background(), message)
+	failed := waitForInstanceMessage(t, client, "instance.failed", "allocation-unknown")
+	require.NotNil(t, failed)
+	require.Contains(t, *failed.Error, "multiple resident allocations")
+	require.Equal(t, 2, client.activeInstanceCount(), "an ambiguous match must not guess and evict either resident")
+}
+
 func TestHeartbeatAndRegistrationReportIndependentResidentCounts(t *testing.T) {
 	directory := t.TempDir()
 	client := instanceTestClient(t, quickHarnessBinary(t, directory), directory, 3, 2, nil)
