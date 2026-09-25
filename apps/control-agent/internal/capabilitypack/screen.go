@@ -29,12 +29,18 @@ var (
 	// the well-known-root alternative, because one segment is otherwise indistinguishable from prose
 	// punctuation. The home-relative "~/" form is rejected for the same reason an absolute path is: it
 	// names a location on one machine's filesystem.
+	//
+	// The Windows rules cover all three forms a Windows path takes: drive-absolute ("C:\dir"),
+	// drive-relative ("C:dir\file" — still a location on one machine), and a UNC share
+	// ("\\\\host\\share\\file"). Drive-relative requires a following separator so that ordinary prose
+	// with a colon ("Step A:Done") is not mistaken for a path.
 	absolutePathPattern = regexp.MustCompile(
 		`(?:^|[^A-Za-z0-9._~/-])(?:` +
 			`(?:/[A-Za-z0-9._-]+){2,}` +
 			`|/(?:home|Users|var|etc|usr|opt|tmp|root|private|Volumes|mnt|srv|proc|sys|dev|bin|sbin|run|nix|data|workspace|Applications|Library)(?:/|\b)` +
 			`|~/` +
-			`|[A-Za-z]:[\\/]` +
+			`|[A-Za-z]:(?:[\\/]|[A-Za-z0-9._-]+[\\/])` +
+			`|\\\\[A-Za-z0-9._-]+[\\/]` +
 			`)`)
 	// schemaMarkers are the syntactic markers of a JSON Schema. The run-scoped MCP server owns every
 	// tool input and output schema (internal/mcpserver/tools.go); a pack that restated one would

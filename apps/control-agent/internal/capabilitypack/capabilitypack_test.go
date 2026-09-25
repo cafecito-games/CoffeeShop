@@ -248,6 +248,10 @@ func TestArchiveTreeRejectsArchivesNobodyCouldHaveProducedDeterministically(t *t
 			}
 			var buffer bytes.Buffer
 			gzipWriter := gzip.NewWriter(&buffer)
+			// Pinned explicitly rather than left to the standard library's defaults, so this test
+			// exercises the tar-header rule under test and not the gzip-header rule.
+			gzipWriter.ModTime = time.Time{}
+			gzipWriter.OS = gzipUnknownOS
 			tarWriter := tar.NewWriter(gzipWriter)
 			for _, path := range paths {
 				header := &tar.Header{
@@ -279,6 +283,8 @@ func TestArchiveTreeRejectsArchivesNobodyCouldHaveProducedDeterministically(t *t
 	// packer, so it is refused rather than skipped.
 	var buffer bytes.Buffer
 	gzipWriter := gzip.NewWriter(&buffer)
+	gzipWriter.ModTime = time.Time{}
+	gzipWriter.OS = gzipUnknownOS
 	tarWriter := tar.NewWriter(gzipWriter)
 	if err := tarWriter.WriteHeader(&tar.Header{Typeflag: tar.TypeDir, Name: "skills", Mode: 0o755, Format: tar.FormatUSTAR}); err != nil {
 		t.Fatalf("WriteHeader() error = %v", err)
@@ -597,6 +603,8 @@ func TestCanonicalPackCarriesNoEndpointCredentialPathOrSchema(t *testing.T) {
 		{"Put it in /srv/packs.", "contains an absolute machine path"},
 		{"Write it to ~/notes/plan.md.", "contains an absolute machine path"},
 		{"Open C:\\Users\\operator\\project.", "contains an absolute machine path"},
+		{"Open C:Users\\operator\\project.", "contains an absolute machine path"},
+		{"Copy it from \\\\barista-fileserver\\packs\\roast.md.", "contains an absolute machine path"},
 		{"Consult /etc for the host policy.", "contains an absolute machine path"},
 	}
 	for _, violation := range violations {
