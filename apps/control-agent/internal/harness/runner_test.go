@@ -190,3 +190,21 @@ func TestAdvertisedProfilesNeverMakeAHarnessNativelyRunnable(t *testing.T) {
 	require.ErrorIs(t, runner.Admit("claude-cli", TransportACP, TransportNative), ErrDriverUnavailable,
 		"native fallback must still require the native CLI even when the dispatch permits it")
 }
+
+// An explicit transport request is admissible exactly when the harness advertises it, so a harness
+// this node reaches only through ACP must be refused for native-cli. An omitted transport is a
+// legacy v1-v4 dispatch whose implicit transport is the native CLI, so it stays admissible; native
+// execution itself still requires the natively discovered profile.
+func TestAdmitRefusesAnExplicitTransportTheHarnessDoesNotAdvertise(t *testing.T) {
+	runner := NewRunner(nativeACPOnlyClaude()).WithAdvertisedProfiles(advertisedACPOnlyClaude())
+
+	require.ErrorIs(t, runner.Admit("claude-cli", TransportNative, ""), ErrDriverUnavailable,
+		"an explicit native-cli request must be refused for a harness advertised over acp-v1 only")
+	require.NoError(t, runner.Admit("claude-cli", "", ""), "an omitted transport is a legacy native dispatch")
+
+	// A natively available harness is admitted for both the omitted and the explicit native
+	// transport, including a profile that predates transport advertisement and carries no list.
+	native := NewRunner(fakeNativeCodex(t))
+	require.NoError(t, native.Admit("codex-cli", "", ""))
+	require.NoError(t, native.Admit("codex-cli", TransportNative, ""))
+}

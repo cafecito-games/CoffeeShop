@@ -309,6 +309,31 @@ func TestProvisionRefusesHarnessesWhoseACPProbeFailed(t *testing.T) {
 	require.Zero(t, client.activeInstanceCount())
 }
 
+// An allocation that names a transport the harness does not advertise — here native-cli for a
+// harness this node can reach only through ACP — must be refused at admission: Barista would
+// otherwise reserve resident capacity and acknowledge instance.ready for work it cannot execute.
+func TestProvisionRefusesATransportTheHarnessDoesNotAdvertise(t *testing.T) {
+	driver, _, nativeProfiles := advertisingClaudeCLIDriver(t, "claude-probe-models")
+	advertised, failures := harness.AdvertiseACP(context.Background(), nativeProfiles, driver)
+	require.Empty(t, failures)
+	require.Equal(t, []string{harness.TransportACP}, advertised[0].Transports, "claude-cli is advertised over acp-v1 only")
+
+	runner := harness.NewRunner(nativeProfiles).WithAdvertisedProfiles(advertised).WithACP(driver)
+	client := NewClient(config.Config{
+		Concurrency: 1, InstanceCapacity: 1, WorkspaceRoots: []string{t.TempDir()},
+	}, protocol.ComputeNode{ID: "node-one", Harnesses: advertised}, runner, emptyCapabilityReport)
+
+	instance, allocation := testInstanceAndAllocation(client.config.WorkspaceRoots[0])
+	allocation.HarnessID = "claude-cli"
+	allocation.Model = acptest.ClaudeModel
+	allocation.Transport = harness.TransportNative
+	client.handleInstanceMessage(context.Background(), testProvisionMessage(instance, allocation))
+	failed := waitForInstanceMessage(t, client, "instance.failed", allocation.ID)
+	require.NotNil(t, failed)
+	require.Contains(t, *failed.Error, "transport native-cli is not available for harness claude-cli")
+	require.Zero(t, client.activeInstanceCount(), "a provision for an unadvertised transport must not reserve a slot")
+}
+
 func TestProvisionCapacityZeroDisabledFullAndFree(t *testing.T) {
 	directory := t.TempDir()
 

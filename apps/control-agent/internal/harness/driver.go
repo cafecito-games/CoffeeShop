@@ -167,8 +167,12 @@ func (r *Runner) Run(ctx context.Context, run protocol.Run, agent protocol.Agent
 // run is accepted.
 func (r *Runner) Admit(harnessID, transport, fallbackTransport string) error {
 	switch transport {
-	case "", TransportNative:
+	case "":
+		// A dispatch that omits the transport is a legacy v1-v4 request whose implicit transport is
+		// the native CLI; native execution still requires the natively discovered profile.
 		return nil
+	case TransportNative:
+		return r.nativeTransportAdmitted(harnessID)
 	case TransportACP:
 		err := r.acpAvailable(harnessID)
 		if err == nil || r.fallbackPermitted(harnessID, fallbackTransport) {
@@ -178,6 +182,22 @@ func (r *Runner) Admit(harnessID, transport, fallbackTransport string) error {
 	default:
 		return fmt.Errorf("%w: unknown harness transport", ErrDriverUnavailable)
 	}
+}
+
+// nativeTransportAdmitted reports whether the harness advertises the native CLI transport. An
+// explicit native-cli request is admissible exactly when the advertised profile carries it, so a
+// harness this node reaches only through ACP is refused before it can reserve capacity for work
+// the native driver cannot execute. A profile without a transport list predates transport
+// advertisement and keeps its native-only meaning. A harness absent from the advertised set keeps
+// the legacy verdict of the omitted-transport case above: v4 native dispatch performs no harness
+// admission (native execution itself still requires the natively discovered profile), and a v5
+// provision passes AdmitModel first, which refuses a harness the node does not advertise.
+func (r *Runner) nativeTransportAdmitted(harnessID string) error {
+	profile, available := r.advertisedProfile(harnessID)
+	if available && len(profile.Transports) > 0 && !slices.Contains(profile.Transports, TransportNative) {
+		return fmt.Errorf("%w: harness %s does not advertise the %s transport", ErrDriverUnavailable, harnessID, TransportNative)
+	}
+	return nil
 }
 
 // AdmitResume reports whether an acp-v1 run of the harness may ask to resume a provider session:

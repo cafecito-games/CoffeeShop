@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -93,6 +94,13 @@ func TestRunnerAdmissionMatchesTheAdvertisedHarnessProfiles(t *testing.T) {
 		for _, transport := range profile.Transports {
 			require.NoError(t, runner.Admit(profile.ID, transport, ""),
 				"an advertised transport must be admissible: %s over %s", profile.ID, transport)
+		}
+		for _, transport := range protocol.HarnessTransports {
+			if slices.Contains(profile.Transports, transport) {
+				continue
+			}
+			require.ErrorIs(t, runner.Admit(profile.ID, transport, ""), harness.ErrDriverUnavailable,
+				"a transport the profile does not advertise must be refused: %s over %s", profile.ID, transport)
 		}
 	}
 	require.True(t, advertisedHarness, "the probed adapter must advertise claude-cli without its native CLI")
