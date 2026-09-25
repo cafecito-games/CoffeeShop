@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
   allocationStatuses,
   hasAuthoritativeInstanceEvidence,
+  instanceLimits,
   instanceStatuses,
   validateInstanceHubMessage,
   type AgentInstance,
@@ -14,9 +16,12 @@ import {
 } from "@coffee-shop/protocol";
 import {
   applyInstanceLifecycle,
+  classifyInstanceResidentEvidence,
+  classifyReportedInstanceCount,
   currentAllocationInState,
   flushPendingInstanceDeliveries,
   instanceAuditLimits,
+  instanceDeliveryBarrier,
   listThreadInstances,
   maintainInstanceLifecycle,
   nonTerminalInstanceStatuses,
@@ -28,6 +33,17 @@ import {
   operatorInstanceCreator
 } from "./instances.js";
 import { Store, type State } from "./store.js";
+import { submitTaskBatch } from "./tasks.js";
+
+/*
+ * Byte-faithful version-5 frames. The files are written by the Barista wire encoder itself
+ * (apps/control-agent/internal/protocol/instances_test.go:46 marshals apps/control-agent/internal/
+ * protocol/messages.go:88 `Outbound` into packages/protocol/test/fixtures/control-v5) and are read
+ * here through the same path as the protocol suite's producer
+ * (packages/protocol/test/instance-fixture-producer.mjs:4).
+ */
+const controlFixture = (name: string): Record<string, unknown> =>
+  JSON.parse(readFileSync(new URL(`../../../packages/protocol/test/fixtures/control-v5/${name}.json`, import.meta.url), "utf8"));
 
 const operatorCaller = operatorInstanceCreator;
 const at = (secondsFromEpoch: number) => new Date(secondsFromEpoch * 1000).toISOString();
@@ -732,4 +748,271 @@ test("legacy snapshots load without inventing instance allocations", async () =>
   assert.deepEqual(snapshot.templates, []);
   assert.equal("instanceLifecycleReceipts" in JSON.parse(JSON.stringify(snapshot)), false);
   assert.equal("instanceDeliveries" in JSON.parse(JSON.stringify(snapshot)), false);
+});
+
+test("a reported resident the hub does not own occupies a slot beside new reservations", async () => {
+  // A capacity-2 node reporting one unknown resident has one slot left, not two: reported residency
+  // and persisted allocations are disjoint sets of identities, so their union is what is occupied.
+  const store = await hubStore((state) => { seedThread(state); seedNode(state, { instanceCapacity: 2 }); });
+  const first = await applyInstanceLifecycle(store, operatorCaller, createRequest(), at(1));
+  const second = await applyInstanceLifecycle(store, operatorCaller, createRequest("thread-one", {
+    idempotency: { caller: operatorCaller, key: "create-two" }
+  }), at(1));
+  await store.transact((state) => { reconcileNodeInstancesInState(state, "node-one", ["foreign-instance"], at(2)); return true; });
+
+  const reserved = await reserveInstanceAllocation(store, first.instance.id, candidate("/work/one"), at(3));
+  assert.equal(reserved.kind, "reserved");
+  const refused = await reserveInstanceAllocation(store, second.instance.id, candidate("/work/two"), at(4));
+  assert.equal(refused.kind, "capacity", JSON.stringify(refused));
+  store.read((state) => {
+    const node = state.nodes[0];
+    assert.deepEqual(residentInstanceUsage(node, state.allocations ?? [], state.remoteReleaseRequests ?? []), { capacity: 2, used: 2 });
+    // An identity in both sets is counted once, so an overlapping report cannot double-book.
+    assert.deepEqual(
+      residentInstanceUsage(node, state.allocations ?? [], [{ nodeId: "node-one", instanceId: first.instance.id, requestedAt: at(2) }]),
+      { capacity: 2, used: 1 }
+    );
+    // Another node's reported residents never consume this node's capacity.
+    assert.deepEqual(
+      residentInstanceUsage(node, state.allocations ?? [], [{ nodeId: "node-two", instanceId: "foreign-instance", requestedAt: at(2) }]),
+      { capacity: 2, used: 1 }
+    );
+  });
+});
+
+test("resident evidence is validated before the delivery barrier is decided", () => {
+  const authoritative = classifyInstanceResidentEvidence(controlFixture("sync"), "5");
+  assert.deepEqual(authoritative, { kind: "authoritative", residents: ["instance-one"] });
+  assert.equal(instanceDeliveryBarrier(authoritative), "open-after-reconcile");
+  // An explicitly empty resident set is a claim, not an omission.
+  const empty = classifyInstanceResidentEvidence(controlFixture("sync-empty"), "5");
+  assert.deepEqual(empty, { kind: "authoritative", residents: [] });
+  assert.equal(instanceDeliveryBarrier(empty), "open-after-reconcile");
+  const absent = classifyInstanceResidentEvidence(controlFixture("sync-absent"), "5");
+  assert.deepEqual(absent, { kind: "absent" });
+  assert.equal(instanceDeliveryBarrier(absent), "open-now");
+
+  // The mutations the protocol suite treats as invalid resident evidence must fail closed here too.
+  for (const residents of [null, ["same", "same"], [""], ["bad/id"], Array.from({ length: instanceLimits.collectionEntries + 1 }, (_, index) => `i-${index}`)]) {
+    const frame = { ...controlFixture("sync"), activeInstanceIds: residents };
+    const evidence = classifyInstanceResidentEvidence(frame, "5");
+    assert.equal(evidence.kind, "malformed", JSON.stringify(residents));
+    assert.equal(instanceDeliveryBarrier(evidence), "stay-closed", JSON.stringify(residents));
+    // The barrier cannot be decided from this predicate alone: it answers the same for a malformed
+    // claim as for an omitted one, which is why validation has to precede the decision.
+    assert.equal(hasAuthoritativeInstanceEvidence(frame), false);
+    assert.equal(hasAuthoritativeInstanceEvidence(controlFixture("sync-absent")), false);
+  }
+  // A node that cannot host instances makes no resident claim at all.
+  assert.deepEqual(classifyInstanceResidentEvidence(controlFixture("sync"), "4"), { kind: "absent" });
+});
+
+test("a reported instance count is validated before it reaches the node record", () => {
+  assert.deepEqual(classifyReportedInstanceCount(controlFixture("heartbeat"), "5"), { kind: "reported", count: 1 });
+  const omitted = controlFixture("heartbeat");
+  delete omitted.activeInstances;
+  assert.deepEqual(classifyReportedInstanceCount(omitted, "5"), { kind: "absent" });
+  for (const count of [-1, 1.5, 65_536, null, "0"]) {
+    const evidence = classifyReportedInstanceCount({ ...controlFixture("heartbeat"), activeInstances: count }, "5");
+    assert.equal(evidence.kind, "malformed", JSON.stringify(count));
+  }
+  assert.deepEqual(classifyReportedInstanceCount(controlFixture("heartbeat"), "4"), { kind: "absent" });
+});
+
+test("a release the node never acted on replays after an authoritative reconnect", async () => {
+  const store = await hubStore((state) => { seedThread(state); seedNode(state); });
+  const { created, reservation } = await provisionInstance(store);
+  await receiveInstanceLifecycleReport(store, "node-one", readyReport(created.instance.id, reservation.allocation.id), at(3));
+  await applyInstanceLifecycle(store, operatorCaller, releaseRequest(created.instance.id, "release-one", "drain"), at(4));
+
+  const sent: string[] = [];
+  await flushPendingInstanceDeliveries(store, (_nodeId, message) => { sent.push(message.type); return true; });
+  assert.deepEqual(sent, ["instance.release"]);
+
+  // The socket write returned, but the connection dropped before Barista processed the frame: the
+  // node reconnects still reporting the instance resident, which is proof it was never acted on.
+  await store.transact((state) => { reconcileNodeInstancesInState(state, "node-one", [created.instance.id], at(5)); return true; });
+  await maintainInstanceLifecycle(store, at(6));
+  const replayed: string[] = [];
+  await flushPendingInstanceDeliveries(store, (_nodeId, message) => { replayed.push(message.type); return true; });
+  assert.deepEqual(replayed, ["instance.release"], "the unacknowledged release is reissued");
+  store.read((state) => {
+    // Replay reuses the record instead of duplicating it, so the outbox cannot grow per reconnect.
+    assert.equal(state.instanceDeliveries?.filter((record) => record.kind === "release").length, 1);
+    assert.equal(state.instances?.[0].status, "draining");
+    assert.equal(currentAllocationInState(state, created.instance.id)?.id, reservation.allocation.id);
+  });
+
+  // Barista's own acknowledgement is what retires the command; after it nothing replays.
+  const released = await receiveInstanceLifecycleReport(store, "node-one", releasedReport(created.instance.id, reservation.allocation.id), at(7));
+  assert.equal(released.kind, "accepted");
+  await maintainInstanceLifecycle(store, at(8));
+  store.read((state) => assert.deepEqual(state.instanceDeliveries, []));
+  const afterAcknowledgement: string[] = [];
+  await flushPendingInstanceDeliveries(store, (_nodeId, message) => { afterAcknowledgement.push(message.type); return true; });
+  assert.deepEqual(afterAcknowledgement, []);
+});
+
+test("a command removed before its delivery transaction is never sent", async () => {
+  const store = await hubStore((state) => { seedThread(state); seedNode(state); });
+  const created = await applyInstanceLifecycle(store, operatorCaller, createRequest(), at(1));
+  const reservation = await reserveInstanceAllocation(store, created.instance.id, candidate("/work/one"), at(2));
+  assert.equal(reservation.kind, "reserved");
+  await store.transact((state) => {
+    state.allocations!.find((allocation) => allocation.instanceId === created.instance.id)!.status = "provisioning";
+  });
+  let sends = 0;
+  const changed = await flushPendingInstanceDeliveries(store, () => { sends += 1; return true; }, {
+    beforeDelivery: async () => {
+      await store.transact((state) => { reconcileNodeInstancesInState(state, "node-one", [], at(3)); return true; });
+    }
+  });
+  assert.equal(sends, 0, "the reconciliation that removed the command committed before the send decision");
+  assert.equal(changed, false);
+  store.read((state) => assert.deepEqual(state.instanceDeliveries, []));
+});
+
+test("the derived initial-task key is caller-scoped and cannot be occupied by an ordinary batch", async () => {
+  const client = { kind: "orchestrator-client", clientId: "client-one" } as const;
+  const seed = (state: State) => {
+    seedThread(state);
+    state.agents.push({
+      id: "agent-one", name: "Agent One", title: "Agent", summary: "", glyph: "A", avatarShape: "cup",
+      avatarColor: "amber", state: "working", currentAction: "Working", harnessId: "claude-cli", model: "fable",
+      computeNodeId: "node-one", workspace: "/work", systemPrompt: "Work", canDelegate: true, unread: 0, updatedAt: at(1)
+    } as never);
+    state.runs.push({
+      id: "run-source", threadId: "thread-one", agentId: "agent-one", nodeId: "node-one", harnessId: "claude-cli",
+      model: "fable", workspace: "/work", prompt: "Coordinate", status: "running", output: "", depth: 0, createdAt: at(1)
+    } as never);
+    state.orchestratorAttachments = [{ id: "attach-one", threadId: "thread-one", clientId: "client-one", connectionId: "conn-one", attachedAt: at(1), lastHeartbeatAt: at(1), status: "attached" }];
+    state.orchestratorClients = [{ id: "client-one", name: "Bridge", scopes: ["orchestrate"], createdAt: at(1), secretHash: "hash" }];
+  };
+  const ordinaryBatch = (idempotencyKey: string) => ({
+    idempotencyKey,
+    tasks: [{ key: "ordinary", title: "Ordinary chore", instructions: "Unrelated work.", dependencies: [] }]
+  });
+
+  const store = await hubStore(seed);
+  const created = await applyInstanceLifecycle(store, operatorCaller, createRequest("thread-one", {
+    initialTask: { title: "First chore", instructions: "Be careful." }
+  }), at(2));
+  assert.notEqual(created.initialTaskId, undefined);
+  const derived = store.read((state) => state.taskSubmissions!.find((submission) => submission.origin === "instance-lifecycle")!.idempotencyKey);
+  assert.ok(derived.length <= 128);
+
+  // The derived key is deterministic, so an ordinary caller can submit exactly that string. It must
+  // neither answer the lifecycle submission nor conflict with it.
+  await submitTaskBatch(store, "run-source", ordinaryBatch(derived), at(3));
+  store.read((state) => {
+    assert.equal(state.tasks?.length, 2);
+    assert.equal(state.tasks?.find((task) => task.id === created.initialTaskId)!.title, "First chore");
+    assert.equal(state.taskSubmissions?.filter((submission) => submission.idempotencyKey === derived).length, 2);
+    assert.deepEqual(state.taskSubmissions?.map((submission) => submission.origin).sort(), ["instance-lifecycle", undefined]);
+  });
+
+  // Lifecycle idempotency is caller-scoped, so another principal reusing the same lifecycle key on
+  // the same thread creates its own instance and its own initial task instead of colliding.
+  const byClient = await applyInstanceLifecycle(store, client, createRequest("thread-one", {
+    idempotency: { caller: client, key: "create-one" },
+    initialTask: { title: "Client chore", instructions: "Be careful." }
+  }), at(4));
+  assert.notEqual(byClient.instance.id, created.instance.id);
+  assert.notEqual(byClient.initialTaskId, created.initialTaskId);
+  // The same caller and key still replays exactly, with no second task.
+  const replay = await applyInstanceLifecycle(store, operatorCaller, createRequest("thread-one", {
+    initialTask: { title: "First chore", instructions: "Be careful." }
+  }), at(5));
+  assert.equal(replay.replayed, true);
+  assert.equal(replay.initialTaskId, created.initialTaskId);
+  store.read((state) => assert.equal(state.tasks?.length, 3));
+
+  // The same collision in the other order: the ordinary batch is submitted first, on a fresh hub.
+  const occupied = await hubStore(seed);
+  await submitTaskBatch(occupied, "run-source", ordinaryBatch(derived), at(2));
+  const afterOrdinary = await applyInstanceLifecycle(occupied, operatorCaller, createRequest("thread-one", {
+    initialTask: { title: "First chore", instructions: "Be careful." }
+  }), at(3));
+  assert.equal(afterOrdinary.replayed, false);
+  occupied.read((state) => {
+    assert.equal(state.tasks?.length, 2);
+    assert.equal(state.tasks?.find((task) => task.id === afterOrdinary.initialTaskId)!.title, "First chore");
+  });
+});
+
+test("remote release requests are retired by the node's later snapshots", async () => {
+  const store = await hubStore((state) => { seedThread(state); seedNode(state); });
+  // Every reconnect reports different unknown residents; retention must not accumulate them.
+  for (let reconnect = 0; reconnect < 5; reconnect += 1) {
+    await store.transact((state) => {
+      reconcileNodeInstancesInState(state, "node-one", [`foreign-${reconnect}-a`, `foreign-${reconnect}-b`], at(10 + reconnect));
+      return true;
+    });
+    store.read((state) => assert.equal(state.remoteReleaseRequests?.length, 2, `after reconnect ${reconnect}`));
+  }
+  // A resident the node keeps reporting keeps its original request, so nothing actionable is lost.
+  await store.transact((state) => { reconcileNodeInstancesInState(state, "node-one", ["foreign-4-a"], at(20)); return true; });
+  store.read((state) => assert.deepEqual(state.remoteReleaseRequests, [{ nodeId: "node-one", instanceId: "foreign-4-a", requestedAt: at(14) }]));
+  // Another node's requests are outside this snapshot's authority.
+  await store.transact((state) => { state.remoteReleaseRequests!.push({ nodeId: "node-two", instanceId: "foreign-elsewhere", requestedAt: at(21) }); });
+  await store.transact((state) => { reconcileNodeInstancesInState(state, "node-one", [], at(22)); return true; });
+  store.read((state) => assert.deepEqual(state.remoteReleaseRequests, [{ nodeId: "node-two", instanceId: "foreign-elsewhere", requestedAt: at(21) }]));
+});
+
+test("receipts are bounded per live instance without dropping its creation receipt", async () => {
+  const store = await hubStore((state) => { seedThread(state); });
+  const created = await applyInstanceLifecycle(store, operatorCaller, createRequest(), at(1));
+  const renewals = instanceAuditLimits.retainedReceiptsPerInstance + 20;
+  for (let index = 0; index < renewals; index += 1) {
+    await applyInstanceLifecycle(store, operatorCaller, renewRequest(created.instance.id, `renew-${index}`, 3600), at(100 + index));
+  }
+  store.read((state) => {
+    const receipts = state.instanceLifecycleReceipts ?? [];
+    assert.ok(receipts.length <= instanceAuditLimits.retainedReceiptsPerInstance, `receipts grew to ${receipts.length}`);
+    // The receipt that maps the caller's key to the instance identity is never the one dropped.
+    assert.equal(receipts.filter((receipt) => receipt.operation === "create").length, 1);
+    // The newest renewals are the ones retained.
+    assert.ok(receipts.some((receipt) => receipt.idempotencyKey === `renew-${renewals - 1}`));
+    assert.equal(receipts.some((receipt) => receipt.idempotencyKey === "renew-0"), false);
+  });
+  const replay = await applyInstanceLifecycle(store, operatorCaller, createRequest(), at(1000));
+  assert.equal(replay.replayed, true);
+  assert.equal(replay.instance.id, created.instance.id);
+});
+
+test("store load rejects persisted records whose identifiers exist but do not belong together", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "coffee-shop-instances-"));
+  const path = join(directory, "state.json");
+  const store = new Store(path);
+  await store.load();
+  await store.transact((state) => { seedThread(state); seedThread(state, "thread-two"); seedNode(state); });
+  const created = await applyInstanceLifecycle(store, operatorCaller, createRequest(), at(1));
+  const reservation = await reserveInstanceAllocation(store, created.instance.id, candidate("/work/one"), at(2));
+  assert.equal(reservation.kind, "reserved");
+  await applyInstanceLifecycle(store, operatorCaller, releaseRequest(created.instance.id, "release-one", "drain"), at(3));
+  // The hub's own persisted bytes are the fixture; Store.save wrote them (store.ts save, JSON branch).
+  const persisted = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>;
+  assert.ok((persisted.instanceLifecycleReceipts as unknown[]).length >= 1);
+  assert.ok((persisted.instanceDeliveries as unknown[]).length >= 1);
+  assert.ok((persisted.instanceReleaseIntents as unknown[]).length >= 1);
+
+  const rejects = async (mutate: (state: Record<string, unknown>) => void, pattern: RegExp) => {
+    const copy = JSON.parse(JSON.stringify(persisted)) as Record<string, unknown>;
+    mutate(copy);
+    await writeFile(path, JSON.stringify(copy));
+    const reloaded = new Store(path);
+    await assert.rejects(reloaded.load(), pattern);
+  };
+  // Both thread-two and the instance exist; the instance simply is not in that thread.
+  await rejects((state) => { (state.instanceLifecycleReceipts as Array<Record<string, unknown>>)[0].threadId = "thread-two"; }, /receipt 0 names instance .* from another thread/);
+  await rejects((state) => { (state.instanceReleaseIntents as Array<Record<string, unknown>>)[0].threadId = "thread-two"; }, /intent 0 names instance .* from another thread/);
+  await rejects((state) => { (state.instanceDeliveries as Array<Record<string, unknown>>)[0].allocationId = "allocation-elsewhere"; }, /names unknown allocation/);
+  await rejects((state) => { (state.instanceDeliveries as Array<Record<string, unknown>>)[0].nodeId = "node-two"; }, /does not hold allocation/);
+  await rejects((state) => {
+    const instances = state.instances as Array<Record<string, unknown>>;
+    instances.push({ ...structuredClone(instances[0]), id: "instance-elsewhere", status: "requested" });
+    // The release command names a real instance and a real allocation that belong to each other.
+    const release = (state.instanceDeliveries as Array<Record<string, unknown>>).find((record) => record.kind === "release")!;
+    (release.message as Record<string, unknown>).instanceId = "instance-elsewhere";
+  }, /does not own allocation/);
 });

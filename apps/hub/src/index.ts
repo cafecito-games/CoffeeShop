@@ -8,7 +8,6 @@ import express from "express";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
 import {
   canSendToControlAgent,
-  hasAuthoritativeInstanceEvidence,
   isControlProtocolVersion,
   isTerminalTaskStatus,
   isTerminalWorkspaceLeaseStatus,
@@ -35,8 +34,11 @@ import { detachEveryAttachmentInState, postOperatorMessageInState, type Operator
 import { createHubToolHandler, hubToolError } from "./hubTools.js";
 import {
   applyInstanceLifecycle,
+  classifyInstanceResidentEvidence,
+  classifyReportedInstanceCount,
   currentAllocationInState,
   flushPendingInstanceDeliveries,
+  instanceDeliveryBarrier,
   listThreadInstances,
   maintainInstanceLifecycle,
   operatorInstanceCreator,
@@ -788,12 +790,16 @@ wss.on("connection", (socket, request) => {
        * must be applied before any pending provision or release may be written to the socket.
        * Without it, a maintenance pass could deliver a pending provision between the replay barrier
        * and reconciliation, and the pre-provision snapshot would then mark it lost, duplicating
-       * residency. Absent evidence opens the barrier with nothing to apply.
+       * residency. The evidence is validated before the barrier is decided, so absent, explicitly
+       * empty, and malformed stay three distinct answers: only an absent claim opens the barrier
+       * with nothing to apply, and a malformed one leaves it closed.
        */
-      const instanceEvidence = supportsControlCapability(protocolVersion, "instances") && hasAuthoritativeInstanceEvidence(decoded)
-        ? { residents: decoded.activeInstanceIds }
-        : undefined;
-      if (!instanceEvidence) controlAgents.openInstanceDelivery(connection);
+      const residentEvidence = classifyInstanceResidentEvidence(decoded, protocolVersion);
+      const barrier = instanceDeliveryBarrier(residentEvidence);
+      if (residentEvidence.kind === "malformed") {
+        console.warn(redactor.redact(`refused resident evidence from ${nodeId}: ${residentEvidence.reason}`));
+      }
+      if (barrier === "open-now") controlAgents.openInstanceDelivery(connection);
       await dispatchQueuedRuns(connection, activeRunIds ?? []);
       if (supportsControlCapability(protocolVersion, "orchestration") && activeRunIds !== undefined) {
         reconcileWorkspaceLeases(store, nodeId, activeRunIds, sendAfterBarrier);
@@ -803,25 +809,28 @@ wss.on("connection", (socket, request) => {
       // Explicit resident evidence is authoritative: absent evidence (no valid activeInstanceIds)
       // changes nothing. Everything the node still reports stays, missing allocations become lost,
       // and unknown residents are asked to release without ever being adopted.
-      if (instanceEvidence) {
-        const residents = instanceEvidence.residents;
+      if (residentEvidence.kind === "authoritative") {
+        const residents = residentEvidence.residents;
         let reconciled = false;
         await store.transact((state) => {
           reconciled = reconcileNodeInstancesInState(state, nodeId, residents, new Date().toISOString());
           return reconciled;
         });
         if (reconciled) broadcast();
-        controlAgents.openInstanceDelivery(connection);
+        if (barrier === "open-after-reconcile") controlAgents.openInstanceDelivery(connection);
       }
       await runInstanceMaintenance();
       requestScheduling();
     } else if (message.type === "heartbeat") {
       let capacityChanged = false;
-      const reportedInstances = supportsControlCapability(protocolVersion, "instances")
-        && message.nodeId === nodeId && message.activeInstances !== undefined && Number.isSafeInteger(message.activeInstances)
-        ? message.activeInstances
-        : undefined;
-      await store.transact((state) => { const node = state.nodes.find((item) => item.id === message.nodeId); if (node) { capacityChanged = node.activeRuns !== message.activeRuns || node.activeInstances !== reportedInstances; node.lastSeen = message.at; node.activeRuns = message.activeRuns; if (reportedInstances !== undefined) node.activeInstances = reportedInstances; node.status = message.activeRuns ? "busy" : "online"; } });
+      // The reported resident count is validated before it is applied, so a malformed count neither
+      // reaches the node record nor passes for an omitted one: the last known usage stands.
+      const reportedCount = message.nodeId === nodeId ? classifyReportedInstanceCount(decoded, protocolVersion) : { kind: "absent" as const };
+      if (reportedCount.kind === "malformed") {
+        console.warn(redactor.redact(`refused reported instance usage from ${nodeId}: ${reportedCount.reason}`));
+      }
+      const reportedInstances = reportedCount.kind === "reported" ? reportedCount.count : undefined;
+      await store.transact((state) => { const node = state.nodes.find((item) => item.id === message.nodeId); if (node) { capacityChanged = node.activeRuns !== message.activeRuns || (reportedInstances !== undefined && node.activeInstances !== reportedInstances); node.lastSeen = message.at; node.activeRuns = message.activeRuns; if (reportedInstances !== undefined) node.activeInstances = reportedInstances; node.status = message.activeRuns ? "busy" : "online"; } });
       broadcast();
       if (capacityChanged) requestScheduling();
     } else if (decodedType === "instance.ready" || decodedType === "instance.failed" || decodedType === "instance.released") {

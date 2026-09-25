@@ -41,6 +41,12 @@ export interface TaskSubmission {
   /** The agent the submitting run executes as; absent for an external orchestrator. */
   creatorAgentId?: string;
   idempotencyKey: string;
+  /**
+   * The key space the idempotency key belongs to. Absent for a caller-supplied batch; a batch the
+   * hub derives on a caller's behalf names its own origin so the two spaces cannot collide even on
+   * an identical key string.
+   */
+  origin?: "instance-lifecycle";
   /** SHA-256 of the normalized batch; see `taskBatchDigest`. */
   digest: string;
   tasks: Array<{ key: string; taskId: string }>;
@@ -310,7 +316,8 @@ export function assertPersistedTaskState(state: State) {
   for (const [index, submission] of (state.taskSubmissions ?? []).entries()) {
     if (!isRecord(submission) || !isNonEmptyString(submission.id) || !isNonEmptyString(submission.threadId) || !isNonEmptyString(submission.idempotencyKey)
       || !isNonEmptyString(submission.digest) || !Array.isArray(submission.tasks)
-      || !submission.tasks.every((entry) => isRecord(entry) && isNonEmptyString(entry.key) && isNonEmptyString(entry.taskId))) {
+      || !submission.tasks.every((entry) => isRecord(entry) && isNonEmptyString(entry.key) && isNonEmptyString(entry.taskId))
+      || (submission.origin !== undefined && submission.origin !== "instance-lifecycle")) {
       throw new Error(`Persisted task submission ${index} is malformed`);
     }
   }

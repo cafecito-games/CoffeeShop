@@ -339,7 +339,10 @@ type BatchPlan =
 function planTaskBatch(state: Readonly<State>, callerSource: CallerSource, batch: NormalizedTaskBatch, options: TaskBatchOptions): BatchPlan {
   const source = authorizeSource(state, callerSource);
   const digest = taskBatchDigest(batch, source.threadId, source.digestIdentity, options.placementOverrides);
-  const prior = state.taskSubmissions?.find((item) => item.threadId === source.threadId && item.idempotencyKey === batch.idempotencyKey);
+  // Caller-supplied keys live in their own space: a submission the hub derived for another caller's
+  // operation never answers, and never conflicts with, a key an ordinary caller chose.
+  const prior = state.taskSubmissions?.find((item) =>
+    item.threadId === source.threadId && item.origin === undefined && item.idempotencyKey === batch.idempotencyKey);
   if (prior) {
     if (prior.digest !== digest) throw new CoordinationError("idempotency_conflict", "The idempotency key was already used with a different task batch");
     return { kind: "replay", submission: prior };
@@ -493,12 +496,18 @@ export async function submitTaskBatchForSource(
   return result;
 }
 
+/**
+ * The key space of a task the hub derives for an instance lifecycle request. No caller-supplied
+ * batch can enter it, so a derived key and a caller-chosen key of the same string never meet.
+ */
+const initialTaskOrigin = "instance-lifecycle" as const;
+
 /** The seed for the atomic initial task created with an instance, in the instance lifecycle transaction. */
 export interface InitialTaskSeed {
   title: string;
   instructions: string;
   requirements?: ExecutionRequirements;
-  /** Namespaced by the caller so it can never collide with a caller-chosen task batch key. */
+  /** Derived over the caller principal, thread, and operation; see `initialTaskIdempotencyKey`. */
   idempotencyKey: string;
   /** The canonical principal identity of the instance lifecycle caller. */
   sourceKey: string;
@@ -523,7 +532,8 @@ export function appendInitialTaskInState(state: State, threadId: string, seed: I
     }]
   });
   const digest = taskBatchDigest(batch, threadId, seed.sourceKey);
-  const prior = state.taskSubmissions?.find((item) => item.threadId === threadId && item.idempotencyKey === seed.idempotencyKey);
+  const prior = state.taskSubmissions?.find((item) =>
+    item.threadId === threadId && item.origin === initialTaskOrigin && item.idempotencyKey === seed.idempotencyKey);
   if (prior) {
     if (prior.digest !== digest) throw new CoordinationError("idempotency_conflict", "The idempotency key was already used with a different task batch");
     const existing = state.tasks?.find((item) => prior.tasks.some((entry) => entry.taskId === item.id));
@@ -552,6 +562,7 @@ export function appendInitialTaskInState(state: State, threadId: string, seed: I
     threadId,
     sourceKey: seed.sourceKey,
     idempotencyKey: seed.idempotencyKey,
+    origin: initialTaskOrigin,
     digest,
     tasks: [{ key: "initial", taskId: task.id }],
     createdAt: at

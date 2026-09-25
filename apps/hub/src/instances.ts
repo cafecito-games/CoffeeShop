@@ -6,15 +6,18 @@ import {
   instanceLifecycleOperations,
   instanceLifecycleDigestInput,
   isActiveRunStatus,
+  supportsControlCapability,
   validateAgentInstance,
   validateAgentTemplate,
   validateInstanceAllocation,
+  validateInstanceControlMessage,
   validateInstanceHubMessage,
   validateInstanceLifecycleRequest,
   type AgentInstance,
   type AgentTemplate,
   type AllocationStatus,
   type ComputeNode,
+  type ControlProtocolVersion,
   type HarnessId,
   type HarnessTransport,
   type InstanceAllocation,
@@ -57,7 +60,13 @@ export const operatorInstanceCreator: InstanceCreator = { kind: "operator", oper
 /** Bounds on retained audit records; pruning never touches a nonterminal record or an actionable outbox entry. */
 export const instanceAuditLimits = {
   retainedTerminalInstances: 200,
-  retainedReceipts: 1_000
+  retainedReceipts: 1_000,
+  /**
+   * Receipts kept for one instance. A live instance may be renewed or released under a new key
+   * without limit, so the per-instance bound is what keeps the collection — and the idempotency
+   * lookup that scans it — finite while the instance itself is retained.
+   */
+  retainedReceiptsPerInstance: 50
 } as const;
 
 /** The hub's durable idempotency receipt for one accepted lifecycle request. */
@@ -84,22 +93,32 @@ export interface InstanceReleaseIntent {
   updatedAt: string;
 }
 
-/** A lifecycle command persisted before its socket write; replayed until a current synced v5 socket accepts it. */
+/**
+ * A lifecycle command persisted before its socket write; replayed until the peer has demonstrably
+ * acted on it. `deliveredAt` records only that a socket write was accepted locally, which is not
+ * proof of receipt, so it never permanently suppresses a replay: the node's next authoritative
+ * snapshot re-arms a release the node has plainly not acted on, and a provision whose allocation
+ * that snapshot declares lost is removed with the allocation. A record is retired only once the
+ * peer's own evidence — `instance.ready`, or an acknowledged terminal transition — has arrived.
+ */
 export interface InstanceDeliveryRecord {
   allocationId: string;
   kind: "provision" | "release";
   nodeId: string;
   message: InstanceHubMessage;
   createdAt: string;
+  /** When a socket write was accepted for this command; evidence of a send, never of receipt. */
   deliveredAt?: string;
 }
 
 /**
  * A release requested for a resident the hub does not own; never adopted as hub state. Each request
- * is an actionable outbox entry: it is retained until it is delivered, never pruned, because a v5
- * sync can report up to `instanceLimits.collectionEntries` unknown residents at once and dropping
- * any of them would leave a resident supervised indefinitely. Reconciliation deduplicates by node
- * and instance, so retention cannot grow without new evidence.
+ * is an actionable outbox entry retained until it is delivered — a v5 sync can report up to
+ * `instanceLimits.collectionEntries` unknown residents at once and dropping any of them would leave
+ * a resident supervised indefinitely — and it is never pruned by an audit bound. It is retired only
+ * by the node's own later authoritative snapshot, which no longer reports that resident. With
+ * deduplication by node and instance, the requests for one node are therefore bounded by one
+ * snapshot's resident set however often the node reconnects.
  */
 export interface RemoteReleaseRequest {
   nodeId: string;
@@ -108,6 +127,60 @@ export interface RemoteReleaseRequest {
 }
 
 export type InstanceLifecycleEvidence = Extract<InstanceControlMessage, { type: "instance.ready" | "instance.failed" | "instance.released" }>;
+
+/**
+ * The three distinct states of the resident evidence a node may carry on a version-5 sync. They
+ * stay distinct at every decision point: absent means the node made no claim, `authoritative` is a
+ * complete resident set (an explicit empty set included), and `malformed` is a claim the hub cannot
+ * read — never a claim it did not make.
+ */
+export type InstanceResidentEvidence =
+  | { kind: "absent" }
+  | { kind: "authoritative"; residents: readonly string[] }
+  | { kind: "malformed"; reason: string };
+
+/**
+ * Classifies the resident evidence of a `sync.complete` frame. The protocol validator runs before
+ * the classification, so no decision is ever taken on an unvalidated field: a present but malformed
+ * `activeInstanceIds` is reported as malformed instead of collapsing into absent.
+ */
+export function classifyInstanceResidentEvidence(frame: unknown, version: ControlProtocolVersion): InstanceResidentEvidence {
+  if (!supportsControlCapability(version, "instances")) return { kind: "absent" };
+  const validated = validateInstanceControlMessage(frame, version);
+  if (!validated.ok) return { kind: "malformed", reason: validated.reason };
+  if (validated.value.type !== "sync.complete") return { kind: "malformed", reason: "the frame is not a reconciliation barrier" };
+  const residents = validated.value.activeInstanceIds;
+  return residents === undefined ? { kind: "absent" } : { kind: "authoritative", residents };
+}
+
+/**
+ * When instance command delivery may open for the connection that carried this evidence. Absent
+ * evidence has nothing to apply, authoritative evidence must be applied first, and malformed
+ * evidence fails closed: delivery stays shut until an authoritative sync arrives.
+ */
+export const instanceDeliveryBarrier = (evidence: InstanceResidentEvidence): "open-now" | "open-after-reconcile" | "stay-closed" =>
+  evidence.kind === "absent" ? "open-now" : evidence.kind === "authoritative" ? "open-after-reconcile" : "stay-closed";
+
+/** The reported resident count of a heartbeat: a valid count, no claim, or a claim the hub cannot read. */
+export type ReportedInstanceCount =
+  | { kind: "absent" }
+  | { kind: "reported"; count: number }
+  | { kind: "malformed"; reason: string };
+
+/**
+ * Classifies the `activeInstances` count of a heartbeat after validating the frame, so a malformed
+ * count never reaches the node record and is never mistaken for an omitted one. A malformed count
+ * leaves the last known usage in place rather than lowering it, because usage the hub cannot read is
+ * unknown, not zero.
+ */
+export function classifyReportedInstanceCount(frame: unknown, version: ControlProtocolVersion): ReportedInstanceCount {
+  if (!supportsControlCapability(version, "instances")) return { kind: "absent" };
+  const validated = validateInstanceControlMessage(frame, version);
+  if (!validated.ok) return { kind: "malformed", reason: validated.reason };
+  if (validated.value.type !== "heartbeat") return { kind: "malformed", reason: "the frame is not a heartbeat" };
+  const count = validated.value.activeInstances;
+  return count === undefined ? { kind: "absent" } : { kind: "reported", count };
+}
 
 /** The canonical principal identity of a lifecycle caller; the two namespaces never collide. */
 export function instanceCreatorSourceKey(creator: InstanceCreator): string {
@@ -125,20 +198,47 @@ export function currentAllocationInState(state: Readonly<State>, instanceId: str
 
 export interface ResidentInstanceUsage {
   capacity: number;
-  /** Slots held by persisted nonterminal allocations or the node's latest report, whichever is larger. */
+  /** Slots held by the union of persisted resident intent and reported residents the hub does not own. */
   used: number;
 }
 
 /**
  * Resident usage for one node. A node without `instanceCapacity` is incapable of hosting instances
- * (zero capacity); absent reported usage is unknown, so persisted allocation intent alone still
- * reserves — reconnect lag can under-report but never overbook.
+ * (zero capacity).
+ *
+ * Residency is a set of identities, not a count, so the two sources of truth are unioned by
+ * identity instead of compared as numbers:
+ *
+ * - every occupying allocation this hub persists for the node contributes its instance identity,
+ *   whether or not the node has reported it yet, so reconnect lag cannot overbook;
+ * - every resident the node reported that the hub does not own contributes its own identity. Those
+ *   are exactly the node's `remoteReleaseRequests`, which reconciliation keeps in step with the
+ *   node's latest authoritative snapshot; a requested remote release still occupies its slot until
+ *   the node confirms it is gone.
+ *
+ * The union cannot undercount when the two sets are disjoint, because a reported resident the hub
+ * does not own adds a slot of its own instead of being masked by a larger persisted count. It
+ * cannot double-count when they overlap, because a reported identity that an occupying allocation
+ * on this node already claims is excluded from the unowned set.
+ *
+ * `activeInstances` is a scalar the node reports without identities, so it can only raise the floor:
+ * it covers residency whose identity the hub has not seen at all (a report that arrived before its
+ * resident set did). Absent or malformed, it is unknown and contributes no floor, never a default.
  */
-export function residentInstanceUsage(node: ComputeNode, allocations: readonly InstanceAllocation[]): ResidentInstanceUsage {
+export function residentInstanceUsage(
+  node: ComputeNode,
+  allocations: readonly InstanceAllocation[],
+  remoteResidents: readonly RemoteReleaseRequest[] = []
+): ResidentInstanceUsage {
   const capacity = Number.isSafeInteger(node.instanceCapacity) && node.instanceCapacity! > 0 ? node.instanceCapacity! : 0;
-  const reported = Number.isSafeInteger(node.activeInstances) && node.activeInstances! >= 0 ? node.activeInstances! : 0;
-  const reserved = allocations.filter((allocation) => allocation.nodeId === node.id && occupyingAllocationStatuses.includes(allocation.status)).length;
-  return { capacity, used: Math.max(reported, reserved) };
+  const reportedFloor = Number.isSafeInteger(node.activeInstances) && node.activeInstances! >= 0 ? node.activeInstances! : 0;
+  const owned = new Set(allocations
+    .filter((allocation) => allocation.nodeId === node.id && occupyingAllocationStatuses.includes(allocation.status))
+    .map((allocation) => allocation.instanceId));
+  const unowned = new Set(remoteResidents
+    .filter((request) => request.nodeId === node.id && !owned.has(request.instanceId))
+    .map((request) => request.instanceId));
+  return { capacity, used: Math.max(owned.size + unowned.size, reportedFloor) };
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
@@ -199,18 +299,30 @@ const instanceRequestDigest = (request: InstanceLifecycleRequest): string => {
 };
 
 /*
- * A lifecycle idempotency key may be 128 bytes, and prefixing it would exceed the task-batch key
- * limit of 128 characters, turning a valid create-with-initial-task into a rejection. Deriving the
- * namespaced key through a digest keeps it inside that bound for every accepted lifecycle key while
- * remaining injective for distinct keys.
+ * The idempotency key of the task created with an instance. A lifecycle idempotency key may be 128
+ * bytes and the task-batch key limit is also 128 characters, so the key cannot be carried verbatim
+ * with its scope prefixed; it is derived through a digest instead, which keeps it inside that bound.
+ *
+ * The derivation carries the full scope lifecycle idempotency is defined over — caller principal,
+ * thread, and operation — because the task-submission lookup is keyed by thread and key alone: two
+ * principals reusing the same lifecycle key on one thread must not collide into one conflict. NUL
+ * separators keep it injective, since neither a source key nor a thread id may contain one.
+ *
+ * The digest alone is not enough, because an ordinary task caller may submit any 128-character key
+ * and could therefore occupy this string. The submission is written in its own namespace
+ * (`origin: "instance-lifecycle"`), which no caller-supplied batch can enter, so the two key spaces
+ * are disjoint by construction rather than by the unguessability of a hash.
  */
-const initialTaskIdempotencyKey = (key: string) => `instance-create:${createHash("sha256").update(key).digest("hex")}`;
+const initialTaskIdempotencyKey = (sourceKey: string, threadId: string, key: string) =>
+  createHash("sha256").update(`instance-create\u0000${sourceKey}\u0000${threadId}\u0000${key}`).digest("hex");
 
 const receiptKeyMatches = (receipt: InstanceLifecycleReceipt, threadId: string, sourceKey: string, idempotencyKey: string) =>
   receipt.threadId === threadId && receipt.sourceKey === sourceKey && receipt.idempotencyKey === idempotencyKey;
 
 function replayResult(state: Readonly<State>, receipt: InstanceLifecycleReceipt): InstanceLifecycleResult {
-  const instance = state.instances?.find((item) => item.id === receipt.instanceId);
+  // The receipt is looked up by thread, so the instance it names must belong to that thread; a
+  // replay never reaches outside the thread it was accepted on, whatever a snapshot claims.
+  const instance = state.instances?.find((item) => item.id === receipt.instanceId && item.threadId === receipt.threadId);
   if (!instance) throw new CoordinationError("not_found", "Instance not found");
   const allocation = currentAllocationInState(state, instance.id);
   return {
@@ -276,7 +388,7 @@ export async function applyInstanceLifecycle(
           title: request.initialTask.title,
           instructions: request.initialTask.instructions,
           requirements: structuredClone(request.requirements),
-          idempotencyKey: initialTaskIdempotencyKey(request.idempotency.key),
+          idempotencyKey: initialTaskIdempotencyKey(sourceKey, thread.id, request.idempotency.key),
           sourceKey
         }, at).id;
       }
@@ -446,7 +558,7 @@ export async function reserveInstanceAllocation(
       result = { kind: "capacity", reason: `Compute node ${candidate.nodeId} is not available` };
       return false;
     }
-    const usage = residentInstanceUsage(node, state.allocations ?? []);
+    const usage = residentInstanceUsage(node, state.allocations ?? [], state.remoteReleaseRequests ?? []);
     if (usage.used >= usage.capacity) {
       result = { kind: "capacity", reason: `Compute node ${candidate.nodeId} has no resident instance capacity (${usage.used}/${usage.capacity})` };
       return false;
@@ -498,6 +610,12 @@ export async function reserveInstanceAllocation(
     return true;
   });
   return result;
+}
+
+/** Test seams for the delivery pass; production callers pass none. */
+export interface InstanceDeliveryHooks {
+  /** Awaited after the outbox is read and before the transaction that decides one command. */
+  beforeDelivery?: (record: { allocationId: string; kind: "provision" | "release" }) => void | Promise<void>;
 }
 
 export type InstanceReportKind = "accepted" | "ignored" | "rejected";
@@ -616,7 +734,11 @@ function settleTerminalInstance(state: State, instance: AgentInstance, at: strin
  * as active evidence — and their non-draining instances return to `requested` for replacement. A
  * still-undelivered reservation is left for outbox replay rather than judged missing. An unknown
  * resident is never adopted: the hub asks the node to release it. Absent evidence must never reach
- * this function; the caller checks `hasAuthoritativeInstanceEvidence` first.
+ * this function; the caller classifies the sync with `classifyInstanceResidentEvidence` first.
+ *
+ * The snapshot is also the authority that retires outbox entries: a release for a resident the node
+ * still reports is re-armed for replay, and a remote release request for a resident it no longer
+ * reports is retired. Both directions are needed for the outbox to be finite as well as sufficient.
  */
 export function reconcileNodeInstancesInState(state: State, nodeId: string, activeInstanceIds: readonly string[], at: string): boolean {
   const reported = new Set(activeInstanceIds);
@@ -653,11 +775,51 @@ export function reconcileNodeInstancesInState(state: State, nodeId: string, acti
     }));
     changed = true;
   }
+  changed = rearmUnacknowledgedReleases(state, nodeId, reported, at) || changed;
   for (const instanceId of activeInstanceIds) {
     if (expectedInstanceIds.has(instanceId)) continue;
     state.remoteReleaseRequests ??= [];
     if (state.remoteReleaseRequests.some((request) => request.nodeId === nodeId && request.instanceId === instanceId)) continue;
     state.remoteReleaseRequests.push({ nodeId, instanceId, requestedAt: at });
+    changed = true;
+  }
+  /*
+   * This snapshot is the complete resident set of the node, so a request for a resident it no longer
+   * reports has nothing left to act on and is retired. Nothing actionable is discarded: only a
+   * resident the node itself stopped reporting is dropped, and if it reappears in a later snapshot
+   * the request is written again. Each node's requests are therefore bounded by the resident set a
+   * snapshot may carry (`instanceLimits.collectionEntries`) and cannot grow across reconnects.
+   */
+  const requests = state.remoteReleaseRequests ?? [];
+  const retained = requests.filter((request) => request.nodeId !== nodeId || reported.has(request.instanceId));
+  if (retained.length !== requests.length) {
+    state.remoteReleaseRequests = retained;
+    changed = true;
+  }
+  return changed;
+}
+
+/**
+ * Re-arms release commands this node has not acted on. A socket write that returned is not proof the
+ * peer received the frame, so a release whose instance the node still reports resident after an
+ * authoritative reconnect is marked undelivered again and replays. The record is reused rather than
+ * duplicated, so replay cannot grow the outbox.
+ */
+function rearmUnacknowledgedReleases(state: State, nodeId: string, reported: ReadonlySet<string>, at: string): boolean {
+  const allocationsById = new Map((state.allocations ?? []).map((allocation) => [allocation.id, allocation]));
+  // An escalation already waiting to be written carries the stronger mode, so the superseded command
+  // it replaced is not re-armed behind it.
+  const awaitingRelease = new Set((state.instanceDeliveries ?? [])
+    .filter((record) => record.kind === "release" && record.deliveredAt === undefined)
+    .map((record) => record.allocationId));
+  let changed = false;
+  for (const record of state.instanceDeliveries ?? []) {
+    if (record.kind !== "release" || record.nodeId !== nodeId || record.deliveredAt === undefined) continue;
+    if (awaitingRelease.has(record.allocationId)) continue;
+    const allocation = allocationsById.get(record.allocationId);
+    if (!allocation || !occupyingAllocationStatuses.includes(allocation.status) || !reported.has(allocation.instanceId)) continue;
+    record.deliveredAt = undefined;
+    record.createdAt = at;
     changed = true;
   }
   return changed;
@@ -709,6 +871,11 @@ function settleDrainingInstances(state: State, at: string): boolean {
     if (activeRunsForInstance(state, instance.id).length > 0) continue;
     const allocation = currentAllocationInState(state, instance.id);
     if (allocation) {
+      /*
+       * One command per allocation: an existing record already carries this release. If the node has
+       * not acted on it, its next authoritative snapshot re-arms that record for replay, so a lost
+       * frame is reissued without ever duplicating the command here.
+       */
       const commanded = (state.instanceDeliveries ?? []).some((record) => record.kind === "release" && record.allocationId === allocation.id);
       if (commanded) continue;
       const mode = (state.instanceReleaseIntents ?? []).find((intent) => intent.instanceId === instance.id)?.mode ?? "drain";
@@ -745,16 +912,22 @@ function settleDrainingInstances(state: State, at: string): boolean {
  * recording happen in one transaction, so a reconciliation that removed the record while this pass
  * was awaiting can never be raced by a stale send. A delivered provision command moves its
  * allocation to `provisioning`, which is what a later `instance.ready` requires.
+ *
+ * `hooks.beforeDelivery` is the seam that makes that ordering testable: it runs between the pass's
+ * read of the outbox and the transaction that decides one command, which is exactly where a
+ * concurrent reconciliation would interleave.
  */
 export async function flushPendingInstanceDeliveries(
   store: Store,
-  deliver: (nodeId: string, message: InstanceHubMessage) => boolean
+  deliver: (nodeId: string, message: InstanceHubMessage) => boolean,
+  hooks: InstanceDeliveryHooks = {}
 ): Promise<boolean> {
   let changed = false;
   const pending = store.read((state) => (state.instanceDeliveries ?? [])
     .filter((record) => record.deliveredAt === undefined)
     .map((record) => ({ allocationId: record.allocationId, kind: record.kind })));
   for (const { allocationId, kind } of pending) {
+    if (hooks.beforeDelivery) await hooks.beforeDelivery({ allocationId, kind });
     await store.transact((state) => {
       const target = (state.instanceDeliveries ?? []).find((item) => item.allocationId === allocationId && item.kind === kind && item.deliveredAt === undefined);
       if (!target || !deliver(target.nodeId, target.message)) return false;
@@ -770,6 +943,12 @@ export async function flushPendingInstanceDeliveries(
       return true;
     });
   }
+  /*
+   * A remote release names no allocation the hub owns, so the instance identity addresses it. The
+   * request is removed once the write is accepted rather than on an acknowledgement, because the hub
+   * holds no record to acknowledge: if the node still hosts that resident, its next authoritative
+   * snapshot reports it again and the request is written again, which is the replay.
+   */
   const remote = store.read((state) => structuredClone(state.remoteReleaseRequests ?? []));
   for (const request of remote) {
     await store.transact((state) => {
@@ -816,20 +995,77 @@ export function pruneInstanceAuditRecords(state: State): boolean {
     state.instanceDeliveries = (state.instanceDeliveries ?? []).filter((record) => !dropped.has(commandInstanceId(record.message)));
     changed = true;
   }
+  if (pruneLifecycleReceipts(state)) changed = true;
+  if (retireSettledDeliveries(state)) changed = true;
+  return changed;
+}
+
+/**
+ * Bounds retained receipts both per instance and overall, so no single live instance can grow the
+ * collection without limit.
+ *
+ * Drop order is by how actionable a receipt is, oldest first within each rank: a receipt whose
+ * instance is gone can answer nothing, a renew or release receipt replays an operation that is
+ * re-derivable from the instance's own state, and a `create` receipt is the one that maps a caller's
+ * key to an instance identity, so it is dropped last and never while its instance is retained and
+ * the collection is inside its global bound. Losing a create receipt would turn a replay into a
+ * second creation, which is why the per-instance bound never touches one.
+ */
+function pruneLifecycleReceipts(state: State): boolean {
   const receipts = state.instanceLifecycleReceipts ?? [];
-  if (receipts.length > instanceAuditLimits.retainedReceipts) {
-    const instanceIds = new Set((state.instances ?? []).map((instance) => instance.id));
-    const prunable = receipts
-      .filter((receipt) => !instanceIds.has(receipt.instanceId))
-      .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
-    const budget = receipts.length - instanceAuditLimits.retainedReceipts;
-    const drop = new Set(prunable.slice(0, budget).map((receipt) => receipt.id));
-    if (drop.size > 0) {
-      state.instanceLifecycleReceipts = receipts.filter((receipt) => !drop.has(receipt.id));
-      changed = true;
+  const instanceIds = new Set((state.instances ?? []).map((instance) => instance.id));
+  const oldestFirst = (left: InstanceLifecycleReceipt, right: InstanceLifecycleReceipt) =>
+    left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id);
+  const drop = new Set<string>();
+  const byInstance = new Map<string, InstanceLifecycleReceipt[]>();
+  for (const receipt of receipts) {
+    const group = byInstance.get(receipt.instanceId) ?? [];
+    group.push(receipt);
+    byInstance.set(receipt.instanceId, group);
+  }
+  for (const group of byInstance.values()) {
+    if (group.length <= instanceAuditLimits.retainedReceiptsPerInstance) continue;
+    const replaceable = group.filter((receipt) => receipt.operation !== "create" || !instanceIds.has(receipt.instanceId)).sort(oldestFirst);
+    for (const receipt of replaceable.slice(0, group.length - instanceAuditLimits.retainedReceiptsPerInstance)) drop.add(receipt.id);
+  }
+  const overGlobalBound = () => receipts.length - drop.size - instanceAuditLimits.retainedReceipts;
+  const rankedForGlobalBound = [
+    (receipt: InstanceLifecycleReceipt) => !instanceIds.has(receipt.instanceId),
+    (receipt: InstanceLifecycleReceipt) => receipt.operation !== "create",
+    () => true
+  ];
+  for (const rank of rankedForGlobalBound) {
+    if (overGlobalBound() <= 0) break;
+    for (const receipt of receipts.filter((item) => !drop.has(item.id) && rank(item)).sort(oldestFirst)) {
+      if (overGlobalBound() <= 0) break;
+      drop.add(receipt.id);
     }
   }
-  return changed;
+  if (drop.size === 0) return false;
+  state.instanceLifecycleReceipts = receipts.filter((receipt) => !drop.has(receipt.id));
+  return true;
+}
+
+/**
+ * Retires delivery records the peer has settled. A provision is settled when its allocation reaches
+ * `active` — the `instance.ready` acknowledgement — and either kind is settled once its allocation
+ * is gone or no longer holds a slot, because nothing can act on the command any more. An
+ * unacknowledged record is never retired here, so replay stays possible; at most one provision and
+ * the escalated release commands of one allocation are held at a time, which bounds the outbox by
+ * the allocations the hub retains.
+ */
+function retireSettledDeliveries(state: State): boolean {
+  const records = state.instanceDeliveries ?? [];
+  const allocationsById = new Map((state.allocations ?? []).map((allocation) => [allocation.id, allocation]));
+  const retained = records.filter((record) => {
+    const allocation = allocationsById.get(record.allocationId);
+    if (!allocation) return false;
+    if (!occupyingAllocationStatuses.includes(allocation.status)) return false;
+    return !(record.kind === "provision" && record.deliveredAt !== undefined && allocation.status === "active");
+  });
+  if (retained.length === records.length) return false;
+  state.instanceDeliveries = retained;
+  return true;
 }
 
 /** The instance a persisted lifecycle command concerns, regardless of its wire shape. */
@@ -858,7 +1094,9 @@ export function assertPersistedInstanceState(state: State) {
     instanceIds.add(instance.id);
     if (!threadIds.has(instance.threadId)) throw new Error(`${context} names unknown thread ${instance.threadId}`);
   }
+  const instanceThreadIds = new Map((state.instances ?? []).map((instance) => [instance.id, instance.threadId]));
   const allocationIds = new Set<string>();
+  const allocationsById = new Map<string, InstanceAllocation>();
   const occupying = new Map<string, number>();
   for (const [index, allocation] of (state.allocations ?? []).entries()) {
     const context = `Persisted instance allocation ${index}`;
@@ -867,6 +1105,7 @@ export function assertPersistedInstanceState(state: State) {
     if (allocationIds.has(allocation.id)) throw new Error(`${context} repeats allocation id ${allocation.id}`);
     allocationIds.add(allocation.id);
     if (!instanceIds.has(allocation.instanceId)) throw new Error(`${context} names unknown instance ${allocation.instanceId}`);
+    allocationsById.set(allocation.id, allocation);
     if (occupyingAllocationStatuses.includes(allocation.status)) {
       const count = (occupying.get(allocation.instanceId) ?? 0) + 1;
       occupying.set(allocation.instanceId, count);
@@ -892,6 +1131,11 @@ export function assertPersistedInstanceState(state: State) {
     if (!(instanceLifecycleOperations as readonly string[]).includes(receipt.operation)) throw new Error(`${context} has an unknown operation`);
     if (!threadIds.has(receipt.threadId)) throw new Error(`${context} names unknown thread ${receipt.threadId}`);
     if (!instanceIds.has(receipt.instanceId)) throw new Error(`${context} names unknown instance ${receipt.instanceId}`);
+    // Both identifiers existing is not the invariant; the receipt must name the thread its instance
+    // belongs to, or a thread-scoped replay could answer with an instance from another thread.
+    if (instanceThreadIds.get(receipt.instanceId) !== receipt.threadId) {
+      throw new Error(`${context} names instance ${receipt.instanceId} from another thread`);
+    }
     const key = `${receipt.threadId}\u0000${receipt.sourceKey}\u0000${receipt.idempotencyKey}`;
     if (receiptKeys.has(key)) throw new Error(`${context} repeats its caller and idempotency key`);
     receiptKeys.add(key);
@@ -903,6 +1147,9 @@ export function assertPersistedInstanceState(state: State) {
       throw new Error(`${context} is malformed`);
     }
     if (!instanceIds.has(intent.instanceId)) throw new Error(`${context} names unknown instance ${intent.instanceId}`);
+    if (instanceThreadIds.get(intent.instanceId) !== intent.threadId) {
+      throw new Error(`${context} names instance ${intent.instanceId} from another thread`);
+    }
   }
   for (const [index, record] of (state.instanceDeliveries ?? []).entries()) {
     const context = `Persisted instance delivery ${index}`;
@@ -913,6 +1160,17 @@ export function assertPersistedInstanceState(state: State) {
     if (!validateInstanceHubMessage(record.message as InstanceHubMessage, "5").ok) throw new Error(`${context} holds a command that is not wire-valid`);
     const expectedType = record.kind === "provision" ? "instance.provision" : "instance.release";
     if (record.message.type !== expectedType) throw new Error(`${context} holds a command that does not match its kind`);
+    /*
+     * A command is addressed by allocation, so the allocation must exist and the record's node and
+     * instance must be the ones that allocation names. Otherwise a snapshot could replay a command
+     * to a node that never held the instance, or against a generation the allocation does not own.
+     */
+    const allocation = allocationsById.get(record.allocationId);
+    if (!allocation) throw new Error(`${context} names unknown allocation ${record.allocationId}`);
+    if (allocation.nodeId !== record.nodeId) throw new Error(`${context} names a node that does not hold allocation ${record.allocationId}`);
+    if (commandInstanceId(record.message as InstanceHubMessage) !== allocation.instanceId) {
+      throw new Error(`${context} holds a command for an instance that does not own allocation ${record.allocationId}`);
+    }
   }
   for (const [index, request] of (state.remoteReleaseRequests ?? []).entries()) {
     const context = `Persisted remote release request ${index}`;
