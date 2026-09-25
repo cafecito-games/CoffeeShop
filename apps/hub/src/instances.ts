@@ -51,6 +51,14 @@ import { appendInitialTaskInState } from "./tasks.js";
 
 /** The resident-intent statuses: an allocation in one of these holds a node slot. */
 export const occupyingAllocationStatuses: readonly AllocationStatus[] = ["reserved", "provisioning", "active"];
+/**
+ * The allocation statuses a node's own evidence has settled: the peer has acknowledged the instance
+ * released or failed, so the identity is gone from the node and can never occupy a slot again. Only
+ * an acknowledgement from the allocation's own node, or the hub settling an instance that holds no
+ * occupying allocation at all, reaches one of these, which is why they may be discounted against a
+ * residency snapshot that still names the identity.
+ */
+export const settledAllocationStatuses: readonly AllocationStatus[] = ["released", "failed"];
 /** Statuses from which an instance may still be placed, replaced, or released. */
 export const nonTerminalInstanceStatuses: readonly InstanceStatus[] = ["requested", "provisioning", "ready", "busy", "idle"];
 export const terminalInstanceStatuses: readonly InstanceStatus[] = ["released", "failed"];
@@ -235,7 +243,11 @@ export function currentAllocationInState(state: Readonly<State>, instanceId: str
 
 export interface ResidentInstanceUsage {
   capacity: number;
-  /** Slots held by the union of persisted resident intent and reported residents the hub does not own. */
+  /**
+   * Slots held by the union of persisted resident intent and the residency the node itself reports;
+   * where the node has reported only a count, the upper bound of that union, because a count and a
+   * set of identities cannot be reconciled.
+   */
   used: number;
 }
 
@@ -243,19 +255,33 @@ export interface ResidentInstanceUsage {
  * Resident usage for one node. A node without `instanceCapacity` is incapable of hosting instances
  * (zero capacity).
  *
- * Residency is a set of identities, not a count, and it has exactly two sources, unioned by identity:
+ * Every residency state a node can be in is derived here, and each is derived from evidence rather
+ * than from a default:
  *
- * - every occupying allocation this hub persists for the node contributes its instance identity,
- *   whether or not the node has reported it yet, so reconnect lag cannot overbook;
- * - the node's authoritative residency record contributes every identity it reports. The identities
- *   an occupying allocation on this node already claims are excluded, so an overlap is counted once.
- *
- * The record is authoritative when it exists, which is what the scalar `activeInstances` cannot be:
- * a count carries no identities, so it can neither be reconciled nor superseded by identity. It
- * therefore survives only as a floor for a node that has not yet produced an authoritative snapshot,
- * covering residency the hub has no identity for at all. Absent or malformed, it is unknown and
- * contributes no floor, never a default. Once a snapshot exists — an explicitly empty one included —
- * the record alone decides, so a stale count can never keep blocking a valid reservation.
+ * - **An authoritative record exists.** Residency is a set of identities, and the record is the
+ *   node's own complete resident set. Usage is the union, by identity, of the occupying allocations
+ *   this hub persists for the node — whether or not the node has reported them yet, so reconnect lag
+ *   cannot overbook — and the identities the record names that the hub does not own. An overlap is
+ *   counted once. An identity whose allocation on this node is already settled is discounted: the
+ *   node itself acknowledged that instance released or failed, so the record naming it is older than
+ *   that acknowledgement and the slot is free. Discounting in the reader rather than editing the
+ *   record covers every way an identity stops occupying a slot — acknowledged release, acknowledged
+ *   failure, and terminal settlement alike — instead of only the transition a single writer happened
+ *   to be taught about, and it keeps the record a faithful copy of what the node reported, which is
+ *   what the release outbox and its load validation depend on.
+ * - **An authoritative record exists and is empty.** The union is the hub's own occupying
+ *   allocations, so an empty record means zero unowned residency, authoritatively, however stale the
+ *   scalar count is.
+ * - **No authoritative record has ever arrived.** `activeInstances` is a count, and a count cannot
+ *   be reconciled with a set of identities: the hub cannot tell whether it names the instances it
+ *   already owns or others entirely. Residency therefore lies between `max(owned, count)` and
+ *   `owned + count`, and only the upper bound is safe to place a reservation against, so the count is
+ *   added to the owned identities rather than maxed against them. Overbooking a node produces a
+ *   provision Barista must reject and a lifecycle failure the hub already recorded; refusing a
+ *   candidate only defers it until the node's first authoritative snapshot, which then supersedes the
+ *   count entirely. A count of zero costs nothing, because the upper and lower bounds coincide there.
+ * - **The count is absent or malformed.** It is unknown, never zero and never a default: it
+ *   contributes nothing, and only the hub's own occupying allocations count.
  */
 export function residentInstanceUsage(
   node: ComputeNode,
@@ -263,15 +289,19 @@ export function residentInstanceUsage(
   residency?: NodeInstanceResidency
 ): ResidentInstanceUsage {
   const capacity = Number.isSafeInteger(node.instanceCapacity) && node.instanceCapacity! > 0 ? node.instanceCapacity! : 0;
-  const owned = new Set(allocations
-    .filter((allocation) => allocation.nodeId === node.id && occupyingAllocationStatuses.includes(allocation.status))
+  const onNode = allocations.filter((allocation) => allocation.nodeId === node.id);
+  const owned = new Set(onNode
+    .filter((allocation) => occupyingAllocationStatuses.includes(allocation.status))
     .map((allocation) => allocation.instanceId));
   if (residency !== undefined && residency.nodeId === node.id) {
-    const unowned = new Set(residency.instanceIds.filter((instanceId) => !owned.has(instanceId)));
+    const settled = new Set(onNode
+      .filter((allocation) => settledAllocationStatuses.includes(allocation.status))
+      .map((allocation) => allocation.instanceId));
+    const unowned = new Set(residency.instanceIds.filter((instanceId) => !owned.has(instanceId) && !settled.has(instanceId)));
     return { capacity, used: owned.size + unowned.size };
   }
-  const reportedFloor = Number.isSafeInteger(node.activeInstances) && node.activeInstances! >= 0 ? node.activeInstances! : 0;
-  return { capacity, used: Math.max(owned.size, reportedFloor) };
+  const unnamedResidents = Number.isSafeInteger(node.activeInstances) && node.activeInstances! > 0 ? node.activeInstances! : 0;
+  return { capacity, used: owned.size + unnamedResidents };
 }
 
 /** The node's authoritative resident set, if it has produced one. */
@@ -422,7 +452,6 @@ export async function applyInstanceLifecycle(
       result = replayResult(state, prior);
       return false;
     }
-    if (request.operation !== "create") assertReceiptBudget(state, request.instanceId, request.operation);
     if (request.operation === "create") {
       if (thread.status !== "active") throw new CoordinationError("thread_inactive", "Instance creation requires an active thread");
       const instance: AgentInstance = {
@@ -478,6 +507,13 @@ export async function applyInstanceLifecycle(
     } else {
       const instance = (state.instances ?? []).find((item) => item.id === request.instanceId && item.threadId === request.threadId);
       if (!instance) throw new CoordinationError("not_found", "Instance not found");
+      /*
+       * Scope before anything observable. The receipt budget is a property of the named instance, so
+       * checking it before the instance is known to belong to the requested thread would answer for a
+       * foreign instance: one at its budget would conflict while one below it stayed hidden behind the
+       * not-found answer, which is how a caller could probe another thread's instances.
+       */
+      assertReceiptBudget(state, instance.id, request.operation);
       if (request.operation === "renew") {
         if (instance.status === "released" || instance.status === "failed") {
           throw new CoordinationError("conflict", `A ${instance.status} instance cannot be renewed`);
@@ -1085,6 +1121,15 @@ export async function flushPendingInstanceDeliveries(
         changed = true;
         return true;
       }
+      /*
+       * The hub knows only the instance identity of a resident it does not own — a node reports its
+       * residents as instance ids — so the instance identity has to address the command in a field
+       * the wire defines as an allocation id. Barista resolves a release by allocation id today, so
+       * whether this command actually evicts the resident depends on the instance-id fallback tracked
+       * by cafecito-games/CoffeeShop#90; the hub side deliberately keeps emitting it, and holds it
+       * until the node's own snapshots stop reporting the resident, so the eviction happens as soon as
+       * that gate lands without any protocol change here.
+       */
       const message: InstanceHubMessage = { type: "instance.release", instanceId: target.instanceId, allocationId: target.instanceId, mode: "cancel" };
       if (!deliver(target.nodeId, message)) return false;
       target.deliveredAt = new Date().toISOString();
@@ -1264,7 +1309,7 @@ export function assertPersistedInstanceState(state: State) {
       throw new Error(`${context} names instance ${intent.instanceId} from another thread`);
     }
   }
-  const releaseSequences = new Map<string, Set<number>>();
+  const commandSequences = new Map<string, Set<number>>();
   for (const [index, record] of (state.instanceDeliveries ?? []).entries()) {
     const context = `Persisted instance delivery ${index}`;
     if (!isRecord(record) || !isNonEmptyString(record.allocationId) || !isNonEmptyString(record.nodeId) || !isNonEmptyString(record.createdAt)
@@ -1273,17 +1318,18 @@ export function assertPersistedInstanceState(state: State) {
       throw new Error(`${context} is malformed`);
     }
     /*
-     * Release commands of one allocation are ordered by their sequence, and the order decides which
-     * mode the peer ends up holding. Two records sharing a position would make that order ambiguous.
+     * A sequence is a position in one allocation's command order, across every kind of command: the
+     * delivery pass looks a record up by allocation and sequence alone, and the order decides which
+     * release mode the peer ends up holding. Two records of an allocation sharing a position — a
+     * provision and a release included — would make both that lookup and that order ambiguous, so
+     * uniqueness is checked over all kinds rather than among releases alone.
      */
-    if (record.kind === "release") {
-      const seen = releaseSequences.get(record.allocationId) ?? new Set<number>();
-      if (seen.has(record.sequence as number)) {
-        throw new Error(`${context} repeats release sequence ${record.sequence} for allocation ${record.allocationId}`);
-      }
-      seen.add(record.sequence as number);
-      releaseSequences.set(record.allocationId, seen);
+    const seen = commandSequences.get(record.allocationId) ?? new Set<number>();
+    if (seen.has(record.sequence as number)) {
+      throw new Error(`${context} repeats command sequence ${record.sequence} for allocation ${record.allocationId}`);
     }
+    seen.add(record.sequence as number);
+    commandSequences.set(record.allocationId, seen);
     if (!validateInstanceHubMessage(record.message as InstanceHubMessage, "5").ok) throw new Error(`${context} holds a command that is not wire-valid`);
     const expectedType = record.kind === "provision" ? "instance.provision" : "instance.release";
     if (record.message.type !== expectedType) throw new Error(`${context} holds a command that does not match its kind`);

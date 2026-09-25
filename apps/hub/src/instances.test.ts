@@ -265,8 +265,8 @@ test("concurrent duplicate creation with the same key produces exactly one insta
  * above the persisted allocations, an absent scalar leaving persisted intent to reserve, and
  * non-occupying or foreign allocations never counting — and add the supersession cases.
  */
-test("an authoritative resident record supersedes the reported scalar, which is only a floor without one", () => {
-  const node = computeNode({ instanceCapacity: 4, activeInstances: 3 });
+test("an authoritative resident record supersedes the reported scalar, which is unnamed residency without one", () => {
+  const node = computeNode({ instanceCapacity: 8, activeInstances: 3 });
   const allocations = [
     { instanceId: "a", nodeId: "node-one", status: "reserved" },
     { instanceId: "b", nodeId: "node-one", status: "active" },
@@ -274,21 +274,114 @@ test("an authoritative resident record supersedes the reported scalar, which is 
     { instanceId: "d", nodeId: "node-one", status: "released" },
     { instanceId: "e", nodeId: "node-two", status: "active" }
   ].map((entry) => entry as never);
-  // With no record of its own, the node's scalar count still raises the floor above the two
-  // occupying allocations the hub persists for it.
-  assert.deepEqual(residentInstanceUsage(node, allocations), { capacity: 4, used: 3 });
+  /*
+   * With no record of its own the node has named nothing, so its count cannot be reconciled with the
+   * two occupying allocations the hub persists: the residents may be the same two or three others
+   * entirely. Usage is the upper bound of that union, because only the upper bound is safe to place a
+   * reservation against. This replaces an assertion of `Math.max(owned, count)`, which was the lower
+   * bound and let a node with disjoint sets be overbooked; the replacement still blocks every case
+   * the maximum blocked, because the sum is never smaller.
+   */
+  assert.deepEqual(residentInstanceUsage(node, allocations), { capacity: 8, used: 5 });
   // Absent reported usage is unknown, not zero: persisted intent still reserves.
-  const unknown = computeNode({ instanceCapacity: 4 });
+  const unknown = computeNode({ instanceCapacity: 8 });
   delete (unknown as Partial<ComputeNode>).activeInstances;
-  assert.deepEqual(residentInstanceUsage(unknown, allocations), { capacity: 4, used: 2 });
+  assert.deepEqual(residentInstanceUsage(unknown, allocations), { capacity: 8, used: 2 });
+  // A malformed count never reaches the node record, and a zero count costs nothing.
+  assert.deepEqual(residentInstanceUsage(computeNode({ instanceCapacity: 8, activeInstances: 0 }), allocations), { capacity: 8, used: 2 });
   // An authoritative snapshot decides on identities, so a stale scalar no longer inflates usage.
   const residency = (instanceIds: string[]) => ({ nodeId: "node-one", instanceIds, observedAt: at(2) });
-  assert.deepEqual(residentInstanceUsage(node, allocations, residency([])), { capacity: 4, used: 2 });
+  assert.deepEqual(residentInstanceUsage(node, allocations, residency([])), { capacity: 8, used: 2 });
   // An identity in both sets is counted once; an unowned one adds a slot of its own.
-  assert.deepEqual(residentInstanceUsage(node, allocations, residency(["a", "b"])), { capacity: 4, used: 2 });
-  assert.deepEqual(residentInstanceUsage(node, allocations, residency(["a", "foreign"])), { capacity: 4, used: 3 });
-  // Another node's record never decides this node's usage.
-  assert.deepEqual(residentInstanceUsage(node, allocations, { nodeId: "node-two", instanceIds: [], observedAt: at(2) }), { capacity: 4, used: 3 });
+  assert.deepEqual(residentInstanceUsage(node, allocations, residency(["a", "b"])), { capacity: 8, used: 2 });
+  assert.deepEqual(residentInstanceUsage(node, allocations, residency(["a", "foreign"])), { capacity: 8, used: 3 });
+  // A resident whose allocation the node itself settled holds no slot, however stale the record is.
+  assert.deepEqual(residentInstanceUsage(node, allocations, residency(["d"])), { capacity: 8, used: 2 });
+  // A lost allocation is not settled evidence: where that identity went is unknown, so it still counts.
+  assert.deepEqual(residentInstanceUsage(node, allocations, residency(["c"])), { capacity: 8, used: 3 });
+  // Another node's record never decides this node's usage, so the unnamed count still bounds it.
+  assert.deepEqual(residentInstanceUsage(node, allocations, { nodeId: "node-two", instanceIds: [], observedAt: at(2) }), { capacity: 8, used: 5 });
+});
+
+test("a scalar-only node is never overbooked by reservations its count cannot name", async () => {
+  /*
+   * A protocol-v5 sync without `activeInstanceIds` is well formed: it opens instance delivery and
+   * creates no residency record. The node then reports one resident as a bare count, and the hub
+   * cannot tell whether that resident is one it owns or a pre-existing one it has no identity for. A
+   * capacity-2 node must therefore accept one reservation and refuse the second: accepting both would
+   * produce a provision Barista rejects and a lifecycle failure the hub already recorded.
+   */
+  const store = await hubStore((state) => { seedThread(state); seedNode(state, { instanceCapacity: 2, activeInstances: 1 }); });
+  const first = await applyInstanceLifecycle(store, operatorCaller, createRequest(), at(1));
+  const second = await applyInstanceLifecycle(store, operatorCaller, createRequest("thread-one", {
+    idempotency: { caller: operatorCaller, key: "create-two" }
+  }), at(1));
+  store.read((state) => assert.equal(nodeResidencyInState(state, "node-one"), undefined, "a sync without identities records nothing"));
+
+  const reserved = await reserveInstanceAllocation(store, first.instance.id, candidate("/work/one"), at(2));
+  assert.equal(reserved.kind, "reserved", JSON.stringify(reserved));
+  const refused = await reserveInstanceAllocation(store, second.instance.id, candidate("/work/two"), at(3));
+  assert.equal(refused.kind, "capacity", JSON.stringify(refused));
+  store.read((state) => {
+    assert.deepEqual(residentInstanceUsage(state.nodes[0], state.allocations ?? [], nodeResidencyInState(state, "node-one")), { capacity: 2, used: 2 });
+    assert.equal(state.allocations?.length, 1);
+  });
+
+  // The node's first authoritative snapshot names its residents, and the record supersedes the count:
+  // the pre-existing resident turns out to be the one the hub owns, so the second slot is free.
+  await store.transact((state) => { reconcileNodeInstancesInState(state, "node-one", [first.instance.id], at(4)); return true; });
+  const admitted = await reserveInstanceAllocation(store, second.instance.id, candidate("/work/two"), at(5));
+  assert.equal(admitted.kind, "reserved", JSON.stringify(admitted));
+});
+
+test("a released resident stops occupying its slot without waiting for another snapshot", async () => {
+  /*
+   * A reconnect records the resident in the node's residency record, and the record overrides later
+   * heartbeat counts. The node then acknowledges the release, which makes the allocation non-occupying
+   * — so the slot must be free at once. Waiting for the next `sync.complete` would refuse a valid
+   * reservation for as long as the node stays connected.
+   */
+  const store = await hubStore((state) => { seedThread(state); seedNode(state, { instanceCapacity: 1 }); });
+  const { created, reservation } = await provisionInstance(store);
+  await store.transact((state) => { reconcileNodeInstancesInState(state, "node-one", [created.instance.id], at(3)); return true; });
+  assert.equal((await receiveInstanceLifecycleReport(store, "node-one", readyReport(created.instance.id, reservation.allocation.id), at(4))).kind, "accepted");
+  await applyInstanceLifecycle(store, operatorCaller, releaseRequest(created.instance.id, "release-one", "drain"), at(5));
+  const released = await receiveInstanceLifecycleReport(store, "node-one", releasedReport(created.instance.id, reservation.allocation.id), at(6));
+  assert.equal(released.kind, "accepted", JSON.stringify(released));
+
+  const replacement = await applyInstanceLifecycle(store, operatorCaller, createRequest("thread-one", {
+    idempotency: { caller: operatorCaller, key: "create-two" }
+  }), at(7));
+  store.read((state) => {
+    // The record still names the released resident: it is the node's snapshot, not hub bookkeeping.
+    assert.deepEqual(nodeResidencyInState(state, "node-one")?.instanceIds, [created.instance.id]);
+    assert.deepEqual(residentInstanceUsage(state.nodes[0], state.allocations ?? [], nodeResidencyInState(state, "node-one")), { capacity: 1, used: 0 });
+  });
+  const reserved = await reserveInstanceAllocation(store, replacement.instance.id, candidate("/work/two"), at(8));
+  assert.equal(reserved.kind, "reserved", JSON.stringify(reserved));
+  // A resident the node still reports and has not settled keeps its slot, so the discount is evidence
+  // driven rather than a blanket exemption for anything the record names.
+  store.read((state) => {
+    const withStranger = { nodeId: "node-one", instanceIds: [created.instance.id, "foreign-instance"], observedAt: at(9) };
+    assert.deepEqual(residentInstanceUsage(state.nodes[0], state.allocations ?? [], withStranger), { capacity: 1, used: 2 });
+  });
+});
+
+test("an acknowledged failure also frees the slot its residency record still names", async () => {
+  // The same coverage question for the other terminal acknowledgement: the reader discounts any
+  // settled allocation, so failure needs no writer of its own.
+  const store = await hubStore((state) => { seedThread(state); seedNode(state, { instanceCapacity: 1 }); });
+  const { created, reservation } = await provisionInstance(store);
+  await store.transact((state) => { reconcileNodeInstancesInState(state, "node-one", [created.instance.id], at(3)); return true; });
+  assert.equal((await receiveInstanceLifecycleReport(store, "node-one", failedReport(created.instance.id, reservation.allocation.id), at(4))).kind, "accepted");
+  const replacement = await applyInstanceLifecycle(store, operatorCaller, createRequest("thread-one", {
+    idempotency: { caller: operatorCaller, key: "create-two" }
+  }), at(5));
+  store.read((state) => {
+    assert.deepEqual(nodeResidencyInState(state, "node-one")?.instanceIds, [created.instance.id]);
+    assert.deepEqual(residentInstanceUsage(state.nodes[0], state.allocations ?? [], nodeResidencyInState(state, "node-one")), { capacity: 1, used: 0 });
+  });
+  assert.equal((await reserveInstanceAllocation(store, replacement.instance.id, candidate("/work/two"), at(6))).kind, "reserved");
 });
 
 test("reservation occupies capacity atomically and never overbooks across transactions", async () => {
@@ -874,7 +967,12 @@ test("a reported resident the hub does not own occupies a slot beside new reserv
   });
   const stillFull = await reserveInstanceAllocation(store, second.instance.id, candidate("/work/two"), at(5));
   assert.equal(stillFull.kind, "capacity", JSON.stringify(stillFull));
-  // The node stops reporting the resident: now the slot is free and the request is retired.
+  /*
+   * What the hub guarantees is the emission and the retention asserted above, not the eviction: the
+   * command addresses a resident the hub holds no allocation for, and Barista resolves a release by
+   * allocation id until cafecito-games/CoffeeShop#90 adds the instance-id fallback. The step below is
+   * the node's own later snapshot, whatever made it stop reporting the resident.
+   */
   await store.transact((state) => { reconcileNodeInstancesInState(state, "node-one", [first.instance.id], at(6)); return true; });
   store.read((state) => assert.deepEqual(state.remoteReleaseRequests, []));
   const freed = await reserveInstanceAllocation(store, second.instance.id, candidate("/work/two"), at(7));
@@ -1315,11 +1413,13 @@ test("store load rejects persisted records whose identifiers exist but do not be
   await rejects((state) => { (state.instanceDeliveries as Array<Record<string, unknown>>)[0].nodeId = "node-two"; }, /does not hold allocation/);
   await rejects((state) => { delete (state.instanceDeliveries as Array<Record<string, unknown>>)[0].sequence; }, /Persisted instance delivery 0 is malformed/);
   // Two release commands sharing a position would make one allocation's escalation order ambiguous.
+  // The wording is the only thing that changed here: the check now spans kinds, so its message names
+  // the command sequence rather than the release sequence, and the same state is still rejected.
   await rejects((state) => {
     const deliveries = state.instanceDeliveries as Array<Record<string, unknown>>;
     const release = deliveries.find((record) => record.kind === "release")!;
     deliveries.push(structuredClone(release));
-  }, /repeats release sequence/);
+  }, /repeats command sequence/);
   await rejects((state) => {
     const instances = state.instances as Array<Record<string, unknown>>;
     instances.push({ ...structuredClone(instances[0]), id: "instance-elsewhere", status: "requested" });
@@ -1327,4 +1427,140 @@ test("store load rejects persisted records whose identifiers exist but do not be
     const release = (state.instanceDeliveries as Array<Record<string, unknown>>).find((record) => record.kind === "release")!;
     (release.message as Record<string, unknown>).instanceId = "instance-elsewhere";
   }, /does not own allocation/);
+});
+
+test("a foreign instance stays hidden whether or not it has spent its receipt budget", async () => {
+  /*
+   * Thread isolation is an ordering property: nothing whose result a caller can observe may be
+   * decided before the caller's authority over the named resource is established. The receipt budget
+   * is a property of the instance, so checking it before the instance is known to belong to the
+   * requested thread answers for a foreign instance — one at its budget conflicts while one below it
+   * stays behind the not-found answer, which tells the caller both that it exists and how much of its
+   * budget it has spent.
+   */
+  const store = await hubStore((state) => { seedThread(state); seedThread(state, "thread-two"); seedNode(state); });
+  const { created } = await provisionInstance(store);
+  const renewBudget = instanceAuditLimits.retainedReceiptsPerInstance - instanceAuditLimits.releaseReceiptHeadroom;
+  for (let index = 0; index < renewBudget - 1; index += 1) {
+    await applyInstanceLifecycle(store, operatorCaller, renewRequest(created.instance.id, `renew-${index}`, 3600), at(100 + index));
+  }
+  const hidden = (error: unknown) => error instanceof CoordinationError && error.code === "not_found" && /Instance not found/.test(error.message);
+  const overBudget = (error: unknown) => error instanceof CoordinationError && error.code === "conflict" && /receipt idempotency budget/.test(error.message);
+
+  await assert.rejects(applyInstanceLifecycle(store, operatorCaller, {
+    ...renewRequest(created.instance.id, "probe-renew", 3600), threadId: "thread-two"
+  }, at(500)), hidden);
+  // The renewal budget is genuinely spent, so the owning thread does get the budget refusal.
+  await assert.rejects(applyInstanceLifecycle(store, operatorCaller, renewRequest(created.instance.id, "owning-renew", 3600), at(501)), overBudget);
+
+  // Release keeps reserved headroom, so spend that too and repeat the probe for the release path.
+  await applyInstanceLifecycle(store, operatorCaller, releaseRequest(created.instance.id, "release-drain", "drain"), at(600));
+  await applyInstanceLifecycle(store, operatorCaller, releaseRequest(created.instance.id, "release-cancel", "cancel"), at(601));
+  store.read((state) => {
+    assert.equal(state.instanceLifecycleReceipts?.length, instanceAuditLimits.retainedReceiptsPerInstance);
+    assert.equal(state.instances?.find((instance) => instance.id === created.instance.id)?.status, "draining");
+  });
+  await assert.rejects(applyInstanceLifecycle(store, operatorCaller, {
+    ...releaseRequest(created.instance.id, "probe-release", "cancel"), threadId: "thread-two"
+  }, at(602)), hidden);
+  await assert.rejects(applyInstanceLifecycle(store, operatorCaller, releaseRequest(created.instance.id, "owning-release", "cancel"), at(603)), overBudget);
+
+  // No probe left a receipt, an event, or any other trace on the thread it named.
+  store.read((state) => {
+    assert.equal(state.instanceLifecycleReceipts?.some((receipt) => receipt.threadId === "thread-two"), false);
+    assert.equal(state.instanceLifecycleReceipts?.some((receipt) => receipt.idempotencyKey.startsWith("probe-")), false);
+    assert.equal(state.events.some((event) => event.threadId === "thread-two"), false);
+  });
+});
+
+test("store load rejects a provision and a release at the same command position", async () => {
+  /*
+   * A sequence is a position in one allocation's command order across every kind of command: the
+   * delivery pass finds a record by allocation and sequence without consulting kind, and the release
+   * order decides which mode the peer ends up holding. A provision and a release sharing a position
+   * therefore make both ambiguous, and no hub writer produces it — `nextDeliverySequence` already
+   * counts every kind — so a snapshot carrying it is malformed and must be refused rather than loaded
+   * into a state whose causal order depends on array order.
+   */
+  const directory = await mkdtemp(join(tmpdir(), "coffee-shop-instances-"));
+  const path = join(directory, "state.json");
+  const store = new Store(path);
+  await store.load();
+  await store.transact((state) => { seedThread(state); seedNode(state); });
+  const created = await applyInstanceLifecycle(store, operatorCaller, createRequest(), at(1));
+  assert.equal((await reserveInstanceAllocation(store, created.instance.id, candidate("/work/one"), at(2))).kind, "reserved");
+  await applyInstanceLifecycle(store, operatorCaller, releaseRequest(created.instance.id, "release-one", "drain"), at(3));
+  const persisted = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>;
+  const deliveries = persisted.instanceDeliveries as Array<Record<string, unknown>>;
+  const provision = deliveries.find((record) => record.kind === "provision")!;
+  const release = deliveries.find((record) => record.kind === "release")!;
+  assert.equal(release.allocationId, provision.allocationId, "both commands belong to the same allocation");
+  assert.notEqual(release.sequence, provision.sequence, "the hub's own writer never reuses a position");
+  release.sequence = provision.sequence;
+  await writeFile(path, JSON.stringify(persisted));
+  const reloaded = new Store(path);
+  await assert.rejects(reloaded.load(), /repeats command sequence/);
+});
+
+test("every occupancy transition leaves the residency record and the derived usage agreeing", async () => {
+  /*
+   * The sweep behind findings 1 and 2: each transition that changes whether an identity occupies a
+   * slot, walked in order, with the capacity derivation checked after every one. A transition the
+   * residency model does not cover shows up here as a usage the allocations contradict.
+   */
+  const store = await hubStore((state) => { seedThread(state); seedNode(state, { instanceCapacity: 2, activeInstances: 0 }); });
+  const usage = () => store.read((state) => residentInstanceUsage(state.nodes[0], state.allocations ?? [], nodeResidencyInState(state, "node-one")));
+  const snapshot = async (residents: string[], observedAt: string) => {
+    await store.transact((state) => { reconcileNodeInstancesInState(state, "node-one", residents, observedAt); return true; });
+  };
+
+  const created = await applyInstanceLifecycle(store, operatorCaller, createRequest(), at(1));
+  assert.deepEqual(usage(), { capacity: 2, used: 0 }, "a requested instance holds nothing");
+  const reservation = await reserveInstanceAllocation(store, created.instance.id, candidate("/work/one"), at(2));
+  assert.equal(reservation.kind, "reserved");
+  assert.deepEqual(usage(), { capacity: 2, used: 1 }, "a reservation occupies before the node has heard of it");
+  await flushPendingInstanceDeliveries(store, () => true);
+  assert.deepEqual(usage(), { capacity: 2, used: 1 }, "a delivered provision still occupies exactly one slot");
+  await snapshot([created.instance.id], at(3));
+  assert.deepEqual(usage(), { capacity: 2, used: 1 }, "a report of an identity the hub owns is counted once, not twice");
+  assert.equal((await receiveInstanceLifecycleReport(store, "node-one", readyReport(created.instance.id, reservation.allocation.id), at(4))).kind, "accepted");
+  assert.deepEqual(usage(), { capacity: 2, used: 1 }, "an active allocation occupies");
+
+  // Allocation loss: the same snapshot that declares it missing also rewrites the record.
+  await snapshot([], at(5));
+  store.read((state) => {
+    assert.equal(state.allocations?.find((allocation) => allocation.id === reservation.allocation.id)?.status, "lost");
+    assert.equal(state.instances?.find((instance) => instance.id === created.instance.id)?.status, "requested");
+    assert.deepEqual(nodeResidencyInState(state, "node-one")?.instanceIds, []);
+  });
+  assert.deepEqual(usage(), { capacity: 2, used: 0 }, "a lost allocation frees its slot and is not named by the record");
+
+  const replacement = await reserveInstanceAllocation(store, created.instance.id, candidate("/work/two"), at(6));
+  assert.equal(replacement.kind, "reserved");
+  await flushPendingInstanceDeliveries(store, () => true);
+  assert.deepEqual(usage(), { capacity: 2, used: 1 }, "a replacement occupies one slot, never two");
+  // The node reports the replacement, so the record names it for the rest of the walk: every step
+  // below has to stay correct against a record the node has no reason to send again.
+  await snapshot([created.instance.id], at(7));
+  assert.deepEqual(usage(), { capacity: 2, used: 1 }, "a reported replacement is still one slot");
+
+  // Idle expiry and drain are intents, not evictions: the instance stays resident until Barista says
+  // otherwise, so the slot must stay occupied.
+  await store.transact((state) => {
+    const instance = state.instances!.find((item) => item.id === created.instance.id)!;
+    instance.lease = { idleTimeoutSeconds: 60, expiresAt: at(8) };
+    return true;
+  });
+  await maintainInstanceLifecycle(store, at(9));
+  store.read((state) => assert.equal(state.instances?.find((instance) => instance.id === created.instance.id)?.status, "draining"));
+  assert.deepEqual(usage(), { capacity: 2, used: 1 }, "a draining instance still occupies its slot");
+
+  // Terminal settlement through the node's own acknowledgement is what frees it.
+  assert.equal((await receiveInstanceLifecycleReport(store, "node-one", releasedReport(created.instance.id, replacement.allocation.id), at(10))).kind, "accepted");
+  store.read((state) => {
+    assert.equal(state.instances?.find((instance) => instance.id === created.instance.id)?.status, "released");
+    assert.ok((state.allocations ?? []).every((allocation) => !occupyingAllocationStatuses.includes(allocation.status)));
+    assert.deepEqual(nodeResidencyInState(state, "node-one")?.instanceIds, [created.instance.id], "the record still names it: it is the node's snapshot");
+  });
+  assert.deepEqual(usage(), { capacity: 2, used: 0 }, "an acknowledged release frees the slot at once");
 });
