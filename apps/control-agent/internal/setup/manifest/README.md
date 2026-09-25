@@ -76,7 +76,9 @@ Authentication is a **separate operator action after installation**, never part 
 
   The pins, exactly as they appear in `components.json`, so the manifest can be reviewed against
   this record without reading the JSON. Re-derive any of them with
-  `curl -sSL <url> | sha256sum` and `curl -sSLo /dev/null -w '%{size_download}\n' <url>`:
+  `curl -fsSL <url> | sha256sum` and `curl -fsSLo /dev/null -w '%{size_download}\n' <url>`
+  (`-f` matters: without it a rate-limited or renamed asset makes curl write GitHub's error
+  body to stdout and exit 0, so you would hash the error page and not notice):
 
 * `darwin-amd64` — `https://github.com/openai/codex/releases/download/rust-v0.147.0/codex-x86_64-apple-darwin.tar.gz`
   * `sizeBytes` `95851149`
