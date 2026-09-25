@@ -1035,6 +1035,7 @@ func DecodeInstanceControlMessage(data []byte, version string) (InstanceControlM
 			required["at"] = v5Time
 			required["activeRuns"] = v5Count
 			optional["activeInstances"] = v5Count
+			optional["activeInstanceIds"] = v5IDs
 		case "sync.complete":
 			required["nodeId"] = v5ID
 			required["at"] = v5Time

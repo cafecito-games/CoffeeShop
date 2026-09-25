@@ -703,12 +703,14 @@ func httpEndpoint(controlEndpoint, path string) (string, error) {
 	return parsed.String(), nil
 }
 
-// heartbeatMessage reports the node's live run and resident counts; the two capacities are
-// enforced independently, so both numbers are authoritative evidence, not one derived from the
-// other.
+// heartbeatMessage reports the node's live run and resident counts plus the resident identities
+// themselves; the count and the list are independent evidence, not one derived from the other. The
+// identity list makes every heartbeat a current residency snapshot, so the hub never has to
+// reconstruct it from lifecycle events.
 func (client *Client) heartbeatMessage() protocol.Outbound {
 	activeInstances := client.activeInstanceCount()
-	return protocol.Outbound{Type: "heartbeat", NodeID: client.node.ID, ActiveRuns: client.activeRuns(), ActiveInstances: &activeInstances, At: now()}
+	activeInstanceIDs := client.activeInstanceIDs()
+	return protocol.Outbound{Type: "heartbeat", NodeID: client.node.ID, ActiveRuns: client.activeRuns(), ActiveInstances: &activeInstances, ActiveInstanceIDs: &activeInstanceIDs, At: now()}
 }
 
 func (client *Client) activeRuns() int {

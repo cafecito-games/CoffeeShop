@@ -211,6 +211,25 @@ func (supervisor *residentSupervisor) provisionReplayOutcomeLocked(instance prot
 	}
 }
 
+// duplicateResidentRejectionLocked reports why the instance cannot be hosted under a second
+// concurrent allocation, or "" when it may. An instance is hosted by one allocation at a time — the
+// same invariant the hub's load validation states — so refusing here keeps the heartbeat identity
+// list unique by construction and an accurate occupancy count, where deduplicating it would
+// under-count the occupied slots instead. The replay lookup has already settled the allocation
+// itself, so any match here names a different, concurrently resident allocation. The caller must
+// hold the resident lock.
+func (supervisor *residentSupervisor) duplicateResidentRejectionLocked(instanceID string) string {
+	hosting, hostingAllocationID, ambiguous := supervisor.residentByInstanceIDLocked(instanceID)
+	switch {
+	case ambiguous:
+		return "the instance is hosted by multiple resident allocations on this Barista"
+	case hosting == nil:
+		return ""
+	default:
+		return fmt.Sprintf("instance %s is already hosted by allocation %s on this Barista", instanceID, hostingAllocationID)
+	}
+}
+
 // reportProvisionOutcome reports a settled provision outcome; an empty failure is acknowledged
 // ready.
 func (client *Client) reportProvisionOutcome(allocationID, instanceID, failure string) {
@@ -254,6 +273,11 @@ func (client *Client) provisionInstance(message protocol.InstanceHubMessage) {
 	if client.residents.capacity <= 0 {
 		client.residents.mu.Unlock()
 		client.reportInstanceFailure(allocation.ID, instance.ID, "instance hosting is disabled on this Barista")
+		return
+	}
+	if reason := client.residents.duplicateResidentRejectionLocked(instance.ID); reason != "" {
+		client.residents.mu.Unlock()
+		client.reportInstanceFailure(allocation.ID, instance.ID, reason)
 		return
 	}
 	if len(client.residents.residentsTable) >= client.residents.capacity {
@@ -390,10 +414,11 @@ func (client *Client) releaseInstance(ctx context.Context, message protocol.Inst
 	client.reportInstanceReleased(allocationID, message.InstanceID)
 }
 
-// residentByInstanceIDLocked resolves the single resident hosting instanceID. The table is keyed by
-// allocation ID and does not structurally guarantee one allocation per instance, so a match that is
-// not unique is reported as ambiguous for the caller to refuse rather than guess. The caller must
-// hold the resident lock.
+// residentByInstanceIDLocked resolves the single resident hosting instanceID. Admission refuses a
+// provision that would host an instance under a second concurrent allocation, so at most one
+// resident matches by construction; the ambiguity branch below is defense in depth for a table that
+// structurally permits what admission refuses, so it keeps refusing rather than guessing. The
+// caller must hold the resident lock.
 func (supervisor *residentSupervisor) residentByInstanceIDLocked(instanceID string) (resident *residentInstance, allocationID string, ambiguous bool) {
 	var match *residentInstance
 	var matchAllocationID string
@@ -554,7 +579,9 @@ func (client *Client) activeInstanceCount() int {
 }
 
 // activeInstanceIDs snapshots the sorted resident instance IDs under the lock; encoding happens
-// after it is released.
+// after it is released. Admission hosts an instance under at most one concurrent allocation, so the
+// identities are unique by construction and the list length is the occupied-slot count — accurate
+// occupancy evidence, never deduplicated, which would under-count the occupied slots instead.
 func (client *Client) activeInstanceIDs() []string {
 	client.residents.mu.Lock()
 	defer client.residents.mu.Unlock()
