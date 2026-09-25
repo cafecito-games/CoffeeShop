@@ -1,0 +1,12 @@
+{
+  "records": [
+    {
+      "path": "/var/lib/barista/adapters/claude-cli/claude-acp/0.79.0/bin/claude-agent-acp",
+      "adapterId": "codex-acp",
+      "adapterVersion": "0.79.0",
+      "contentSha256": "3f786850e387550fdab836ed7e6dc881de23001b3f786850e387550fdab836ed",
+      "sizeBytes": 4096,
+      "installedAt": "2026-09-24T18:12:05.123456789Z"
+    }
+  ]
+}

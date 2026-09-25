@@ -1,10 +1,13 @@
 package setup
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/protocol"
 )
 
 // RollbackResult reports what Uninstall removed and what it left in place because it was no
@@ -14,18 +17,53 @@ type RollbackResult struct {
 	Retained []OwnershipRecord // present in the ledger but no longer safe to delete
 }
 
-// Uninstall removes every file recorded in ledger for the given adapterID (all versions, or a
-// single version when adapterVersion is non-empty) whose on-disk content still matches its
+// ComponentSelector names which ledger records one rollback addresses. Kind and ID are required —
+// an empty field is a rejection, never a wildcard that would sweep every component — while an empty
+// Version deliberately means every installed version of that component.
+type ComponentSelector struct {
+	Kind    ComponentKind
+	ID      string
+	Version string
+}
+
+// Validate refuses a selector that does not name exactly one component, so a zero-value selector can
+// never be read as "everything".
+func (selector ComponentSelector) Validate() error {
+	if !selector.Kind.Valid() {
+		return errors.New("component kind is unknown")
+	}
+	if selector.ID == "" || !protocol.LabelOrAcceleratorPattern.MatchString(selector.ID) {
+		return errors.New("component id is not kebab-case")
+	}
+	if selector.Version != "" && !protocol.IsNormalizedVersion(selector.Version) {
+		return errors.New("component version is not a normalized dotted version")
+	}
+	return nil
+}
+
+// Matches reports whether ref is addressed by the selector.
+func (selector ComponentSelector) Matches(ref ComponentRef) bool {
+	if ref.Kind != selector.Kind || ref.ID != selector.ID {
+		return false
+	}
+	return selector.Version == "" || ref.Version == selector.Version
+}
+
+// Uninstall removes every file recorded in ledger for the component the selector names (all
+// versions, or a single version when the selector pins one) whose on-disk content still matches its
 // recorded digest exactly. A record whose target is missing, whose digest no longer matches, or
 // whose path has become a symlink is retained (never deleted, never silently dropped from the
 // ledger either — Uninstall returns an updated ledger with only the actually-removed records
 // dropped) and reported back for operator action. Uninstall never deletes a directory, only the
 // exact recorded files, and never touches anything outside dataRoot.
-func Uninstall(dataRoot string, ledger OwnershipLedger, adapterID string, adapterVersion string) (RollbackResult, OwnershipLedger, error) {
+func Uninstall(dataRoot string, ledger OwnershipLedger, selector ComponentSelector) (RollbackResult, OwnershipLedger, error) {
+	if err := selector.Validate(); err != nil {
+		return RollbackResult{}, OwnershipLedger{}, fmt.Errorf("uninstall selector: %w", err)
+	}
 	result := RollbackResult{}
-	updated := OwnershipLedger{Records: make([]OwnershipRecord, 0, len(ledger.Records))}
+	updated := OwnershipLedger{LedgerVersion: OwnershipLedgerVersion, Records: make([]OwnershipRecord, 0, len(ledger.Records))}
 	for _, record := range ledger.Records {
-		if record.AdapterID != adapterID || (adapterVersion != "" && record.AdapterVersion != adapterVersion) {
+		if !selector.Matches(record.Component) {
 			updated.Records = append(updated.Records, record)
 			continue
 		}

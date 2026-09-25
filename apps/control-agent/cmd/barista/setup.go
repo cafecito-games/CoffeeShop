@@ -23,7 +23,7 @@ import (
 // the connection immediately on success.
 const doctorDialTimeout = 3 * time.Second
 
-// applyHTTPTimeout bounds every adapter archive download one apply performs.
+// applyHTTPTimeout bounds every component archive download one apply performs.
 const applyHTTPTimeout = 2 * time.Minute
 
 // runSetup dispatches the setup subcommands. Only `plan` and `apply` exist; anything else names
@@ -90,11 +90,11 @@ func loadSetupManifest(manifestPath string) ([]byte, setup.Manifest, error) {
 	}
 	manifestBytes, err := os.ReadFile(manifestPath)
 	if err != nil {
-		return nil, setup.Manifest{}, fmt.Errorf("read adapter manifest: %w", err)
+		return nil, setup.Manifest{}, fmt.Errorf("read component manifest: %w", err)
 	}
 	manifest, err := setup.ParseManifest(manifestBytes)
 	if err != nil {
-		return nil, setup.Manifest{}, fmt.Errorf("adapter manifest at %s: %w", manifestPath, err)
+		return nil, setup.Manifest{}, fmt.Errorf("component manifest at %s: %w", manifestPath, err)
 	}
 	return manifestBytes, manifest, nil
 }
@@ -111,7 +111,7 @@ func runSetupPlan(args []string) int {
 	set := flag.NewFlagSet("setup plan", flag.ContinueOnError)
 	set.SetOutput(os.Stderr)
 	dataRoot := set.String("data-root", setup.DefaultDataRoot(), "Barista-owned data root; never $HOME itself")
-	manifestPath := set.String("manifest", "", "path to an adapter manifest JSON file (default: the manifest embedded in this binary)")
+	manifestPath := set.String("manifest", "", "path to a component manifest JSON file (default: the manifest embedded in this binary)")
 	outPath := set.String("out", "", "write the plan JSON to this path (default: stdout)")
 	if err := set.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -159,8 +159,8 @@ func runSetupPlan(args []string) int {
 		fmt.Fprintf(os.Stderr, "setup plan: write plan: %v\n", err)
 		return 2
 	}
-	for _, harnessID := range skipped {
-		fmt.Fprintf(os.Stderr, "skipped: %s has no platform distribution for %s\n", harnessID, currentPlatform())
+	for _, component := range skipped {
+		fmt.Fprintf(os.Stderr, "skipped: %s has no platform distribution for %s\n", component, currentPlatform())
 	}
 	return 0
 }
@@ -169,12 +169,12 @@ func runSetupApply(args []string) int {
 	set := flag.NewFlagSet("setup apply", flag.ContinueOnError)
 	set.SetOutput(os.Stderr)
 	dataRoot := set.String("data-root", setup.DefaultDataRoot(), "Barista-owned data root; never $HOME itself")
-	manifestPath := set.String("manifest", "", "path to an adapter manifest JSON file (default: the manifest embedded in this binary)")
+	manifestPath := set.String("manifest", "", "path to a component manifest JSON file (default: the manifest embedded in this binary)")
 	planPath := set.String("plan", "", "path to the plan JSON file produced by `barista setup plan` (required)")
 	var allowedHosts, manualArtifactValues, manualChecksumValues repeatedFlag
-	set.Var(&allowedHosts, "allowed-host", "download host an archive adapter may redirect to; repeat the flag for multiple hosts")
-	set.Var(&manualArtifactValues, "manual-artifact", "adapterID=PATH local artifact for a manual adapter; repeat the flag per adapter")
-	set.Var(&manualChecksumValues, "manual-checksum", "adapterID=SHA256 operator-asserted checksum for a manual adapter; repeat the flag per adapter")
+	set.Var(&allowedHosts, "allowed-host", "download host an archive component may redirect to; repeat the flag for multiple hosts")
+	set.Var(&manualArtifactValues, "manual-artifact", "componentID=PATH local artifact for a manual component; repeat the flag per component")
+	set.Var(&manualChecksumValues, "manual-checksum", "componentID=SHA256 operator-asserted checksum for a manual component; repeat the flag per component")
 	if err := set.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -213,15 +213,22 @@ func runSetupApply(args []string) int {
 		fmt.Fprintf(os.Stderr, "setup apply: parse plan: %v\n", err)
 		return 1
 	}
-	manifestBytes, manifest, err := loadSetupManifest(*manifestPath)
+	manifestBytes, _, err := loadSetupManifest(*manifestPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "setup apply: %v\n", err)
 		return 1
 	}
-	ledger, err := setup.LoadOwnershipLedger(*dataRoot)
+	// Apply is the only mutating command, so it is also where a legacy adapter-generation ownership
+	// ledger is rewritten in the current generation — atomically, and only once every legacy record
+	// has been proven to map to exactly one ACP adapter. A ledger that cannot be migrated fails the
+	// command with its previous bytes still in place rather than being partially claimed.
+	ledger, migrated, err := setup.MigrateOwnershipLedgerFile(*dataRoot)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "setup apply: %v\n", err)
 		return 1
+	}
+	if migrated {
+		fmt.Printf("migrated the ownership ledger to generation %s\n", setup.OwnershipLedgerVersion)
 	}
 	// Apply stages every download and extraction under the data root, so apply — the one mutating
 	// command — creates the root it owns when it does not exist yet. Planning and doctor never do.
@@ -241,16 +248,14 @@ func runSetupApply(args []string) int {
 	}
 	// Apply persists the ownership ledger itself after every completed operation, so this command
 	// never writes the ledger a second time.
-	harnessByAdapter := make(map[string]string, len(manifest.Adapters))
-	for index := range manifest.Adapters {
-		harnessByAdapter[manifest.Adapters[index].ID] = manifest.Adapters[index].HarnessID
-	}
 	for _, operation := range result.Applied {
-		fmt.Printf("installed: %s@%s\n", operation.AdapterID, operation.AdapterVersion)
-		fmt.Print(config.AdapterConfigSnippet(harnessByAdapter[operation.AdapterID], operation.TargetPath))
+		fmt.Printf("installed: %s\n", operation.Component)
+		if operation.Component.Kind == setup.ComponentKindACPAdapter {
+			fmt.Print(config.AdapterConfigSnippet(operation.HarnessID, operation.TargetPath))
+		}
 	}
 	for _, operation := range result.Skipped {
-		fmt.Printf("already installed: %s\n", operation.AdapterID)
+		fmt.Printf("already installed: %s\n", operation.Component)
 	}
 	return 0
 }
@@ -262,7 +267,7 @@ func runDoctor(args []string) int {
 	set := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	set.SetOutput(os.Stderr)
 	dataRoot := set.String("data-root", setup.DefaultDataRoot(), "Barista-owned data root; never $HOME itself")
-	manifestPath := set.String("manifest", "", "path to an adapter manifest JSON file (default: the manifest embedded in this binary)")
+	manifestPath := set.String("manifest", "", "path to a component manifest JSON file (default: the manifest embedded in this binary)")
 	controlEndpoint := set.String("control-endpoint", config.DefaultEndpoint, "Coffee Shop URL or WebSocket endpoint to test for reachability")
 	claudeACPAuthMode := set.String("claude-acp-auth-mode", os.Getenv("BARISTA_CLAUDE_ACP_AUTH_MODE"), "administrator auth-mode policy that would be required before Claude ACP loads: local-subscription or api")
 	asJSON := set.Bool("json", false, "print the report as JSON instead of a human-readable summary")
@@ -303,7 +308,7 @@ func runDoctor(args []string) int {
 	// the existing capability, not a new one.
 	profiles := harness.Discover(context.Background())
 	report := setup.RunDoctor(context.Background(), manifest, ledger, *dataRoot, currentPlatform(), profiles, *controlEndpoint, dialHubEndpoint)
-	addClaudeACPAuthModeNote(report.Adapters, strings.TrimSpace(*claudeACPAuthMode))
+	addClaudeACPAuthModeNote(report.Components, strings.TrimSpace(*claudeACPAuthMode))
 	report.ApprovalPolicies = map[string]string{}
 	for _, harnessID := range harness.ApprovalPolicyHarnessIDs {
 		report.ApprovalPolicies[harnessID] = approvalPolicies.For(harnessID)
@@ -317,11 +322,11 @@ func runDoctor(args []string) int {
 		fmt.Println(string(encoded))
 		return 0
 	}
-	for _, entry := range report.Adapters {
-		fmt.Printf("%s (%s): harness=%s adapter=%s auth=%s launch=%s\n",
-			entry.AdapterID, entry.HarnessID,
+	for _, entry := range report.Components {
+		fmt.Printf("%s (%s): harness=%s component=%s auth=%s launch=%s\n",
+			entry.Component, entry.HarnessID,
 			installedOrMissing(entry.HarnessInstalled),
-			installedOrMissing(entry.AdapterInstalled),
+			installedOrMissing(entry.ComponentInstalled),
 			entry.AuthReadiness,
 			readyOrNot(entry.ACPLaunchReady))
 		for _, note := range entry.Notes {
@@ -422,9 +427,9 @@ func hostPortFromEndpoint(raw string) (string, error) {
 // daemon, without depending on the daemon's own launch environment having already been screened:
 // doctor evaluates the gate itself against the current process environment so an operator sees the
 // same reason `barista doctor` and the daemon would each report for the current configuration.
-func addClaudeACPAuthModeNote(adapters []setup.AdapterDoctorEntry, claudeACPAuthMode string) {
+func addClaudeACPAuthModeNote(adapters []setup.ComponentDoctorEntry, claudeACPAuthMode string) {
 	for index := range adapters {
-		if adapters[index].HarnessID != "claude-cli" {
+		if adapters[index].HarnessID != "claude-cli" || adapters[index].Component.Kind != setup.ComponentKindACPAdapter {
 			continue
 		}
 		if authMode, err := harness.ClaudeACPAuthGate(claudeACPAuthMode, os.Environ()); err != nil {

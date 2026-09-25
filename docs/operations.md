@@ -40,17 +40,21 @@ Core flags and environment equivalents: `--control-endpoint` (`CONTROL_ENDPOINT`
 Node setup workflow:
 
 - `barista setup plan --data-root <path> [--manifest <path>] [--out <file>]` — read-only; renders the exact operations an apply would perform as a digest-sealed JSON plan. It writes nothing under the data root and creates no ledger.
-- `barista setup apply --plan <file> [--manual-artifact <adapterId>=<path>] [--manual-checksum <adapterId>=<sha256>] [--manifest <path>] [--allowed-host <host>]` — the only mutating command, and the only one that creates the data root. A hand-edited plan, a changed manifest, or a target that changed since planning is refused before any mutation.
+- `barista setup apply --plan <file> [--manual-artifact <componentId>=<path>] [--manual-checksum <componentId>=<sha256>] [--manifest <path>] [--allowed-host <host>]` — the only mutating command, and the only one that creates the data root. A hand-edited plan, a changed manifest, or a target that changed since planning is refused before any mutation.
 - `barista doctor [--data-root] [--manifest] [--control-endpoint] [--claude-acp-auth-mode] [--approval-policy] [--json]` — entirely read-only (it also prints the effective [approval policy](#approval-policy) per harness): re-verifies installed adapters against the ownership ledger, runs coarse exit-code auth probes, and makes one unauthenticated TCP connection attempt to the control endpoint. Doctor exits 0 whenever it could build a report; problems show up in the report itself.
 
 The default data root resolves through `os.UserConfigDir()` to `<user config>/coffee-shop/barista`, never `$HOME` itself. The adapter manifest is compiled into the binary; `--adapter-manifest` (`BARISTA_ADAPTER_MANIFEST`) overrides it for both the daemon and setup.
 
 ## Installing and verifying ACP adapters
 
-The compiled-in manifest (`apps/control-agent/internal/setup/manifest/adapters.json`) pins:
+The compiled-in managed component manifest (`apps/control-agent/internal/setup/manifest/components.json`, schema generation `2`) pins:
 
 - `codex-acp` (`@agentclientprotocol/codex-acp`) **1.12.0**, harness `codex-cli`;
 - `claude-acp` (`@agentclientprotocol/claude-agent-acp`) **0.79.0**, harness `claude-cli`.
+
+Both are declared with `"kind": "acp-adapter"`. The manifest schema also admits `"kind": "harness"` for a provider CLI Barista manages itself; no harness distribution ships yet. An ACP adapter installs at `<data-root>/adapters/<harnessId>/<componentId>/<version>/<executablePath>` — unchanged from the adapter-only schema, so an existing install is never relocated — and a harness component at `<data-root>/harnesses/<harnessId>/<componentId>/<version>/<executablePath>`.
+
+The previous adapter-only manifest (schema generation `1`, an `adapters` array with no component kind) is still accepted verbatim by `--manifest` for the transition: every entry migrates to `acp-adapter` and installs at exactly the same path. A document that mixes the two generations, or declares a generation nobody supports, is rejected whole. The ownership ledger migrates the same way: a legacy `ownership.json` is rewritten in generation `2` by `barista setup apply`, atomically and only once every legacy record has been proven to name exactly one ACP adapter at its own recorded install path. A record that cannot be mapped leaves the ledger and every installed file untouched, and the command reports the offending record index rather than claiming ownership.
 
 Neither project publishes a standalone signed release artifact. For `codex-acp`, build a single-file executable from the tagged source (`npm run bundle:all`), then install it manually:
 

@@ -19,16 +19,21 @@ const hubConnectivityGenericDetail = "connection attempt failed"
 // well enough to sanitize; an endpoint that cannot be sanitized is never echoed verbatim instead.
 const hubEndpointInvalidDisplay = "invalid control endpoint"
 
-// AdapterDoctorEntry reports one manifest adapter's status on this node.
-type AdapterDoctorEntry struct {
-	AdapterID        string        `json:"adapterId"`
-	HarnessID        string        `json:"harnessId"`
-	HarnessInstalled bool          `json:"harnessInstalled"` // from the discovered harness profile's Available flag, passed in
-	AdapterInstalled bool          `json:"adapterInstalled"` // ownership ledger has a matching-digest record at this platform's target path
-	AdapterPath      string        `json:"adapterPath,omitempty"`
-	AuthReadiness    AuthReadiness `json:"authReadiness"`
-	ACPLaunchReady   bool          `json:"acpLaunchReady"`  // HarnessInstalled && AdapterInstalled && AuthReadiness == ready
-	Notes            []string      `json:"notes,omitempty"` // bounded, non-secret human-readable gaps, e.g. "no platform distribution for linux-arm64"
+// ComponentDoctorEntry reports one manifest component's status on this node. Component is the same
+// shared identity the plan and the ownership ledger use, so doctor cannot describe a component in
+// terms the rest of setup would not recognize.
+type ComponentDoctorEntry struct {
+	Component          ComponentRef  `json:"component"`
+	HarnessID          string        `json:"harnessId"`
+	HarnessInstalled   bool          `json:"harnessInstalled"`   // from the discovered harness profile's Available flag, passed in
+	ComponentInstalled bool          `json:"componentInstalled"` // ownership ledger has a matching-digest record at this platform's target path
+	ComponentPath      string        `json:"componentPath,omitempty"`
+	AuthReadiness      AuthReadiness `json:"authReadiness"`
+	// ACPLaunchReady is meaningful only for an ACP adapter: it is the conjunction of a discovered
+	// harness, a verified installed adapter, and ready authentication. A harness component is never
+	// reported as ACP-launch-ready, because it is not the thing that speaks ACP.
+	ACPLaunchReady bool     `json:"acpLaunchReady"`
+	Notes          []string `json:"notes,omitempty"` // bounded, non-secret human-readable gaps, e.g. "no platform distribution for linux-arm64"
 }
 
 // HubConnectivity reports whether the configured control endpoint accepted a bounded, read-only
@@ -43,11 +48,11 @@ type HubConnectivity struct {
 
 // Report is the full, read-only doctor output. It performs no filesystem or network mutation.
 type Report struct {
-	Platform         string               `json:"platform"`
-	DataRoot         string               `json:"dataRoot"`
-	Adapters         []AdapterDoctorEntry `json:"adapters"`
-	HubConnectivity  HubConnectivity      `json:"hubConnectivity"`
-	ProjectReadiness string               `json:"projectReadiness"`
+	Platform         string                 `json:"platform"`
+	DataRoot         string                 `json:"dataRoot"`
+	Components       []ComponentDoctorEntry `json:"components"`
+	HubConnectivity  HubConnectivity        `json:"hubConnectivity"`
+	ProjectReadiness string                 `json:"projectReadiness"`
 	// ApprovalPolicies is the effective approval policy per harness that the given configuration
 	// would run under; the doctor command fills it in from its --approval-policy setting.
 	ApprovalPolicies map[string]string `json:"approvalPolicies,omitempty"`
@@ -68,7 +73,7 @@ const ProjectReadinessNotAvailable = "not available: no hub endpoint exists yet 
 //
 // Every auth-readiness probe doctor runs comes from the compiled-in AuthProbeAllowlist, keyed by
 // harness ID, and its binary is always the exact absolute path harness discovery already resolved
-// and trusted as "this harness is installed" — never a command or path named by the adapter
+// and trusted as "this harness is installed" — never a command or path named by the component
 // manifest, which --manifest can point at an arbitrary local file.
 func RunDoctor(
 	ctx context.Context,
@@ -83,40 +88,48 @@ func RunDoctor(
 	report := Report{
 		Platform:         platform,
 		DataRoot:         dataRoot,
-		Adapters:         make([]AdapterDoctorEntry, 0, len(manifest.Adapters)),
+		Components:       make([]ComponentDoctorEntry, 0, len(manifest.Components)),
 		ProjectReadiness: ProjectReadinessNotAvailable,
 	}
-	for index := range manifest.Adapters {
-		entry := manifest.Adapters[index]
+	for index := range manifest.Components {
+		entry := manifest.Components[index]
 		harnessProfile, discovered := findHarnessProfile(harnesses, entry.HarnessID)
-		doctorEntry := AdapterDoctorEntry{
-			AdapterID:        entry.ID,
+		doctorEntry := ComponentDoctorEntry{
+			Component:        entry.Ref(),
 			HarnessID:        entry.HarnessID,
 			HarnessInstalled: discovered && harnessProfile.Available,
 			AuthReadiness:    AuthReadinessUnknown,
 		}
 		distribution, supported := entry.Platforms[platform]
 		if !supported {
-			// An adapter with no distribution for this platform stays visible in the report with a
+			// A component with no distribution for this platform stays visible in the report with a
 			// note; silently dropping it would hide unsupported-platform gaps the operator asked
 			// doctor to surface.
 			doctorEntry.Notes = append(doctorEntry.Notes, "no platform distribution for "+platform)
-			report.Adapters = append(report.Adapters, doctorEntry)
+			report.Components = append(report.Components, doctorEntry)
 			continue
 		}
-		targetPath := AdapterTargetPath(dataRoot, entry, distribution)
-		doctorEntry.AdapterPath = targetPath
+		targetPath, err := ComponentTargetPath(dataRoot, entry, distribution)
+		if err != nil {
+			// A kind with no install location is reported as a gap rather than guessed at; the note
+			// names only the kind, which is a closed vocabulary value, never manifest free text.
+			doctorEntry.Notes = append(doctorEntry.Notes, "no install location for component kind "+string(entry.Kind))
+			report.Components = append(report.Components, doctorEntry)
+			continue
+		}
+		doctorEntry.ComponentPath = targetPath
 		// Installed means the ledger record still matches the file on disk — a stale ledger entry
 		// over a deleted or corrupted file must not report as installed. observeCurrentState makes
 		// exactly that distinction, and anything ambiguous classifies as not installed.
-		doctorEntry.AdapterInstalled = observeCurrentState(targetPath, ledger) == ExpectedOwnedMatch
+		doctorEntry.ComponentInstalled = observeCurrentState(targetPath, ledger) == ExpectedOwnedMatch
 		if spec, allowed := AuthProbeAllowlist[entry.HarnessID]; allowed && doctorEntry.HarnessInstalled {
 			doctorEntry.AuthReadiness = RunAuthProbe(ctx, harnessProfile.Binary, spec.Arguments, spec.SuccessExitCode)
 		}
-		doctorEntry.ACPLaunchReady = doctorEntry.HarnessInstalled &&
-			doctorEntry.AdapterInstalled &&
+		doctorEntry.ACPLaunchReady = entry.Kind == ComponentKindACPAdapter &&
+			doctorEntry.HarnessInstalled &&
+			doctorEntry.ComponentInstalled &&
 			doctorEntry.AuthReadiness == AuthReadinessReady
-		report.Adapters = append(report.Adapters, doctorEntry)
+		report.Components = append(report.Components, doctorEntry)
 	}
 	report.HubConnectivity = HubConnectivity{Endpoint: sanitizeEndpointForDisplay(controlEndpoint)}
 	if dial == nil {

@@ -38,14 +38,16 @@ type Result struct {
 // native transport, and the reason is reported.
 func Load(options Options) (Result, error) {
 	result := Result{Adapters: map[string]harness.ACPAdapter{}, Skipped: map[string]string{}}
-	entries := map[string][]setup.AdapterManifestEntry{}
-	for _, entry := range options.Manifest.Adapters {
+	// Only ACP adapter components can be launched as an adapter; a harness component in the same
+	// manifest is not a candidate here and must never be substituted for one.
+	entries := map[string][]setup.ComponentManifestEntry{}
+	for _, entry := range options.Manifest.ComponentsOfKind(setup.ComponentKindACPAdapter) {
 		entries[entry.HarnessID] = append(entries[entry.HarnessID], entry)
 	}
 	for index, override := range options.Overrides {
 		candidates := entries[override.HarnessID]
 		if len(candidates) != 1 {
-			return Result{}, fmt.Errorf("acp adapter at index %d names a harness without exactly one manifest adapter", index)
+			return Result{}, fmt.Errorf("acp adapter at index %d names a harness without exactly one manifest ACP adapter", index)
 		}
 		adapter, err := verifiedOverride(candidates[0], override)
 		if err != nil {
@@ -63,10 +65,10 @@ func Load(options Options) (Result, error) {
 			result.Skipped[harnessID] = "the ownership ledger could not be read"
 			continue
 		}
-		verified := []setup.InstalledAdapter{}
+		verified := []setup.InstalledComponent{}
 		for _, entry := range candidates {
-			installed, err := setup.VerifyInstalledAdapter(options.DataRoot, entry, options.Platform, ledger)
-			if errors.Is(err, setup.ErrAdapterNotInstalled) {
+			installed, err := setup.VerifyInstalledComponent(options.DataRoot, entry, options.Platform, ledger)
+			if errors.Is(err, setup.ErrComponentNotInstalled) {
 				continue
 			}
 			if err != nil {
@@ -89,7 +91,7 @@ func Load(options Options) (Result, error) {
 	return result, nil
 }
 
-func installedAdapter(installed setup.InstalledAdapter) harness.ACPAdapter {
+func installedAdapter(installed setup.InstalledComponent) harness.ACPAdapter {
 	return harness.ACPAdapter{
 		Binary:      installed.Path,
 		Arguments:   installed.Entry.Launch.Arguments,
@@ -101,7 +103,7 @@ func installedAdapter(installed setup.InstalledAdapter) harness.ACPAdapter {
 	}
 }
 
-func verifiedOverride(entry setup.AdapterManifestEntry, override config.ACPAdapterOverride) (harness.ACPAdapter, error) {
+func verifiedOverride(entry setup.ComponentManifestEntry, override config.ACPAdapterOverride) (harness.ACPAdapter, error) {
 	verify := func() error { return verifyPinnedExecutable(override.Path, override.SHA256) }
 	if err := verify(); err != nil {
 		return harness.ACPAdapter{}, err

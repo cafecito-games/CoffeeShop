@@ -14,9 +14,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func codexManifestEntry() setup.AdapterManifestEntry {
-	return setup.AdapterManifestEntry{
+func codexManifestEntry() setup.ComponentManifestEntry {
+	return setup.ComponentManifestEntry{
 		ID:        "codex-acp",
+		Kind:      setup.ComponentKindACPAdapter,
 		HarnessID: "codex-cli",
 		Provider:  "openai",
 		Label:     "Codex ACP adapter",
@@ -28,7 +29,7 @@ func codexManifestEntry() setup.AdapterManifestEntry {
 	}
 }
 
-func claudeManifestEntry() setup.AdapterManifestEntry {
+func claudeManifestEntry() setup.ComponentManifestEntry {
 	entry := codexManifestEntry()
 	entry.ID = "claude-acp"
 	entry.HarnessID = "claude-cli"
@@ -39,7 +40,7 @@ func claudeManifestEntry() setup.AdapterManifestEntry {
 }
 
 func twoHarnessManifest() setup.Manifest {
-	return setup.Manifest{ManifestVersion: setup.ManifestVersion, Adapters: []setup.AdapterManifestEntry{codexManifestEntry(), claudeManifestEntry()}}
+	return setup.Manifest{ManifestVersion: setup.ManifestVersion, Components: []setup.ComponentManifestEntry{codexManifestEntry(), claudeManifestEntry()}}
 }
 
 // installLedgerVerifiedCodex writes a ledger-verified codex adapter into dataRoot, persisting the
@@ -47,17 +48,18 @@ func twoHarnessManifest() setup.Manifest {
 func installLedgerVerifiedCodex(t *testing.T, dataRoot string) string {
 	t.Helper()
 	entry := codexManifestEntry()
-	target := setup.AdapterTargetPath(dataRoot, entry, entry.Platforms[setup.CurrentPlatform()])
+	target, err := setup.ComponentTargetPath(dataRoot, entry, entry.Platforms[setup.CurrentPlatform()])
+	require.NoError(t, err)
 	require.NoError(t, os.MkdirAll(filepath.Dir(target), 0o755))
 	require.NoError(t, os.WriteFile(target, []byte("codex adapter payload"), 0o755))
 	digest := sha256.Sum256([]byte("codex adapter payload"))
 	ledger := setup.OwnershipLedger{}.WithRecord(setup.OwnershipRecord{
-		Path:           target,
-		AdapterID:      entry.ID,
-		AdapterVersion: entry.Version,
-		ContentSHA256:  hex.EncodeToString(digest[:]),
-		SizeBytes:      int64(len("codex adapter payload")),
-		InstalledAt:    "2026-09-21T12:00:00Z",
+		Path:          target,
+		Component:     entry.Ref(),
+		HarnessID:     entry.HarnessID,
+		ContentSHA256: hex.EncodeToString(digest[:]),
+		SizeBytes:     int64(len("codex adapter payload")),
+		InstalledAt:   "2026-09-21T12:00:00Z",
 	})
 	require.NoError(t, ledger.Save(dataRoot))
 	return target
@@ -129,16 +131,17 @@ func TestLoadSkipsWhenTwoInstalledAdaptersMatchOneHarness(t *testing.T) {
 	alternate := codexManifestEntry()
 	alternate.ID = "codex-alt"
 	alternate.Version = "0.9.0"
-	manifest := setup.Manifest{ManifestVersion: setup.ManifestVersion, Adapters: []setup.AdapterManifestEntry{codexManifestEntry(), alternate}}
+	manifest := setup.Manifest{ManifestVersion: setup.ManifestVersion, Components: []setup.ComponentManifestEntry{codexManifestEntry(), alternate}}
 
 	ledger := setup.OwnershipLedger{}
-	for _, entry := range manifest.Adapters {
-		target := setup.AdapterTargetPath(dataRoot, entry, entry.Platforms[setup.CurrentPlatform()])
+	for _, entry := range manifest.Components {
+		target, err := setup.ComponentTargetPath(dataRoot, entry, entry.Platforms[setup.CurrentPlatform()])
+		require.NoError(t, err)
 		require.NoError(t, os.MkdirAll(filepath.Dir(target), 0o755))
 		require.NoError(t, os.WriteFile(target, []byte("codex adapter payload"), 0o755))
 		digest := sha256.Sum256([]byte("codex adapter payload"))
 		ledger = ledger.WithRecord(setup.OwnershipRecord{
-			Path: target, AdapterID: entry.ID, AdapterVersion: entry.Version,
+			Path: target, Component: entry.Ref(), HarnessID: entry.HarnessID,
 			ContentSHA256: hex.EncodeToString(digest[:]), InstalledAt: "2026-09-21T12:00:00Z",
 		})
 	}
@@ -242,7 +245,7 @@ func TestLoadRejectsOverridesThatCannotBeVerified(t *testing.T) {
 				alternate := codexManifestEntry()
 				alternate.ID = "codex-alt"
 				alternate.Version = "0.9.0"
-				return setup.Manifest{ManifestVersion: setup.ManifestVersion, Adapters: []setup.AdapterManifestEntry{codexManifestEntry(), alternate}}
+				return setup.Manifest{ManifestVersion: setup.ManifestVersion, Components: []setup.ComponentManifestEntry{codexManifestEntry(), alternate}}
 			},
 		},
 	}

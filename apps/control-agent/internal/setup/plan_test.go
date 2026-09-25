@@ -13,9 +13,10 @@ import (
 func planManifestFixture() Manifest {
 	return Manifest{
 		ManifestVersion: ManifestVersion,
-		Adapters: []AdapterManifestEntry{
+		Components: []ComponentManifestEntry{
 			{
 				ID:        "alpha-acp",
+				Kind:      ComponentKindACPAdapter,
 				HarnessID: "alpha-cli",
 				Provider:  "alpha-vendor",
 				Label:     "Alpha ACP adapter",
@@ -32,6 +33,7 @@ func planManifestFixture() Manifest {
 			},
 			{
 				ID:        "beta-acp",
+				Kind:      ComponentKindACPAdapter,
 				HarnessID: "beta-cli",
 				Provider:  "beta-vendor",
 				Label:     "Beta ACP adapter",
@@ -45,6 +47,7 @@ func planManifestFixture() Manifest {
 			},
 			{
 				ID:        "gamma-acp",
+				Kind:      ComponentKindACPAdapter,
 				HarnessID: "gamma-cli",
 				Provider:  "gamma-vendor",
 				Label:     "Gamma ACP adapter",
@@ -113,8 +116,8 @@ func TestBuildPlanSkipsUnsupportedPlatform(t *testing.T) {
 	if len(plan.Operations) != 2 {
 		t.Fatalf("BuildPlan() produced %d operations, want 2", len(plan.Operations))
 	}
-	if len(skipped) != 1 || skipped[0] != "gamma-cli" {
-		t.Fatalf("BuildPlan() skipped = %v, want [gamma-cli]", skipped)
+	if len(skipped) != 1 || skipped[0] != (ComponentRef{Kind: ComponentKindACPAdapter, ID: "gamma-acp", Version: "0.3.0"}) {
+		t.Fatalf("BuildPlan() skipped = %v, want the gamma acp-adapter", skipped)
 	}
 }
 
@@ -174,7 +177,7 @@ func TestBuildPlanExpectedCurrentState(t *testing.T) {
 		}
 		for _, operation := range plan.Operations {
 			if operation.ExpectedCurrentState != ExpectedAbsent {
-				t.Fatalf("operation for %s expected %s, want absent", operation.AdapterID, operation.ExpectedCurrentState)
+				t.Fatalf("operation for %s expected %s, want absent", operation.Component, operation.ExpectedCurrentState)
 			}
 		}
 	})
@@ -192,7 +195,8 @@ func TestBuildPlanExpectedCurrentState(t *testing.T) {
 		}
 		ledger := OwnershipLedger{}.WithRecord(OwnershipRecord{
 			Path:          target,
-			AdapterID:     "alpha-acp",
+			Component:     ComponentRef{Kind: ComponentKindACPAdapter, ID: "alpha-acp", Version: "1.0.0"},
+			HarnessID:     "alpha-cli",
 			ContentSHA256: hex.EncodeToString(summed[:]),
 			SizeBytes:     int64(len(content)),
 		})

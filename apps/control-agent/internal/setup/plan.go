@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"unicode/utf8"
 )
@@ -35,6 +36,28 @@ const (
 	OperationManualPlacementCheck OperationKind = "manual-placement-check"
 )
 
+// OperationKinds is the single enumeration of every supported OperationKind. installOperation must
+// handle each value or refuse it; a value outside this set never reaches a mutation.
+var OperationKinds = []OperationKind{OperationInstallArchive, OperationManualPlacementCheck}
+
+// Valid reports whether kind is in the closed vocabulary.
+func (kind OperationKind) Valid() bool {
+	return slices.Contains(OperationKinds, kind)
+}
+
+// operationKindForDistribution maps a distribution kind to the one operation kind that can satisfy
+// it. A distribution kind with no mapping produces no operation at all rather than a defaulted one.
+func operationKindForDistribution(kind DistributionKind) (OperationKind, error) {
+	switch kind {
+	case DistributionKindArchive:
+		return OperationInstallArchive, nil
+	case DistributionKindManual:
+		return OperationManualPlacementCheck, nil
+	default:
+		return "", fmt.Errorf("distribution kind %q has no install operation", kind)
+	}
+}
+
 // ExpectedCurrentState is what the planner observed (or asserted absent) at TargetPath when the
 // plan was built. Apply refuses to proceed the instant reality no longer matches this, rather
 // than silently recomputing a new expectation.
@@ -46,18 +69,41 @@ const (
 	ExpectedUnownedExists ExpectedCurrentState = "unowned-exists" // something exists at the target that this tool did not create — always refused, never overwritten
 )
 
+// ExpectedCurrentStates is the single enumeration of every observable target state. Apply switches
+// on all three and refuses anything else rather than treating an unrecognized state as "absent",
+// which would install over a target whose state it never actually established.
+var ExpectedCurrentStates = []ExpectedCurrentState{ExpectedAbsent, ExpectedOwnedMatch, ExpectedUnownedExists}
+
+// Valid reports whether state is in the closed vocabulary.
+func (state ExpectedCurrentState) Valid() bool {
+	return slices.Contains(ExpectedCurrentStates, state)
+}
+
 // postconditionMaximumBytes bounds each human-readable postcondition string.
 const postconditionMaximumBytes = 256
 
-// Operation is one planned, individually verifiable mutation.
+// Operation is one planned, individually verifiable mutation. Component carries the full shared
+// identity (kind, id, version) so a plan operation, the ownership record it produces, and doctor's
+// installed check all compare the same value; because Component is a plain struct field it is part
+// of the canonical plan JSON and therefore of the plan digest.
 type Operation struct {
 	Kind                 OperationKind        `json:"kind"`
-	AdapterID            string               `json:"adapterId"`
-	AdapterVersion       string               `json:"adapterVersion"`
+	Component            ComponentRef         `json:"component"`
+	HarnessID            string               `json:"harnessId"`  // the harness this component belongs to; identity, so digested
 	TargetPath           string               `json:"targetPath"` // absolute, always inside the plan's DataRoot
 	ExpectedChecksum     string               `json:"expectedChecksum"`
 	ExpectedCurrentState ExpectedCurrentState `json:"expectedCurrentState"`
 	Source               PlatformDistribution `json:"source"`
+}
+
+// IdempotencyKey is the stable identity of the mutation this operation performs: the same key means
+// the same component version being placed at the same path by the same mechanism, which is exactly
+// the condition under which a completed apply may be replayed as a no-op. It deliberately excludes
+// ExpectedCurrentState and Source, which describe *when* the operation is still valid rather than
+// what it is, and it is used for within-plan collision detection and for naming an operation in an
+// error without echoing manifest free text.
+func (operation Operation) IdempotencyKey() string {
+	return string(operation.Kind) + "|" + operation.Component.String() + "|" + operation.TargetPath
 }
 
 // Plan is a fully serializable, replayable description of the exact mutations one setup apply
@@ -73,23 +119,28 @@ type Plan struct {
 	Platform        string      `json:"platform"`       // "GOOS-GOARCH"
 	DataRoot        string      `json:"dataRoot"`
 	Operations      []Operation `json:"operations"`
-	Postconditions  []string    `json:"postconditions"` // human-readable, e.g. "claude-cli ACP adapter verified at <path>"
-	Digest          string      `json:"digest"`         // sha256 over the canonical JSON of every field above, computed with Digest itself omitted
+	Postconditions  []string    `json:"postconditions"` // human-readable, e.g. "<label> (acp-adapter for claude-cli) verified at <path>"
+	// Digest is sha256 over the canonical JSON of every field above, computed with Digest itself
+	// omitted. It is also the plan's idempotency key: two planning runs that bind the same manifest
+	// bytes, platform, data root, component identities, and observed target state produce the same
+	// digest, and applying a plan whose digest still matches a freshly derived plan is a no-op for
+	// every operation already satisfied.
+	Digest string `json:"digest"`
 }
 
-// BuildPlan produces a deterministic plan for every adapter entry in manifest whose HarnessID has
-// a PlatformDistribution for platform ("GOOS-GOARCH"). Adapters with no entry for platform are
-// skipped (not an error — planning is best-effort across a mixed-support manifest) and reported
-// back in the second return value so a caller (doctor, CLI output) can say why an adapter has no
-// operation. existingLedger supplies ExpectedCurrentState by checking, for each computed
-// TargetPath, whether a matching-digest owned file, a mismatched/foreign file, or nothing exists
-// on the real filesystem at planning time (BuildPlan does touch the filesystem to *observe*
+// BuildPlan produces a deterministic plan for every component entry in manifest — harness or ACP
+// adapter — that has a PlatformDistribution for platform ("GOOS-GOARCH"). Components with no entry
+// for platform are skipped (not an error — planning is best-effort across a mixed-support manifest)
+// and reported back in the second return value so a caller (doctor, CLI output) can say why a
+// component has no operation. existingLedger supplies ExpectedCurrentState by checking, for each
+// computed TargetPath, whether a matching-digest owned file, a mismatched/foreign file, or nothing
+// exists on the real filesystem at planning time (BuildPlan does touch the filesystem to *observe*
 // current state — it is read-only, never mutating).
 //
 // ManifestDigest is taken over the exact manifest bytes rather than the parsed structure, so even
 // a formatting-only manifest change invalidates every plan built from the previous bytes: "the
 // manifest source changed" must always fail a later apply closed, per the issue's contract.
-func BuildPlan(manifestBytes []byte, manifest Manifest, platform string, dataRoot string, existingLedger OwnershipLedger) (plan Plan, skipped []string, err error) {
+func BuildPlan(manifestBytes []byte, manifest Manifest, platform string, dataRoot string, existingLedger OwnershipLedger) (plan Plan, skipped []ComponentRef, err error) {
 	if err := manifest.Validate(); err != nil {
 		return Plan{}, nil, err
 	}
@@ -106,32 +157,44 @@ func BuildPlan(manifestBytes []byte, manifest Manifest, platform string, dataRoo
 		Platform:        platform,
 		DataRoot:        dataRoot,
 	}
-	for index := range manifest.Adapters {
-		entry := manifest.Adapters[index]
+	// seenOperations is defense in depth behind Manifest.Validate's duplicate-target rejection: two
+	// operations that would perform the same mutation must never coexist in one plan, because the
+	// second would observe state the first created and could not be replayed.
+	seenOperations := make(map[string]bool, len(manifest.Components))
+	for index := range manifest.Components {
+		entry := manifest.Components[index]
 		distribution, supported := entry.Platforms[platform]
 		if !supported {
-			skipped = append(skipped, entry.HarnessID)
+			skipped = append(skipped, entry.Ref())
 			continue
 		}
-		targetPath := AdapterTargetPath(dataRoot, entry, distribution)
+		targetPath, err := ComponentTargetPath(dataRoot, entry, distribution)
+		if err != nil {
+			return Plan{}, nil, fmt.Errorf("component at index %d: %w", index, err)
+		}
+		operationKind, err := operationKindForDistribution(distribution.Kind)
+		if err != nil {
+			return Plan{}, nil, fmt.Errorf("component at index %d: %w", index, err)
+		}
 		operation := Operation{
-			AdapterID:            entry.ID,
-			AdapterVersion:       entry.Version,
+			Kind:                 operationKind,
+			Component:            entry.Ref(),
+			HarnessID:            entry.HarnessID,
 			TargetPath:           targetPath,
 			ExpectedCurrentState: observeCurrentState(targetPath, existingLedger),
 			Source:               distribution,
 		}
-		switch distribution.Kind {
-		case DistributionKindArchive:
-			operation.Kind = OperationInstallArchive
+		// An archive pins its checksum in the manifest; a manual entry intentionally carries none
+		// there and the operator asserts one at apply time through ApplyOptions.ManualChecksums.
+		if distribution.Kind == DistributionKindArchive {
 			operation.ExpectedChecksum = distribution.SHA256
-		case DistributionKindManual:
-			// A manual entry intentionally carries no checksum in the manifest; the operator
-			// asserts one at apply time through ApplyOptions.ManualChecksums.
-			operation.Kind = OperationManualPlacementCheck
 		}
+		if seenOperations[operation.IdempotencyKey()] {
+			return Plan{}, nil, fmt.Errorf("component at index %d: duplicate install operation", index)
+		}
+		seenOperations[operation.IdempotencyKey()] = true
 		plan.Operations = append(plan.Operations, operation)
-		postcondition := fmt.Sprintf("%s (%s) ACP adapter verified at %s", entry.Label, entry.HarnessID, targetPath)
+		postcondition := fmt.Sprintf("%s (%s for harness %s) verified at %s", entry.Label, entry.Kind, entry.HarnessID, targetPath)
 		plan.Postconditions = append(plan.Postconditions, truncateAtRuneBoundary(postcondition, postconditionMaximumBytes))
 	}
 	plan.Digest = ComputePlanDigest(plan)
@@ -154,13 +217,37 @@ func ComputePlanDigest(plan Plan) string {
 	return hex.EncodeToString(summed[:])
 }
 
-// AdapterTargetPath is the single deterministic install location for one adapter entry at one
-// pinned version: <dataRoot>/adapters/<harnessId>/<adapterId>/<version>/<executablePath>. The
-// version segment guarantees two adapters or two versions never collide, and a version bump
+// componentKindDirectories is the data-root layout: one fixed directory per component kind. ACP
+// adapters keep the "adapters" segment they were installed under before the schema generalized, so
+// an already-installed adapter and its existing ownership record still resolve to the same path and
+// migration never silently relocates or orphans an installed file. A kind absent from this map has
+// no install location at all, which fails planning closed rather than inventing one.
+var componentKindDirectories = map[ComponentKind]string{
+	ComponentKindACPAdapter: "adapters",
+	ComponentKindHarness:    "harnesses",
+}
+
+// componentRelativeTargetPath is the data-root-relative install location for one component entry at
+// one pinned version: <kindDirectory>/<harnessId>/<componentId>/<version>/<executablePath>. The
+// version segment guarantees two components or two versions never collide, and a version bump
 // naturally targets a new path so the old version's files are left for explicit rollback rather
 // than silently replaced.
-func AdapterTargetPath(dataRoot string, entry AdapterManifestEntry, distribution PlatformDistribution) string {
-	return filepath.Join(dataRoot, "adapters", entry.HarnessID, entry.ID, entry.Version, filepath.FromSlash(distribution.ExecutablePath))
+func componentRelativeTargetPath(entry ComponentManifestEntry, distribution PlatformDistribution) (string, error) {
+	directory, known := componentKindDirectories[entry.Kind]
+	if !known {
+		return "", fmt.Errorf("component kind %q has no install location", entry.Kind)
+	}
+	return filepath.Join(directory, entry.HarnessID, entry.ID, entry.Version, filepath.FromSlash(distribution.ExecutablePath)), nil
+}
+
+// ComponentTargetPath is the single deterministic absolute install location for one component entry
+// at one pinned version under dataRoot.
+func ComponentTargetPath(dataRoot string, entry ComponentManifestEntry, distribution PlatformDistribution) (string, error) {
+	relative, err := componentRelativeTargetPath(entry, distribution)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dataRoot, relative), nil
 }
 
 // observeCurrentState classifies what currently exists at targetPath against the ledger. Anything

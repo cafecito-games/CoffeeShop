@@ -15,17 +15,17 @@ func doctorManifestFixture(t *testing.T) string {
 	t.Helper()
 	platform := runtime.GOOS + "-" + runtime.GOARCH
 	manifestJSON := fmt.Sprintf(`{
-		"manifestVersion": "1",
-		"adapters": [
+		"manifestVersion": "2",
+		"components": [
 			{
-				"id": "manual-acp", "harnessId": "manual-cli", "provider": "manual-vendor",
+				"id": "manual-acp", "kind": "acp-adapter", "harnessId": "manual-cli", "provider": "manual-vendor",
 				"label": "Manual ACP adapter", "version": "0.4.0",
 				"platforms": {"%s": {"kind": "manual", "executablePath": "bin/adapter"}},
 				"launch": {}
 			}
 		]
 	}`, platform)
-	manifestPath := filepath.Join(t.TempDir(), "adapters.json")
+	manifestPath := filepath.Join(t.TempDir(), "components.json")
 	require.NoError(t, os.WriteFile(manifestPath, []byte(manifestJSON), 0o644))
 	return manifestPath
 }
@@ -47,14 +47,18 @@ func TestDoctorJSONReportsUnreachableHubAndStillSucceeds(t *testing.T) {
 	require.Equal(t, 0, code, "an unreachable hub is a reported fact, not a command failure; stderr: %s", stderr)
 
 	var report struct {
-		Adapters []struct {
-			AdapterID        string `json:"adapterId"`
-			HarnessID        string `json:"harnessId"`
-			HarnessInstalled bool   `json:"harnessInstalled"`
-			AdapterInstalled bool   `json:"adapterInstalled"`
-			AuthReadiness    string `json:"authReadiness"`
-			ACPLaunchReady   bool   `json:"acpLaunchReady"`
-		} `json:"adapters"`
+		Components []struct {
+			Component struct {
+				Kind    string `json:"kind"`
+				ID      string `json:"id"`
+				Version string `json:"version"`
+			} `json:"component"`
+			HarnessID          string `json:"harnessId"`
+			HarnessInstalled   bool   `json:"harnessInstalled"`
+			ComponentInstalled bool   `json:"componentInstalled"`
+			AuthReadiness      string `json:"authReadiness"`
+			ACPLaunchReady     bool   `json:"acpLaunchReady"`
+		} `json:"components"`
 		HubConnectivity struct {
 			Endpoint  string `json:"endpoint"`
 			Reachable bool   `json:"reachable"`
@@ -62,14 +66,16 @@ func TestDoctorJSONReportsUnreachableHubAndStillSucceeds(t *testing.T) {
 		ProjectReadiness string `json:"projectReadiness"`
 	}
 	require.NoError(t, json.Unmarshal([]byte(stdout), &report))
-	require.Len(t, report.Adapters, 1)
-	entry := report.Adapters[0]
-	require.Equal(t, "manual-acp", entry.AdapterID)
+	require.Len(t, report.Components, 1)
+	entry := report.Components[0]
+	require.Equal(t, "manual-acp", entry.Component.ID)
+	require.Equal(t, "acp-adapter", entry.Component.Kind)
+	require.Equal(t, "0.4.0", entry.Component.Version)
 	require.False(t, entry.HarnessInstalled)
-	require.False(t, entry.AdapterInstalled)
+	require.False(t, entry.ComponentInstalled)
 	require.Equal(t, "unknown", entry.AuthReadiness)
 	// launch readiness is exactly the conjunction of the three inputs.
-	require.Equal(t, entry.HarnessInstalled && entry.AdapterInstalled && entry.AuthReadiness == "ready", entry.ACPLaunchReady)
+	require.Equal(t, entry.HarnessInstalled && entry.ComponentInstalled && entry.AuthReadiness == "ready", entry.ACPLaunchReady)
 	require.False(t, report.HubConnectivity.Reachable)
 	require.Equal(t, "http://127.0.0.1:1", report.HubConnectivity.Endpoint)
 	require.NotEmpty(t, report.ProjectReadiness)
@@ -83,7 +89,7 @@ func TestDoctorHumanSummaryReportsUnreachableHub(t *testing.T) {
 		return runDoctor([]string{"--manifest", manifestPath, "--data-root", t.TempDir(), "--control-endpoint", "http://127.0.0.1:1"})
 	})
 	require.Equal(t, 0, code)
-	require.Contains(t, stdout, "manual-acp (manual-cli): harness=missing adapter=missing auth=unknown launch=not-ready")
+	require.Contains(t, stdout, "acp-adapter/manual-acp@0.4.0 (manual-cli): harness=missing component=missing auth=unknown launch=not-ready")
 	require.Contains(t, stdout, "hub http://127.0.0.1:1: unreachable")
 	require.Contains(t, stdout, "project readiness:")
 	require.Contains(t, stdout, "approval policy for claude-cli: manual (every ACP permission request is sent to Coffee Shop)")
