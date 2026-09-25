@@ -30,8 +30,11 @@ import (
 //   - the gzip header carries no original file name, no comment, a zero modification time, and the
 //     "unknown" OS byte.
 //
-// The reader enforces every one of them, so an archive that was not produced this way is rejected
-// rather than accepted as an equivalent pack.
+// The reader enforces every one of these that survives into the bytes — entry order, entry type, path
+// grammar, mode, modification time, owner fields, USTAR framing, and all four gzip header fields — so
+// an archive that was not produced this way is rejected rather than accepted as an equivalent pack.
+// Only the absence of directory entries is implied rather than checked, because a directory entry is
+// refused outright by the entry-type rule.
 const (
 	archiveEntryMode = 0o644
 	// ArchiveMediaType is what the archive is; a manual distribution declares it as its executable
@@ -40,9 +43,20 @@ const (
 	// MaximumArchiveBytes bounds the compressed artifact. The expanded tree is bounded separately by
 	// MaximumPackBytes, which is what actually guards against a compression bomb.
 	MaximumArchiveBytes = 1 << 20
+	// maximumExpandedArchiveBytes bounds the decompressed *tar stream*, which is the content bound
+	// plus tar framing: one 512-byte header and up to 511 bytes of padding per entry, plus the
+	// 1024-byte end-of-archive trailer. It must exceed MaximumPackBytes by at least that much, or a
+	// tree the packer accepts at the content bound would build successfully and then fail every later
+	// read — a pack that installs but can never activate. The real guard against an oversized or
+	// compression-bombed archive is the running content total below, not this framing headroom.
+	maximumExpandedArchiveBytes = MaximumPackBytes + MaximumPackFiles*1024 + 1024
 )
 
 var archiveEntryModTime = time.Unix(0, 0).UTC()
+
+// gzipUnknownOS is the gzip "unknown operating system" byte. It is written and required on read, so
+// the building host's operating system never appears in the archive bytes.
+const gzipUnknownOS = 255
 
 // BuildArchive validates tree and returns the deterministic archive bytes for it. A pack that does
 // not validate produces no archive at all: there is no "build anyway" path, because the activation
@@ -61,7 +75,7 @@ func BuildArchive(tree Tree, vocabulary Vocabulary) ([]byte, PackManifest, error
 	gzipWriter.Name = ""
 	gzipWriter.Comment = ""
 	gzipWriter.ModTime = time.Time{}
-	gzipWriter.OS = 255 // unknown, so the building operating system never appears in the bytes
+	gzipWriter.OS = gzipUnknownOS // so the building operating system never appears in the bytes
 	tarWriter := tar.NewWriter(gzipWriter)
 	for _, path := range tree.Paths() {
 		content := tree[path]
@@ -109,7 +123,13 @@ func ArchiveTree(data []byte) (Tree, error) {
 		return nil, fmt.Errorf("read pack archive: %s", screenDetail(err.Error()))
 	}
 	defer gzipReader.Close()
-	tarReader := tar.NewReader(io.LimitReader(gzipReader, MaximumPackBytes+1))
+	// The gzip header is producer state too: a recorded original file name, a comment, a real
+	// modification time, or a named operating system all vary per machine, so an archive carrying any
+	// of them was not produced deterministically and is refused rather than normalized.
+	if gzipReader.Name != "" || gzipReader.Comment != "" || !gzipReader.ModTime.IsZero() || gzipReader.OS != gzipUnknownOS {
+		return nil, errors.New("pack archive gzip header does not carry the normalized metadata a deterministic pack archive has")
+	}
+	tarReader := tar.NewReader(io.LimitReader(gzipReader, maximumExpandedArchiveBytes+1))
 	tree := Tree{}
 	total := 0
 	previous := ""
@@ -133,6 +153,12 @@ func ArchiveTree(data []byte) (Tree, error) {
 		if header.Mode != archiveEntryMode || header.ModTime.Unix() != 0 ||
 			header.Uid != 0 || header.Gid != 0 || header.Uname != "" || header.Gname != "" {
 			return nil, fmt.Errorf("pack archive entry %s does not carry the normalized metadata a deterministic pack archive has", header.Name)
+		}
+		// Format is a set of the formats the header could be read as. USTAR must be among them: a
+		// GNU-only or PAX-only header carries extension records this packer never writes, and those
+		// records are exactly where producer state would hide.
+		if header.Format&tar.FormatUSTAR == 0 {
+			return nil, fmt.Errorf("pack archive entry %s is not a USTAR header, so it may carry extension records", header.Name)
 		}
 		if header.Name <= previous {
 			return nil, fmt.Errorf("pack archive entry %s is out of sorted order or duplicated", header.Name)

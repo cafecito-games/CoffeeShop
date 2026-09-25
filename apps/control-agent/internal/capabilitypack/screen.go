@@ -22,7 +22,20 @@ var (
 	// absolutePathPattern matches a machine-local absolute path, POSIX or Windows. Workflow prose is
 	// portable; an absolute path in it is either a leaked operator path or an instruction that only
 	// works on one machine.
-	absolutePathPattern = regexp.MustCompile(`(?:^|[^A-Za-z0-9._/-])(?:/(?:home|Users|var|etc|usr|opt|tmp|root|private|Volumes|mnt|srv|proc|sys|dev|bin|sbin)(?:/|\b)|[A-Za-z]:[\\/])`)
+	//
+	// The POSIX rule is general rather than a list of known top-level directories: any leading-slash
+	// path of two or more segments is rejected, so /workspace/..., /data/..., /run/..., and
+	// /nix/store/... are caught as surely as /home/... A single-segment path (/etc, /tmp) still matches
+	// the well-known-root alternative, because one segment is otherwise indistinguishable from prose
+	// punctuation. The home-relative "~/" form is rejected for the same reason an absolute path is: it
+	// names a location on one machine's filesystem.
+	absolutePathPattern = regexp.MustCompile(
+		`(?:^|[^A-Za-z0-9._~/-])(?:` +
+			`(?:/[A-Za-z0-9._-]+){2,}` +
+			`|/(?:home|Users|var|etc|usr|opt|tmp|root|private|Volumes|mnt|srv|proc|sys|dev|bin|sbin|run|nix|data|workspace|Applications|Library)(?:/|\b)` +
+			`|~/` +
+			`|[A-Za-z]:[\\/]` +
+			`)`)
 	// schemaMarkers are the syntactic markers of a JSON Schema. The run-scoped MCP server owns every
 	// tool input and output schema (internal/mcpserver/tools.go); a pack that restated one would
 	// create a second schema that could drift from the served one.
