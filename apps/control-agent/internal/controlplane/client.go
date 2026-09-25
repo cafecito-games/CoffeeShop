@@ -47,6 +47,7 @@ type Client struct {
 	runsMu           sync.Mutex
 	runs             map[string]context.CancelFunc
 	cancelled        map[string]struct{}
+	residents        residentSupervisor
 	pendingMu        sync.Mutex
 	pending          map[string]chan rpcResult
 	requestID        atomic.Uint64
@@ -66,8 +67,14 @@ func NewClient(cfg config.Config, node protocol.ComputeNode, runner *harness.Run
 		config: cfg, node: node, runner: runner, buildCapabilityReport: buildCapabilityReport,
 		workspaces: workspace.NewManager(cfg.WorkspaceRoots, git),
 		runs:       map[string]context.CancelFunc{}, cancelled: map[string]struct{}{}, pending: map[string]chan rpcResult{},
-		sessions: map[string]*runSession{},
+		sessions: map[string]*runSession{}, residents: newResidentSupervisor(cfg.InstanceCapacity),
 	}
+	// The registered node advertises independent run and resident-instance capacities, and its
+	// resident count is refreshed from the supervisor on every registration and heartbeat.
+	instanceCapacity := cfg.InstanceCapacity
+	activeInstances := 0
+	client.node.InstanceCapacity = &instanceCapacity
+	client.node.ActiveInstances = &activeInstances
 	client.bridge = mcpserver.New(client.callHub, client.uploadArtifact)
 	return client
 }
@@ -144,7 +151,14 @@ func (client *Client) runOnce(ctx context.Context) (bool, error) {
 		}
 		message, err := protocol.DecodeInbound(data)
 		if err != nil {
-			log.Printf("ignore invalid control-plane message: %v", err)
+			// The legacy decoder refuses every v5 instance message rather than reinterpreting it;
+			// only the v5 decoder may accept one, and it re-validates the whole payload.
+			instanceMessage, instanceErr := protocol.DecodeInstanceHubMessage(data, protocol.Version)
+			if instanceErr != nil {
+				log.Printf("ignore invalid control-plane message: %v", err)
+				continue
+			}
+			client.handleInstanceMessage(ctx, instanceMessage)
 			continue
 		}
 		if message.Type == "hub.rpc.response" {
@@ -161,6 +175,8 @@ func (client *Client) attach(ctx context.Context, connection *websocket.Conn) er
 	client.connection = connection
 	registrationNode := client.node
 	registrationNode.ActiveRuns = client.activeRuns()
+	activeInstances := client.activeInstanceCount()
+	registrationNode.ActiveInstances = &activeInstances
 	registrationNode.LastSeen = now()
 	registration := protocol.Outbound{Type: "register", ProtocolVersion: protocol.Version, Node: &registrationNode}
 	if err := write(ctx, connection, registration); err != nil {
@@ -180,7 +196,11 @@ func (client *Client) attach(ctx context.Context, connection *websocket.Conn) er
 	}
 	client.outboxEvents, client.outboxEventBytes = 0, 0
 	activeRunIDs := client.activeRunIDs()
-	return write(ctx, connection, protocol.Outbound{Type: "sync.complete", NodeID: client.node.ID, ActiveRunIDs: &activeRunIDs, At: now()})
+	// activeInstanceIds is always present on sync.complete — an explicitly empty array is the
+	// authoritative statement that no resident survived the reconnect, distinct from an absent
+	// field, which the hub must not read as evidence.
+	activeInstanceIDs := client.activeInstanceIDs()
+	return write(ctx, connection, protocol.Outbound{Type: "sync.complete", NodeID: client.node.ID, ActiveRunIDs: &activeRunIDs, ActiveInstanceIDs: &activeInstanceIDs, At: now()})
 }
 
 // awaitRegistrationAcknowledgement waits for the hub's first message, a ping, which it sends only
@@ -234,7 +254,7 @@ func (client *Client) heartbeat(ctx context.Context) {
 	for {
 		select {
 		case <-ticker.C:
-			client.send(protocol.Outbound{Type: "heartbeat", NodeID: client.node.ID, ActiveRuns: client.activeRuns(), At: now()})
+			client.send(client.heartbeatMessage())
 		case <-ctx.Done():
 			return
 		}
@@ -258,7 +278,7 @@ func (client *Client) capabilityReportLoop(ctx context.Context) {
 func (client *Client) handle(ctx context.Context, message protocol.Inbound) {
 	switch message.Type {
 	case "ping":
-		client.send(protocol.Outbound{Type: "heartbeat", NodeID: client.node.ID, ActiveRuns: client.activeRuns(), At: now()})
+		client.send(client.heartbeatMessage())
 	case "cancel":
 		client.runsMu.Lock()
 		client.cancelled[message.RunID] = struct{}{}
@@ -398,32 +418,57 @@ func (client *Client) admitResume() admitResume {
 }
 
 func (client *Client) dispatch(ctx context.Context, run protocol.Run, agent protocol.Agent, execution *protocol.DispatchExecution) {
-	// The guard may re-verify an adapter executable's digest, so it runs before taking the run
-	// lock; its verdict is applied in the same place as before, after the tombstone and duplicate
+	client.dispatchRun(ctx, run, agent, execution, "")
+}
+
+// dispatchRun admits and executes one dispatch. A non-empty allocationID also binds the run to
+// that resident allocation: admission validates the resident and registers the run membership
+// under the resident lock in the same critical section that registers the run, so a concurrent
+// release either sees this run and waits for it, or has already closed the resident and this
+// dispatch fails. The resident lock is always taken before runsMu and never the reverse.
+func (client *Client) dispatchRun(ctx context.Context, run protocol.Run, agent protocol.Agent, execution *protocol.DispatchExecution, allocationID string) {
+	// The guard may re-verify an adapter executable's digest, so it runs before taking any lock;
+	// its verdict is applied in the same place as before, after the tombstone and duplicate
 	// checks.
 	rejection := unsupportedExecutionReason(run, execution, client.admitTransport(), client.admitResume(), client.workspaces)
+	client.residents.mu.Lock()
+	if allocationID != "" {
+		if reason := client.residents.admitRunLocked(allocationID, run); reason != "" {
+			client.residents.mu.Unlock()
+			client.send(protocol.Outbound{Type: "run.failed", RunID: run.ID, Error: reason, At: now()})
+			return
+		}
+	}
 	client.runsMu.Lock()
 	if _, cancelled := client.cancelled[run.ID]; cancelled {
 		client.runsMu.Unlock()
+		client.residents.mu.Unlock()
 		return
 	}
 	if _, exists := client.runs[run.ID]; exists {
 		client.runsMu.Unlock()
+		client.residents.mu.Unlock()
 		return
 	}
 	if rejection != "" {
 		client.runsMu.Unlock()
+		client.residents.mu.Unlock()
 		client.send(protocol.Outbound{Type: "run.failed", RunID: run.ID, Error: rejection, At: now()})
 		return
 	}
 	if len(client.runs) >= client.config.Concurrency {
 		client.runsMu.Unlock()
+		client.residents.mu.Unlock()
 		client.send(protocol.Outbound{Type: "run.failed", RunID: run.ID, Error: fmt.Sprintf("Barista concurrency limit (%d) reached", client.config.Concurrency), At: now()})
 		return
 	}
 	runContext, cancel := context.WithCancel(ctx)
 	client.runs[run.ID] = cancel
+	if allocationID != "" {
+		client.residents.residentsTable[allocationID].runs[run.ID] = struct{}{}
+	}
 	client.runsMu.Unlock()
+	client.residents.mu.Unlock()
 
 	fallbackTransport := ""
 	if execution != nil {
@@ -440,6 +485,9 @@ func (client *Client) dispatch(ctx context.Context, run protocol.Run, agent prot
 			_, cancelled := client.cancelled[run.ID]
 			client.runsMu.Unlock()
 			cancel()
+			if allocationID != "" {
+				client.finishResidentRun(allocationID, run.ID)
+			}
 			if cancelled {
 				client.send(protocol.Outbound{Type: "run.cancelled", RunID: run.ID, At: now()})
 			}
@@ -471,6 +519,16 @@ func (client *Client) dispatch(ctx context.Context, run protocol.Run, agent prot
 		defer client.bridge.Revoke(capability.Token)
 		session := client.openSession(run.ID)
 		defer client.closeSession(session)
+		if allocationID != "" {
+			// The run's own completion closes its session; this closer is the resident's defensive
+			// backstop that a release invokes if a session outlived its run.
+			client.registerResidentCleanup(allocationID, run.ID, func() error {
+				if open := client.session(run.ID); open != nil {
+					client.closeSession(open)
+				}
+				return nil
+			})
+		}
 		// run.started is sent only when the driver is about to hand the harness its prompt, after
 		// transport selection and, for ACP, after the adapter connected to the Coffee Shop MCP
 		// server; it carries that selection. Events produced before then are held by the session.
@@ -643,6 +701,14 @@ func httpEndpoint(controlEndpoint, path string) (string, error) {
 	parsed.RawQuery = ""
 	parsed.Fragment = ""
 	return parsed.String(), nil
+}
+
+// heartbeatMessage reports the node's live run and resident counts; the two capacities are
+// enforced independently, so both numbers are authoritative evidence, not one derived from the
+// other.
+func (client *Client) heartbeatMessage() protocol.Outbound {
+	activeInstances := client.activeInstanceCount()
+	return protocol.Outbound{Type: "heartbeat", NodeID: client.node.ID, ActiveRuns: client.activeRuns(), ActiveInstances: &activeInstances, At: now()}
 }
 
 func (client *Client) activeRuns() int {

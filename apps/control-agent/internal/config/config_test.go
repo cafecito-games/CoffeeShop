@@ -449,3 +449,50 @@ func TestParseRejectsNegativeMemory(t *testing.T) {
 	_, err = Parse([]string{"--name", "Worker 1", "--id", "worker-1", "--memory-megabytes", "-1"})
 	require.EqualError(t, err, "memory megabytes must not be negative")
 }
+
+func TestParseInstanceCapacityDefaultsToConcurrencyAndHonorsExplicitValues(t *testing.T) {
+	t.Setenv("WORKSPACE_ROOTS", absoluteExistingRoot(t))
+
+	t.Run("defaults to run concurrency", func(t *testing.T) {
+		t.Setenv("BARISTA_CONCURRENCY", "3")
+		t.Setenv("BARISTA_INSTANCE_CAPACITY", "")
+		parsed, err := Parse([]string{"--name", "Worker 1", "--id", "worker-1"})
+		require.NoError(t, err)
+		require.Equal(t, 3, parsed.InstanceCapacity)
+		require.Equal(t, 3, parsed.Concurrency)
+	})
+
+	t.Run("explicit environment zero disables hosting without touching concurrency", func(t *testing.T) {
+		t.Setenv("BARISTA_INSTANCE_CAPACITY", "0")
+		parsed, err := Parse([]string{"--name", "Worker 1", "--id", "worker-1"})
+		require.NoError(t, err)
+		require.Zero(t, parsed.InstanceCapacity)
+		require.Equal(t, 2, parsed.Concurrency)
+	})
+
+	t.Run("the flag overrides the environment", func(t *testing.T) {
+		t.Setenv("BARISTA_INSTANCE_CAPACITY", "4")
+		parsed, err := Parse([]string{"--name", "Worker 1", "--id", "worker-1", "--instance-capacity", "7"})
+		require.NoError(t, err)
+		require.Equal(t, 7, parsed.InstanceCapacity)
+	})
+
+	t.Run("capacity stays independent of a later concurrency flag", func(t *testing.T) {
+		t.Setenv("BARISTA_INSTANCE_CAPACITY", "")
+		parsed, err := Parse([]string{"--name", "Worker 1", "--id", "worker-1", "--concurrency", "5"})
+		require.NoError(t, err)
+		require.Equal(t, 5, parsed.Concurrency)
+		require.Equal(t, 2, parsed.InstanceCapacity, "an unset capacity defaults to the environment concurrency, not a later flag")
+	})
+
+	t.Run("rejects a negative or non-integer environment value", func(t *testing.T) {
+		t.Setenv("BARISTA_INSTANCE_CAPACITY", "-1")
+		_, err := Parse([]string{"--name", "Worker 1", "--id", "worker-1"})
+		require.EqualError(t, err, `BARISTA_INSTANCE_CAPACITY must be a non-negative integer`)
+	})
+
+	t.Run("rejects a capacity above the protocol bound", func(t *testing.T) {
+		_, err := Parse([]string{"--name", "Worker 1", "--id", "worker-1", "--instance-capacity", "65536"})
+		require.ErrorContains(t, err, "instance capacity must be between 0 and 65535")
+	})
+}

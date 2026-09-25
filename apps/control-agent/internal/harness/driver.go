@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -170,6 +171,21 @@ func (r *Runner) AdmitResume(harnessID string) error {
 		return err
 	}
 	return r.acp.SupportsResume(harnessID)
+}
+
+// AdmitModel reports whether the harness is installed and advertises the model. A harness whose
+// advertised model list is empty accepts any model identifier, because its CLI chooses defaults
+// on its own. It performs no execution and is safe to call before a run or a resident instance is
+// accepted.
+func (r *Runner) AdmitModel(harnessID, model string) error {
+	profile, available := r.profile(harnessID)
+	if !available {
+		return fmt.Errorf("harness %s is not installed or did not pass its version check", harnessID)
+	}
+	if len(profile.Models) > 0 && !slices.Contains(profile.Models, model) {
+		return fmt.Errorf("model %s is not advertised by harness %s on this Barista", model, harnessID)
+	}
+	return nil
 }
 
 // Execute dispatches the invocation to the driver for its transport.

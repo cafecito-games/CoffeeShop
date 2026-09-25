@@ -1,0 +1,809 @@
+package controlplane
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/config"
+	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/harness"
+	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/protocol"
+	"github.com/stretchr/testify/require"
+	"nhooyr.io/websocket"
+)
+
+const instanceAt = "2026-09-24T12:00:00Z"
+
+// fakeHarnessBinary writes a codex-cli agent_message event and then sleeps, so a run stays active
+// until it is cancelled or the sleep elapses. A completed-at-once variant is built per test.
+func fakeHarnessBinary(t *testing.T, directory, name, script string) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("test fixture is a shell script")
+	}
+	binary := filepath.Join(directory, name)
+	require.NoError(t, os.WriteFile(binary, []byte(script), 0o755))
+	return binary
+}
+
+func slowHarnessBinary(t *testing.T, directory string) string {
+	return fakeHarnessBinary(t, directory, "fake-codex",
+		"#!/bin/sh\nprintf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"started\"}}'\nsleep 30\n")
+}
+
+func quickHarnessBinary(t *testing.T, directory string) string {
+	return fakeHarnessBinary(t, directory, "fake-codex",
+		"#!/bin/sh\nprintf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"done\"}}'\n")
+}
+
+func instanceTestClient(t *testing.T, binary, workspace string, concurrency, instanceCapacity int, models []string) *Client {
+	t.Helper()
+	runner := harness.NewRunner([]protocol.HarnessProfile{{ID: "codex-cli", Binary: binary, Available: true, Models: models}})
+	return NewClient(config.Config{
+		Concurrency: concurrency, InstanceCapacity: instanceCapacity, WorkspaceRoots: []string{workspace},
+	}, protocol.ComputeNode{ID: "node-one"}, runner, emptyCapabilityReport)
+}
+
+func testInstanceAndAllocation(workspace string) (protocol.AgentInstance, protocol.InstanceAllocation) {
+	return testInstanceAndAllocationFor("instance-one", "allocation-one", workspace)
+}
+
+func testInstanceAndAllocationFor(instanceID, allocationID, workspace string) (protocol.AgentInstance, protocol.InstanceAllocation) {
+	lease := protocol.InstanceLease{IdleTimeoutSeconds: protocol.DefaultInstanceIdleTimeoutSeconds, ExpiresAt: "2026-09-24T12:30:00Z"}
+	instance := protocol.AgentInstance{
+		ID: instanceID, ThreadID: "thread-one",
+		Creator:    protocol.InstanceCreator{Kind: "operator", OperatorID: "operator-one"},
+		Delegation: protocol.InstanceDelegationPolicy{CanDelegate: false},
+		Lease:      lease, Status: "provisioning", CreatedAt: instanceAt, UpdatedAt: instanceAt,
+	}
+	allocation := protocol.InstanceAllocation{
+		ID: allocationID, InstanceID: instanceID, NodeID: "node-one", HarnessID: "codex-cli", Model: "default",
+		Transport: "native-cli", Workspace: workspace, Lease: lease, Status: "provisioning", CreatedAt: instanceAt, UpdatedAt: instanceAt,
+	}
+	return instance, allocation
+}
+
+func testProvisionMessage(instance protocol.AgentInstance, allocation protocol.InstanceAllocation) protocol.InstanceHubMessage {
+	return protocol.InstanceHubMessage{Type: "instance.provision", Instance: &instance, Allocation: &allocation}
+}
+
+func testDispatchMessage(instance protocol.AgentInstance, allocation protocol.InstanceAllocation, runID string) protocol.InstanceHubMessage {
+	run := &protocol.InstanceRun{
+		ID: runID, ThreadID: instance.ThreadID, InstanceID: instance.ID, AllocationID: allocation.ID, NodeID: allocation.NodeID,
+		HarnessID: allocation.HarnessID, Model: allocation.Model, Workspace: allocation.Workspace, Prompt: "do the work",
+		Status: "queued", Depth: 0, CreatedAt: instanceAt, Transport: allocation.Transport,
+	}
+	return protocol.InstanceHubMessage{Type: "dispatch", Instance: &instance, Allocation: &allocation, Run: run}
+}
+
+func testReleaseMessage(allocation protocol.InstanceAllocation, mode string) protocol.InstanceHubMessage {
+	return protocol.InstanceHubMessage{Type: "instance.release", InstanceID: allocation.InstanceID, AllocationID: allocation.ID, Mode: mode}
+}
+
+// provisionReady provisions one resident and requires its acknowledgement before returning.
+func provisionReady(t *testing.T, client *Client, instance protocol.AgentInstance, allocation protocol.InstanceAllocation) {
+	t.Helper()
+	client.handleInstanceMessage(context.Background(), testProvisionMessage(instance, allocation))
+	require.NotNil(t, waitForInstanceMessage(t, client, "instance.ready", ""), "provision must be acknowledged with instance.ready")
+}
+
+func instanceControlMessages(t *testing.T, client *Client) []protocol.InstanceControlMessage {
+	t.Helper()
+	client.connectionMu.Lock()
+	defer client.connectionMu.Unlock()
+	messages := make([]protocol.InstanceControlMessage, 0, len(client.outbox))
+	for _, data := range client.outbox {
+		var message protocol.InstanceControlMessage
+		if err := json.Unmarshal(data, &message); err == nil && strings.Contains(strings.Join(protocol.InstanceControlMessageTypes, " "), message.Type) {
+			messages = append(messages, message)
+		}
+	}
+	return messages
+}
+
+// waitForInstanceMessage returns the latest message of messageType, optionally narrowed to one
+// allocation. The outbox accumulates across a test, so callers that provoke several messages of
+// the same type must narrow by allocation and take the latest.
+func waitForInstanceMessage(t *testing.T, client *Client, messageType string, allocationID string) *protocol.InstanceControlMessage {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		var latest *protocol.InstanceControlMessage
+		for index, message := range instanceControlMessages(t, client) {
+			if message.Type == messageType && (allocationID == "" || message.AllocationID == allocationID) {
+				latest = &instanceControlMessages(t, client)[index]
+			}
+		}
+		if latest != nil {
+			return latest
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return nil
+}
+
+// waitForRunFailure waits for the run.failed addressed to exactly this run, ignoring failures of
+// other runs queued earlier in the outbox.
+func waitForRunFailure(t *testing.T, client *Client, runID string) protocol.Outbound {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, message := range outboundMessages(t, client) {
+			if message.Type == "run.failed" && message.RunID == runID {
+				return message
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for run.failed for %s", runID)
+	return protocol.Outbound{}
+}
+
+// waitForInstanceReason waits for an instance message whose error contains reason, so an earlier
+// instance.failed for the same allocation cannot satisfy the wait.
+func waitForInstanceReason(t *testing.T, client *Client, messageType, allocationID, reason string) protocol.InstanceControlMessage {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, message := range instanceControlMessages(t, client) {
+			if message.Type == messageType && message.AllocationID == allocationID && message.Error != nil && strings.Contains(*message.Error, reason) {
+				return message
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s of %s containing %q", messageType, allocationID, reason)
+	return protocol.InstanceControlMessage{}
+}
+
+// waitForInstanceMessageCount waits until allocationID has exactly count messages of messageType.
+func waitForInstanceMessageCount(t *testing.T, client *Client, messageType, allocationID string, count int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		seen := 0
+		for _, message := range instanceControlMessages(t, client) {
+			if message.Type == messageType && message.AllocationID == allocationID {
+				seen++
+			}
+		}
+		if seen >= count {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %d %s messages of %s", count, messageType, allocationID)
+}
+
+func TestProvisionValidatesEveryPrerequisiteBeforeReserving(t *testing.T) {
+	directory := t.TempDir()
+	runner := harness.NewRunner([]protocol.HarnessProfile{{ID: "codex-cli", Binary: quickHarnessBinary(t, directory), Available: true, Models: []string{"sonnet"}}})
+	newClient := func() *Client {
+		return NewClient(config.Config{Concurrency: 2, InstanceCapacity: 2, WorkspaceRoots: []string{directory}}, protocol.ComputeNode{ID: "node-one"}, runner, emptyCapabilityReport)
+	}
+	baseInstance, baseAllocation := testInstanceAndAllocation(directory)
+
+	wrongNode := baseAllocation
+	wrongNode.NodeID = "node-two"
+	unknownHarness := baseAllocation
+	unknownHarness.HarnessID = "shell"
+	unadvertisedModel := baseAllocation
+	unadvertisedModel.Model = "opus"
+	acpTransport := baseAllocation
+	acpTransport.Transport = "acp-v1"
+	outsideRoots := baseAllocation
+	outsideRoots.Workspace = filepath.Join(os.TempDir(), "elsewhere")
+
+	cases := []struct {
+		name       string
+		allocation protocol.InstanceAllocation
+	}{
+		{"wrong node", wrongNode},
+		{"unknown harness", unknownHarness},
+		{"unadvertised model", unadvertisedModel},
+		{"unavailable transport", acpTransport},
+		{"workspace outside roots", outsideRoots},
+	}
+	for _, item := range cases {
+		t.Run(item.name, func(t *testing.T) {
+			client := newClient()
+			client.handleInstanceMessage(context.Background(), testProvisionMessage(baseInstance, item.allocation))
+			failed := waitForInstanceMessage(t, client, "instance.failed", "")
+			require.NotNil(t, failed)
+			require.Equal(t, baseAllocation.ID, failed.AllocationID)
+			require.NotNil(t, failed.Error)
+			require.Zero(t, client.activeInstanceCount(), "a rejected provision must not reserve a slot")
+		})
+	}
+	t.Run("no harness inventory", func(t *testing.T) {
+		client := NewClient(config.Config{Concurrency: 2, InstanceCapacity: 2, WorkspaceRoots: []string{directory}}, protocol.ComputeNode{ID: "node-one"}, nil, emptyCapabilityReport)
+		client.handleInstanceMessage(context.Background(), testProvisionMessage(baseInstance, baseAllocation))
+		failed := waitForInstanceMessage(t, client, "instance.failed", "")
+		require.NotNil(t, failed)
+		require.Contains(t, *failed.Error, "no harness inventory")
+	})
+}
+
+func TestProvisionCapacityZeroDisabledFullAndFree(t *testing.T) {
+	directory := t.TempDir()
+
+	disabled := instanceTestClient(t, quickHarnessBinary(t, directory), directory, 2, 0, nil)
+	instance, allocation := testInstanceAndAllocation(directory)
+	disabled.handleInstanceMessage(context.Background(), testProvisionMessage(instance, allocation))
+	waitForInstanceReason(t, disabled, "instance.failed", allocation.ID, "instance hosting is disabled")
+	require.Zero(t, disabled.activeInstanceCount())
+
+	client := instanceTestClient(t, quickHarnessBinary(t, directory), directory, 2, 1, nil)
+	provisionReady(t, client, instance, allocation)
+	require.Equal(t, 1, client.activeInstanceCount())
+
+	secondInstance, secondAllocation := testInstanceAndAllocationFor("instance-two", "allocation-two", directory)
+	client.handleInstanceMessage(context.Background(), testProvisionMessage(secondInstance, secondAllocation))
+	waitForInstanceReason(t, client, "instance.failed", secondAllocation.ID, "resident instance capacity (1) reached")
+	require.Equal(t, 1, client.activeInstanceCount(), "a full node must not evict the hosted resident")
+
+	client.handleInstanceMessage(context.Background(), testReleaseMessage(allocation, "drain"))
+	require.NotNil(t, waitForInstanceMessage(t, client, "instance.released", ""))
+	require.Zero(t, client.activeInstanceCount(), "release frees the slot")
+	client.handleInstanceMessage(context.Background(), testProvisionMessage(secondInstance, secondAllocation))
+	require.NotNil(t, waitForInstanceMessage(t, client, "instance.ready", ""), "the freed slot hosts the next resident")
+}
+
+func TestProvisionReplayIsExactAndConflictsAreRefused(t *testing.T) {
+	directory := t.TempDir()
+	client := instanceTestClient(t, quickHarnessBinary(t, directory), directory, 2, 2, nil)
+	instance, allocation := testInstanceAndAllocation(directory)
+	provisionReady(t, client, instance, allocation)
+
+	client.handleInstanceMessage(context.Background(), testProvisionMessage(instance, allocation))
+	ready := waitForInstanceMessage(t, client, "instance.ready", "")
+	require.NotNil(t, ready, "an exact replay is acknowledged like the original")
+	require.Equal(t, 1, client.activeInstanceCount())
+
+	conflictingInstance, conflictingAllocation := instance, allocation
+	conflictingInstance.ID = "instance-other"
+	conflictingAllocation.InstanceID = "instance-other"
+	conflictingAllocation.Model = "other-model"
+	client.handleInstanceMessage(context.Background(), testProvisionMessage(conflictingInstance, conflictingAllocation))
+	waitForInstanceReason(t, client, "instance.failed", allocation.ID, "a different resident is already hosted for this allocation")
+	require.Equal(t, 1, client.activeInstanceCount(), "a conflicting replay must not replace the original")
+
+	client.handleInstanceMessage(context.Background(), testDispatchMessage(instance, allocation, "run-one"))
+	require.NotNil(t, waitForMessage(t, client, "run.completed"), "the original resident still dispatches")
+}
+
+func TestProvisionAfterReleaseRefusesToReopenTheAllocation(t *testing.T) {
+	directory := t.TempDir()
+	client := instanceTestClient(t, quickHarnessBinary(t, directory), directory, 2, 2, nil)
+	instance, allocation := testInstanceAndAllocation(directory)
+	provisionReady(t, client, instance, allocation)
+	client.handleInstanceMessage(context.Background(), testReleaseMessage(allocation, "drain"))
+	require.NotNil(t, waitForInstanceMessage(t, client, "instance.released", ""))
+
+	client.handleInstanceMessage(context.Background(), testProvisionMessage(instance, allocation))
+	waitForInstanceReason(t, client, "instance.failed", allocation.ID, "this allocation was already released")
+}
+
+func TestProvisionDoesNotStartProviderWork(t *testing.T) {
+	directory := t.TempDir()
+	started := filepath.Join(directory, "provider-started")
+	binary := fakeHarnessBinary(t, directory, "fake-codex", "#!/bin/sh\ntouch "+started+"\n")
+	client := instanceTestClient(t, binary, directory, 2, 2, nil)
+	instance, allocation := testInstanceAndAllocation(directory)
+	provisionReady(t, client, instance, allocation)
+
+	time.Sleep(100 * time.Millisecond)
+	_, err := os.Stat(started)
+	require.True(t, os.IsNotExist(err), "instance.ready must prove local prerequisites without starting a provider process or prompt")
+}
+
+func TestDispatchRequiresAnExactReadyAllocation(t *testing.T) {
+	directory := t.TempDir()
+	client := instanceTestClient(t, slowHarnessBinary(t, directory), directory, 4, 2, nil)
+	instance, allocation := testInstanceAndAllocation(directory)
+	provisionReady(t, client, instance, allocation)
+
+	requireDispatchFailure := func(t *testing.T, message protocol.InstanceHubMessage, runID, expectedReason string) {
+		t.Helper()
+		client.handleInstanceMessage(context.Background(), message)
+		failed := waitForRunFailure(t, client, runID)
+		require.Contains(t, failed.Error, expectedReason)
+		require.Zero(t, client.activeRuns(), "a rejected dispatch must never occupy a run slot")
+	}
+
+	unknownAllocation := allocation
+	unknownAllocation.ID = "allocation-unknown"
+	unknownInstance := instance
+	unknownInstance.ID = "instance-unknown"
+	unknownInstance.ThreadID = "thread-other"
+	delegatingInstance := instance
+	delegatingInstance.Delegation = protocol.InstanceDelegationPolicy{CanDelegate: true}
+	otherThread := instance
+	otherThread.ThreadID = "thread-other"
+	otherLease := allocation
+	otherLease.Lease.ExpiresAt = "2026-09-24T13:30:00Z"
+
+	cases := []struct {
+		name       string
+		instance   protocol.AgentInstance
+		allocation protocol.InstanceAllocation
+		reason     string
+	}{
+		{"unknown allocation", instance, unknownAllocation, "no resident allocation"},
+		{"different instance", unknownInstance, allocation, "approved identity or placement"},
+		{"different thread", otherThread, allocation, "approved identity or placement"},
+		{"different delegation policy", delegatingInstance, allocation, "approved identity or placement"},
+		{"different lease", instance, otherLease, "approved identity or placement"},
+	}
+	for _, item := range cases {
+		t.Run(item.name, func(t *testing.T) {
+			requireDispatchFailure(t, testDispatchMessage(item.instance, item.allocation, "run-"+item.name), "run-"+item.name, item.reason)
+		})
+	}
+
+	mismatches := []struct {
+		name string
+		edit func(run *protocol.InstanceRun)
+	}{
+		{"harness", func(run *protocol.InstanceRun) { run.HarnessID = "claude-cli" }},
+		{"model", func(run *protocol.InstanceRun) { run.Model = "other-model" }},
+		{"transport", func(run *protocol.InstanceRun) { run.Transport = "acp-v1" }},
+		{"workspace", func(run *protocol.InstanceRun) { run.Workspace = filepath.Join(directory, "elsewhere") }},
+	}
+	for _, item := range mismatches {
+		t.Run("run "+item.name, func(t *testing.T) {
+			message := testDispatchMessage(instance, allocation, "run-"+item.name)
+			item.edit(message.Run)
+			requireDispatchFailure(t, message, "run-"+item.name, "does not match the resident allocation")
+		})
+	}
+
+	t.Run("session binding", func(t *testing.T) {
+		message := testDispatchMessage(instance, allocation, "run-binding")
+		binding := "binding-one"
+		message.Run.SessionBindingID = &binding
+		requireDispatchFailure(t, message, "run-binding", "unsupported execution: the run's session binding is missing or names a different binding")
+	})
+	t.Run("workspace lease", func(t *testing.T) {
+		message := testDispatchMessage(instance, allocation, "run-lease")
+		lease := "lease-one"
+		message.Run.WorkspaceLeaseID = &lease
+		requireDispatchFailure(t, message, "run-lease", "unsupported execution: the run's workspace lease grant is missing or names a different lease")
+	})
+}
+
+func TestDispatchRejectsWhileDrainingAndAfterRelease(t *testing.T) {
+	directory := t.TempDir()
+	client := instanceTestClient(t, slowHarnessBinary(t, directory), directory, 2, 1, nil)
+	instance, allocation := testInstanceAndAllocation(directory)
+	provisionReady(t, client, instance, allocation)
+
+	client.handleInstanceMessage(context.Background(), testDispatchMessage(instance, allocation, "run-one"))
+	waitForMessage(t, client, "run.started")
+	// The release goroutine marks the resident draining before it waits, so a dispatch racing it
+	// loses deterministically once draining is visible.
+	client.handleInstanceMessage(context.Background(), testReleaseMessage(allocation, "drain"))
+	time.Sleep(50 * time.Millisecond)
+	client.handleInstanceMessage(context.Background(), testDispatchMessage(instance, allocation, "run-two"))
+	failed := waitForRunFailure(t, client, "run-two")
+	require.Contains(t, failed.Error, "the resident allocation is closed to new dispatch")
+
+	// The drain stays waiting for run-one; finish it the way a hub cancel would so the release
+	// can complete inside the test's time budget.
+	client.handle(context.Background(), protocol.Inbound{Type: "cancel", RunID: "run-one"})
+	require.NotNil(t, waitForMessage(t, client, "run.cancelled"))
+	require.NotNil(t, waitForInstanceMessage(t, client, "instance.released", allocation.ID))
+	client.handleInstanceMessage(context.Background(), testDispatchMessage(instance, allocation, "run-three"))
+	failed = waitForRunFailure(t, client, "run-three")
+	require.Contains(t, failed.Error, "no resident allocation on this Barista matches the dispatch")
+}
+
+func TestDrainWaitsForActiveRunsBeforeReportingReleased(t *testing.T) {
+	directory := t.TempDir()
+	client := instanceTestClient(t, slowHarnessBinary(t, directory), directory, 2, 1, nil)
+	instance, allocation := testInstanceAndAllocation(directory)
+	provisionReady(t, client, instance, allocation)
+	client.handleInstanceMessage(context.Background(), testDispatchMessage(instance, allocation, "run-one"))
+	waitForMessage(t, client, "run.started")
+
+	client.handleInstanceMessage(context.Background(), testReleaseMessage(allocation, "drain"))
+	// The drain cannot complete while the run is still active; the run finishes only by timing out
+	// the harness sleep, so simulate the run's completion by cancelling it through the run cancel
+	// path a hub would trigger, then require the release to finish.
+	time.Sleep(100 * time.Millisecond)
+	require.Nil(t, waitForInstanceMessage(t, client, "instance.released", allocation.ID), "a drain must not report released while a run is active")
+
+	client.handle(context.Background(), protocol.Inbound{Type: "cancel", RunID: "run-one"})
+	require.NotNil(t, waitForMessage(t, client, "run.cancelled"))
+	released := waitForInstanceMessage(t, client, "instance.released", allocation.ID)
+	require.NotNil(t, released)
+	require.Equal(t, allocation.ID, released.AllocationID)
+	require.Zero(t, client.activeInstanceCount())
+}
+
+func TestCancelReleaseTerminatesActiveRunsThenReleases(t *testing.T) {
+	directory := t.TempDir()
+	client := instanceTestClient(t, slowHarnessBinary(t, directory), directory, 2, 1, nil)
+	instance, allocation := testInstanceAndAllocation(directory)
+	provisionReady(t, client, instance, allocation)
+	client.handleInstanceMessage(context.Background(), testDispatchMessage(instance, allocation, "run-one"))
+	waitForMessage(t, client, "run.started")
+
+	client.handleInstanceMessage(context.Background(), testReleaseMessage(allocation, "cancel"))
+	require.NotNil(t, waitForMessage(t, client, "run.cancelled"), "a cancelling release terminates the resident's active runs")
+	require.NotNil(t, waitForInstanceMessage(t, client, "instance.released", allocation.ID))
+	require.Zero(t, client.activeRuns())
+	require.Zero(t, client.activeInstanceCount())
+
+	// The cancelled run stays tombstoned: a replayed dispatch for it is never restarted.
+	client.handleInstanceMessage(context.Background(), testDispatchMessage(instance, allocation, "run-one"))
+	time.Sleep(50 * time.Millisecond)
+	require.Zero(t, client.activeRuns())
+}
+
+func TestSequentialRunsShareOneResidentWhileConcurrencyStaysIndependent(t *testing.T) {
+	directory := t.TempDir()
+	client := instanceTestClient(t, quickHarnessBinary(t, directory), directory, 1, 1, nil)
+	instance, allocation := testInstanceAndAllocation(directory)
+	provisionReady(t, client, instance, allocation)
+
+	client.handleInstanceMessage(context.Background(), testDispatchMessage(instance, allocation, "run-one"))
+	require.NotNil(t, waitForMessage(t, client, "run.completed"))
+	client.handleInstanceMessage(context.Background(), testDispatchMessage(instance, allocation, "run-two"))
+	require.NotNil(t, waitForMessage(t, client, "run.completed"), "one resident may run sequential attempts")
+	require.Equal(t, 1, client.activeInstanceCount())
+}
+
+func TestRunConcurrencyIsStillEnforcedAlongsideResidents(t *testing.T) {
+	directory := t.TempDir()
+	client := instanceTestClient(t, slowHarnessBinary(t, directory), directory, 1, 1, nil)
+	instance, allocation := testInstanceAndAllocation(directory)
+	provisionReady(t, client, instance, allocation)
+
+	client.handleInstanceMessage(context.Background(), testDispatchMessage(instance, allocation, "run-one"))
+	waitForMessage(t, client, "run.started")
+	client.handleInstanceMessage(context.Background(), testDispatchMessage(instance, allocation, "run-two"))
+	failed := waitForRunFailure(t, client, "run-two")
+	require.Equal(t, "Barista concurrency limit (1) reached", failed.Error)
+
+	client.handleInstanceMessage(context.Background(), testReleaseMessage(allocation, "cancel"))
+	require.NotNil(t, waitForInstanceMessage(t, client, "instance.released", allocation.ID))
+}
+
+func TestReleaseCleanupFailureKeepsTheSlotOccupiedAndRetrySucceeds(t *testing.T) {
+	directory := t.TempDir()
+	client := instanceTestClient(t, quickHarnessBinary(t, directory), directory, 2, 1, nil)
+	instance, allocation := testInstanceAndAllocation(directory)
+	provisionReady(t, client, instance, allocation)
+
+	attempts := 0
+	client.registerResidentCleanup(allocation.ID, "stuck-resource", func() error {
+		attempts++
+		if attempts == 1 {
+			return errors.New("the provider session could not be closed")
+		}
+		return nil
+	})
+
+	client.handleInstanceMessage(context.Background(), testReleaseMessage(allocation, "drain"))
+	waitForInstanceReason(t, client, "instance.failed", allocation.ID, "release cleanup failed")
+	require.Equal(t, 1, client.activeInstanceCount(), "a failed cleanup must never advertise the slot as free")
+
+	client.handleInstanceMessage(context.Background(), testDispatchMessage(instance, allocation, "run-one"))
+	rejected := waitForMessage(t, client, "run.failed")
+	require.Equal(t, "run-one", rejected.RunID)
+	require.Contains(t, rejected.Error, "closed to new dispatch")
+
+	client.handleInstanceMessage(context.Background(), testProvisionMessage(instance, allocation))
+	waitForInstanceReason(t, client, "instance.failed", allocation.ID, "held by a failed release cleanup")
+
+	client.handleInstanceMessage(context.Background(), testReleaseMessage(allocation, "drain"))
+	waitForInstanceMessageCount(t, client, "instance.released", allocation.ID, 1)
+	require.Zero(t, client.activeInstanceCount())
+	require.Equal(t, 2, attempts)
+}
+
+func TestDuplicateAndUnknownReleasesReturnThePriorOutcome(t *testing.T) {
+	directory := t.TempDir()
+	client := instanceTestClient(t, quickHarnessBinary(t, directory), directory, 2, 2, nil)
+	instance, allocation := testInstanceAndAllocation(directory)
+	provisionReady(t, client, instance, allocation)
+	client.handleInstanceMessage(context.Background(), testReleaseMessage(allocation, "drain"))
+	require.NotNil(t, waitForInstanceMessage(t, client, "instance.released", allocation.ID))
+	client.handleInstanceMessage(context.Background(), testReleaseMessage(allocation, "drain"))
+	waitForInstanceMessageCount(t, client, "instance.released", allocation.ID, 2)
+
+	_, unknownAllocation := testInstanceAndAllocationFor("instance-two", "allocation-unknown", directory)
+	client.handleInstanceMessage(context.Background(), testReleaseMessage(unknownAllocation, "cancel"))
+	unknown := waitForInstanceMessage(t, client, "instance.released", "allocation-unknown")
+	require.NotNil(t, unknown, "releasing an allocation this Barista does not host acknowledges released so the hub converges")
+}
+
+func TestReleaseWithWrongInstanceIDIsRefused(t *testing.T) {
+	directory := t.TempDir()
+	client := instanceTestClient(t, quickHarnessBinary(t, directory), directory, 2, 1, nil)
+	instance, allocation := testInstanceAndAllocation(directory)
+	provisionReady(t, client, instance, allocation)
+
+	message := testReleaseMessage(allocation, "drain")
+	message.InstanceID = "instance-other"
+	client.handleInstanceMessage(context.Background(), message)
+	failed := waitForInstanceMessage(t, client, "instance.failed", "")
+	require.NotNil(t, failed)
+	require.Contains(t, *failed.Error, "names a different instance")
+	require.Equal(t, 1, client.activeInstanceCount(), "the resident is retained")
+}
+
+func TestHeartbeatAndRegistrationReportIndependentResidentCounts(t *testing.T) {
+	directory := t.TempDir()
+	client := instanceTestClient(t, quickHarnessBinary(t, directory), directory, 3, 2, nil)
+	instance, allocation := testInstanceAndAllocation(directory)
+
+	heartbeat := client.heartbeatMessage()
+	require.Equal(t, 0, *heartbeat.ActiveInstances)
+	require.Equal(t, 0, heartbeat.ActiveRuns)
+	require.Nil(t, heartbeat.ActiveInstanceIDs, "only sync.complete carries identity evidence")
+
+	provisionReady(t, client, instance, allocation)
+	heartbeat = client.heartbeatMessage()
+	require.Equal(t, 1, *heartbeat.ActiveInstances)
+
+	instanceIDs := client.activeInstanceIDs()
+	require.Equal(t, []string{"instance-one"}, instanceIDs)
+	require.NotNil(t, client.node.InstanceCapacity)
+	require.Equal(t, 2, *client.node.InstanceCapacity)
+}
+
+func TestSyncCompleteReportsExplicitEmptyInstanceEvidence(t *testing.T) {
+	client := NewClient(config.Config{Concurrency: 1, InstanceCapacity: 2}, protocol.ComputeNode{ID: "node-one"}, nil, emptyCapabilityReport)
+	sync := client.attachTestSync()
+	require.NotNil(t, sync.ActiveInstanceIDs)
+	require.Empty(t, *sync.ActiveInstanceIDs, "a reconnect with zero residents sends an explicit empty array, not an absent field")
+}
+
+// attachTestSync drives one attach cycle against a throwaway hub socket and returns the
+// sync.complete message the hub received.
+func (client *Client) attachTestSync() (sync protocol.Outbound) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		connection, err := websocket.Accept(writer, request, nil)
+		if err != nil {
+			return
+		}
+		defer connection.Close(websocket.StatusNormalClosure, "test complete")
+		ctx := request.Context()
+		for {
+			_, data, readErr := connection.Read(ctx)
+			if readErr != nil {
+				return
+			}
+			var message protocol.Outbound
+			if json.Unmarshal(data, &message) != nil {
+				continue
+			}
+			switch message.Type {
+			case "register":
+				if err := connection.Write(ctx, websocket.MessageText, []byte(`{"type":"ping"}`)); err != nil {
+					return
+				}
+			case "sync.complete":
+				sync = message
+				return
+			}
+		}
+	}))
+	defer server.Close()
+	client.config.ControlEndpoint = strings.Replace(server.URL, "http://", "ws://", 1)
+	client.runOnce(context.Background())
+	return sync
+}
+
+func TestReconnectRetainsResidentsAcrossConnections(t *testing.T) {
+	directory := t.TempDir()
+	client := instanceTestClient(t, quickHarnessBinary(t, directory), directory, 2, 2, nil)
+	instance, allocation := testInstanceAndAllocation(directory)
+	provisionReady(t, client, instance, allocation)
+
+	var registered []*protocol.ComputeNode
+	var synced []*protocol.Outbound
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		connection, err := websocket.Accept(writer, request, nil)
+		if err != nil {
+			return
+		}
+		defer connection.Close(websocket.StatusNormalClosure, "test complete")
+		ctx := request.Context()
+		for {
+			_, data, readErr := connection.Read(ctx)
+			if readErr != nil {
+				return
+			}
+			var message protocol.Outbound
+			if json.Unmarshal(data, &message) != nil {
+				continue
+			}
+			switch message.Type {
+			case "register":
+				require.NoError(t, connection.Write(ctx, websocket.MessageText, []byte(`{"type":"ping"}`)))
+				if message.Node != nil {
+					nodeCopy := *message.Node
+					registered = append(registered, &nodeCopy)
+				}
+			case "sync.complete":
+				syncCopy := message
+				synced = append(synced, &syncCopy)
+				return
+			}
+		}
+	}))
+	defer server.Close()
+	client.config.ControlEndpoint = strings.Replace(server.URL, "http://", "ws://", 1)
+
+	client.runOnce(context.Background())
+	client.runOnce(context.Background())
+
+	require.Len(t, registered, 2, "each connection registers")
+	for _, node := range registered {
+		require.NotNil(t, node.InstanceCapacity)
+		require.Equal(t, 2, *node.InstanceCapacity)
+		require.NotNil(t, node.ActiveInstances)
+		require.Equal(t, 1, *node.ActiveInstances)
+	}
+	require.Len(t, synced, 2)
+	for _, sync := range synced {
+		require.NotNil(t, sync.ActiveInstanceIDs)
+		require.Equal(t, []string{"instance-one"}, *sync.ActiveInstanceIDs, "resident supervision survives reconnection for the process lifetime")
+	}
+}
+
+func TestInstanceMessagesFromTheProtocolFixturesAreAccepted(t *testing.T) {
+	directory := t.TempDir()
+	client := instanceTestClient(t, quickHarnessBinary(t, directory), directory, 2, 2, nil)
+	// The fixture allocation names node-one with workspace /workspace, which no test root
+	// contains; the dispatch must still be decoded and answered with run.failed rather than
+	// crashing or being silently reinterpreted as a legacy run.
+	data, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "packages", "protocol", "test", "fixtures", "control-v5", "dispatch.json"))
+	require.NoError(t, err)
+	message, err := protocol.DecodeInstanceHubMessage(data, protocol.Version)
+	require.NoError(t, err)
+	require.Equal(t, "dispatch", message.Type)
+	client.handleInstanceMessage(context.Background(), message)
+	provisionData, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "packages", "protocol", "test", "fixtures", "control-v5", "provision.json"))
+	require.NoError(t, err)
+	provision, err := protocol.DecodeInstanceHubMessage(provisionData, protocol.Version)
+	require.NoError(t, err)
+	client.handleInstanceMessage(context.Background(), provision)
+	failed := waitForInstanceMessage(t, client, "instance.failed", "")
+	require.NotNil(t, failed)
+	require.Zero(t, client.activeInstanceCount())
+}
+
+func TestEveryInstanceHubMessageTypeAndReleaseModeIsHandled(t *testing.T) {
+	directory := t.TempDir()
+	for _, messageType := range protocol.InstanceHubMessageTypes {
+		t.Run(messageType, func(t *testing.T) {
+			client := instanceTestClient(t, quickHarnessBinary(t, directory), directory, 2, 1, nil)
+			instance, allocation := testInstanceAndAllocation(directory)
+			var message protocol.InstanceHubMessage
+			switch messageType {
+			case "instance.provision":
+				message = testProvisionMessage(instance, allocation)
+			case "instance.release":
+				message = testReleaseMessage(allocation, "drain")
+			case "dispatch":
+				message = testDispatchMessage(instance, allocation, "run-one")
+			}
+			require.NotPanics(t, func() { client.handleInstanceMessage(context.Background(), message) })
+		})
+	}
+	for _, mode := range protocol.InstanceReleaseModes {
+		t.Run("release-"+mode, func(t *testing.T) {
+			client := instanceTestClient(t, quickHarnessBinary(t, directory), directory, 2, 1, nil)
+			instance, allocation := testInstanceAndAllocation(directory)
+			provisionReady(t, client, instance, allocation)
+			client.handleInstanceMessage(context.Background(), testReleaseMessage(allocation, mode))
+			require.NotNil(t, waitForInstanceMessage(t, client, "instance.released", ""))
+		})
+	}
+}
+
+func TestLegacyDispatchStillWorksAlongsideResidentSupervision(t *testing.T) {
+	directory := t.TempDir()
+	client := instanceTestClient(t, quickHarnessBinary(t, directory), directory, 2, 2, nil)
+	instance, allocation := testInstanceAndAllocation(directory)
+	provisionReady(t, client, instance, allocation)
+
+	run := protocol.Run{ID: "legacy-run", HarnessID: "codex-cli", Model: "default", Workspace: directory, Prompt: "legacy"}
+	client.handle(context.Background(), protocol.Inbound{Type: "dispatch", Run: run, Agent: protocol.Agent{ID: "agent-one"}})
+	require.NotNil(t, waitForMessage(t, client, "run.completed"))
+	require.Equal(t, 1, client.activeInstanceCount(), "a legacy run neither consumes nor disturbs resident capacity")
+}
+
+func TestInstanceFailedReasonsStayWithinTheDiagnosticBound(t *testing.T) {
+	require.LessOrEqual(t, len(boundedInstanceReason(strings.Repeat("x", 10*1024))), 2*1024)
+	require.Equal(t, "short", boundedInstanceReason("short"))
+}
+
+func TestReleaseAfterReconnectCancelsRunsAndReleasesTheResident(t *testing.T) {
+	directory := t.TempDir()
+	client := instanceTestClient(t, slowHarnessBinary(t, directory), directory, 2, 1, nil)
+	instance, allocation := testInstanceAndAllocation(directory)
+	provisionReady(t, client, instance, allocation)
+	client.handleInstanceMessage(context.Background(), testDispatchMessage(instance, allocation, "run-one"))
+	waitForMessage(t, client, "run.started")
+
+	// The connection drops and Barista reconnects; the run and the resident both survive.
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		connection, err := websocket.Accept(writer, request, nil)
+		if err != nil {
+			return
+		}
+		defer connection.Close(websocket.StatusNormalClosure, "test complete")
+		ctx := request.Context()
+		for {
+			_, data, readErr := connection.Read(ctx)
+			if readErr != nil {
+				return
+			}
+			var message protocol.Outbound
+			if json.Unmarshal(data, &message) != nil {
+				continue
+			}
+			if message.Type == "register" {
+				require.NoError(t, connection.Write(ctx, websocket.MessageText, []byte(`{"type":"ping"}`)))
+				continue
+			}
+			if message.Type == "sync.complete" {
+				sync := message
+				require.NotNil(t, sync.ActiveRunIDs)
+				require.Equal(t, []string{"run-one"}, *sync.ActiveRunIDs)
+				require.NotNil(t, sync.ActiveInstanceIDs)
+				require.Equal(t, []string{"instance-one"}, *sync.ActiveInstanceIDs)
+				return
+			}
+		}
+	}))
+	defer server.Close()
+	client.config.ControlEndpoint = strings.Replace(server.URL, "http://", "ws://", 1)
+	client.runOnce(context.Background())
+	require.Equal(t, 1, client.activeRuns(), "the run survives the reconnect")
+	require.Equal(t, 1, client.activeInstanceCount(), "the resident survives the reconnect")
+
+	client.handleInstanceMessage(context.Background(), testReleaseMessage(allocation, "cancel"))
+	require.NotNil(t, waitForMessage(t, client, "run.cancelled"))
+	require.NotNil(t, waitForInstanceMessage(t, client, "instance.released", allocation.ID))
+	require.Zero(t, client.activeRuns())
+	require.Zero(t, client.activeInstanceCount())
+}
+
+func TestConcurrentProvisionDispatchAndReleaseStayConsistent(t *testing.T) {
+	directory := t.TempDir()
+	client := instanceTestClient(t, quickHarnessBinary(t, directory), directory, 4, 2, nil)
+	instance, allocation := testInstanceAndAllocation(directory)
+
+	const rounds = 20
+	for round := 0; round < rounds; round++ {
+		client.handleInstanceMessage(context.Background(), testProvisionMessage(instance, allocation))
+		go client.handleInstanceMessage(context.Background(), testDispatchMessage(instance, allocation, fmt.Sprintf("run-%d", round)))
+		client.handleInstanceMessage(context.Background(), testReleaseMessage(allocation, "cancel"))
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for client.activeRuns() > 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	require.Zero(t, client.activeRuns())
+	waitForInstanceMessageCount(t, client, "instance.released", allocation.ID, rounds)
+	require.Zero(t, client.activeInstanceCount(), "every round's release completed and freed the slot")
+	// The resident table never leaks a run membership entry after everything settled.
+	client.residents.mu.Lock()
+	require.Empty(t, client.residents.residentsTable)
+	client.residents.mu.Unlock()
+}

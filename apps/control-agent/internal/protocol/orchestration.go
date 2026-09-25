@@ -501,8 +501,8 @@ func truncateDiagnostic(value string) string {
 	return value[:cut]
 }
 
-// Instance contracts mirror packages/protocol/src/index.ts. Version stays 4 until resident
-// supervision is implemented: LatestVersion describes the contract, not deployed behavior.
+// Instance contracts mirror packages/protocol/src/index.ts. Barista registers as version 5, so
+// resident-instance supervision and these contracts are deployed behavior, not contract-only.
 var InstanceStatuses = []string{"requested", "provisioning", "ready", "busy", "idle", "draining", "released", "failed"}
 var AllocationStatuses = []string{"reserved", "provisioning", "active", "lost", "released", "failed"}
 var InstanceReleaseModes = []string{"drain", "cancel"}

@@ -95,6 +95,11 @@ func run(args []string) int {
 	}
 	log.Printf("discovered harnesses: %s", strings.Join(available, ", "))
 	log.Printf("allowed workspace roots: %s", strings.Join(cfg.WorkspaceRoots, ", "))
+	if cfg.InstanceCapacity == 0 {
+		log.Printf("resident instance hosting is disabled (instance capacity 0)")
+	} else {
+		log.Printf("resident instance capacity: %d (run concurrency %d)", cfg.InstanceCapacity, cfg.Concurrency)
+	}
 
 	node := protocol.ComputeNode{
 		ID:             cfg.NodeID,

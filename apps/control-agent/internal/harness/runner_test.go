@@ -129,3 +129,18 @@ func TestHarnessCommandsInjectRunScopedMCPWithoutPuttingTokenInArguments(t *test
 		require.NotContains(t, joined, configuration.Token)
 	}
 }
+
+func TestAdmitModelChecksInstallationAndAdvertisementWithoutExecuting(t *testing.T) {
+	runner := NewRunner([]protocol.HarnessProfile{
+		{ID: "codex-cli", Available: true, Models: []string{"sonnet", "opus"}},
+		{ID: "claude-cli", Available: false, Models: []string{"sonnet"}},
+		{ID: "shell", Available: true},
+	})
+
+	require.NoError(t, runner.AdmitModel("codex-cli", "sonnet"))
+	require.NoError(t, runner.AdmitModel("shell", "any"), "an unadvertised harness has no model list to enforce")
+
+	require.ErrorContains(t, runner.AdmitModel("codex-cli", "unreleased-model"), "model unreleased-model is not advertised by harness codex-cli")
+	require.ErrorContains(t, runner.AdmitModel("claude-cli", "sonnet"), "harness claude-cli is not installed")
+	require.ErrorContains(t, runner.AdmitModel("unknown-cli", "sonnet"), "harness unknown-cli is not installed")
+}
