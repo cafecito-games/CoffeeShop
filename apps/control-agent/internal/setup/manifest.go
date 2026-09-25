@@ -31,8 +31,9 @@ const LegacyAdapterManifestVersion = "1"
 var embeddedManifest []byte
 
 // ComponentKind is the closed vocabulary of things Barista setup can own. Every value must appear
-// in ComponentKinds and be handled by componentKindDirectory; a value outside the vocabulary is
-// rejected at parse time and never defaulted.
+// in ComponentKinds, have an install location in componentKindDirectories, have an entry in
+// componentKindBehaviors, and be handled by the activation probe switch in cmd/barista; a value
+// outside the vocabulary is rejected at parse time and never defaulted.
 type ComponentKind string
 
 const (
@@ -41,15 +42,51 @@ const (
 	// ComponentKindACPAdapter is an Agent Client Protocol adapter Barista launches alongside a
 	// harness.
 	ComponentKindACPAdapter ComponentKind = "acp-adapter"
+	// ComponentKindCapabilityPack is a versioned Coffee Shop capability pack: one deterministic
+	// archive of workflow skills and their supporting resources. Unlike the other two kinds it is not
+	// an executable and Barista never runs it — its activation probe validates the installed bytes
+	// through internal/capabilitypack instead of asking the artifact to report anything about itself.
+	ComponentKindCapabilityPack ComponentKind = "capability-pack"
 )
 
 // ComponentKinds is the single enumeration of every supported ComponentKind. Consumers that must
 // handle every kind (containment layout, doctor, tests) iterate this rather than repeating a list.
-var ComponentKinds = []ComponentKind{ComponentKindHarness, ComponentKindACPAdapter}
+var ComponentKinds = []ComponentKind{ComponentKindHarness, ComponentKindACPAdapter, ComponentKindCapabilityPack}
 
 // Valid reports whether kind is in the closed vocabulary.
 func (kind ComponentKind) Valid() bool {
 	return slices.Contains(ComponentKinds, kind)
+}
+
+// componentKindBehavior is the per-kind schema and reporting behavior every kind-specific rule reads,
+// so the rules live in one table instead of being spread across comparisons against individual kinds.
+// A kind absent from componentKindBehaviors has no rules at all, which Manifest.Validate treats as a
+// rejection rather than as "no constraints".
+type componentKindBehavior struct {
+	// harnessIDIsOwnIdentity requires harnessId == id: the component *is* that harness, and one that
+	// claimed another harness's identity would let one entry silently stand in for another.
+	harnessIDIsOwnIdentity bool
+	// consumesLaunchTemplate reports whether anything actually invokes the entry's launch template. A
+	// kind that consumes none must declare none, because an ignored template is a promise Barista does
+	// not keep.
+	consumesLaunchTemplate bool
+	// hasHarnessOfItsOwn reports whether "is this component's harness installed?" is a meaningful
+	// question for the kind. A capability pack is harness-agnostic: it has no CLI of its own, so an
+	// absent harness is not a gap and must never be reported to an operator as one.
+	hasHarnessOfItsOwn bool
+}
+
+var componentKindBehaviors = map[ComponentKind]componentKindBehavior{
+	ComponentKindHarness:        {harnessIDIsOwnIdentity: true, consumesLaunchTemplate: false, hasHarnessOfItsOwn: true},
+	ComponentKindACPAdapter:     {harnessIDIsOwnIdentity: false, consumesLaunchTemplate: true, hasHarnessOfItsOwn: true},
+	ComponentKindCapabilityPack: {harnessIDIsOwnIdentity: false, consumesLaunchTemplate: false, hasHarnessOfItsOwn: false},
+}
+
+// HasHarnessOfItsOwn reports whether a component of this kind has a provider harness whose presence
+// on the node is meaningful. It is exported because doctor's presentation layer must be able to tell
+// "this harness is missing" from "this kind has no harness", and a false value is the second.
+func (kind ComponentKind) HasHarnessOfItsOwn() bool {
+	return componentKindBehaviors[kind].hasHarnessOfItsOwn
 }
 
 // ComponentRef is the identity triple every managed component is addressed by across the manifest,
@@ -335,16 +372,23 @@ func (manifest Manifest) Validate() error {
 		if entry.HarnessID == "" || !protocol.LabelOrAcceleratorPattern.MatchString(entry.HarnessID) {
 			return fmt.Errorf("component at index %d: harnessId is not kebab-case", index)
 		}
-		if entry.Kind == ComponentKindHarness && entry.HarnessID != entry.ID {
-			return fmt.Errorf("component at index %d: a harness component's harnessId must equal its id", index)
+		behavior, described := componentKindBehaviors[entry.Kind]
+		if !described {
+			// Unreachable while ComponentKinds and componentKindBehaviors agree; a kind added to the
+			// vocabulary with no rules is refused rather than validated against no rules at all.
+			return fmt.Errorf("component at index %d: kind has no schema rules", index)
+		}
+		if behavior.harnessIDIsOwnIdentity && entry.HarnessID != entry.ID {
+			return fmt.Errorf("component at index %d: a %s component's harnessId must equal its id", index, entry.Kind)
 		}
 		// Native harness execution builds its own arguments and environment (internal/harness/runner.go)
-		// and reads no manifest launch template, so a harness entry that declared one would be making a
-		// promise Barista does not keep. Nothing consumes it, so it is refused rather than silently
-		// ignored — an operator pointing --manifest at a file with harness arguments must be told they
-		// have no effect, not left believing a sandbox or permission flag was applied.
-		if entry.Kind == ComponentKindHarness && (len(entry.Launch.Arguments) > 0 || len(entry.Launch.Environment) > 0) {
-			return fmt.Errorf("component at index %d: a harness component's launch template must be empty", index)
+		// and reads no manifest launch template, and nothing launches a capability pack at all, so an
+		// entry of either kind that declared one would be making a promise Barista does not keep.
+		// Nothing consumes it, so it is refused rather than silently ignored — an operator pointing
+		// --manifest at a file with harness arguments must be told they have no effect, not left
+		// believing a sandbox or permission flag was applied.
+		if !behavior.consumesLaunchTemplate && (len(entry.Launch.Arguments) > 0 || len(entry.Launch.Environment) > 0) {
+			return fmt.Errorf("component at index %d: a %s component's launch template must be empty", index, entry.Kind)
 		}
 		if entry.Provider == "" || !protocol.LabelOrAcceleratorPattern.MatchString(entry.Provider) {
 			return fmt.Errorf("component at index %d: provider is not kebab-case", index)

@@ -48,6 +48,9 @@ func TestComponentKindVocabularyIsClosed(t *testing.T) {
 	if len(ComponentKinds) != len(componentKindDirectories) {
 		t.Fatalf("ComponentKinds has %d values but componentKindDirectories has %d", len(ComponentKinds), len(componentKindDirectories))
 	}
+	if len(ComponentKinds) != len(componentKindBehaviors) {
+		t.Fatalf("ComponentKinds has %d values but componentKindBehaviors has %d", len(ComponentKinds), len(componentKindBehaviors))
+	}
 	seenDirectories := map[string]ComponentKind{}
 	for _, kind := range ComponentKinds {
 		if !kind.Valid() {
@@ -56,6 +59,9 @@ func TestComponentKindVocabularyIsClosed(t *testing.T) {
 		directory, known := componentKindDirectories[kind]
 		if !known || directory == "" {
 			t.Fatalf("component kind %q has no install directory", kind)
+		}
+		if _, described := componentKindBehaviors[kind]; !described {
+			t.Fatalf("component kind %q has no schema rules in componentKindBehaviors", kind)
 		}
 		if other, duplicate := seenDirectories[directory]; duplicate {
 			t.Fatalf("component kinds %q and %q share the install directory %q", kind, other, directory)
@@ -84,6 +90,22 @@ func TestComponentKindVocabularyIsClosed(t *testing.T) {
 	unknown := ComponentManifestEntry{Kind: ComponentKind("shell-installer")}
 	if unknown.Kind.Valid() {
 		t.Fatal("ComponentKind.Valid accepted a value outside the vocabulary")
+	}
+	if _, described := componentKindBehaviors[unknown.Kind]; described {
+		t.Fatal("componentKindBehaviors describes a kind outside the vocabulary")
+	}
+	// A kind outside the vocabulary has no rules, and Manifest.Validate must refuse it rather than
+	// validate it against no rules at all.
+	unknownManifest := Manifest{ManifestVersion: ManifestVersion, Components: []ComponentManifestEntry{{
+		ID: "vendor-installer", Kind: unknown.Kind, HarnessID: "vendor-installer", Provider: "vendor",
+		Label: "Vendor installer", Version: "1.0.0",
+		Platforms: map[string]PlatformDistribution{"linux-amd64": {Kind: DistributionKindManual, ExecutablePath: "bin/install"}},
+	}}}
+	if err := unknownManifest.Validate(); err == nil || !strings.Contains(err.Error(), "kind is unknown") {
+		t.Fatalf("Manifest.Validate() for an unknown kind error = %v, want an unknown-kind refusal", err)
+	}
+	if unknown.Kind.HasHarnessOfItsOwn() {
+		t.Fatal("an unknown component kind claimed a harness of its own")
 	}
 	if _, err := ComponentTargetPath("/data", unknown, PlatformDistribution{ExecutablePath: "bin/x"}); err == nil {
 		t.Fatal("ComponentTargetPath() accepted an unknown component kind, want rejection")
@@ -183,10 +205,19 @@ func TestParseManifestAcceptsTheEmbeddedManifestBytes(t *testing.T) {
 			t.Fatalf("embedded manifest component %s declares unknown kind %q", entry.ID, entry.Kind)
 		}
 	}
-	// Every kind in the closed vocabulary is accounted for by the two projections, so a kind added
-	// to the vocabulary without being projected here cannot slip through unexercised.
-	if len(manifest.ComponentsOfKind(ComponentKindACPAdapter))+len(manifest.ComponentsOfKind(ComponentKindHarness)) != len(manifest.Components) {
-		t.Fatal("embedded manifest declares a component whose kind neither projection returns")
+	// Every kind in the closed vocabulary is accounted for by a projection, and the shipped manifest
+	// declares at least one entry of every kind, so a kind added to the vocabulary without a real
+	// shipped entry cannot slip through unexercised.
+	projected := 0
+	for _, kind := range ComponentKinds {
+		ofKind := manifest.ComponentsOfKind(kind)
+		if len(ofKind) == 0 {
+			t.Fatalf("embedded manifest declares no component of kind %q", kind)
+		}
+		projected += len(ofKind)
+	}
+	if projected != len(manifest.Components) {
+		t.Fatal("embedded manifest declares a component whose kind no projection returns")
 	}
 }
 
@@ -305,40 +336,57 @@ func componentEntryJSON(id string, kind ComponentKind, harnessID string, provide
 		`","platforms":{"linux-amd64":{"kind":"manual","executablePath":"` + executablePath + `"}},"launch":{}}`
 }
 
-// TestParseManifestAcceptsBothComponentKinds proves a manifest may declare a harness and an ACP
-// adapter together, that each lands in its own install location, and that both flow through the
-// plan with their own identity.
+// TestParseManifestAcceptsBothComponentKinds proves a manifest may declare every kind in the closed
+// vocabulary together — a harness, an ACP adapter, and a capability pack — that each lands in its own
+// install location, and that all of them flow through the plan with their own identity. It also
+// asserts an entry whose kind is outside the vocabulary is still refused.
 func TestParseManifestAcceptsBothComponentKinds(t *testing.T) {
 	data := componentManifestJSON(
 		componentEntryJSON("claude-cli", ComponentKindHarness, "claude-cli", "anthropic", "2.1.0", "bin/claude"),
 		componentEntryJSON("claude-acp", ComponentKindACPAdapter, "claude-cli", "anthropic", "0.79.0", "bin/claude-agent-acp"),
+		componentEntryJSON("coffeeshop-capability-pack", ComponentKindCapabilityPack, "coffee-shop", "cafecito-games", "1.0.0", "coffeeshop-capability-pack.tar.gz"),
 	)
 	manifest, err := ParseManifest(data)
 	if err != nil {
 		t.Fatalf("ParseManifest() error = %v", err)
 	}
-	if len(manifest.ComponentsOfKind(ComponentKindHarness)) != 1 || len(manifest.ComponentsOfKind(ComponentKindACPAdapter)) != 1 {
-		t.Fatalf("ParseManifest() lost a kind: %+v", manifest.Components)
+	for _, kind := range ComponentKinds {
+		if len(manifest.ComponentsOfKind(kind)) != 1 {
+			t.Fatalf("ParseManifest() lost kind %q: %+v", kind, manifest.Components)
+		}
 	}
 	dataRoot := t.TempDir()
 	plan, skipped, err := BuildPlan(data, manifest, "linux-amd64", dataRoot, OwnershipLedger{})
 	if err != nil {
 		t.Fatalf("BuildPlan() error = %v", err)
 	}
-	if len(skipped) != 0 || len(plan.Operations) != 2 {
-		t.Fatalf("BuildPlan() produced %d operations and skipped %v, want 2 operations", len(plan.Operations), skipped)
+	if len(skipped) != 0 || len(plan.Operations) != len(ComponentKinds) {
+		t.Fatalf("BuildPlan() produced %d operations and skipped %v, want %d operations", len(plan.Operations), skipped, len(ComponentKinds))
 	}
 	wantTargets := map[ComponentKind]string{
-		ComponentKindHarness:    filepath.Join(dataRoot, "harnesses", "claude-cli", "claude-cli", "2.1.0", "bin", "claude"),
-		ComponentKindACPAdapter: filepath.Join(dataRoot, "adapters", "claude-cli", "claude-acp", "0.79.0", "bin", "claude-agent-acp"),
+		ComponentKindHarness:        filepath.Join(dataRoot, "harnesses", "claude-cli", "claude-cli", "2.1.0", "bin", "claude"),
+		ComponentKindACPAdapter:     filepath.Join(dataRoot, "adapters", "claude-cli", "claude-acp", "0.79.0", "bin", "claude-agent-acp"),
+		ComponentKindCapabilityPack: filepath.Join(dataRoot, "capability-packs", "coffee-shop", "coffeeshop-capability-pack", "1.0.0", "coffeeshop-capability-pack.tar.gz"),
+	}
+	wantHarnessIDs := map[ComponentKind]string{
+		ComponentKindHarness:        "claude-cli",
+		ComponentKindACPAdapter:     "claude-cli",
+		ComponentKindCapabilityPack: "coffee-shop",
 	}
 	for _, operation := range plan.Operations {
 		if operation.TargetPath != wantTargets[operation.Component.Kind] {
 			t.Fatalf("operation for %s targets %s, want %s", operation.Component, operation.TargetPath, wantTargets[operation.Component.Kind])
 		}
-		if operation.HarnessID != "claude-cli" {
+		if operation.HarnessID != wantHarnessIDs[operation.Component.Kind] {
 			t.Fatalf("operation for %s lost its harness association: %q", operation.Component, operation.HarnessID)
 		}
+	}
+	// A kind outside the vocabulary is still refused rather than defaulted to a known one.
+	outside := componentManifestJSON(
+		componentEntryJSON("vendor-installer", ComponentKind("shell-installer"), "vendor-cli", "vendor", "1.0.0", "bin/install"),
+	)
+	if _, err := ParseManifest(outside); err == nil || !strings.Contains(err.Error(), "kind is unknown") {
+		t.Fatalf("ParseManifest() for a kind outside the vocabulary error = %v, want an unknown-kind refusal", err)
 	}
 }
 

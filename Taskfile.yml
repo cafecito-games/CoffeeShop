@@ -49,6 +49,7 @@ tasks:
     cmds:
       - pnpm -r test
       - task: control-agent:test
+      - task: capability-pack:test
       - task: system:test
 
   system:test:
@@ -57,6 +58,26 @@ tasks:
     dir: apps/control-agent
     cmds:
       - go test -tags system -count=1 -timeout 10m ./internal/systemtest/...
+
+  capability-pack:build:
+    desc: Build the deterministic Coffee Shop capability pack archive
+    dir: apps/control-agent
+    cmds:
+      - go run ./cmd/capabilitypack build --pack ../../capability-pack --out ../../dist/capability-pack/coffeeshop-capability-pack.tar.gz
+
+  capability-pack:seal:
+    desc: Regenerate the capability pack's derived files and per-file digests in place
+    dir: apps/control-agent
+    cmds:
+      - go run ./cmd/capabilitypack seal --pack ../../capability-pack
+
+  capability-pack:test:
+    desc: Validate the capability pack and run its packaging, screening, and evaluation tests
+    dir: apps/control-agent
+    cmds:
+      - go run ./cmd/capabilitypack seal --pack ../../capability-pack --check
+      - go run ./cmd/capabilitypack validate --pack ../../capability-pack
+      - go test -count=1 ./internal/capabilitypack/...
 
   typecheck:
     desc: Type-check every TypeScript workspace

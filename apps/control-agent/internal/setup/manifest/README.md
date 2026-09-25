@@ -1,4 +1,4 @@
-`components.json` is the managed component manifest compiled into the Barista binary (schema generation `2`). Each entry declares a `kind` from the closed vocabulary `harness` or `acp-adapter`. Four entries ship: the ACP adapters `claude-acp` and `codex-acp`, and the provider harnesses `claude-cli` and `codex-cli`. An `acp-adapter` installs under `<data-root>/adapters/<harnessId>/<id>/<version>/`, a `harness` under `<data-root>/harnesses/<harnessId>/<id>/<version>/`.
+`components.json` is the managed component manifest compiled into the Barista binary (schema generation `2`). Each entry declares a `kind` from the closed vocabulary `harness`, `acp-adapter`, or `capability-pack`. Five entries ship: the ACP adapters `claude-acp` and `codex-acp`, the provider harnesses `claude-cli` and `codex-cli`, and the Coffee Shop capability pack `coffeeshop-capability-pack`. An `acp-adapter` installs under `<data-root>/adapters/<harnessId>/<id>/<version>/`, a `harness` under `<data-root>/harnesses/<harnessId>/<id>/<version>/`, and a `capability-pack` under `<data-root>/capability-packs/<harnessId>/<id>/<version>/`.
 
 The previous adapter-only schema (generation `1`: an `adapters` array with no `kind`) is still accepted by `barista setup --manifest <path>` for the transition. Every entry migrates to `acp-adapter` and resolves to exactly the same install path, so an administrator who kept their old manifest file installs the same thing. A document that mixes the two generations, or declares a generation nobody supports, is rejected whole rather than resolved in either generation's favour. `../testdata/manifest-legacy-generation-1.json` is the exact generation-1 bytes this manifest replaced, kept as the migration fixture.
 
@@ -49,7 +49,7 @@ Authentication is a **separate operator action after installation**, never part 
   barista setup apply --plan plan.json \
     --manual-artifact claude-cli=$PWD/package/claude \
     --manual-checksum claude-cli=<sha256>
-  barista setup activate --component harness/claude-cli --version 2.1.231
+  barista setup activate --kind harness --id claude-cli --version 2.1.231
   ```
 
   Verify before asserting the digest: `./package/claude --version` must print `2.1.231`, or activation will refuse the candidate.
@@ -100,7 +100,7 @@ Authentication is a **separate operator action after installation**, never part 
   barista setup apply --plan plan.json \
     --allowed-host github.com \
     --allowed-host release-assets.githubusercontent.com
-  barista setup activate --component harness/codex-cli --version 0.147.0
+  barista setup activate --kind harness --id codex-cli --version 0.147.0
   ```
 
   No `--manual-artifact` or `--manual-checksum` is needed for this entry. Barista downloads the archive once, hashes it while writing, refuses it on any digest or size mismatch, and extracts only the single declared entry. Re-verify the host list against the redirect if GitHub changes it; a changed redirect target fails closed rather than downloading from somewhere unexpected.
@@ -114,6 +114,39 @@ Authentication is a **separate operator action after installation**, never part 
 - `codex-acp` pins `@agentclientprotocol/codex-acp` 1.12.0. Its release publishes no standalone artifact; build the single-file executable with `npm run bundle:all` from the tagged source (the `dist/bin` output for the node's platform) and install it with `barista setup plan` and `barista setup apply --plan <plan> --manual-artifact codex-acp=<file> --manual-checksum codex-acp=<digest>`. A global npm install is a script that loads unpinned `node_modules`, so it cannot be verified by one digest and is not supported. Never point Barista at `npx`.
 - `claude-acp` pins `@agentclientprotocol/claude-agent-acp` 0.79.0, the official ACP agent built on the Claude Agent SDK (`bin: claude-agent-acp`). It also publishes no standalone signed artifact; package the CLI's `bin/claude-agent-acp` entry point (with its bundled `node_modules`, or a single-file bundle built the same way as codex-acp) and install it the same way, with `--manual-artifact claude-acp=<file> --manual-checksum claude-acp=<digest>`. The adapter authenticates through Claude's own locally owned CLI credential storage (or an operator-inherited provider environment) exactly like the native `claude` binary; Barista never installs, exports, or forwards a credential for it, and never points it at an API key to approximate a subscription.
 
+## Capability pack entries
+
+A `capability-pack` entry is versioned Coffee Shop workflow content — focused `SKILL.md` workflows and their supporting references — packaged as **one deterministic `.tar.gz`**. It is a managed component for the same reason the other kinds are: `barista setup activate` refuses any version the manifest does not declare, and everything downstream consumes the pack through the activation ledger rather than by reading a directory.
+
+It is deliberately *not* one of the other two kinds. `Manifest.Validate` requires a `harness` entry's `harnessId` to equal its `id`, and the activation probe routes a `harness` to its `--version` contract and an `acp-adapter` to the ACP startup handshake. A pack archive answers neither, so mislabelling it would either fail activation or, worse, pin a version nothing confirmed.
+
+### `coffeeshop-capability-pack` — the canonical Coffee Shop workflows
+
+* Pin: **1.0.0**, provider `cafecito-games`, harness identity `coffee-shop`.
+* `harnessId` is `coffee-shop` because the field is mandatory kebab-case for every entry and the pack is harness-agnostic: it belongs to no provider CLI. It must not collide with `claude-cli` or `codex-cli`, and the one-provider-per-`harnessId` rule keeps `coffee-shop` owned by `cafecito-games` alone.
+* `platforms` carries the identical distribution on all four supported keys. The pack is platform-independent, but `platforms` must be non-empty with `GOOS-GOARCH` keys and there is no fallback platform, so every supported platform is listed explicitly.
+* `launch` is `{}` and must stay so: nothing launches a pack. `Manifest.Validate` refuses a non-empty launch template for this kind for the same reason it refuses one on a harness.
+* Decision: **`manual` on all four platforms.** Step 1 cannot apply: there is no versioned vendor URL for an artifact this repository builds, so no reviewable SHA-256 of vendor bytes exists to pin. Step 2 applies exactly — an administrator deterministically produces a single file from a documented, tagged source — and `task capability-pack:build` is that documented procedure. A `manual` distribution carries no `url` or `sha256`, needs no `--allowed-host`, and changes nothing about the archive download path.
+* The artifact is byte-reproducible, which is what makes a `manual` digest reviewable rather than asserted: the packer sorts entry paths, writes no directory entries, pins mode `0644`, zeroes every timestamp and owner field, and writes USTAR headers with no PAX records. Building the same source tree twice on any machine produces the same bytes and therefore the same SHA-256. `apps/control-agent/internal/capabilitypack` asserts this by building twice and comparing digests.
+* What the operator packages, and how a node installs and activates it:
+
+  ```bash
+  # From a checkout of the tagged Coffee Shop source. This writes the archive and prints its digest.
+  task capability-pack:build
+  sha256sum dist/capability-pack/coffeeshop-capability-pack.tar.gz
+
+  barista setup plan --data-root <path> --out plan.json
+  barista setup apply --plan plan.json \
+    --manual-artifact coffeeshop-capability-pack=$PWD/dist/capability-pack/coffeeshop-capability-pack.tar.gz \
+    --manual-checksum coffeeshop-capability-pack=<sha256>
+  barista setup activate --kind capability-pack --id coffeeshop-capability-pack --version 1.0.0
+  ```
+
+* Activation runs no process. The probe re-validates the installed bytes through the same `internal/capabilitypack` entry point that packaged them — pack manifest grammar, per-file digests, path containment, skill metadata, declared tool vocabulary against `protocol.HubToolNames`, secret and endpoint screening — and additionally refuses an archive whose own declared pack id or version is not the one this entry pins. A pack that stops validating never becomes active, and a failed activation leaves both ledgers and every installed file exactly as they were.
+* `barista doctor` reports a capability pack with `harness=not-applicable`, not `harness=missing`. The pack has no provider CLI of its own, so an absent harness is not a gap to chase; `harnessApplicable` is `false` in the JSON report and presentation must read it before rendering `harnessInstalled`.
+* Authentication is not a concept for this kind: a pack carries no credential, no endpoint, and no absolute machine path, and validation rejects one that does. Skills teach workflows; the run-scoped Coffee Shop MCP server remains the only live action and authorization layer.
+* The pack tree itself lives at `capability-pack/` in this repository and is the single source of truth for workflow content. Bump this entry's `version` together with `capability-pack/pack.json` — the probe refuses an archive whose declared version differs — then re-run plan/apply/activate. The previous version's files stay installed as the rollback target until an explicit `barista setup prune`.
+
 ## Harness launch templates are empty and stay empty
 
-A `harness` entry's `launch` must be `{}`, and `Manifest.Validate` rejects one that is not. Native harness execution builds its own arguments and environment in `../../harness/runner.go` and reads no manifest launch template, so accepting operator-supplied arguments there would be a promise Barista does not keep — including, dangerously, a sandbox or permission flag an administrator believed had been applied. An `acp-adapter` entry's `launch` is consumed and stays allowed.
+A `harness` entry's `launch` must be `{}`, and so must a `capability-pack` entry's; `Manifest.Validate` rejects one that is not. Native harness execution builds its own arguments and environment in `../../harness/runner.go` and reads no manifest launch template, so accepting operator-supplied arguments there would be a promise Barista does not keep — including, dangerously, a sandbox or permission flag an administrator believed had been applied. An `acp-adapter` entry's `launch` is consumed and stays allowed.
