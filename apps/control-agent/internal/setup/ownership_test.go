@@ -10,22 +10,22 @@ import (
 )
 
 func fixtureLedger() OwnershipLedger {
-	return OwnershipLedger{Records: []OwnershipRecord{
+	return OwnershipLedger{LedgerVersion: OwnershipLedgerVersion, Records: []OwnershipRecord{
 		{
-			Path:           "/data/adapters/claude-cli/claude-acp/0.1.0/bin/adapter",
-			AdapterID:      "claude-acp",
-			AdapterVersion: "0.1.0",
-			ContentSHA256:  strings.Repeat("a", 64),
-			SizeBytes:      1234,
-			InstalledAt:    time.Now().UTC().Format(time.RFC3339Nano),
+			Path:          "/data/adapters/claude-cli/claude-acp/0.1.0/bin/adapter",
+			Component:     ComponentRef{Kind: ComponentKindACPAdapter, ID: "claude-acp", Version: "0.1.0"},
+			HarnessID:     "claude-cli",
+			ContentSHA256: strings.Repeat("a", 64),
+			SizeBytes:     1234,
+			InstalledAt:   time.Now().UTC().Format(time.RFC3339Nano),
 		},
 		{
-			Path:           "/data/adapters/codex-cli/codex-acp/0.1.0/bin/adapter",
-			AdapterID:      "codex-acp",
-			AdapterVersion: "0.1.0",
-			ContentSHA256:  strings.Repeat("b", 64),
-			SizeBytes:      4321,
-			InstalledAt:    time.Now().UTC().Format(time.RFC3339Nano),
+			Path:          "/data/adapters/codex-cli/codex-acp/0.1.0/bin/adapter",
+			Component:     ComponentRef{Kind: ComponentKindACPAdapter, ID: "codex-acp", Version: "0.1.0"},
+			HarnessID:     "codex-cli",
+			ContentSHA256: strings.Repeat("b", 64),
+			SizeBytes:     4321,
+			InstalledAt:   time.Now().UTC().Format(time.RFC3339Nano),
 		},
 	}}
 }
@@ -86,7 +86,7 @@ func TestOwnershipLedgerSaveMissingDirectory(t *testing.T) {
 func TestOwnershipLedgerRecordFor(t *testing.T) {
 	ledger := fixtureLedger()
 	record, ok := ledger.RecordFor("/data/adapters/claude-cli/claude-acp/0.1.0/bin/adapter")
-	if !ok || record.AdapterID != "claude-acp" {
+	if !ok || record.Component.ID != "claude-acp" {
 		t.Fatalf("RecordFor() = %+v, %v, want the claude-acp record", record, ok)
 	}
 	if _, ok := ledger.RecordFor("/data/adapters/elsewhere"); ok {
@@ -105,11 +105,15 @@ func TestOwnershipLedgerWithRecord(t *testing.T) {
 	if updated.Records[0].ContentSHA256 != strings.Repeat("c", 64) {
 		t.Fatalf("WithRecord() did not replace the record for the same path: %+v", updated.Records[0])
 	}
-	if updated.Records[1].AdapterID != "codex-acp" {
+	if updated.Records[1].Component.ID != "codex-acp" {
 		t.Fatalf("WithRecord() disturbed an unrelated record: %+v", updated.Records[1])
 	}
-	added := updated.WithRecord(OwnershipRecord{Path: "/data/adapters/new", AdapterID: "new-adapter"})
-	if len(added.Records) != 3 || added.Records[2].AdapterID != "new-adapter" {
+	added := updated.WithRecord(OwnershipRecord{
+		Path:      "/data/adapters/new-cli/new-adapter/1.0.0/bin/adapter",
+		Component: ComponentRef{Kind: ComponentKindACPAdapter, ID: "new-adapter", Version: "1.0.0"},
+		HarnessID: "new-cli",
+	})
+	if len(added.Records) != 3 || added.Records[2].Component.ID != "new-adapter" {
 		t.Fatalf("WithRecord() did not append a record for a new path: %+v", added.Records)
 	}
 }

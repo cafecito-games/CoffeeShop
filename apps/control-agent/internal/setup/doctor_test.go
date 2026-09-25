@@ -22,28 +22,28 @@ import (
 func doctorManifestFixture(t *testing.T) Manifest {
 	t.Helper()
 	manifestJSON := []byte(`{
-		"manifestVersion": "1",
-		"adapters": [
+		"manifestVersion": "2",
+		"components": [
 			{
-				"id": "ready-acp", "harnessId": "claude-cli", "provider": "anthropic",
+				"id": "ready-acp", "kind": "acp-adapter", "harnessId": "claude-cli", "provider": "anthropic",
 				"label": "Ready ACP adapter", "version": "1.0.0",
 				"platforms": {"darwin-arm64": {"kind": "manual", "executablePath": "bin/adapter"}},
 				"launch": {}
 			},
 			{
-				"id": "notready-acp", "harnessId": "codex-cli", "provider": "openai",
+				"id": "notready-acp", "kind": "acp-adapter", "harnessId": "codex-cli", "provider": "openai",
 				"label": "Not-ready ACP adapter", "version": "1.0.0",
 				"platforms": {"darwin-arm64": {"kind": "manual", "executablePath": "bin/adapter"}},
 				"launch": {}
 			},
 			{
-				"id": "drifted-acp", "harnessId": "drifted-cli", "provider": "alpha-vendor",
+				"id": "drifted-acp", "kind": "acp-adapter", "harnessId": "drifted-cli", "provider": "alpha-vendor",
 				"label": "Drifted ACP adapter", "version": "1.0.0",
 				"platforms": {"darwin-arm64": {"kind": "manual", "executablePath": "bin/adapter"}},
 				"launch": {}
 			},
 			{
-				"id": "unsupported-acp", "harnessId": "unsupported-cli", "provider": "beta-vendor",
+				"id": "unsupported-acp", "kind": "acp-adapter", "harnessId": "unsupported-cli", "provider": "beta-vendor",
 				"label": "Unsupported ACP adapter", "version": "2.0.0",
 				"platforms": {"linux-s390x": {"kind": "manual", "executablePath": "bin/adapter"}},
 				"launch": {}
@@ -57,33 +57,34 @@ func doctorManifestFixture(t *testing.T) Manifest {
 
 // installOwnedAdapter places a file at the adapter's target path and records it in the ledger, the
 // way a successful apply would. Returning the path lets a test corrupt the file afterwards.
-func installOwnedAdapter(t *testing.T, dataRoot string, ledger OwnershipLedger, entry AdapterManifestEntry, content []byte) (OwnershipLedger, string) {
+func installOwnedComponent(t *testing.T, dataRoot string, ledger OwnershipLedger, entry ComponentManifestEntry, content []byte) (OwnershipLedger, string) {
 	t.Helper()
 	distribution := entry.Platforms["darwin-arm64"]
-	targetPath := AdapterTargetPath(dataRoot, entry, distribution)
+	targetPath, err := ComponentTargetPath(dataRoot, entry, distribution)
+	require.NoError(t, err)
 	require.NoError(t, os.MkdirAll(filepath.Dir(targetPath), 0o755))
 	require.NoError(t, os.WriteFile(targetPath, content, 0o755))
 	updated := ledger.WithRecord(OwnershipRecord{
-		Path:           targetPath,
-		AdapterID:      entry.ID,
-		AdapterVersion: entry.Version,
-		ContentSHA256:  sha256Hex(content),
-		SizeBytes:      int64(len(content)),
-		InstalledAt:    "2026-01-01T00:00:00Z",
+		Path:          targetPath,
+		Component:     entry.Ref(),
+		HarnessID:     entry.HarnessID,
+		ContentSHA256: sha256Hex(content),
+		SizeBytes:     int64(len(content)),
+		InstalledAt:   "2026-01-01T00:00:00Z",
 	})
 	return updated, targetPath
 }
 
-func doctorEntryFor(report Report, adapterID string) AdapterDoctorEntry {
-	for _, entry := range report.Adapters {
-		if entry.AdapterID == adapterID {
+func doctorEntryFor(report Report, componentID string) ComponentDoctorEntry {
+	for _, entry := range report.Components {
+		if entry.Component.ID == componentID {
 			return entry
 		}
 	}
-	return AdapterDoctorEntry{}
+	return ComponentDoctorEntry{}
 }
 
-func TestRunDoctorReportsAdapterAndHubStatus(t *testing.T) {
+func TestRunDoctorReportsComponentAndHubStatus(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("test fixtures are shell scripts")
 	}
@@ -96,8 +97,8 @@ func TestRunDoctorReportsAdapterAndHubStatus(t *testing.T) {
 	ledger := OwnershipLedger{}
 	// ready-acp is installed; notready-acp deliberately is not, so its auth probe still runs (the
 	// harness itself is installed) but the adapter is not.
-	ledger, _ = installOwnedAdapter(t, dataRoot, ledger, manifest.Adapters[0], []byte("ready adapter bytes"))
-	ledger, driftedPath := installOwnedAdapter(t, dataRoot, ledger, manifest.Adapters[2], []byte("original bytes"))
+	ledger, _ = installOwnedComponent(t, dataRoot, ledger, manifest.Components[0], []byte("ready adapter bytes"))
+	ledger, driftedPath := installOwnedComponent(t, dataRoot, ledger, manifest.Components[2], []byte("original bytes"))
 	// Corrupt the drifted adapter after recording it: doctor must trust the file, not the ledger.
 	require.NoError(t, os.WriteFile(driftedPath, []byte("tampered bytes"), 0o755))
 
@@ -115,26 +116,26 @@ func TestRunDoctorReportsAdapterAndHubStatus(t *testing.T) {
 
 	require.Equal(t, "darwin-arm64", report.Platform)
 	require.Equal(t, dataRoot, report.DataRoot)
-	require.Len(t, report.Adapters, 4)
+	require.Len(t, report.Components, 4)
 	require.Equal(t, ProjectReadinessNotAvailable, report.ProjectReadiness)
 
 	ready := doctorEntryFor(report, "ready-acp")
 	require.True(t, ready.HarnessInstalled)
-	require.True(t, ready.AdapterInstalled)
+	require.True(t, ready.ComponentInstalled)
 	require.Equal(t, AuthReadinessReady, ready.AuthReadiness)
 	require.True(t, ready.ACPLaunchReady)
-	require.NotEmpty(t, ready.AdapterPath)
+	require.NotEmpty(t, ready.ComponentPath)
 
 	notReady := doctorEntryFor(report, "notready-acp")
 	require.True(t, notReady.HarnessInstalled)
-	require.False(t, notReady.AdapterInstalled)
+	require.False(t, notReady.ComponentInstalled)
 	require.Equal(t, AuthReadinessNotReady, notReady.AuthReadiness)
 	require.False(t, notReady.ACPLaunchReady)
 
 	drifted := doctorEntryFor(report, "drifted-acp")
 	require.True(t, drifted.HarnessInstalled)
 	// The ledger says installed, the file no longer matches: doctor reports reality.
-	require.False(t, drifted.AdapterInstalled)
+	require.False(t, drifted.ComponentInstalled)
 	// drifted-cli has no compiled AuthProbeAllowlist entry, so it is always unknown regardless of
 	// installation state.
 	require.Equal(t, AuthReadinessUnknown, drifted.AuthReadiness)
@@ -143,11 +144,11 @@ func TestRunDoctorReportsAdapterAndHubStatus(t *testing.T) {
 	// An unsupported-platform adapter stays in the report with a note rather than being dropped.
 	unsupported := doctorEntryFor(report, "unsupported-acp")
 	require.False(t, unsupported.HarnessInstalled)
-	require.False(t, unsupported.AdapterInstalled)
+	require.False(t, unsupported.ComponentInstalled)
 	require.Equal(t, AuthReadinessUnknown, unsupported.AuthReadiness)
 	require.False(t, unsupported.ACPLaunchReady)
 	require.Equal(t, []string{"no platform distribution for darwin-arm64"}, unsupported.Notes)
-	require.Empty(t, unsupported.AdapterPath)
+	require.Empty(t, unsupported.ComponentPath)
 
 	require.True(t, report.HubConnectivity.Reachable)
 	require.Equal(t, "http://hub.example:8787", report.HubConnectivity.Endpoint)
@@ -160,10 +161,10 @@ func TestRunDoctorReportsAdapterAndHubStatus(t *testing.T) {
 // binary path to run in that case, and doctor must report Unknown rather than guessing at one.
 func TestRunDoctorNeverRunsAuthProbeForUninstalledHarness(t *testing.T) {
 	manifestJSON := []byte(`{
-		"manifestVersion": "1",
-		"adapters": [
+		"manifestVersion": "2",
+		"components": [
 			{
-				"id": "claude-acp", "harnessId": "claude-cli", "provider": "anthropic",
+				"id": "claude-acp", "kind": "acp-adapter", "harnessId": "claude-cli", "provider": "anthropic",
 				"label": "Claude ACP adapter", "version": "1.0.0",
 				"platforms": {"darwin-arm64": {"kind": "manual", "executablePath": "bin/adapter"}},
 				"launch": {}

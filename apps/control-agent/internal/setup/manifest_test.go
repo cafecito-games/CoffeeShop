@@ -12,9 +12,10 @@ const secretLikeFixture = "ghp_abcdefghijklmnop"
 func validManifestFixture() Manifest {
 	return Manifest{
 		ManifestVersion: ManifestVersion,
-		Adapters: []AdapterManifestEntry{
+		Components: []ComponentManifestEntry{
 			{
 				ID:        "fixture-adapter",
+				Kind:      ComponentKindACPAdapter,
 				HarnessID: "claude-cli",
 				Provider:  "anthropic",
 				Label:     "Fixture Adapter",
@@ -35,9 +36,9 @@ func validManifestFixture() Manifest {
 }
 
 func mutateDistribution(manifest *Manifest, mutate func(*PlatformDistribution)) {
-	distribution := manifest.Adapters[0].Platforms["darwin-arm64"]
+	distribution := manifest.Components[0].Platforms["darwin-arm64"]
 	mutate(&distribution)
-	manifest.Adapters[0].Platforms["darwin-arm64"] = distribution
+	manifest.Components[0].Platforms["darwin-arm64"] = distribution
 }
 
 func marshalManifestFixture(t *testing.T, mutate func(*Manifest)) []byte {
@@ -65,8 +66,8 @@ func TestParseManifest(t *testing.T) {
 		{
 			name: "secret-like label wins over structural rejection",
 			mutate: func(manifest *Manifest) {
-				manifest.Adapters[0].Label = "token " + secretLikeFixture
-				manifest.Adapters[0].Version = "not-a-version"
+				manifest.Components[0].Label = "token " + secretLikeFixture
+				manifest.Components[0].Version = "not-a-version"
 			},
 			wantErr: "label looks secret-like",
 		},
@@ -82,92 +83,92 @@ func TestParseManifest(t *testing.T) {
 		{
 			name: "secret-like launch environment entry",
 			mutate: func(manifest *Manifest) {
-				manifest.Adapters[0].Launch.Environment = []string{"API_TOKEN=" + secretLikeFixture}
+				manifest.Components[0].Launch.Environment = []string{"API_TOKEN=" + secretLikeFixture}
 			},
 			wantErr: "launch environment entry looks secret-like",
 		},
 		{
 			name: "secret-like auth docs url",
 			mutate: func(manifest *Manifest) {
-				manifest.Adapters[0].AuthDocsURL = "https://docs.example.com/" + secretLikeFixture
+				manifest.Components[0].AuthDocsURL = "https://docs.example.com/" + secretLikeFixture
 			},
 			wantErr: "authDocsUrl looks secret-like",
 		},
 		{
-			name: "bad manifest version",
+			name: "unknown manifest generation",
 			mutate: func(manifest *Manifest) {
-				manifest.ManifestVersion = "2"
+				manifest.ManifestVersion = "3"
 			},
 			wantErr: "schema generation is unknown",
 		},
 		{
-			name: "duplicate adapter id",
+			name: "duplicate component id",
 			mutate: func(manifest *Manifest) {
-				manifest.Adapters = append(manifest.Adapters, manifest.Adapters[0])
+				manifest.Components = append(manifest.Components, manifest.Components[0])
 			},
 			wantErr: "duplicate id",
 		},
 		{
 			name: "non kebab id",
 			mutate: func(manifest *Manifest) {
-				manifest.Adapters[0].ID = "FixtureAdapter"
+				manifest.Components[0].ID = "FixtureAdapter"
 			},
 			wantErr: "id is not kebab-case",
 		},
 		{
 			name: "non kebab harness id",
 			mutate: func(manifest *Manifest) {
-				manifest.Adapters[0].HarnessID = "claude_cli"
+				manifest.Components[0].HarnessID = "claude_cli"
 			},
 			wantErr: "harnessId is not kebab-case",
 		},
 		{
 			name: "non kebab provider",
 			mutate: func(manifest *Manifest) {
-				manifest.Adapters[0].Provider = "Anthropic"
+				manifest.Components[0].Provider = "Anthropic"
 			},
 			wantErr: "provider is not kebab-case",
 		},
 		{
 			name: "oversized label",
 			mutate: func(manifest *Manifest) {
-				manifest.Adapters[0].Label = strings.Repeat("x", 129)
+				manifest.Components[0].Label = strings.Repeat("x", 129)
 			},
 			wantErr: "label is empty or exceeds 128 bytes",
 		},
 		{
 			name: "empty label",
 			mutate: func(manifest *Manifest) {
-				manifest.Adapters[0].Label = ""
+				manifest.Components[0].Label = ""
 			},
 			wantErr: "label is empty or exceeds 128 bytes",
 		},
 		{
 			name: "unparseable version",
 			mutate: func(manifest *Manifest) {
-				manifest.Adapters[0].Version = "1.2.3-rc1"
+				manifest.Components[0].Version = "1.2.3-rc1"
 			},
 			wantErr: "version is not a normalized dotted version",
 		},
 		{
-			name: "no adapters",
+			name: "no components",
 			mutate: func(manifest *Manifest) {
-				manifest.Adapters = nil
+				manifest.Components = nil
 			},
-			wantErr: "adapter manifest declares no adapters",
+			wantErr: "component manifest declares no components",
 		},
 		{
 			name: "empty platforms",
 			mutate: func(manifest *Manifest) {
-				manifest.Adapters[0].Platforms = map[string]PlatformDistribution{}
+				manifest.Components[0].Platforms = map[string]PlatformDistribution{}
 			},
 			wantErr: "platforms is empty",
 		},
 		{
 			name: "bad platform key shape",
 			mutate: func(manifest *Manifest) {
-				manifest.Adapters[0].Platforms["darwin_arm64"] = manifest.Adapters[0].Platforms["darwin-arm64"]
-				delete(manifest.Adapters[0].Platforms, "darwin-arm64")
+				manifest.Components[0].Platforms["darwin_arm64"] = manifest.Components[0].Platforms["darwin-arm64"]
+				delete(manifest.Components[0].Platforms, "darwin-arm64")
 			},
 			wantErr: "platform key is not GOOS-GOARCH shaped",
 		},
@@ -237,7 +238,7 @@ func TestParseManifest(t *testing.T) {
 		{
 			name: "manual carrying url",
 			mutate: func(manifest *Manifest) {
-				manifest.Adapters[0].Platforms["darwin-arm64"] = PlatformDistribution{
+				manifest.Components[0].Platforms["darwin-arm64"] = PlatformDistribution{
 					Kind:           DistributionKindManual,
 					URL:            "https://downloads.example.com/fixture-adapter",
 					ExecutablePath: "bin/adapter",
@@ -248,7 +249,7 @@ func TestParseManifest(t *testing.T) {
 		{
 			name: "manual carrying sha256",
 			mutate: func(manifest *Manifest) {
-				manifest.Adapters[0].Platforms["darwin-arm64"] = PlatformDistribution{
+				manifest.Components[0].Platforms["darwin-arm64"] = PlatformDistribution{
 					Kind:           DistributionKindManual,
 					SHA256:         strings.Repeat("a", 64),
 					ExecutablePath: "bin/adapter",
@@ -292,8 +293,11 @@ func TestParseManifest(t *testing.T) {
 				if err != nil {
 					t.Fatalf("ParseManifest() error = %v, want none", err)
 				}
-				if manifest.Adapters[0].ID != "fixture-adapter" {
-					t.Fatalf("ParseManifest() lost the adapter id: %q", manifest.Adapters[0].ID)
+				if manifest.Components[0].ID != "fixture-adapter" {
+					t.Fatalf("ParseManifest() lost the component id: %q", manifest.Components[0].ID)
+				}
+				if manifest.Components[0].Kind != ComponentKindACPAdapter {
+					t.Fatalf("ParseManifest() lost the component kind: %q", manifest.Components[0].Kind)
 				}
 				return
 			}
@@ -330,8 +334,8 @@ func TestLoadDefaultManifest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadDefaultManifest() error = %v", err)
 	}
-	harnessIDs := make(map[string]AdapterManifestEntry, len(manifest.Adapters))
-	for _, entry := range manifest.Adapters {
+	harnessIDs := make(map[string]ComponentManifestEntry, len(manifest.Components))
+	for _, entry := range manifest.Components {
 		harnessIDs[entry.HarnessID] = entry
 	}
 	for _, harnessID := range []string{"claude-cli", "codex-cli"} {

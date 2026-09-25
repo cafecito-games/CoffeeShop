@@ -38,22 +38,22 @@ func captureOutput(t *testing.T, fn func() int) (string, string, int) {
 	return string(stdout), string(stderr), code
 }
 
-// cliManualManifestFixture writes a one-manual-adapter manifest for this test binary's platform.
+// cliManualManifestFixture writes a one-manual-component manifest for this test binary's platform.
 func cliManualManifestFixture(t *testing.T) (string, string) {
 	t.Helper()
 	platform := runtime.GOOS + "-" + runtime.GOARCH
 	manifestJSON := fmt.Sprintf(`{
-		"manifestVersion": "1",
-		"adapters": [
+		"manifestVersion": "2",
+		"components": [
 			{
-				"id": "manual-acp", "harnessId": "manual-cli", "provider": "manual-vendor",
+				"id": "manual-acp", "kind": "acp-adapter", "harnessId": "manual-cli", "provider": "manual-vendor",
 				"label": "Manual ACP adapter", "version": "0.4.0",
 				"platforms": {"%s": {"kind": "manual", "executablePath": "bin/adapter"}},
 				"launch": {}
 			}
 		]
 	}`, platform)
-	manifestPath := filepath.Join(t.TempDir(), "adapters.json")
+	manifestPath := filepath.Join(t.TempDir(), "components.json")
 	require.NoError(t, os.WriteFile(manifestPath, []byte(manifestJSON), 0o644))
 	return platform, manifestPath
 }
@@ -73,7 +73,8 @@ func TestSetupPlanWritesPlanWithoutTouchingTheDataRoot(t *testing.T) {
 	require.NoError(t, err)
 	var plan setup.Plan
 	require.NoError(t, json.Unmarshal(planBytes, &plan))
-	require.Equal(t, "manual-acp", plan.Operations[0].AdapterID)
+	require.Equal(t, setup.ComponentRef{Kind: setup.ComponentKindACPAdapter, ID: "manual-acp", Version: "0.4.0"}, plan.Operations[0].Component)
+	require.Equal(t, "manual-cli", plan.Operations[0].HarnessID)
 	require.Equal(t, plan.Digest, setup.ComputePlanDigest(plan))
 
 	// Planning is read-only: the data root directory is never created just to observe state.
@@ -121,7 +122,7 @@ func TestSetupApplyInstallsManualArtifactEndToEnd(t *testing.T) {
 		})
 	})
 	require.Equal(t, 0, code, "stderr: %s", stderr)
-	require.Contains(t, stdout, "installed: manual-acp@0.4.0")
+	require.Contains(t, stdout, "installed: acp-adapter/manual-acp@0.4.0")
 	require.Contains(t, stdout, "Barista loads it at startup from the same --data-root")
 
 	targetPath := filepath.Join(dataRoot, "adapters", "manual-cli", "manual-acp", "0.4.0", "bin", "adapter")

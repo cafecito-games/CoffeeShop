@@ -79,7 +79,7 @@ const postconditionMaximumBytes = 256
 type Operation struct {
 	Kind                 OperationKind        `json:"kind"`
 	Component            ComponentRef         `json:"component"`
-	HarnessID            string               `json:"harnessId"` // the harness this component belongs to; identity, so digested
+	HarnessID            string               `json:"harnessId"`  // the harness this component belongs to; identity, so digested
 	TargetPath           string               `json:"targetPath"` // absolute, always inside the plan's DataRoot
 	ExpectedChecksum     string               `json:"expectedChecksum"`
 	ExpectedCurrentState ExpectedCurrentState `json:"expectedCurrentState"`
