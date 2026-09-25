@@ -177,6 +177,49 @@ export interface NodeInstanceResidency {
   observedAt: string;
 }
 
+/**
+ * One node's statement that a single identity is no longer resident on it: the `instance.released`
+ * acknowledgement the owning node sent for that identity's allocation.
+ *
+ * Residency *evidence* and lifecycle *authority* are separate. A node's snapshot is its complete
+ * resident set, but it is produced only on connection attachment, so between two snapshots the
+ * acknowledgement is the only current word the hub has about one identity. Whether that
+ * acknowledgement is also a legal allocation transition is a different question with a different
+ * answer: a terminal allocation still refuses the transition, and the report is still rejected as
+ * lifecycle. Discarding it wholesale for that reason threw away the node's own statement that the
+ * slot is free, which is how a capacity-1 node stayed unavailable after the node had actually freed
+ * its slot.
+ *
+ * The record is deduplicated by node and identity, which is what makes a replayed acknowledgement
+ * idempotent: a statement is a fact, never a counter, so repeating it frees nothing twice.
+ *
+ * Ordering against a snapshot is the hub's own transaction order rather than any comparison of
+ * timestamps: both writers run inside `store.transact`, so the later transaction is by construction
+ * the later word. A snapshot that names the identity again *refutes* the statement instead of
+ * deleting it, and a refuted statement can never be revived — so a stale or replayed acknowledgement
+ * arriving after that snapshot cannot free a slot the node has re-reported as held. Refuting rather
+ * than deleting is what makes the rule one-way; the cost of refuting a statement that was in fact
+ * true is one deferral, because the node's next snapshot no longer names the identity and the record
+ * itself then frees the slot.
+ */
+export interface NodeResidencyVacancy {
+  nodeId: string;
+  instanceId: string;
+  /**
+   * The allocation generation whose acknowledgement carried the statement. It is the authentication
+   * that survives persistence: the allocation must still name this node and this instance, so a
+   * statement can never discount a slot no allocation of the node's own ever backed.
+   */
+  allocationId: string;
+  reportedAt: string;
+  /**
+   * Set when an authoritative snapshot named this identity resident after the statement arrived. The
+   * node's own newer word wins, and the tombstone keeps a replay of the same acknowledgement from
+   * reviving the discount.
+   */
+  refutedAt?: string;
+}
+
 export type InstanceLifecycleEvidence = Extract<InstanceControlMessage, { type: "instance.ready" | "instance.failed" | "instance.released" }>;
 
 /**
@@ -276,6 +319,13 @@ export interface ResidentInstanceUsage {
  *   `vacatedAllocationStatuses`. Discounting in the reader rather than editing the record keeps the
  *   record a faithful copy of what the node reported, which is what the release outbox and its load
  *   validation depend on.
+ *
+ *   The same proof also arrives in acknowledgements the lifecycle rejects. Once an allocation is
+ *   terminal it can take no further transition, so a release the node completes on a later retry
+ *   never reaches `released` status — and the identity would keep its slot until the node reconnected
+ *   yet again. An unrefuted `NodeResidencyVacancy` is therefore discounted exactly like a `released`
+ *   allocation: it is the same statement from the same producer, authenticated the same way, and
+ *   read here rather than written into the record for the same reason.
  * - **An authoritative record exists and is empty.** The union is the hub's own occupying
  *   allocations, so an empty record means zero unowned residency, authoritatively, however stale the
  *   scalar count is.
@@ -293,7 +343,8 @@ export interface ResidentInstanceUsage {
 export function residentInstanceUsage(
   node: ComputeNode,
   allocations: readonly InstanceAllocation[],
-  residency?: NodeInstanceResidency
+  residency?: NodeInstanceResidency,
+  vacancies: readonly NodeResidencyVacancy[] = []
 ): ResidentInstanceUsage {
   const capacity = Number.isSafeInteger(node.instanceCapacity) && node.instanceCapacity! > 0 ? node.instanceCapacity! : 0;
   const onNode = allocations.filter((allocation) => allocation.nodeId === node.id);
@@ -304,9 +355,19 @@ export function residentInstanceUsage(
     const vacated = new Set(onNode
       .filter((allocation) => vacatedAllocationStatuses.includes(allocation.status))
       .map((allocation) => allocation.instanceId));
+    for (const vacancy of vacancies) {
+      if (vacancy.nodeId !== node.id || vacancy.refutedAt !== undefined) continue;
+      vacated.add(vacancy.instanceId);
+    }
     const unowned = new Set(residency.instanceIds.filter((instanceId) => !owned.has(instanceId) && !vacated.has(instanceId)));
     return { capacity, used: owned.size + unowned.size };
   }
+  /*
+   * A statement never lowers the scalar branch. The count names no identities, so a statement about
+   * one cannot be subtracted from it without assuming the count included that identity — the same
+   * irreconcilability that makes the union an upper bound here. The node's first authoritative
+   * snapshot supersedes the count entirely and the statements apply from then on.
+   */
   const unnamedResidents = Number.isSafeInteger(node.activeInstances) && node.activeInstances! > 0 ? node.activeInstances! : 0;
   return { capacity, used: owned.size + unnamedResidents };
 }
@@ -314,6 +375,21 @@ export function residentInstanceUsage(
 /** The node's authoritative resident set, if it has produced one. */
 export function nodeResidencyInState(state: Readonly<State>, nodeId: string): NodeInstanceResidency | undefined {
   return (state.nodeInstanceResidency ?? []).find((record) => record.nodeId === nodeId);
+}
+
+/** The residency statements this node has made about single identities, refuted ones included. */
+export function nodeResidencyVacanciesInState(state: Readonly<State>, nodeId: string): NodeResidencyVacancy[] {
+  return (state.nodeResidencyVacancies ?? []).filter((vacancy) => vacancy.nodeId === nodeId);
+}
+
+/**
+ * Resident usage for one node derived from every piece of residency evidence the hub holds: its own
+ * occupying allocations, the node's latest snapshot, and the node's statements about single
+ * identities. This is the only correct way to derive usage from persisted state — reading
+ * `residentInstanceUsage` with the snapshot alone would miss a statement that arrived after it.
+ */
+export function residentInstanceUsageInState(state: Readonly<State>, node: ComputeNode): ResidentInstanceUsage {
+  return residentInstanceUsage(node, state.allocations ?? [], nodeResidencyInState(state, node.id), nodeResidencyVacanciesInState(state, node.id));
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
@@ -674,7 +750,7 @@ export async function reserveInstanceAllocation(
       result = { kind: "capacity", reason: `Compute node ${candidate.nodeId} is not available` };
       return false;
     }
-    const usage = residentInstanceUsage(node, state.allocations ?? [], nodeResidencyInState(state, node.id));
+    const usage = residentInstanceUsageInState(state, node);
     if (usage.used >= usage.capacity) {
       result = { kind: "capacity", reason: `Compute node ${candidate.nodeId} has no resident instance capacity (${usage.used}/${usage.capacity})` };
       return false;
@@ -770,14 +846,41 @@ export async function receiveInstanceLifecycleReport(
     }
     const current = currentAllocationInState(state, instance.id);
     const isCurrentGeneration = current !== undefined && current.id === allocation.id;
+    /*
+     * Residency evidence is separate from lifecycle authority, and this is where they part. An
+     * `instance.released` from the owning node is its statement that it deleted the resident — Barista
+     * deletes the resident from its table before sending the frame — and that statement is true
+     * whatever the hub's transition table can still do with the allocation. Recording it before the
+     * branches below is what keeps a report the lifecycle rejects from also discarding what it validly
+     * carries: after a release-cleanup failure the allocation is terminal `failed`, so the retry's
+     * acknowledgement is not a legal transition and never will be, yet it is the node's only word that
+     * the slot is free until the node reconnects again.
+     *
+     * Only `instance.released` says this. `instance.failed` does not: on a release-cleanup failure
+     * Barista keeps the resident in its table and reports the failure afterwards, so a failure is
+     * evidence of nothing about residency and must not vacate a slot. `instance.ready` carries
+     * residency *presence*, which can only raise occupancy, and occupancy is already charged without
+     * it.
+     *
+     * A superseded generation states nothing usable either: when a newer allocation of the same
+     * instance is occupying this node, that allocation holds the slot and an older generation's
+     * acknowledgement is not a statement about it.
+     */
+    const statedVacancy = message.type === "instance.released" && (current === undefined || current.id === allocation.id)
+      ? recordResidencyVacancy(state, nodeId, allocation, at)
+      : false;
+    const rejected = (reason: string): boolean => {
+      outcome = { kind: "rejected", changed: statedVacancy, reason };
+      return statedVacancy;
+    };
+    const ignored = (): boolean => {
+      outcome = { kind: "ignored", changed: statedVacancy };
+      return statedVacancy;
+    };
     if (message.type === "instance.ready") {
-      if (allocation.status === "active" && nonTerminalInstanceStatuses.includes(instance.status)) {
-        outcome = { kind: "ignored", changed: false };
-        return false;
-      }
+      if (allocation.status === "active" && nonTerminalInstanceStatuses.includes(instance.status)) return ignored();
       if (!isCurrentGeneration || !canTransitionAllocation(allocation.status, "active") || !canTransitionInstance(instance.status, "ready")) {
-        outcome = rejectedReport("the ready report does not match the current allocation generation or a legal transition");
-        return false;
+        return rejected("the ready report does not match the current allocation generation or a legal transition");
       }
       allocation.status = "active";
       allocation.updatedAt = at;
@@ -787,13 +890,9 @@ export async function receiveInstanceLifecycleReport(
       return true;
     }
     if (message.type === "instance.failed") {
-      if (allocation.status === "failed" && instance.status === "failed") {
-        outcome = { kind: "ignored", changed: false };
-        return false;
-      }
+      if (allocation.status === "failed" && instance.status === "failed") return ignored();
       if (!isCurrentGeneration || !canTransitionAllocation(allocation.status, "failed") || !canTransitionInstance(instance.status, "failed")) {
-        outcome = rejectedReport("the failure report does not match the current allocation generation or a legal transition");
-        return false;
+        return rejected("the failure report does not match the current allocation generation or a legal transition");
       }
       allocation.status = "failed";
       allocation.updatedAt = at;
@@ -809,13 +908,9 @@ export async function receiveInstanceLifecycleReport(
       outcome = { kind: "accepted", changed: true };
       return true;
     }
-    if (allocation.status === "released" && instance.status === "released") {
-      outcome = { kind: "ignored", changed: false };
-      return false;
-    }
+    if (allocation.status === "released" && instance.status === "released") return ignored();
     if (!isCurrentGeneration || !canTransitionAllocation(allocation.status, "released") || instance.status !== "draining" || !canTransitionInstance(instance.status, "released")) {
-      outcome = rejectedReport("the release report does not match the current allocation generation or a legal transition");
-      return false;
+      return rejected("the release report does not match the current allocation generation or a legal transition");
     }
     allocation.status = "released";
     allocation.updatedAt = at;
@@ -842,6 +937,25 @@ function settleTerminalInstance(state: State, instance: AgentInstance, at: strin
     allocation.status = target;
     allocation.updatedAt = at;
   }
+}
+
+/**
+ * Records the node's statement that one identity is no longer resident on it, and reports whether
+ * state moved.
+ *
+ * Deduplicated by node and identity, which is the whole of replay idempotence: a statement is a fact,
+ * not a counter, so the second delivery of the same acknowledgement finds it already recorded and
+ * changes nothing. A statement an authoritative snapshot has refuted is never revived either — the
+ * node's newer word about the identity outranks a redelivered older one, and the only cost of that
+ * ordering is a deferral, because the node's next snapshot no longer naming the identity frees the
+ * slot through the record itself.
+ */
+function recordResidencyVacancy(state: State, nodeId: string, allocation: InstanceAllocation, at: string): boolean {
+  state.nodeResidencyVacancies ??= [];
+  const existing = state.nodeResidencyVacancies.find((vacancy) => vacancy.nodeId === nodeId && vacancy.instanceId === allocation.instanceId);
+  if (existing !== undefined) return false;
+  state.nodeResidencyVacancies.push({ nodeId, instanceId: allocation.instanceId, allocationId: allocation.id, reportedAt: at });
+  return true;
 }
 
 /**
@@ -898,6 +1012,7 @@ export function reconcileNodeInstancesInState(state: State, nodeId: string, acti
   }
   changed = rearmUnacknowledgedReleases(state, nodeId, reported, at) || changed;
   if (recordNodeResidency(state, nodeId, activeInstanceIds, at)) changed = true;
+  if (supersedeResidencyVacancies(state, nodeId, reported, at)) changed = true;
   for (const instanceId of activeInstanceIds) {
     if (expectedInstanceIds.has(instanceId)) continue;
     state.remoteReleaseRequests ??= [];
@@ -930,6 +1045,38 @@ export function reconcileNodeInstancesInState(state: State, nodeId: string, acti
   const retained = requests.filter((request) => request.nodeId !== nodeId || reported.has(request.instanceId));
   if (retained.length !== requests.length) {
     state.remoteReleaseRequests = retained;
+    changed = true;
+  }
+  return changed;
+}
+
+/**
+ * Applies an authoritative snapshot to the node's residency statements. The snapshot is the node's
+ * complete resident set, so it supersedes every earlier claim about that node, its statements
+ * included: an identity the snapshot names again *refutes* the statement about it, and an identity it
+ * does not name needs no statement at all, because the record the statement is read against no longer
+ * names the identity either.
+ *
+ * Refuting rather than dropping is what makes the ordering one-way. A dropped statement could be
+ * written again by a redelivered acknowledgement and would then free a slot the node has just
+ * re-reported as held; a tombstone cannot.
+ *
+ * A snapshot repeating the known resident set is not a change to the residency record, but it is
+ * still a fresh observation, so refutation keys off the snapshot rather than off whether the record
+ * moved.
+ *
+ * Statements for a node therefore never outlive its next snapshot beyond the identities that snapshot
+ * names, which bounds them by `instanceLimits.collectionEntries` per node, exactly as the record and
+ * the release outbox are bounded.
+ */
+function supersedeResidencyVacancies(state: State, nodeId: string, reported: ReadonlySet<string>, at: string): boolean {
+  const vacancies = state.nodeResidencyVacancies ?? [];
+  const retained = vacancies.filter((vacancy) => vacancy.nodeId !== nodeId || reported.has(vacancy.instanceId));
+  let changed = retained.length !== vacancies.length;
+  if (changed) state.nodeResidencyVacancies = retained;
+  for (const vacancy of retained) {
+    if (vacancy.nodeId !== nodeId || vacancy.refutedAt !== undefined) continue;
+    vacancy.refutedAt = at;
     changed = true;
   }
   return changed;
@@ -1187,6 +1334,10 @@ export function pruneInstanceAuditRecords(state: State): boolean {
     state.allocations = (state.allocations ?? []).filter((allocation) => !dropped.has(allocation.instanceId));
     state.instanceReleaseIntents = (state.instanceReleaseIntents ?? []).filter((intent) => !dropped.has(intent.instanceId));
     state.instanceDeliveries = (state.instanceDeliveries ?? []).filter((record) => !dropped.has(commandInstanceId(record.message)));
+    // A statement is authenticated by the allocation it names, so it cannot outlive that allocation.
+    // Nothing discountable is lost: an identity a residency record still names is pinned above, and one
+    // no record names has nothing left to discount.
+    state.nodeResidencyVacancies = (state.nodeResidencyVacancies ?? []).filter((vacancy) => !dropped.has(vacancy.instanceId));
     changed = true;
   }
   // Receipts and the submissions derived from them are retired in one place, keyed off the instances
@@ -1282,7 +1433,7 @@ export function assertPersistedInstanceState(state: State) {
     ["instances", state.instances], ["allocations", state.allocations], ["templates", state.templates],
     ["instanceLifecycleReceipts", state.instanceLifecycleReceipts], ["instanceReleaseIntents", state.instanceReleaseIntents],
     ["instanceDeliveries", state.instanceDeliveries], ["remoteReleaseRequests", state.remoteReleaseRequests],
-    ["nodeInstanceResidency", state.nodeInstanceResidency]
+    ["nodeInstanceResidency", state.nodeInstanceResidency], ["nodeResidencyVacancies", state.nodeResidencyVacancies]
   ] as const) {
     if (!Array.isArray(collection)) throw new Error(`Persisted ${name} collection is not an array`);
   }
@@ -1399,6 +1550,31 @@ export function assertPersistedInstanceState(state: State) {
     if (new Set(record.instanceIds).size !== record.instanceIds.length) throw new Error(`${context} repeats a resident instance`);
     if (residencyByNode.has(record.nodeId)) throw new Error(`${context} repeats node ${record.nodeId}`);
     residencyByNode.set(record.nodeId, new Set(record.instanceIds as string[]));
+  }
+  const vacancyKeys = new Set<string>();
+  for (const [index, vacancy] of (state.nodeResidencyVacancies ?? []).entries()) {
+    const context = `Persisted node residency vacancy ${index}`;
+    if (!isRecord(vacancy) || !isNonEmptyString(vacancy.nodeId) || !isNonEmptyString(vacancy.instanceId)
+      || !isNonEmptyString(vacancy.allocationId) || !isNonEmptyString(vacancy.reportedAt) || !isOptionalNonEmptyString(vacancy.refutedAt)) {
+      throw new Error(`${context} is malformed`);
+    }
+    // One statement per node and identity is what makes a replayed acknowledgement idempotent, so a
+    // snapshot carrying two of them is rejected rather than letting the reader pick one.
+    const key = `${vacancy.nodeId}\u0000${vacancy.instanceId}`;
+    if (vacancyKeys.has(key)) throw new Error(`${context} repeats its node and instance`);
+    vacancyKeys.add(key);
+    /*
+     * A statement discounts a slot, so its authentication has to survive the reload that its sender
+     * does not: the allocation it names must exist and must be the one tying this node to this
+     * instance. Otherwise a persisted statement could free a slot on a node that never held the
+     * identity, which is exactly what authenticating the acknowledgement prevents while it is live.
+     */
+    const allocation = allocationsById.get(vacancy.allocationId);
+    if (!allocation) throw new Error(`${context} names unknown allocation ${vacancy.allocationId}`);
+    if (allocation.nodeId !== vacancy.nodeId) throw new Error(`${context} names a node that does not hold allocation ${vacancy.allocationId}`);
+    if (allocation.instanceId !== vacancy.instanceId) {
+      throw new Error(`${context} names an instance that does not own allocation ${vacancy.allocationId}`);
+    }
   }
   const remoteRequestKeys = new Set<string>();
   for (const [index, request] of (state.remoteReleaseRequests ?? []).entries()) {

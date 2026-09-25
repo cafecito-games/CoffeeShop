@@ -32,6 +32,7 @@ import {
   type InstanceLifecycleReceipt,
   type InstanceReleaseIntent,
   type NodeInstanceResidency,
+  type NodeResidencyVacancy,
   type RemoteReleaseRequest
 } from "./instances.js";
 import { assertPersistedSessionState } from "./persistedSessionState.js";
@@ -99,6 +100,12 @@ interface HubOnlyState {
    * Written only by instance reconciliation; it is the hub's single record of unowned residency.
    */
   nodeInstanceResidency?: NodeInstanceResidency[];
+  /**
+   * The residency statements nodes have made about single identities, outside their snapshots. Written
+   * only by the lifecycle acknowledgement path and superseded only by the node's next snapshot; see
+   * `NodeResidencyVacancy`.
+   */
+  nodeResidencyVacancies?: NodeResidencyVacancy[];
   /** Prevents a deliberately emptied catalog from re-importing the legacy profiles file. */
   projectProfilesImported?: boolean;
 }
@@ -125,6 +132,7 @@ const emptyState = (): State => withOrchestrationDefaults({
   instanceDeliveries: [],
   remoteReleaseRequests: [],
   nodeInstanceResidency: [],
+  nodeResidencyVacancies: [],
   taskSubmissions: [],
   taskUpdates: [],
   taskEventJournal: [],
@@ -174,6 +182,7 @@ export function addInstanceDefaults(state: State) {
   if (state.instanceDeliveries === undefined) state.instanceDeliveries = [];
   if (state.remoteReleaseRequests === undefined) state.remoteReleaseRequests = [];
   if (state.nodeInstanceResidency === undefined) state.nodeInstanceResidency = [];
+  if (state.nodeResidencyVacancies === undefined) state.nodeResidencyVacancies = [];
 }
 
 /** Rejects malformed or duplicate persisted profiles before they can affect scheduling. */
@@ -622,7 +631,7 @@ export class Store {
       harnessEventStreams: _harnessEventStreams, harnessEvents: _harnessEvents,
       instanceLifecycleReceipts: _instanceLifecycleReceipts, instanceReleaseIntents: _instanceReleaseIntents,
       instanceDeliveries: _instanceDeliveries, remoteReleaseRequests: _remoteReleaseRequests,
-      nodeInstanceResidency: _nodeInstanceResidency,
+      nodeInstanceResidency: _nodeInstanceResidency, nodeResidencyVacancies: _nodeResidencyVacancies,
       projectProfilesImported: _projectProfilesImported, orchestratorClients, ...published
     } = this.state;
     return structuredClone({
