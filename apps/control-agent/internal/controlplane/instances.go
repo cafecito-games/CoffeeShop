@@ -186,7 +186,7 @@ func (client *Client) provisionInstance(message protocol.InstanceHubMessage) {
 	client.residents.mu.Lock()
 	if existing, hosted := client.residents.residentsTable[allocation.ID]; hosted {
 		exactReplay := existing.matches(instance, allocation)
-		heldByFailedCleanup := existing.state == residentCleanupFailed
+		state := existing.state
 		if exactReplay {
 			// An exact replay may carry refreshed hub-side bookkeeping — a renewed lease, new status
 			// or timestamps — which the hosted records adopt without touching identity or placement.
@@ -197,11 +197,18 @@ func (client *Client) provisionInstance(message protocol.InstanceHubMessage) {
 			client.reportInstanceFailure(allocation.ID, instance.ID, "a different resident is already hosted for this allocation")
 			return
 		}
-		if heldByFailedCleanup {
+		switch state {
+		case residentReady:
+			client.reportInstanceReady(allocation.ID, instance.ID)
+		case residentDraining:
+			client.reportInstanceFailure(allocation.ID, instance.ID, "the resident for this allocation is draining a release and is closed to new dispatch")
+		case residentCleanupFailed:
 			client.reportInstanceFailure(allocation.ID, instance.ID, "the resident for this allocation is held by a failed release cleanup")
-			return
+		default:
+			// A state added later must fail closed rather than fall through as ready: instance.ready
+			// advertises capacity the hub may dispatch to, and only a ready resident can accept work.
+			client.reportInstanceFailure(allocation.ID, instance.ID, "the resident for this allocation is closed to new dispatch")
 		}
-		client.reportInstanceReady(allocation.ID, instance.ID)
 		return
 	}
 	if _, released := client.residents.releasedOutcomes[allocation.ID]; released {

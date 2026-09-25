@@ -461,6 +461,47 @@ func TestDispatchRejectsWhileDrainingAndAfterRelease(t *testing.T) {
 	require.Contains(t, failed.Error, "no resident allocation on this Barista matches the dispatch")
 }
 
+func TestProvisionReplayWhileDrainingIsNotAcknowledgedReady(t *testing.T) {
+	directory := t.TempDir()
+	client := instanceTestClient(t, slowHarnessBinary(t, directory), directory, 2, 1, nil)
+	instance, allocation := testInstanceAndAllocation(directory)
+	provisionReady(t, client, instance, allocation)
+	client.handleInstanceMessage(context.Background(), testDispatchMessage(instance, allocation, "run-one"))
+	waitForMessage(t, client, "run.started")
+
+	client.handleInstanceMessage(context.Background(), testReleaseMessage(allocation, "drain"))
+	require.Eventually(t, func() bool {
+		client.residents.mu.Lock()
+		defer client.residents.mu.Unlock()
+		resident := client.residents.residentsTable[allocation.ID]
+		return resident != nil && resident.state == residentDraining
+	}, 5*time.Second, 5*time.Millisecond, "the drain must be visibly waiting before the replay arrives")
+
+	// The exact replay carries only refreshed hub-side bookkeeping, so it matches the draining
+	// resident; acknowledging instance.ready would advertise capacity the hub can no longer dispatch to.
+	replayedInstance := instance
+	replayedInstance.Status = "ready"
+	replayedInstance.UpdatedAt = "2026-09-24T12:10:00Z"
+	client.handleInstanceMessage(context.Background(), testProvisionMessage(replayedInstance, allocation))
+	failed := waitForInstanceReason(t, client, "instance.failed", allocation.ID, "draining")
+	require.Equal(t, allocation.ID, failed.AllocationID)
+	readyMessages := 0
+	for _, message := range instanceControlMessages(t, client) {
+		if message.Type == "instance.ready" && message.AllocationID == allocation.ID {
+			readyMessages++
+		}
+	}
+	require.Equal(t, 1, readyMessages, "a replay against a draining resident must not add a second instance.ready")
+	require.Equal(t, 1, client.activeInstanceCount(), "the replay must neither reserve nor free a slot")
+
+	// The drain still owns the outcome: finish the run the way a hub cancel would and require the
+	// release to complete without the replay having reopened the resident.
+	client.handle(context.Background(), protocol.Inbound{Type: "cancel", RunID: "run-one"})
+	require.NotNil(t, waitForMessage(t, client, "run.cancelled"))
+	require.NotNil(t, waitForInstanceMessage(t, client, "instance.released", allocation.ID))
+	require.Zero(t, client.activeInstanceCount())
+}
+
 func TestDrainWaitsForActiveRunsBeforeReportingReleased(t *testing.T) {
 	directory := t.TempDir()
 	client := instanceTestClient(t, slowHarnessBinary(t, directory), directory, 2, 1, nil)
