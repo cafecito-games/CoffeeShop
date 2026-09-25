@@ -281,6 +281,41 @@ func TestProvisionReplayIsExactAndConflictsAreRefused(t *testing.T) {
 	require.NotNil(t, waitForMessage(t, client, "run.completed"), "the original resident still dispatches")
 }
 
+func TestProvisionReplayConflictsOnEveryImmutableInstanceField(t *testing.T) {
+	directory := t.TempDir()
+	client := instanceTestClient(t, quickHarnessBinary(t, directory), directory, 2, 2, nil)
+	instance, allocation := testInstanceAndAllocation(directory)
+	provisionReady(t, client, instance, allocation)
+
+	differentCreator := instance
+	differentCreator.Creator = protocol.InstanceCreator{Kind: "run", RunID: "run-one", InstanceID: "instance-two"}
+	skills := []string{"frontend-design"}
+	differentRequirements := instance
+	differentRequirements.Requirements.Skills = &skills
+	differentPurpose := instance
+	instructions := "Build the mobile shell."
+	differentPurpose.Purpose = &protocol.InstancePurpose{Instructions: &instructions}
+
+	for name, replay := range map[string]protocol.AgentInstance{
+		"creator":      differentCreator,
+		"requirements": differentRequirements,
+		"purpose":      differentPurpose,
+	} {
+		t.Run(name, func(t *testing.T) {
+			client.handleInstanceMessage(context.Background(), testProvisionMessage(replay, allocation))
+			waitForInstanceReason(t, client, "instance.failed", allocation.ID, "a different resident is already hosted for this allocation")
+		})
+	}
+	require.Equal(t, 1, client.activeInstanceCount(), "a conflicting replay must never replace the original resident")
+
+	refreshed := instance
+	refreshed.Lease.ExpiresAt = "2026-09-24T13:30:00Z"
+	refreshed.Lease.IdleTimeoutSeconds = 3600
+	refreshed.Status = "ready"
+	client.handleInstanceMessage(context.Background(), testProvisionMessage(refreshed, allocation))
+	waitForInstanceMessageCount(t, client, "instance.ready", allocation.ID, 2)
+}
+
 func TestProvisionAfterReleaseRefusesToReopenTheAllocation(t *testing.T) {
 	directory := t.TempDir()
 	client := instanceTestClient(t, quickHarnessBinary(t, directory), directory, 2, 2, nil)
@@ -329,8 +364,6 @@ func TestDispatchRequiresAnExactReadyAllocation(t *testing.T) {
 	delegatingInstance.Delegation = protocol.InstanceDelegationPolicy{CanDelegate: true}
 	otherThread := instance
 	otherThread.ThreadID = "thread-other"
-	otherLease := allocation
-	otherLease.Lease.ExpiresAt = "2026-09-24T13:30:00Z"
 
 	cases := []struct {
 		name       string
@@ -342,7 +375,6 @@ func TestDispatchRequiresAnExactReadyAllocation(t *testing.T) {
 		{"different instance", unknownInstance, allocation, "approved identity or placement"},
 		{"different thread", otherThread, allocation, "approved identity or placement"},
 		{"different delegation policy", delegatingInstance, allocation, "approved identity or placement"},
-		{"different lease", instance, otherLease, "approved identity or placement"},
 	}
 	for _, item := range cases {
 		t.Run(item.name, func(t *testing.T) {
@@ -379,6 +411,28 @@ func TestDispatchRequiresAnExactReadyAllocation(t *testing.T) {
 		message.Run.WorkspaceLeaseID = &lease
 		requireDispatchFailure(t, message, "run-lease", "unsupported execution: the run's workspace lease grant is missing or names a different lease")
 	})
+}
+
+func TestDispatchAfterLeaseRenewalIsAccepted(t *testing.T) {
+	directory := t.TempDir()
+	client := instanceTestClient(t, quickHarnessBinary(t, directory), directory, 2, 1, nil)
+	instance, allocation := testInstanceAndAllocation(directory)
+	provisionReady(t, client, instance, allocation)
+
+	// The protocol defines the lease as mutable — accepted work or an authorized renewal refreshes
+	// its expiry and idle timeout — while the identity and placement stay fixed. A dispatch that
+	// carries the renewed records must be admitted, not rejected as a different resident.
+	renewedInstance, renewedAllocation := instance, allocation
+	renewedInstance.Lease.ExpiresAt = "2026-09-24T13:30:00Z"
+	renewedInstance.Lease.IdleTimeoutSeconds = 3600
+	renewedInstance.Status = "idle"
+	renewedInstance.UpdatedAt = "2026-09-24T12:10:00Z"
+	renewedAllocation.Lease.ExpiresAt = "2026-09-24T13:30:00Z"
+	renewedAllocation.Lease.IdleTimeoutSeconds = 3600
+	renewedAllocation.Status = "active"
+	renewedAllocation.UpdatedAt = "2026-09-24T12:10:00Z"
+	client.handleInstanceMessage(context.Background(), testDispatchMessage(renewedInstance, renewedAllocation, "run-one"))
+	require.NotNil(t, waitForMessage(t, client, "run.completed"), "a dispatch on the renewed lease must be admitted")
 }
 
 func TestDispatchRejectsWhileDrainingAndAfterRelease(t *testing.T) {
@@ -686,6 +740,46 @@ func TestInstanceMessagesFromTheProtocolFixturesAreAccepted(t *testing.T) {
 	require.Zero(t, client.activeInstanceCount())
 }
 
+// The resident comparator is exercised against the committed producer fixtures — the exact output
+// of instanceFixtureProducer in apps/control-agent/internal/protocol/instances_test.go:21 — rather
+// than hand-built records, so the fields it compares are the fields the real wire carries.
+func TestResidentMatchingAgainstTheProtocolFixtures(t *testing.T) {
+	provisionData, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "packages", "protocol", "test", "fixtures", "control-v5", "provision.json"))
+	require.NoError(t, err)
+	provision, err := protocol.DecodeInstanceHubMessage(provisionData, protocol.Version)
+	require.NoError(t, err)
+	dispatchData, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "packages", "protocol", "test", "fixtures", "control-v5", "dispatch.json"))
+	require.NoError(t, err)
+	dispatch, err := protocol.DecodeInstanceHubMessage(dispatchData, protocol.Version)
+	require.NoError(t, err)
+
+	resident := residentInstance{instance: *provision.Instance, allocation: *provision.Allocation}
+
+	// The dispatch fixture carries hub-side bookkeeping the provision fixture does not — ready and
+	// active statuses — while identity, specification, and placement are unchanged.
+	require.True(t, resident.matches(*dispatch.Instance, *dispatch.Allocation))
+
+	renewedInstance, renewedAllocation := *dispatch.Instance, *dispatch.Allocation
+	renewedInstance.Lease.ExpiresAt = "2026-09-24T14:30:00Z"
+	renewedInstance.Lease.IdleTimeoutSeconds = protocol.MaximumInstanceIdleTimeoutSeconds
+	renewedAllocation.Lease.ExpiresAt = "2026-09-24T14:30:00Z"
+	renewedAllocation.Lease.IdleTimeoutSeconds = protocol.MaximumInstanceIdleTimeoutSeconds
+	require.True(t, resident.matches(renewedInstance, renewedAllocation), "a renewal refreshes the lease without changing identity or placement")
+
+	conflictingCreator := renewedInstance
+	conflictingCreator.Creator = protocol.InstanceCreator{Kind: "run", RunID: "run-one", InstanceID: renewedInstance.ID}
+	require.False(t, resident.matches(conflictingCreator, renewedAllocation), "the creator is immutable instance provenance")
+
+	conflictingRequirements := renewedInstance
+	skills := []string{"frontend-design"}
+	conflictingRequirements.Requirements.Skills = &skills
+	require.False(t, resident.matches(conflictingRequirements, renewedAllocation), "the original requirements are immutable")
+
+	conflictingPlacement := renewedAllocation
+	conflictingPlacement.Workspace = "/other"
+	require.False(t, resident.matches(renewedInstance, conflictingPlacement), "the resolved placement is immutable")
+}
+
 func TestEveryInstanceHubMessageTypeAndReleaseModeIsHandled(t *testing.T) {
 	directory := t.TempDir()
 	for _, messageType := range protocol.InstanceHubMessageTypes {
@@ -787,20 +881,24 @@ func TestReleaseAfterReconnectCancelsRunsAndReleasesTheResident(t *testing.T) {
 func TestConcurrentProvisionDispatchAndReleaseStayConsistent(t *testing.T) {
 	directory := t.TempDir()
 	client := instanceTestClient(t, quickHarnessBinary(t, directory), directory, 4, 2, nil)
-	instance, allocation := testInstanceAndAllocation(directory)
 
+	// Each round hosts a fresh allocation and lets its provision, dispatch, and release race freely;
+	// rounds are separated by waiting for the round's release outcome, because a release that
+	// arrives while a drain is still settling is ignored by design and would otherwise swallow that
+	// round's instance.released nondeterministically.
 	const rounds = 20
 	for round := 0; round < rounds; round++ {
+		instance, allocation := testInstanceAndAllocationFor(fmt.Sprintf("instance-%d", round), fmt.Sprintf("allocation-%d", round), directory)
 		client.handleInstanceMessage(context.Background(), testProvisionMessage(instance, allocation))
 		go client.handleInstanceMessage(context.Background(), testDispatchMessage(instance, allocation, fmt.Sprintf("run-%d", round)))
 		client.handleInstanceMessage(context.Background(), testReleaseMessage(allocation, "cancel"))
+		waitForInstanceMessageCount(t, client, "instance.released", allocation.ID, 1)
 	}
 	deadline := time.Now().Add(10 * time.Second)
 	for client.activeRuns() > 0 && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	require.Zero(t, client.activeRuns())
-	waitForInstanceMessageCount(t, client, "instance.released", allocation.ID, rounds)
 	require.Zero(t, client.activeInstanceCount(), "every round's release completed and freed the slot")
 	// The resident table never leaks a run membership entry after everything settled.
 	client.residents.mu.Lock()

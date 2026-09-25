@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"reflect"
 	"sort"
 	"sync"
 	"unicode/utf8"
@@ -27,9 +28,10 @@ const (
 )
 
 // residentInstance is one resident allocation hosted by this Barista. The instance identity,
-// delegation policy, and resolved placement are immutable for the allocation's lifetime; the
-// allocation ID is the lifecycle generation on the wire, because its resolved identity can never
-// change — replacement requires a new ID.
+// creator, purpose, delegation policy, requirements, and resolved placement are immutable for the
+// allocation's lifetime; the lease, status, and timestamps are hub-side mutable state that an
+// exact replay or an accepted dispatch refreshes. The allocation ID is the lifecycle generation on
+// the wire, because its resolved identity can never change — replacement requires a new ID.
 type residentInstance struct {
 	instance   protocol.AgentInstance
 	allocation protocol.InstanceAllocation
@@ -77,20 +79,32 @@ func (resident *residentInstance) closeSettledLocked() {
 	}
 }
 
-// matches reports whether the immutable identity, delegation policy, and resolved placement of a
-// provision or dispatch replay equal the hosted resident's. Hub-side mutable bookkeeping (status
-// and timestamps) is deliberately not compared.
+// immutableResidentForm clears the protocol-defined mutable fields of the instance and allocation
+// records — the lease, which accepted work or an authorized renewal refreshes, and the hub-side
+// status and timestamps — leaving the immutable identity, creator, purpose, delegation policy,
+// requirements, and resolved placement. Every other field of the wire records stays in the form, so
+// a field the protocol adds later is compared by default instead of being silently skipped.
+func immutableResidentForm(instance protocol.AgentInstance, allocation protocol.InstanceAllocation) (protocol.AgentInstance, protocol.InstanceAllocation) {
+	instance.Lease = protocol.InstanceLease{}
+	instance.Status = ""
+	instance.CreatedAt = ""
+	instance.UpdatedAt = ""
+	allocation.Lease = protocol.InstanceLease{}
+	allocation.Status = ""
+	allocation.CreatedAt = ""
+	allocation.UpdatedAt = ""
+	return instance, allocation
+}
+
+// matches reports whether the immutable identity, specification, and resolved placement of a
+// provision or dispatch equal the hosted resident's. The mutable hub-side state — the lease and its
+// bookkeeping — is cleared on both sides first, so a resident whose lease the hub renewed still
+// matches the dispatches that follow the renewal.
 func (resident *residentInstance) matches(instance protocol.AgentInstance, allocation protocol.InstanceAllocation) bool {
-	return resident.instance.ID == instance.ID &&
-		resident.instance.ThreadID == instance.ThreadID &&
-		resident.instance.Delegation == instance.Delegation &&
-		resident.allocation.InstanceID == allocation.InstanceID &&
-		resident.allocation.NodeID == allocation.NodeID &&
-		resident.allocation.HarnessID == allocation.HarnessID &&
-		resident.allocation.Model == allocation.Model &&
-		resident.allocation.Transport == allocation.Transport &&
-		resident.allocation.Workspace == allocation.Workspace &&
-		resident.allocation.Lease == allocation.Lease
+	residentInstanceRecord, residentAllocationRecord := immutableResidentForm(resident.instance, resident.allocation)
+	messageInstanceRecord, messageAllocationRecord := immutableResidentForm(instance, allocation)
+	return reflect.DeepEqual(residentInstanceRecord, messageInstanceRecord) &&
+		reflect.DeepEqual(residentAllocationRecord, messageAllocationRecord)
 }
 
 // recordReleasedLocked remembers a completed release outcome under the bound above.
@@ -173,6 +187,11 @@ func (client *Client) provisionInstance(message protocol.InstanceHubMessage) {
 	if existing, hosted := client.residents.residentsTable[allocation.ID]; hosted {
 		exactReplay := existing.matches(instance, allocation)
 		heldByFailedCleanup := existing.state == residentCleanupFailed
+		if exactReplay {
+			// An exact replay may carry refreshed hub-side bookkeeping — a renewed lease, new status
+			// or timestamps — which the hosted records adopt without touching identity or placement.
+			existing.instance, existing.allocation = instance, allocation
+		}
 		client.residents.mu.Unlock()
 		if !exactReplay {
 			client.reportInstanceFailure(allocation.ID, instance.ID, "a different resident is already hosted for this allocation")
@@ -341,6 +360,10 @@ func (client *Client) dispatchInstance(ctx context.Context, message protocol.Ins
 		mismatch = "no resident allocation on this Barista matches the dispatch"
 	case !resident.matches(instance, allocation):
 		mismatch = "the dispatch does not match the resident allocation's approved identity or placement"
+	default:
+		// Accepted work refreshes the lease, so the dispatch's hub-side bookkeeping is adopted the
+		// same way an exact provision replay's is.
+		resident.instance, resident.allocation = instance, allocation
 	}
 	client.residents.mu.Unlock()
 	if mismatch != "" {

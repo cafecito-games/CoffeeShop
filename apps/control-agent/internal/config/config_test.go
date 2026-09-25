@@ -5,9 +5,11 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/protocol"
 	"github.com/stretchr/testify/require"
 )
 
@@ -491,8 +493,30 @@ func TestParseInstanceCapacityDefaultsToConcurrencyAndHonorsExplicitValues(t *te
 		require.EqualError(t, err, `BARISTA_INSTANCE_CAPACITY must be a non-negative integer`)
 	})
 
-	t.Run("rejects a capacity above the protocol bound", func(t *testing.T) {
-		_, err := Parse([]string{"--name", "Worker 1", "--id", "worker-1", "--instance-capacity", "65536"})
-		require.ErrorContains(t, err, "instance capacity must be between 0 and 65535")
+	t.Run("rejects a capacity above the protocol reconciliation bound", func(t *testing.T) {
+		above := strconv.Itoa(protocol.InstanceCollectionEntries + 1)
+		_, err := Parse([]string{"--name", "Worker 1", "--id", "worker-1", "--instance-capacity", above})
+		require.ErrorContains(t, err, fmt.Sprintf("instance capacity must be between 0 and %d", protocol.InstanceCollectionEntries))
+	})
+
+	t.Run("accepts a capacity at the protocol reconciliation bound", func(t *testing.T) {
+		atBound := strconv.Itoa(protocol.InstanceCollectionEntries)
+		parsed, err := Parse([]string{"--name", "Worker 1", "--id", "worker-1", "--instance-capacity", atBound})
+		require.NoError(t, err)
+		require.Equal(t, protocol.InstanceCollectionEntries, parsed.InstanceCapacity)
+	})
+
+	t.Run("rejects a concurrency above the protocol reconciliation bound", func(t *testing.T) {
+		t.Setenv("BARISTA_INSTANCE_CAPACITY", "")
+		t.Setenv("BARISTA_CONCURRENCY", strconv.Itoa(protocol.InstanceCollectionEntries+1))
+		_, err := Parse([]string{"--name", "Worker 1", "--id", "worker-1"})
+		require.ErrorContains(t, err, fmt.Sprintf("concurrency must not exceed %d", protocol.InstanceCollectionEntries))
+	})
+
+	t.Run("rejects a capacity defaulted from an over-bound concurrency", func(t *testing.T) {
+		t.Setenv("BARISTA_INSTANCE_CAPACITY", "")
+		t.Setenv("BARISTA_CONCURRENCY", strconv.Itoa(protocol.InstanceCollectionEntries+1))
+		_, err := Parse([]string{"--name", "Worker 1", "--id", "worker-1", "--concurrency", "2"})
+		require.ErrorContains(t, err, fmt.Sprintf("instance capacity must be between 0 and %d", protocol.InstanceCollectionEntries))
 	})
 }

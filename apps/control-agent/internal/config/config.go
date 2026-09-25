@@ -192,8 +192,16 @@ func Parse(args []string) (Config, error) {
 	if *limit < 1 {
 		return Config{}, errors.New("concurrency must be at least one")
 	}
-	if *instanceCapacity < 0 || *instanceCapacity > protocol.InstanceCountMaximum {
-		return Config{}, fmt.Errorf("instance capacity must be between 0 and %d", protocol.InstanceCountMaximum)
+	// A reconnect's sync.complete must carry every active run id and every resident instance id,
+	// and the protocol caps both collections at InstanceCollectionEntries. Concurrency bounds the
+	// active runs and instance capacity bounds the residents, so either setting above that cap is
+	// a state the node can reach but never encode in a valid sync.complete; configuration refuses
+	// it here rather than letting the node discover the overflow mid-flight.
+	if *limit > protocol.InstanceCollectionEntries {
+		return Config{}, fmt.Errorf("concurrency must not exceed %d, the protocol's bound on the ids a reconnect must reconcile", protocol.InstanceCollectionEntries)
+	}
+	if *instanceCapacity < 0 || *instanceCapacity > protocol.InstanceCollectionEntries {
+		return Config{}, fmt.Errorf("instance capacity must be between 0 and %d, the protocol's bound on the ids a reconnect must reconcile", protocol.InstanceCollectionEntries)
 	}
 	for _, project := range projects {
 		if !projectIDPattern.MatchString(project) {
