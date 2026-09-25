@@ -142,16 +142,18 @@ export function addOrchestrationDefaults(state: State) {
  * Initializes the version-5 instance collections of a snapshot persisted before they existed. Empty
  * defaults are deterministic: no legacy record is migrated into an instance or allocation, and an
  * absent collection is not a migration, so a legacy file the hub loads is not rewritten for this —
- * the defaults reach disk with the next real transaction.
+ * the defaults reach disk with the next real transaction. Only a missing field is a legacy
+ * snapshot: an explicitly present but malformed value (null, wrong type) is left for validation to
+ * reject, never silently replaced with a default.
  */
 export function addInstanceDefaults(state: State) {
-  state.instances ??= [];
-  state.allocations ??= [];
-  state.templates ??= [];
-  state.instanceLifecycleReceipts ??= [];
-  state.instanceReleaseIntents ??= [];
-  state.instanceDeliveries ??= [];
-  state.remoteReleaseRequests ??= [];
+  if (state.instances === undefined) state.instances = [];
+  if (state.allocations === undefined) state.allocations = [];
+  if (state.templates === undefined) state.templates = [];
+  if (state.instanceLifecycleReceipts === undefined) state.instanceLifecycleReceipts = [];
+  if (state.instanceReleaseIntents === undefined) state.instanceReleaseIntents = [];
+  if (state.instanceDeliveries === undefined) state.instanceDeliveries = [];
+  if (state.remoteReleaseRequests === undefined) state.remoteReleaseRequests = [];
 }
 
 /** Rejects malformed or duplicate persisted profiles before they can affect scheduling. */

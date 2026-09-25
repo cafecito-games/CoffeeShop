@@ -54,11 +54,10 @@ export const terminalInstanceStatuses: readonly InstanceStatus[] = ["released", 
 /** The single operator principal behind the hub's bearer-authenticated REST surface. */
 export const operatorInstanceCreator: InstanceCreator = { kind: "operator", operatorId: "operator" };
 
-/** Bounds on retained audit records; pruning never touches a nonterminal record. */
+/** Bounds on retained audit records; pruning never touches a nonterminal record or an actionable outbox entry. */
 export const instanceAuditLimits = {
   retainedTerminalInstances: 200,
-  retainedReceipts: 1_000,
-  retainedRemoteReleases: 500
+  retainedReceipts: 1_000
 } as const;
 
 /** The hub's durable idempotency receipt for one accepted lifecycle request. */
@@ -95,7 +94,13 @@ export interface InstanceDeliveryRecord {
   deliveredAt?: string;
 }
 
-/** A release requested for a resident the hub does not own; never adopted as hub state. */
+/**
+ * A release requested for a resident the hub does not own; never adopted as hub state. Each request
+ * is an actionable outbox entry: it is retained until it is delivered, never pruned, because a v5
+ * sync can report up to `instanceLimits.collectionEntries` unknown residents at once and dropping
+ * any of them would leave a resident supervised indefinitely. Reconciliation deduplicates by node
+ * and instance, so retention cannot grow without new evidence.
+ */
 export interface RemoteReleaseRequest {
   nodeId: string;
   instanceId: string;
@@ -193,6 +198,14 @@ const instanceRequestDigest = (request: InstanceLifecycleRequest): string => {
   return createHash("sha256").update(digestInput.value).digest("hex");
 };
 
+/*
+ * A lifecycle idempotency key may be 128 bytes, and prefixing it would exceed the task-batch key
+ * limit of 128 characters, turning a valid create-with-initial-task into a rejection. Deriving the
+ * namespaced key through a digest keeps it inside that bound for every accepted lifecycle key while
+ * remaining injective for distinct keys.
+ */
+const initialTaskIdempotencyKey = (key: string) => `instance-create:${createHash("sha256").update(key).digest("hex")}`;
+
 const receiptKeyMatches = (receipt: InstanceLifecycleReceipt, threadId: string, sourceKey: string, idempotencyKey: string) =>
   receipt.threadId === threadId && receipt.sourceKey === sourceKey && receipt.idempotencyKey === idempotencyKey;
 
@@ -263,7 +276,7 @@ export async function applyInstanceLifecycle(
           title: request.initialTask.title,
           instructions: request.initialTask.instructions,
           requirements: structuredClone(request.requirements),
-          idempotencyKey: `instance-create:${request.idempotency.key}`,
+          idempotencyKey: initialTaskIdempotencyKey(request.idempotency.key),
           sourceKey
         }, at).id;
       }
@@ -728,28 +741,29 @@ function settleDrainingInstances(state: State, at: string): boolean {
 /**
  * Sends persisted instance commands. A record is written only after `deliver` confirms a current,
  * synced, protocol-v5 connection accepted the write; a refused or failed send records no delivery,
- * so the command replays after the node's next authoritative reconnect. A delivered provision
- * command moves its allocation to `provisioning`, which is what a later `instance.ready` requires.
+ * so the command replays after the node's next authoritative reconnect. The send decision and its
+ * recording happen in one transaction, so a reconciliation that removed the record while this pass
+ * was awaiting can never be raced by a stale send. A delivered provision command moves its
+ * allocation to `provisioning`, which is what a later `instance.ready` requires.
  */
 export async function flushPendingInstanceDeliveries(
   store: Store,
   deliver: (nodeId: string, message: InstanceHubMessage) => boolean
 ): Promise<boolean> {
   let changed = false;
-  const pending = store.read((state) => structuredClone((state.instanceDeliveries ?? []).filter((record) => record.deliveredAt === undefined)));
-  for (const record of pending) {
-    if (!deliver(record.nodeId, record.message)) continue;
-    const deliveredAt = new Date().toISOString();
+  const pending = store.read((state) => (state.instanceDeliveries ?? [])
+    .filter((record) => record.deliveredAt === undefined)
+    .map((record) => ({ allocationId: record.allocationId, kind: record.kind })));
+  for (const { allocationId, kind } of pending) {
     await store.transact((state) => {
-      const target = (state.instanceDeliveries ?? []).find((item) =>
-        item.allocationId === record.allocationId && item.kind === record.kind && item.deliveredAt === undefined);
-      if (!target) return false;
-      target.deliveredAt = deliveredAt;
-      if (record.kind === "provision") {
-        const allocation = (state.allocations ?? []).find((item) => item.id === record.allocationId);
+      const target = (state.instanceDeliveries ?? []).find((item) => item.allocationId === allocationId && item.kind === kind && item.deliveredAt === undefined);
+      if (!target || !deliver(target.nodeId, target.message)) return false;
+      target.deliveredAt = new Date().toISOString();
+      if (target.kind === "provision") {
+        const allocation = (state.allocations ?? []).find((item) => item.id === target.allocationId);
         if (allocation && allocation.status === "reserved" && canTransitionAllocation(allocation.status, "provisioning")) {
           allocation.status = "provisioning";
-          allocation.updatedAt = deliveredAt;
+          allocation.updatedAt = target.deliveredAt;
         }
       }
       changed = true;
@@ -758,12 +772,12 @@ export async function flushPendingInstanceDeliveries(
   }
   const remote = store.read((state) => structuredClone(state.remoteReleaseRequests ?? []));
   for (const request of remote) {
-    const message: InstanceHubMessage = { type: "instance.release", instanceId: request.instanceId, allocationId: request.instanceId, mode: "cancel" };
-    if (!deliver(request.nodeId, message)) continue;
     await store.transact((state) => {
-      const before = state.remoteReleaseRequests?.length ?? 0;
-      state.remoteReleaseRequests = (state.remoteReleaseRequests ?? []).filter((item) => !(item.nodeId === request.nodeId && item.instanceId === request.instanceId));
-      if (state.remoteReleaseRequests.length === before) return false;
+      const target = (state.remoteReleaseRequests ?? []).find((item) => item.nodeId === request.nodeId && item.instanceId === request.instanceId);
+      if (!target) return false;
+      const message: InstanceHubMessage = { type: "instance.release", instanceId: target.instanceId, allocationId: target.instanceId, mode: "cancel" };
+      if (!deliver(target.nodeId, message)) return false;
+      state.remoteReleaseRequests = (state.remoteReleaseRequests ?? []).filter((item) => item !== target);
       changed = true;
       return true;
     });
@@ -784,7 +798,9 @@ export function listThreadInstances(state: Readonly<State>, threadId: string, in
 
 /**
  * Prunes terminal audit records beyond their bounds, oldest first, together with the receipts,
- * intents, and delivery records that reference them. Live records are never touched.
+ * intents, and delivery records that reference them. Live records are never touched, and an
+ * actionable outbox entry — an undelivered provision, release, or remote release request — is
+ * never pruned; only a successful delivery removes it.
  */
 export function pruneInstanceAuditRecords(state: State): boolean {
   let changed = false;
@@ -813,11 +829,6 @@ export function pruneInstanceAuditRecords(state: State): boolean {
       changed = true;
     }
   }
-  const remote = state.remoteReleaseRequests ?? [];
-  if (remote.length > instanceAuditLimits.retainedRemoteReleases) {
-    state.remoteReleaseRequests = remote.sort((left, right) => left.requestedAt.localeCompare(right.requestedAt)).slice(remote.length - instanceAuditLimits.retainedRemoteReleases);
-    changed = true;
-  }
   return changed;
 }
 
@@ -830,6 +841,13 @@ const commandInstanceId = (message: InstanceHubMessage): string => {
 
 /** Rejects persisted instance state the hub cannot interpret; nothing is defaulted. */
 export function assertPersistedInstanceState(state: State) {
+  for (const [name, collection] of [
+    ["instances", state.instances], ["allocations", state.allocations], ["templates", state.templates],
+    ["instanceLifecycleReceipts", state.instanceLifecycleReceipts], ["instanceReleaseIntents", state.instanceReleaseIntents],
+    ["instanceDeliveries", state.instanceDeliveries], ["remoteReleaseRequests", state.remoteReleaseRequests]
+  ] as const) {
+    if (!Array.isArray(collection)) throw new Error(`Persisted ${name} collection is not an array`);
+  }
   const threadIds = new Set((state.threads ?? []).flatMap((thread) => (isRecord(thread) && isNonEmptyString(thread.id) ? [thread.id] : [])));
   const instanceIds = new Set<string>();
   for (const [index, instance] of (state.instances ?? []).entries()) {

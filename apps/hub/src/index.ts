@@ -783,6 +783,17 @@ wss.on("connection", (socket, request) => {
         if (lostAttempts > 0) broadcast();
       }
       if (!controlAgents.markSynced(connection)) return;
+      /*
+       * Instance commands stay behind a second barrier: the resident set reported with this sync
+       * must be applied before any pending provision or release may be written to the socket.
+       * Without it, a maintenance pass could deliver a pending provision between the replay barrier
+       * and reconciliation, and the pre-provision snapshot would then mark it lost, duplicating
+       * residency. Absent evidence opens the barrier with nothing to apply.
+       */
+      const instanceEvidence = supportsControlCapability(protocolVersion, "instances") && hasAuthoritativeInstanceEvidence(decoded)
+        ? { residents: decoded.activeInstanceIds }
+        : undefined;
+      if (!instanceEvidence) controlAgents.openInstanceDelivery(connection);
       await dispatchQueuedRuns(connection, activeRunIds ?? []);
       if (supportsControlCapability(protocolVersion, "orchestration") && activeRunIds !== undefined) {
         reconcileWorkspaceLeases(store, nodeId, activeRunIds, sendAfterBarrier);
@@ -792,14 +803,15 @@ wss.on("connection", (socket, request) => {
       // Explicit resident evidence is authoritative: absent evidence (no valid activeInstanceIds)
       // changes nothing. Everything the node still reports stays, missing allocations become lost,
       // and unknown residents are asked to release without ever being adopted.
-      if (supportsControlCapability(protocolVersion, "instances") && hasAuthoritativeInstanceEvidence(decoded)) {
-        const residents = (decoded as { activeInstanceIds: string[] }).activeInstanceIds;
+      if (instanceEvidence) {
+        const residents = instanceEvidence.residents;
         let reconciled = false;
         await store.transact((state) => {
           reconciled = reconcileNodeInstancesInState(state, nodeId, residents, new Date().toISOString());
           return reconciled;
         });
         if (reconciled) broadcast();
+        controlAgents.openInstanceDelivery(connection);
       }
       await runInstanceMaintenance();
       requestScheduling();

@@ -426,6 +426,38 @@ test("drain waits for active runs and releases an unallocated instance directly"
   });
 });
 
+test("an omitted renewal and an explicit default renewal never share an idempotency digest", async () => {
+  const store = await hubStore((state) => { seedThread(state); seedNode(state); });
+  const created = await applyInstanceLifecycle(store, operatorCaller, createRequest("thread-one", {
+    idleTimeoutSeconds: 3600, idempotency: { caller: operatorCaller, key: "create-one" }
+  }), at(1));
+  // An omitted timeout preserves the instance's existing timeout...
+  const omitted = await applyInstanceLifecycle(store, operatorCaller, renewRequest(created.instance.id, "renew-one"), at(2));
+  assert.equal(omitted.instance.lease.idleTimeoutSeconds, 3600);
+  // ...so an explicit renewal of the same key with the global default must conflict, not replay.
+  await assert.rejects(
+    applyInstanceLifecycle(store, operatorCaller, renewRequest(created.instance.id, "renew-one", 1800), at(3)),
+    /idempotency key was already used/
+  );
+  store.read((state) => {
+    assert.equal(state.instances?.[0].lease.idleTimeoutSeconds, 3600);
+    assert.equal(state.instanceLifecycleReceipts?.length, 2);
+  });
+});
+
+test("a maximum-length idempotency key still creates its initial task", async () => {
+  const store = await hubStore((state) => { seedThread(state); });
+  const result = await applyInstanceLifecycle(store, operatorCaller, createRequest("thread-one", {
+    idempotency: { caller: operatorCaller, key: "k".repeat(128) },
+    initialTask: { title: "First chore", instructions: "Be careful." }
+  }), at(1));
+  assert.notEqual(result.initialTaskId, undefined);
+  store.read((state) => {
+    assert.equal(state.tasks?.length, 1);
+    assert.equal(state.tasks?.[0].threadId, "thread-one");
+  });
+});
+
 test("renewal extends the lease on the instance and its current allocation only while active", async () => {
   const store = await hubStore((state) => { seedThread(state); seedNode(state); });
   const { created, reservation } = await provisionInstance(store);
@@ -597,6 +629,22 @@ test("terminal audit records are retained under explicit pruning bounds", async 
   });
 });
 
+test("pending remote release requests are retained until delivered, beyond any audit bound", async () => {
+  const store = await hubStore((state) => { seedThread(state); seedNode(state); });
+  // More unknown residents than the old retention bound, and deduplication keeps them stable.
+  const unknownResidents = Array.from({ length: 505 }, (_, index) => `foreign-${index}`);
+  await store.transact((state) => {
+    assert.equal(reconcileNodeInstancesInState(state, "node-one", unknownResidents, at(1)), true);
+  });
+  // The maintenance pass prunes audit records; an actionable release request must survive it.
+  await maintainInstanceLifecycle(store, at(2));
+  store.read((state) => assert.equal(state.remoteReleaseRequests?.length, unknownResidents.length));
+  let delivered = 0;
+  await flushPendingInstanceDeliveries(store, () => { delivered += 1; return true; });
+  assert.equal(delivered, unknownResidents.length);
+  store.read((state) => assert.deepEqual(state.remoteReleaseRequests, []));
+});
+
 test("every instance and allocation status is classified exactly once", () => {
   const instancePartition = [nonTerminalInstanceStatuses, ["draining"], ["released", "failed"]];
   assert.deepEqual([...instancePartition].flat().sort(), [...instanceStatuses].sort());
@@ -624,6 +672,8 @@ test("store load rejects malformed or duplicated instance state", async () => {
     delegation: { canDelegate: false }, requirements: { harnessIds: ["claude-cli"] },
     lease: { idleTimeoutSeconds: 1800, expiresAt: at(1000) }, status: "requested", createdAt: at(1), updatedAt: at(1)
   };
+  // Byte-faithful to what the hub itself persists: Store.save writes JSON.stringify of the state
+  // (store.ts private save, the JSON branch), so these fixtures round-trip the real producer.
   const goodState = {
     agents: [], nodes: [], runs: [], events: [], messages: [],
     threads: [{ id: "thread-one", title: "t", objective: "", summary: "", status: "active", ownerAgentId: "agent-one", orchestrator: { kind: "agent", agentId: "agent-one" }, createdBy: "user", createdAt: at(1), updatedAt: at(1) }],
@@ -658,6 +708,10 @@ test("store load rejects malformed or duplicated instance state", async () => {
   await rejects((state) => {
     state.allocations = [allocationFor({ ...baseInstance, id: "ghost" }, "allocation-one")];
   }, /unknown instance/);
+  // An explicit null is malformed persisted state, not an absent legacy collection.
+  await rejects((state) => { state.instances = null; }, /Persisted instances collection is not an array/);
+  await rejects((state) => { state.remoteReleaseRequests = null; }, /Persisted remoteReleaseRequests collection is not an array/);
+  await rejects((state) => { state.instanceDeliveries = "no"; }, /Persisted instanceDeliveries collection is not an array/);
 });
 
 const allocationFor = (instance: AgentInstance, allocationId: string) => ({
