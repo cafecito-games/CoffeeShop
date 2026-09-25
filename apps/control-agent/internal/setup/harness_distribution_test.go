@@ -240,10 +240,10 @@ func harnessArchiveServer(t *testing.T, path string, archive []byte) *httptest.S
 	return server
 }
 
-// harnessManifestFixture builds a one-harness manifest for this test binary's own platform. An
-// archive-kind harness entry has no real vendor pin to copy — neither vendor publishes a
-// checksummed public archive Barista could pin today — so the archive path is proven against a
-// locally built archive instead of a fabricated URL and digest.
+// harnessManifestFixture builds a one-harness manifest for this test binary's own platform. Its
+// archive-kind fixtures deliberately do not reuse the shipped codex-cli pin: a test must never
+// depend on vendor availability or fetch a vendor artifact, so every archive path here is proven
+// against a locally built archive served in-process, never against a real download.
 func harnessManifestFixture(t *testing.T, id string, version string, distributionJSON string) ([]byte, Manifest) {
 	t.Helper()
 	manifestJSON := []byte(fmt.Sprintf(`{"manifestVersion":%q,"components":[`+
