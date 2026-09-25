@@ -17,6 +17,7 @@ import {
 import { CoordinationError } from "./coordinationError.js";
 import {
   applyInstanceLifecycle,
+  applyNodeResidencyInState,
   classifyInstanceResidentEvidence,
   classifyReportedInstanceCount,
   currentAllocationInState,
@@ -111,6 +112,19 @@ const renewRequest = (instanceId: string, key: string, idleTimeoutSeconds?: numb
 const candidate = (workspace: string) => ({
   nodeId: "node-one", harnessId: "claude-cli" as const, model: "fable", transport: "native-cli" as const, workspace
 });
+
+/**
+ * Applies one node heartbeat's resident identities the way the socket handler does: the frame is
+ * Barista's own heartbeat bytes with the resident set substituted, read by the shared tri-state
+ * classifier, and written only when that classifier calls it authoritative.
+ */
+const heartbeat = async (store: Store, residents: readonly string[], observedAt: string, nodeId = "node-one") => {
+  const frame = { ...controlFixture("heartbeat"), nodeId, activeInstances: residents.length, activeInstanceIds: [...residents] };
+  const evidence = classifyInstanceResidentEvidence(frame, "5", "heartbeat");
+  assert.equal(evidence.kind, "authoritative", JSON.stringify(evidence));
+  await store.transact((state) =>
+    applyNodeResidencyInState(state, nodeId, (evidence as { residents: readonly string[] }).residents, observedAt));
+};
 
 /** Creates, reserves, and delivers one instance so its allocation reports `provisioning`. */
 const provisionInstance = async (store: Store) => {
@@ -298,15 +312,16 @@ test("an authoritative resident record supersedes the reported scalar, which is 
   // An identity in both sets is counted once; an unowned one adds a slot of its own.
   assert.deepEqual(residentInstanceUsage(node, allocations, residency(["a", "b"])), { capacity: 8, used: 2 });
   assert.deepEqual(residentInstanceUsage(node, allocations, residency(["a", "foreign"])), { capacity: 8, used: 3 });
-  // A resident whose release the node acknowledged holds no slot, however stale the record is.
-  assert.deepEqual(residentInstanceUsage(node, allocations, residency(["d"])), { capacity: 8, used: 2 });
   /*
-   * A failed allocation is not that proof. Barista retains the resident when release cleanup fails and
-   * reports `instance.failed` afterwards, so an identity the record still names keeps its slot. This
-   * replaces an assertion that a failed allocation was discounted exactly like a released one.
+   * No settled local status discounts an identity the node reports. The record is the node's own word
+   * as of its latest heartbeat, so a `released`, `failed` or `lost` allocation of the hub's is older
+   * evidence than the record rather than newer, and each of the three counts while the record names
+   * the identity. This replaces three assertions that read those statuses back over the record — the
+   * `released` discount, its `failed` sibling, and the vacancy statement that generalized them — each
+   * of which freed a slot Barista still held. The node's next report is what drops the identity.
    */
+  assert.deepEqual(residentInstanceUsage(node, allocations, residency(["d"])), { capacity: 8, used: 3 });
   assert.deepEqual(residentInstanceUsage(node, allocations, residency(["f"])), { capacity: 8, used: 3 });
-  // A lost allocation is not vacancy evidence either: where that identity went is unknown.
   assert.deepEqual(residentInstanceUsage(node, allocations, residency(["c"])), { capacity: 8, used: 3 });
   // Another node's record never decides this node's usage, so the unnamed count still bounds it.
   assert.deepEqual(residentInstanceUsage(node, allocations, { nodeId: "node-two", instanceIds: [], observedAt: at(2) }), { capacity: 8, used: 5 });
@@ -343,16 +358,17 @@ test("a scalar-only node is never overbooked by reservations its count cannot na
   assert.equal(admitted.kind, "reserved", JSON.stringify(admitted));
 });
 
-test("a released resident stops occupying its slot without waiting for another snapshot", async () => {
+test("a released resident's slot frees on the node's next report, which the hub never edits", async () => {
   /*
-   * A reconnect records the resident in the node's residency record, and the record overrides later
-   * heartbeat counts. The node then acknowledges the release, which makes the allocation non-occupying
-   * — so the slot must be free at once. Waiting for the next `sync.complete` would refuse a valid
-   * reservation for as long as the node stays connected.
+   * The hub's copy of a node's resident set is the node's own snapshot and stays byte-faithful to it:
+   * an acknowledged release does not edit it, and nothing derived from the hub's allocation statuses
+   * is subtracted from it when it is read. What frees the slot is the node's next report, which no
+   * longer names the resident — the release outbox and its load validation both depend on the record
+   * saying only what the node said.
    */
   const store = await hubStore((state) => { seedThread(state); seedNode(state, { instanceCapacity: 1 }); });
   const { created, reservation } = await provisionInstance(store);
-  await store.transact((state) => { reconcileNodeInstancesInState(state, "node-one", [created.instance.id], at(3)); return true; });
+  await heartbeat(store, [created.instance.id], at(3));
   assert.equal((await receiveInstanceLifecycleReport(store, "node-one", readyReport(created.instance.id, reservation.allocation.id), at(4))).kind, "accepted");
   await applyInstanceLifecycle(store, operatorCaller, releaseRequest(created.instance.id, "release-one", "drain"), at(5));
   const released = await receiveInstanceLifecycleReport(store, "node-one", releasedReport(created.instance.id, reservation.allocation.id), at(6));
@@ -362,35 +378,32 @@ test("a released resident stops occupying its slot without waiting for another s
     idempotency: { caller: operatorCaller, key: "create-two" }
   }), at(7));
   store.read((state) => {
-    // The record still names the released resident: it is the node's snapshot, not hub bookkeeping.
+    // The record still names the released resident: it is the node's report, not hub bookkeeping.
     assert.deepEqual(nodeResidencyInState(state, "node-one")?.instanceIds, [created.instance.id]);
-    assert.deepEqual(residentInstanceUsageInState(state, state.nodes[0]), { capacity: 1, used: 0 });
+    assert.deepEqual(residentInstanceUsageInState(state, state.nodes[0]), { capacity: 1, used: 1 });
   });
-  const reserved = await reserveInstanceAllocation(store, replacement.instance.id, candidate("/work/two"), at(8));
+  await heartbeat(store, [], at(8));
+  store.read((state) => assert.deepEqual(nodeResidencyInState(state, "node-one")?.instanceIds, []));
+  const reserved = await reserveInstanceAllocation(store, replacement.instance.id, candidate("/work/two"), at(9));
   assert.equal(reserved.kind, "reserved", JSON.stringify(reserved));
-  // A resident the node still reports and has not settled keeps its slot, so the discount is evidence
-  // driven rather than a blanket exemption for anything the record names.
+  // A resident the node reports that the hub owns no occupying allocation for still holds a slot, so
+  // occupancy follows the report rather than exempting anything the record happens to name.
   store.read((state) => {
-    const withStranger = { nodeId: "node-one", instanceIds: [created.instance.id, "foreign-instance"], observedAt: at(9) };
-    assert.deepEqual(residentInstanceUsage(state.nodes[0], state.allocations ?? [], withStranger), { capacity: 1, used: 2 });
+    const withStranger = { nodeId: "node-one", instanceIds: [created.instance.id, "foreign-instance"], observedAt: at(10) };
+    assert.deepEqual(residentInstanceUsage(state.nodes[0], state.allocations ?? [], withStranger), { capacity: 1, used: 3 });
   });
 });
 
 /*
- * This replaces a test named "an acknowledged failure also frees the slot its residency record still
- * names", which asserted `used: 0` and a successful replacement reservation after `instance.failed`.
- * That assertion was wrong about the producer: merged Barista retains the resident in its table when
+ * A failed allocation is not proof the slot is free: Barista retains the resident in its table when
  * release cleanup fails and only then reports `instance.failed`
- * (apps/control-agent/internal/controlplane/instances.go), so a failed allocation is not proof the
- * slot is free and discounting it overbooks a capacity-1 node. The replacement keeps everything the
- * old test covered - the acknowledgement is accepted, the record still names the resident, and the
- * slot does eventually free for a replacement - and adds what the old one asserted backwards: the
- * slot stays occupied until the node's own snapshot stops naming the identity.
+ * (apps/control-agent/internal/controlplane/instances.go). The slot stays occupied until the node's
+ * own report stops naming the identity, and the hub asks the node to evict the resident it retained.
  */
 test("an acknowledged failure keeps its slot until the node stops naming the resident", async () => {
   const store = await hubStore((state) => { seedThread(state); seedNode(state, { instanceCapacity: 1 }); });
   const { created, reservation } = await provisionInstance(store);
-  await store.transact((state) => { reconcileNodeInstancesInState(state, "node-one", [created.instance.id], at(3)); return true; });
+  await heartbeat(store, [created.instance.id], at(3));
   assert.equal((await receiveInstanceLifecycleReport(store, "node-one", failedReport(created.instance.id, reservation.allocation.id), at(4))).kind, "accepted");
   const replacement = await applyInstanceLifecycle(store, operatorCaller, createRequest("thread-one", {
     idempotency: { caller: operatorCaller, key: "create-two" }
@@ -405,11 +418,11 @@ test("an acknowledged failure keeps its slot until the node stops naming the res
   assert.equal(refused.kind, "capacity", JSON.stringify(refused));
 
   /*
-   * The failed allocation no longer occupies, so the node's next snapshot does not expect the
-   * identity: the hub asks the node to evict the resident it retained, through the remote release
-   * outbox that addresses a resident the hub owns no allocation for.
+   * The failed allocation no longer occupies, so the node's next report names a resident the hub owns
+   * nothing for: the hub asks the node to evict it, through the remote release outbox that addresses a
+   * resident the hub holds no allocation for.
    */
-  await store.transact((state) => { reconcileNodeInstancesInState(state, "node-one", [created.instance.id], at(7)); return true; });
+  await heartbeat(store, [created.instance.id], at(7));
   store.read((state) => {
     assert.deepEqual(state.remoteReleaseRequests?.map((request) => request.instanceId), [created.instance.id]);
     assert.deepEqual(residentInstanceUsageInState(state, state.nodes[0]), { capacity: 1, used: 1 });
@@ -418,8 +431,8 @@ test("an acknowledged failure keeps its slot until the node stops naming the res
   await flushPendingInstanceDeliveries(store, (_nodeId, message) => { sent.push(message.type); return true; });
   assert.deepEqual(sent, ["instance.release"]);
 
-  // Only the node's own snapshot dropping the identity frees the slot.
-  await store.transact((state) => { reconcileNodeInstancesInState(state, "node-one", [], at(8)); return true; });
+  // Only the node's own report dropping the identity frees the slot.
+  await heartbeat(store, [], at(8));
   store.read((state) => {
     assert.deepEqual(state.remoteReleaseRequests, []);
     assert.deepEqual(residentInstanceUsageInState(state, state.nodes[0]), { capacity: 1, used: 0 });
@@ -428,17 +441,15 @@ test("an acknowledged failure keeps its slot until the node stops naming the res
 });
 
 /*
- * The round-6 finding, and the four ways accepting a rejected report as evidence could go wrong.
- *
- * All five share one setup: the node retains a resident after a release-cleanup failure, so the
- * allocation and the instance are terminal `failed` while the node's snapshot still names the
- * identity. A later retry then succeeds, and its `instance.released` is not a legal transition for
- * either record and never will be. Lifecycle authority must still refuse it; residency evidence must
- * still take it.
+ * The setup: the node retains a resident after a release-cleanup failure, so the allocation and the
+ * instance are terminal `failed` while the node's report still names the identity. A later retry then
+ * succeeds, and its `instance.released` is not a legal transition for either record and never will be.
+ * Lifecycle authority refuses it, and it carries no residency weight either — the node's next report
+ * is what frees the slot.
  */
 const retainedResidentAfterCleanupFailure = async (store: Store) => {
   const { created, reservation } = await provisionInstance(store);
-  await store.transact((state) => { reconcileNodeInstancesInState(state, "node-one", [created.instance.id], at(3)); return true; });
+  await heartbeat(store, [created.instance.id], at(3));
   assert.equal((await receiveInstanceLifecycleReport(store, "node-one", readyReport(created.instance.id, reservation.allocation.id), at(4))).kind, "accepted");
   await applyInstanceLifecycle(store, operatorCaller, releaseRequest(created.instance.id, "release-one", "drain"), at(5));
   const drained: string[] = [];
@@ -448,146 +459,17 @@ const retainedResidentAfterCleanupFailure = async (store: Store) => {
   return { created, reservation };
 };
 
-test("a release the lifecycle rejects still frees the slot the node says it vacated", async () => {
+test("a superseded, foreign, or mismatched acknowledgement frees no slot and changes nothing", async () => {
   /*
-   * The authoritative reconnect asks the node to evict the resident its cleanup failure retained, the
-   * retry succeeds, and Barista deletes the resident from its table before acknowledging the original
-   * allocation. That acknowledgement is not a legal transition — both records are terminal `failed` —
-   * but it is the owning node's own statement that the slot is free, and it is the only such statement
-   * the hub will get until the node reconnects again, because Barista sends identity snapshots on
-   * attachment and not on heartbeats. Discarding it is what left a capacity-1 node unavailable
-   * indefinitely.
-   */
-  const store = await hubStore((state) => { seedThread(state); seedNode(state, { instanceCapacity: 1 }); });
-  const { created, reservation } = await retainedResidentAfterCleanupFailure(store);
-  await store.transact((state) => { reconcileNodeInstancesInState(state, "node-one", [created.instance.id], at(7)); return true; });
-  const sent: string[] = [];
-  await flushPendingInstanceDeliveries(store, (_nodeId, message) => { sent.push(message.type); return true; });
-  assert.deepEqual(sent, ["instance.release"], "the retained resident is addressed through the remote release outbox");
-  store.read((state) => {
-    assert.deepEqual(residentInstanceUsageInState(state, state.nodes[0]), { capacity: 1, used: 1 }, "the retained resident still holds its slot");
-  });
-
-  const retry = await receiveInstanceLifecycleReport(store, "node-one", releasedReport(created.instance.id, reservation.allocation.id), at(8));
-  assert.equal(retry.kind, "rejected", JSON.stringify(retry));
-  assert.match(retry.reason ?? "", /legal transition/);
-  store.read((state) => {
-    assert.deepEqual(residentInstanceUsageInState(state, state.nodes[0]), { capacity: 1, used: 0 }, "the node's own statement frees the slot it named");
-  });
-  // The statement is persisted state, so the caller must be told to broadcast and re-run scheduling:
-  // the slot it freed is the one a refused candidate was waiting for.
-  assert.equal(retry.changed, true);
-  store.read((state) => {
-    // Lifecycle authority is unchanged. The transition was and stays illegal.
-    assert.equal(state.allocations?.find((allocation) => allocation.id === reservation.allocation.id)?.status, "failed");
-    assert.equal(state.instances?.find((instance) => instance.id === created.instance.id)?.status, "failed");
-    // The residency record is the node's own snapshot and the hub still never edits it.
-    assert.deepEqual(nodeResidencyInState(state, "node-one")?.instanceIds, [created.instance.id]);
-    assert.deepEqual(state.nodeResidencyVacancies, [{
-      nodeId: "node-one", instanceId: created.instance.id, allocationId: reservation.allocation.id, reportedAt: at(8)
-    }]);
-  });
-
-  const replacement = await applyInstanceLifecycle(store, operatorCaller, createRequest("thread-one", {
-    idempotency: { caller: operatorCaller, key: "create-two" }
-  }), at(9));
-  const reserved = await reserveInstanceAllocation(store, replacement.instance.id, candidate("/work/two"), at(10));
-  assert.equal(reserved.kind, "reserved", `the slot must be free without another reconnect: ${JSON.stringify(reserved)}`);
-});
-
-test("a replayed release statement frees nothing twice and cannot outrank the snapshot that refuted it", async () => {
-  /*
-   * A statement is a fact keyed by node and identity, never a counter, so a redelivered
-   * acknowledgement finds it already recorded and moves no state. The same key is what makes the
-   * refutation one-way: once the node's own newer snapshot has named the identity resident again, a
-   * replay of the older acknowledgement cannot revive the discount.
-   */
-  const store = await hubStore((state) => { seedThread(state); seedNode(state, { instanceCapacity: 1 }); });
-  const { created, reservation } = await retainedResidentAfterCleanupFailure(store);
-  const report = releasedReport(created.instance.id, reservation.allocation.id);
-  const first = await receiveInstanceLifecycleReport(store, "node-one", report, at(7));
-  assert.equal(first.changed, true);
-  const replay = await receiveInstanceLifecycleReport(store, "node-one", report, at(8));
-  assert.equal(replay.kind, "rejected", JSON.stringify(replay));
-  assert.equal(replay.changed, false, "the replay records nothing new");
-  store.read((state) => {
-    assert.equal(state.nodeResidencyVacancies?.length, 1);
-    assert.equal(state.nodeResidencyVacancies?.[0].reportedAt, at(7), "the first statement's observation time stands");
-    assert.deepEqual(residentInstanceUsageInState(state, state.nodes[0]), { capacity: 1, used: 0 });
-  });
-  const replacement = await applyInstanceLifecycle(store, operatorCaller, createRequest("thread-one", {
-    idempotency: { caller: operatorCaller, key: "create-two" }
-  }), at(9));
-  assert.equal((await reserveInstanceAllocation(store, replacement.instance.id, candidate("/work/two"), at(10))).kind, "reserved");
-  // One slot was freed, not two: the replacement now holds it and a third instance is refused.
-  const third = await applyInstanceLifecycle(store, operatorCaller, createRequest("thread-one", {
-    idempotency: { caller: operatorCaller, key: "create-three" }
-  }), at(11));
-  assert.equal((await reserveInstanceAllocation(store, third.instance.id, candidate("/work/three"), at(12))).kind, "capacity");
-});
-
-test("a statement an authoritative snapshot refutes gives the slot back and stays refuted", async () => {
-  /*
-   * The ordering case. The statement and the snapshot are both the node's word about the same
-   * identity, and the hub's own transaction order is which one is later: a snapshot that names the
-   * identity again is newer evidence that the node still holds it, so it must win — including when the
-   * snapshot repeats the resident set exactly and therefore writes no change to the residency record
-   * at all. Refuting rather than dropping the statement is what keeps a redelivered acknowledgement
-   * from freeing the slot a second time behind that snapshot's back.
-   */
-  const store = await hubStore((state) => { seedThread(state); seedNode(state, { instanceCapacity: 1 }); });
-  const { created, reservation } = await retainedResidentAfterCleanupFailure(store);
-  assert.equal((await receiveInstanceLifecycleReport(store, "node-one", releasedReport(created.instance.id, reservation.allocation.id), at(7))).changed, true);
-  store.read((state) => assert.deepEqual(residentInstanceUsageInState(state, state.nodes[0]), { capacity: 1, used: 0 }));
-
-  const recordBefore = store.read((state) => structuredClone(nodeResidencyInState(state, "node-one")));
-  await store.transact((state) => { reconcileNodeInstancesInState(state, "node-one", [created.instance.id], at(8)); return true; });
-  store.read((state) => {
-    // The snapshot repeats the known resident set, so the record itself did not move — the refutation
-    // keys off the snapshot, not off whether the record changed.
-    assert.deepEqual(nodeResidencyInState(state, "node-one")?.instanceIds, recordBefore?.instanceIds);
-    assert.equal(nodeResidencyInState(state, "node-one")?.observedAt, recordBefore?.observedAt);
-    assert.equal(state.nodeResidencyVacancies?.[0].refutedAt, at(8));
-    assert.deepEqual(residentInstanceUsageInState(state, state.nodes[0]), { capacity: 1, used: 1 }, "the node's newer word wins");
-  });
-  const replacement = await applyInstanceLifecycle(store, operatorCaller, createRequest("thread-one", {
-    idempotency: { caller: operatorCaller, key: "create-two" }
-  }), at(9));
-  assert.equal((await reserveInstanceAllocation(store, replacement.instance.id, candidate("/work/two"), at(10))).kind, "capacity");
-
-  // A replay of the same acknowledgement cannot revive the discount behind the snapshot.
-  const replay = await receiveInstanceLifecycleReport(store, "node-one", releasedReport(created.instance.id, reservation.allocation.id), at(11));
-  assert.equal(replay.changed, false);
-  store.read((state) => {
-    assert.equal(state.nodeResidencyVacancies?.length, 1);
-    assert.equal(state.nodeResidencyVacancies?.[0].refutedAt, at(8));
-    assert.deepEqual(residentInstanceUsageInState(state, state.nodes[0]), { capacity: 1, used: 1 });
-  });
-  assert.equal((await reserveInstanceAllocation(store, replacement.instance.id, candidate("/work/two"), at(12))).kind, "capacity");
-
-  /*
-   * Refutation costs a deferral and never a permanent leak: the node's next snapshot no longer names
-   * the identity, which retires the statement and frees the slot through the record itself.
-   */
-  await store.transact((state) => { reconcileNodeInstancesInState(state, "node-one", [], at(13)); return true; });
-  store.read((state) => {
-    assert.deepEqual(state.nodeResidencyVacancies, []);
-    assert.deepEqual(residentInstanceUsageInState(state, state.nodes[0]), { capacity: 1, used: 0 });
-  });
-  assert.equal((await reserveInstanceAllocation(store, replacement.instance.id, candidate("/work/two"), at(14))).kind, "reserved");
-});
-
-test("a statement from a superseded generation frees no slot its replacement holds", async () => {
-  /*
-   * The stale-generation case. A lifecycle generation is the allocation identity itself, so an
-   * acknowledgement from a generation a replacement has superseded says nothing about who is resident
-   * now: the replacement holds the slot, and the older allocation's word about the identity must not
-   * discount it. Authentication by node, allocation and instance is unchanged, and the generation is
-   * the fourth part of it.
+   * Acknowledgement authentication, all four parts of it: node, allocation, instance, and generation.
+   * A lifecycle generation is the allocation identity itself, so an acknowledgement from a generation a
+   * replacement has superseded says nothing about who is resident now, and neither does one from
+   * another node or one whose instance and allocation do not belong together. Each is refused without
+   * touching capacity.
    */
   const store = await hubStore((state) => { seedThread(state); seedNode(state, { instanceCapacity: 1 }); });
   const { created, reservation } = await provisionInstance(store);
-  // The node's snapshot does not name the resident, so the first generation is lost and replaced.
+  // The node's reconnect snapshot does not name the resident, so the first generation is lost and replaced.
   await store.transact((state) => { reconcileNodeInstancesInState(state, "node-one", [], at(3)); return true; });
   const replacementAllocation = await reserveInstanceAllocation(store, created.instance.id, candidate("/work/one"), at(4));
   assert.equal(replacementAllocation.kind, "reserved", JSON.stringify(replacementAllocation));
@@ -595,11 +477,8 @@ test("a statement from a superseded generation frees no slot its replacement hol
 
   const stale = await receiveInstanceLifecycleReport(store, "node-one", releasedReport(created.instance.id, reservation.allocation.id), at(5));
   assert.equal(stale.kind, "rejected", JSON.stringify(stale));
-  assert.equal(stale.changed, false, "a superseded generation states nothing about current residency");
-  store.read((state) => {
-    assert.deepEqual(state.nodeResidencyVacancies, []);
-    assert.deepEqual(residentInstanceUsageInState(state, state.nodes[0]), { capacity: 1, used: 1 });
-  });
+  assert.equal(stale.changed, false, "a superseded generation says nothing about current residency");
+  store.read((state) => assert.deepEqual(residentInstanceUsageInState(state, state.nodes[0]), { capacity: 1, used: 1 }));
   const other = await applyInstanceLifecycle(store, operatorCaller, createRequest("thread-one", {
     idempotency: { caller: operatorCaller, key: "create-two" }
   }), at(6));
@@ -612,65 +491,27 @@ test("a statement from a superseded generation frees no slot its replacement hol
   const mismatched = await receiveInstanceLifecycleReport(store, "node-one", releasedReport(other.instance.id, replacementAllocation.allocation.id), at(9));
   assert.equal(mismatched.kind, "rejected", JSON.stringify(mismatched));
   assert.equal(mismatched.changed, false);
-  store.read((state) => {
-    assert.deepEqual(state.nodeResidencyVacancies, []);
-    assert.deepEqual(residentInstanceUsageInState(state, state.nodes[0]), { capacity: 1, used: 1 });
-  });
+  store.read((state) => assert.deepEqual(residentInstanceUsageInState(state, state.nodes[0]), { capacity: 1, used: 1 }));
 });
 
-test("an acknowledged failure states no vacancy, whether the lifecycle takes it or rejects it", async () => {
+test("an acknowledged failure frees no slot, whether the lifecycle takes it or ignores it", async () => {
   /*
-   * Round 5's `high`, restated against the new evidence path so accepting one rejected report cannot
-   * quietly generalize to the other. Barista sets the resident to `residentCleanupFailed`, keeps it in
-   * `residentsTable`, and only then reports `instance.failed`, so a failure is the node's evidence that
-   * the allocation is dead and none at all that the slot is free. The accepted failure writes no
-   * statement, and neither does a replay or a stale-generation failure the lifecycle rejects.
+   * Barista sets the resident to `residentCleanupFailed`, keeps it in `residentsTable`, and only then
+   * reports `instance.failed`, so a failure is the node's evidence that the allocation is dead and none
+   * at all that the slot is free. Neither the accepted failure nor its replay moves capacity, and the
+   * node's own next report confirms it still hosts the resident.
    */
   const store = await hubStore((state) => { seedThread(state); seedNode(state, { instanceCapacity: 1 }); });
   const { created, reservation } = await retainedResidentAfterCleanupFailure(store);
   const replay = await receiveInstanceLifecycleReport(store, "node-one", failedReport(created.instance.id, reservation.allocation.id, "node-one", "cleanup failed"), at(7));
   assert.equal(replay.kind, "ignored", JSON.stringify(replay));
   assert.equal(replay.changed, false);
-  await store.transact((state) => { reconcileNodeInstancesInState(state, "node-one", [created.instance.id], at(8)); return true; });
-  store.read((state) => {
-    assert.deepEqual(state.nodeResidencyVacancies, [], "no failure of either kind states a vacancy");
-    assert.deepEqual(residentInstanceUsageInState(state, state.nodes[0]), { capacity: 1, used: 1 });
-  });
+  await heartbeat(store, [created.instance.id], at(8));
+  store.read((state) => assert.deepEqual(residentInstanceUsageInState(state, state.nodes[0]), { capacity: 1, used: 1 }));
   const replacement = await applyInstanceLifecycle(store, operatorCaller, createRequest("thread-one", {
     idempotency: { caller: operatorCaller, key: "create-two" }
   }), at(9));
   assert.equal((await reserveInstanceAllocation(store, replacement.instance.id, candidate("/work/two"), at(10))).kind, "capacity");
-});
-
-test("a residency statement is retired with the allocation that authenticates it", async () => {
-  /*
-   * A statement discounts a slot on the strength of the allocation it names, so it may not outlive
-   * that allocation — a persisted statement whose allocation is gone could no longer be checked
-   * against the node and instance that produced it, and load validation refuses one. Nothing
-   * discountable is lost: an identity a residency record still names is pinned against pruning, and
-   * one no record names has nothing left to discount.
-   */
-  const store = await hubStore((state) => { seedThread(state); seedNode(state, { instanceCapacity: 1 }); });
-  const { created, reservation } = await retainedResidentAfterCleanupFailure(store);
-  assert.equal((await receiveInstanceLifecycleReport(store, "node-one", releasedReport(created.instance.id, reservation.allocation.id), at(7))).changed, true);
-  // The node stops naming the identity, which unpins it, and the audit bound then retires it.
-  await store.transact((state) => { reconcileNodeInstancesInState(state, "node-one", [], at(8)); return true; });
-  store.read((state) => assert.deepEqual(state.nodeResidencyVacancies, [], "the snapshot already retired the statement"));
-
-  // A statement written after that snapshot survives until pruning drops its allocation.
-  assert.equal((await receiveInstanceLifecycleReport(store, "node-one", releasedReport(created.instance.id, reservation.allocation.id), at(9))).changed, true);
-  await store.transact((state) => {
-    const template = state.instances!.find((instance) => instance.id === created.instance.id)!;
-    for (let index = 0; index < instanceAuditLimits.retainedTerminalInstances; index += 1) {
-      state.instances!.push({ ...structuredClone(template), id: `filler-${index}`, status: "released", updatedAt: at(1000 + index) });
-    }
-    return true;
-  });
-  await maintainInstanceLifecycle(store, at(2000));
-  store.read((state) => {
-    assert.equal(state.instances?.some((instance) => instance.id === created.instance.id), false, "the unpinned terminal instance is pruned");
-    assert.deepEqual(state.nodeResidencyVacancies, []);
-  });
 });
 
 test("reservation occupies capacity atomically and never overbooks across transactions", async () => {
@@ -1065,25 +906,26 @@ test("terminal audit records are retained under explicit pruning bounds", async 
   });
 });
 
-test("pruning never drops an identity the node's residency record still names", async () => {
+test("pruning holds the terminal bound exactly, and the next report restores occupancy", async () => {
   /*
-   * Finding 2: pruning must not destroy the evidence the capacity derivation depends on. Once a
-   * settled allocation is gone the node's unchanged record still names its identity, and nothing is
-   * left to discount it, so the slot reads as occupied. Barista sends identity snapshots on connection
-   * attachment rather than on heartbeats, so a node that stays connected never refreshes the record and
-   * that phantom occupancy would be permanent rather than temporary.
+   * Pruning used to pin every identity a node's record named, because the record refreshed only on
+   * connection attachment: dropping the settled allocation left nothing to discount the identity, and
+   * the resulting phantom occupancy was permanent for as long as the node stayed connected. The record
+   * now refreshes every heartbeat, so nothing has to be preserved for the capacity derivation and the
+   * terminal bound is exactly `retainedTerminalInstances` with no residency exemption above it. The
+   * cost is one heartbeat interval of a record naming an identity the hub no longer retains.
    */
   const store = await hubStore((state) => { seedThread(state); seedNode(state, { instanceCapacity: 1 }); });
   const { created, reservation } = await provisionInstance(store);
-  await store.transact((state) => { reconcileNodeInstancesInState(state, "node-one", [created.instance.id], at(3)); return true; });
+  await heartbeat(store, [created.instance.id], at(3));
   assert.equal((await receiveInstanceLifecycleReport(store, "node-one", readyReport(created.instance.id, reservation.allocation.id), at(4))).kind, "accepted");
   await applyInstanceLifecycle(store, operatorCaller, releaseRequest(created.instance.id, "release-one", "drain"), at(5));
   assert.equal((await receiveInstanceLifecycleReport(store, "node-one", releasedReport(created.instance.id, reservation.allocation.id), at(6))).kind, "accepted");
   const usage = () => store.read((state) => residentInstanceUsageInState(state, state.nodes[0]));
-  assert.deepEqual(usage(), { capacity: 1, used: 0 }, "the acknowledged release freed the slot");
+  assert.deepEqual(usage(), { capacity: 1, used: 1 }, "the node still reports the resident it has not yet dropped");
 
   // Enough later terminal instances to push the released one past the retention bound; every filler
-  // settles after it, so it is the oldest and would be the first record pruning drops.
+  // settles after it, so it is the oldest and is the first record pruning drops.
   const beyond = instanceAuditLimits.retainedTerminalInstances + 5;
   for (let index = 0; index < beyond; index += 1) {
     const filler = await applyInstanceLifecycle(store, operatorCaller, createRequest("thread-one", {
@@ -1093,23 +935,19 @@ test("pruning never drops an identity the node's residency record still names", 
   }
   await maintainInstanceLifecycle(store, at(1000));
   store.read((state) => {
-    assert.ok(state.instances!.some((instance) => instance.id === created.instance.id), "the pinned identity survives");
-    assert.ok(state.allocations!.some((allocation) => allocation.id === reservation.allocation.id), "so does the allocation that discounts it");
-    assert.equal(state.instances!.length, instanceAuditLimits.retainedTerminalInstances + 1, "the pin costs exactly the identities the node names");
-  });
-  assert.deepEqual(usage(), { capacity: 1, used: 0 }, "the slot stays free rather than becoming phantom occupancy");
-  const replacement = await applyInstanceLifecycle(store, operatorCaller, createRequest("thread-one", {
-    idempotency: { caller: operatorCaller, key: "create-replacement" }
-  }), at(1001));
-  assert.equal((await reserveInstanceAllocation(store, replacement.instance.id, candidate("/work/two"), at(1002))).kind, "reserved");
-
-  // The node's own next snapshot releases the pin, and only then may the record be pruned.
-  await store.transact((state) => { reconcileNodeInstancesInState(state, "node-one", [replacement.instance.id], at(1003)); return true; });
-  await maintainInstanceLifecycle(store, at(1004));
-  store.read((state) => {
-    assert.equal(state.instances!.some((instance) => instance.id === created.instance.id), false, "an unpinned identity is pruned normally");
+    assert.equal(state.instances!.some((instance) => instance.id === created.instance.id), false, "no identity is exempt from the bound");
+    assert.equal(state.instances!.length, instanceAuditLimits.retainedTerminalInstances, "the bound is exact");
     assert.equal(state.instances!.filter((instance) => terminalInstanceStatuses.includes(instance.status)).length, instanceAuditLimits.retainedTerminalInstances);
   });
+  assert.deepEqual(usage(), { capacity: 1, used: 1 }, "the record still names the pruned identity until the node's next report");
+
+  // One heartbeat interval later the node no longer names it, and the slot is free again.
+  await heartbeat(store, [], at(1001));
+  assert.deepEqual(usage(), { capacity: 1, used: 0 });
+  const replacement = await applyInstanceLifecycle(store, operatorCaller, createRequest("thread-one", {
+    idempotency: { caller: operatorCaller, key: "create-replacement" }
+  }), at(1002));
+  assert.equal((await reserveInstanceAllocation(store, replacement.instance.id, candidate("/work/two"), at(1003))).kind, "reserved");
 });
 
 test("pruning retires the task submission a create receipt derived, not just the receipt", async () => {
@@ -1438,21 +1276,21 @@ test("an authoritative empty snapshot clears a stale reported usage floor", asyn
 });
 
 test("resident evidence is validated before the delivery barrier is decided", () => {
-  const authoritative = classifyInstanceResidentEvidence(controlFixture("sync"), "5");
+  const authoritative = classifyInstanceResidentEvidence(controlFixture("sync"), "5", "sync.complete");
   assert.deepEqual(authoritative, { kind: "authoritative", residents: ["instance-one"] });
   assert.equal(instanceDeliveryBarrier(authoritative), "open-after-reconcile");
   // An explicitly empty resident set is a claim, not an omission.
-  const empty = classifyInstanceResidentEvidence(controlFixture("sync-empty"), "5");
+  const empty = classifyInstanceResidentEvidence(controlFixture("sync-empty"), "5", "sync.complete");
   assert.deepEqual(empty, { kind: "authoritative", residents: [] });
   assert.equal(instanceDeliveryBarrier(empty), "open-after-reconcile");
-  const absent = classifyInstanceResidentEvidence(controlFixture("sync-absent"), "5");
+  const absent = classifyInstanceResidentEvidence(controlFixture("sync-absent"), "5", "sync.complete");
   assert.deepEqual(absent, { kind: "absent" });
   assert.equal(instanceDeliveryBarrier(absent), "open-now");
 
   // The mutations the protocol suite treats as invalid resident evidence must fail closed here too.
   for (const residents of [null, ["same", "same"], [""], ["bad/id"], Array.from({ length: instanceLimits.collectionEntries + 1 }, (_, index) => `i-${index}`)]) {
     const frame = { ...controlFixture("sync"), activeInstanceIds: residents };
-    const evidence = classifyInstanceResidentEvidence(frame, "5");
+    const evidence = classifyInstanceResidentEvidence(frame, "5", "sync.complete");
     assert.equal(evidence.kind, "malformed", JSON.stringify(residents));
     assert.equal(instanceDeliveryBarrier(evidence), "stay-closed", JSON.stringify(residents));
     // The barrier cannot be decided from this predicate alone: it answers the same for a malformed
@@ -1461,7 +1299,7 @@ test("resident evidence is validated before the delivery barrier is decided", ()
     assert.equal(hasAuthoritativeInstanceEvidence(controlFixture("sync-absent")), false);
   }
   // A node that cannot host instances makes no resident claim at all.
-  assert.deepEqual(classifyInstanceResidentEvidence(controlFixture("sync"), "4"), { kind: "absent" });
+  assert.deepEqual(classifyInstanceResidentEvidence(controlFixture("sync"), "4", "sync.complete"), { kind: "absent" });
 });
 
 test("the residency record is written from the producer's own sync bytes and replaced wholesale", async () => {
@@ -1474,7 +1312,7 @@ test("the residency record is written from the producer's own sync bytes and rep
    */
   const store = await hubStore((state) => { seedThread(state); seedNode(state, { instanceCapacity: 2, activeInstances: 2 }); });
   const applySync = async (fixture: string) => {
-    const evidence = classifyInstanceResidentEvidence(controlFixture(fixture), "5");
+    const evidence = classifyInstanceResidentEvidence(controlFixture(fixture), "5", "sync.complete");
     assert.equal(evidence.kind, "authoritative", fixture);
     await store.transact((state) => {
       reconcileNodeInstancesInState(state, "node-one", (evidence as { residents: readonly string[] }).residents, at(3));
@@ -1491,8 +1329,8 @@ test("the residency record is written from the producer's own sync bytes and rep
     assert.deepEqual(residentInstanceUsageInState(state, state.nodes[0]), { capacity: 2, used: 0 });
   });
   // Absent evidence reaches no writer at all, so the record stands; malformed evidence likewise.
-  assert.deepEqual(classifyInstanceResidentEvidence(controlFixture("sync-absent"), "5"), { kind: "absent" });
-  assert.equal(classifyInstanceResidentEvidence({ ...controlFixture("sync"), activeInstanceIds: ["bad/id"] }, "5").kind, "malformed");
+  assert.deepEqual(classifyInstanceResidentEvidence(controlFixture("sync-absent"), "5", "sync.complete"), { kind: "absent" });
+  assert.equal(classifyInstanceResidentEvidence({ ...controlFixture("sync"), activeInstanceIds: ["bad/id"] }, "5", "sync.complete").kind, "malformed");
   store.read((state) => assert.deepEqual(nodeResidencyInState(state, "node-one")?.instanceIds, []));
 });
 
@@ -1934,45 +1772,6 @@ test("store load rejects a provision and a release at the same command position"
   await assert.rejects(reloaded.load(), /repeats command sequence/);
 });
 
-test("store load rejects a residency statement no allocation of that node authenticates", async () => {
-  /*
-   * A statement discounts a slot, so the authentication that admitted it has to survive the reload its
-   * sender does not: the allocation it names must exist and must be the one tying that node to that
-   * instance. A persisted statement naming a foreign allocation, or two statements about the same
-   * identity, would let a snapshot free a slot the node still holds — the very thing authenticating
-   * the acknowledgement prevents while the connection is live.
-   */
-  const directory = await mkdtemp(join(tmpdir(), "coffee-shop-instances-"));
-  const path = join(directory, "state.json");
-  const store = new Store(path);
-  await store.load();
-  await store.transact((state) => { seedThread(state); seedNode(state, { instanceCapacity: 1 }); });
-  const { created, reservation } = await retainedResidentAfterCleanupFailure(store);
-  assert.equal((await receiveInstanceLifecycleReport(store, "node-one", releasedReport(created.instance.id, reservation.allocation.id), at(7))).changed, true);
-  const persisted = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>;
-  assert.equal((persisted.nodeResidencyVacancies as unknown[]).length, 1, "the hub's own bytes carry the statement");
-  // The unmodified snapshot loads, statement included, so each rejection below is about the mutation.
-  await assert.doesNotReject(new Store(path).load());
-
-  const rejects = async (mutate: (state: Record<string, unknown>) => void, pattern: RegExp) => {
-    const copy = JSON.parse(JSON.stringify(persisted)) as Record<string, unknown>;
-    mutate(copy);
-    await writeFile(path, JSON.stringify(copy));
-    await assert.rejects(new Store(path).load(), pattern);
-  };
-  const vacancies = (state: Record<string, unknown>) => state.nodeResidencyVacancies as Array<Record<string, unknown>>;
-  await rejects((state) => { delete vacancies(state)[0].reportedAt; }, /Persisted node residency vacancy 0 is malformed/);
-  await rejects((state) => { vacancies(state)[0].refutedAt = ""; }, /Persisted node residency vacancy 0 is malformed/);
-  await rejects((state) => { vacancies(state).push(structuredClone(vacancies(state)[0])); }, /vacancy 1 repeats its node and instance/);
-  await rejects((state) => { vacancies(state)[0].allocationId = "allocation-elsewhere"; }, /vacancy 0 names unknown allocation/);
-  await rejects((state) => { vacancies(state)[0].nodeId = "node-two"; }, /vacancy 0 names a node that does not hold allocation/);
-  await rejects((state) => {
-    const instances = state.instances as Array<Record<string, unknown>>;
-    instances.push({ ...structuredClone(instances[0]), id: "instance-elsewhere", status: "requested" });
-    vacancies(state)[0].instanceId = "instance-elsewhere";
-  }, /vacancy 0 names an instance that does not own allocation/);
-});
-
 test("every occupancy transition leaves the residency record and the derived usage agreeing", async () => {
   /*
    * The sweep behind findings 1 and 2: each transition that changes whether an identity occupies a
@@ -2026,12 +1825,172 @@ test("every occupancy transition leaves the residency record and the derived usa
   store.read((state) => assert.equal(state.instances?.find((instance) => instance.id === created.instance.id)?.status, "draining"));
   assert.deepEqual(usage(), { capacity: 2, used: 1 }, "a draining instance still occupies its slot");
 
-  // Terminal settlement through the node's own acknowledgement is what frees it.
+  // Terminal settlement is lifecycle authority; the node's next report is what frees the slot.
   assert.equal((await receiveInstanceLifecycleReport(store, "node-one", releasedReport(created.instance.id, replacement.allocation.id), at(10))).kind, "accepted");
   store.read((state) => {
     assert.equal(state.instances?.find((instance) => instance.id === created.instance.id)?.status, "released");
     assert.ok((state.allocations ?? []).every((allocation) => !occupyingAllocationStatuses.includes(allocation.status)));
-    assert.deepEqual(nodeResidencyInState(state, "node-one")?.instanceIds, [created.instance.id], "the record still names it: it is the node's snapshot");
+    assert.deepEqual(nodeResidencyInState(state, "node-one")?.instanceIds, [created.instance.id], "the record still names it: it is the node's report");
   });
-  assert.deepEqual(usage(), { capacity: 2, used: 0 }, "an acknowledged release frees the slot at once");
+  assert.deepEqual(usage(), { capacity: 2, used: 1 }, "an acknowledged release does not overrule the node's latest report");
+  await heartbeat(store, [], at(11));
+  assert.deepEqual(usage(), { capacity: 2, used: 0 }, "the node's next report frees the slot");
+});
+
+/*
+ * The class-closure suite. Each test names the review round whose rule is gone and asserts the form
+ * of the defect that rule was chasing cannot recur, now that the node reports its resident identities
+ * on every heartbeat (#114) and the hub derives nothing.
+ */
+
+test("class closure: disjoint reported and owned residency never overbooks (rev-b2c736)", async () => {
+  /*
+   * `max(reported, persisted)` read one resident here and left a free slot that did not exist. The
+   * union by identity is what capacity is, and it is now read from a set the node refreshes every
+   * beat rather than from a count that could not be reconciled with identities at all.
+   */
+  const store = await hubStore((state) => { seedThread(state); seedNode(state, { instanceCapacity: 2, activeInstances: 1 }); });
+  const { created } = await provisionInstance(store);
+  await heartbeat(store, [created.instance.id, "foreign-instance"], at(3));
+  store.read((state) => assert.deepEqual(residentInstanceUsageInState(state, state.nodes[0]), { capacity: 2, used: 2 },
+    "one owned and one foreign resident fill a capacity-2 node"));
+  const other = await applyInstanceLifecycle(store, operatorCaller, createRequest("thread-one", {
+    idempotency: { caller: operatorCaller, key: "create-two" }
+  }), at(4));
+  assert.equal((await reserveInstanceAllocation(store, other.instance.id, candidate("/work/two"), at(5))).kind, "capacity");
+  // The foreign resident is asked to release, and the node's own next beat is what frees the slot.
+  store.read((state) => assert.deepEqual(state.remoteReleaseRequests?.map((request) => request.instanceId), ["foreign-instance"]));
+  await heartbeat(store, [created.instance.id], at(6));
+  store.read((state) => assert.deepEqual(state.remoteReleaseRequests, [], "a request the node's report no longer supports is retired"));
+  assert.equal((await reserveInstanceAllocation(store, other.instance.id, candidate("/work/two"), at(7))).kind, "reserved");
+});
+
+test("class closure: a cleanup-failure report frees no slot and the next heartbeat still names the resident (rev-acf810, rev-f4707a)", async () => {
+  /*
+   * Discounting every settled status, and later `released` plus `failed`, both freed a slot Barista
+   * still held: on a release-cleanup failure Barista *retains* the resident and only then reports
+   * `instance.failed`. The hub no longer reads allocation status against residency at all, so the
+   * producer's own next beat is both the assertion and the authority.
+   */
+  const store = await hubStore((state) => { seedThread(state); seedNode(state, { instanceCapacity: 1 }); });
+  const { created, reservation } = await provisionInstance(store);
+  await heartbeat(store, [created.instance.id], at(3));
+  assert.equal((await receiveInstanceLifecycleReport(store, "node-one", readyReport(created.instance.id, reservation.allocation.id), at(4))).kind, "accepted");
+  await applyInstanceLifecycle(store, operatorCaller, releaseRequest(created.instance.id, "release-one", "drain"), at(5));
+  await flushPendingInstanceDeliveries(store, () => true);
+  const failure = await receiveInstanceLifecycleReport(store, "node-one", failedReport(created.instance.id, reservation.allocation.id, "node-one", "cleanup failed"), at(6));
+  assert.equal(failure.kind, "accepted", JSON.stringify(failure));
+  store.read((state) => {
+    assert.equal(state.allocations?.find((allocation) => allocation.id === reservation.allocation.id)?.status, "failed");
+    assert.deepEqual(residentInstanceUsageInState(state, state.nodes[0]), { capacity: 1, used: 1 },
+      "a failure is evidence the allocation is dead and none at all that the slot is free");
+  });
+  await heartbeat(store, [created.instance.id], at(7));
+  store.read((state) => assert.deepEqual(residentInstanceUsageInState(state, state.nodes[0]), { capacity: 1, used: 1 },
+    "the node itself confirms it still hosts the resident"));
+  const replacement = await applyInstanceLifecycle(store, operatorCaller, createRequest("thread-one", {
+    idempotency: { caller: operatorCaller, key: "create-two" }
+  }), at(8));
+  assert.equal((await reserveInstanceAllocation(store, replacement.instance.id, candidate("/work/two"), at(9))).kind, "capacity");
+});
+
+test("class closure: a released resident's slot is freed by the next heartbeat with no reconnect (rev-af8920)", async () => {
+  /*
+   * Pinning residency-named identities against pruning existed to preserve the `released` discount,
+   * because the record refreshed only on attachment and the discount was the only thing that could
+   * free the slot before the next one. A beat now carries the node's current resident set, so the
+   * slot frees itself and no local evidence has to be preserved to make that happen.
+   */
+  const store = await hubStore((state) => { seedThread(state); seedNode(state, { instanceCapacity: 1 }); });
+  const { created, reservation } = await provisionInstance(store);
+  await heartbeat(store, [created.instance.id], at(3));
+  assert.equal((await receiveInstanceLifecycleReport(store, "node-one", readyReport(created.instance.id, reservation.allocation.id), at(4))).kind, "accepted");
+  await applyInstanceLifecycle(store, operatorCaller, releaseRequest(created.instance.id, "release-one", "drain"), at(5));
+  assert.equal((await receiveInstanceLifecycleReport(store, "node-one", releasedReport(created.instance.id, reservation.allocation.id), at(6))).kind, "accepted");
+  const replacement = await applyInstanceLifecycle(store, operatorCaller, createRequest("thread-one", {
+    idempotency: { caller: operatorCaller, key: "create-two" }
+  }), at(7));
+  // Staleness is bounded by one beat, not by the next reconnect, and the safe direction is to defer.
+  store.read((state) => assert.deepEqual(residentInstanceUsageInState(state, state.nodes[0]), { capacity: 1, used: 1 }));
+  await heartbeat(store, [], at(8));
+  store.read((state) => {
+    assert.deepEqual(nodeResidencyInState(state, "node-one")?.instanceIds, [], "an explicitly empty beat is an authoritative zero");
+    assert.deepEqual(residentInstanceUsageInState(state, state.nodes[0]), { capacity: 1, used: 0 });
+  });
+  const reserved = await reserveInstanceAllocation(store, replacement.instance.id, candidate("/work/two"), at(9));
+  assert.equal(reserved.kind, "reserved", `no reconnect was needed: ${JSON.stringify(reserved)}`);
+});
+
+test("class closure: a release retry after a cleanup failure frees the slot within one heartbeat (rev-aa9db2)", async () => {
+  /*
+   * Round 7's `high`. Vacancy statements accepted a lifecycle-rejected `instance.released` as evidence,
+   * and the tombstone that kept a replay of it from freeing a slot twice also suppressed the next
+   * genuine one for good. There is no statement and no tombstone now: the retry's acknowledgement is
+   * refused as lifecycle and carries no residency weight either way, and the node's report decides.
+   */
+  const store = await hubStore((state) => { seedThread(state); seedNode(state, { instanceCapacity: 1 }); });
+  const { created, reservation } = await provisionInstance(store);
+  await heartbeat(store, [created.instance.id], at(3));
+  assert.equal((await receiveInstanceLifecycleReport(store, "node-one", readyReport(created.instance.id, reservation.allocation.id), at(4))).kind, "accepted");
+  await applyInstanceLifecycle(store, operatorCaller, releaseRequest(created.instance.id, "release-one", "drain"), at(5));
+  await flushPendingInstanceDeliveries(store, () => true);
+  assert.equal((await receiveInstanceLifecycleReport(store, "node-one", failedReport(created.instance.id, reservation.allocation.id, "node-one", "cleanup failed"), at(6))).kind, "accepted");
+
+  // The hub asks the node to evict the resident its failed cleanup retained.
+  await heartbeat(store, [created.instance.id], at(7));
+  const sent: string[] = [];
+  await flushPendingInstanceDeliveries(store, (_nodeId, message) => { sent.push(message.type); return true; });
+  assert.deepEqual(sent, ["instance.release"], "the retained resident is addressed through the remote release outbox");
+
+  // The retry succeeds on the node. Its acknowledgement is not a legal transition and never will be.
+  const retry = await receiveInstanceLifecycleReport(store, "node-one", releasedReport(created.instance.id, reservation.allocation.id), at(8));
+  assert.equal(retry.kind, "rejected", JSON.stringify(retry));
+  assert.match(retry.reason ?? "", /legal transition/);
+  assert.equal(retry.changed, false, "a refused acknowledgement writes nothing at all");
+  store.read((state) => {
+    assert.equal(state.allocations?.find((allocation) => allocation.id === reservation.allocation.id)?.status, "failed");
+    assert.equal(state.instances?.find((instance) => instance.id === created.instance.id)?.status, "failed");
+    assert.deepEqual(nodeResidencyInState(state, "node-one")?.instanceIds, [created.instance.id],
+      "the record is the node's own report and the hub never edits it");
+    assert.equal("nodeResidencyVacancies" in state, false, "there is no statement record to tombstone");
+  });
+
+  // A beat that raced the retry still names the resident, and that must not become permanent.
+  await heartbeat(store, [created.instance.id], at(9));
+  store.read((state) => assert.deepEqual(residentInstanceUsageInState(state, state.nodes[0]), { capacity: 1, used: 1 }));
+  await heartbeat(store, [], at(10));
+  store.read((state) => {
+    assert.deepEqual(state.remoteReleaseRequests, [], "the eviction request is retired with the resident it named");
+    assert.deepEqual(residentInstanceUsageInState(state, state.nodes[0]), { capacity: 1, used: 0 });
+  });
+  const replacement = await applyInstanceLifecycle(store, operatorCaller, createRequest("thread-one", {
+    idempotency: { caller: operatorCaller, key: "create-two" }
+  }), at(11));
+  const reserved = await reserveInstanceAllocation(store, replacement.instance.id, candidate("/work/two"), at(12));
+  assert.equal(reserved.kind, "reserved", `nothing may suppress the node's own word: ${JSON.stringify(reserved)}`);
+});
+
+test("class closure: absent, explicitly empty, and malformed heartbeat residency stay three outcomes", () => {
+  /*
+   * Collapsing malformed into absent is the failure this tri-state exists to prevent: an unreadable
+   * claim would become "the node claimed nothing", which infers zero unowned residency by omission.
+   * The heartbeat field is read by the same classifier, the same protocol validator, and the same
+   * `instanceLimits.collectionEntries` bound as the reconnect barrier's, and the carrier is named so
+   * one frame can never be read as the other.
+   */
+  assert.deepEqual(classifyInstanceResidentEvidence(controlFixture("heartbeat"), "5", "heartbeat"),
+    { kind: "authoritative", residents: ["instance-one"] });
+  assert.deepEqual(classifyInstanceResidentEvidence(controlFixture("heartbeat-empty"), "5", "heartbeat"),
+    { kind: "authoritative", residents: [] }, "an explicit empty set is a claim, not an omission");
+  const omitted = controlFixture("heartbeat");
+  delete omitted.activeInstanceIds;
+  assert.deepEqual(classifyInstanceResidentEvidence(omitted, "5", "heartbeat"), { kind: "absent" });
+  for (const residents of [null, ["same", "same"], [""], ["bad/id"], Array.from({ length: instanceLimits.collectionEntries + 1 }, (_, index) => `i-${index}`)]) {
+    const evidence = classifyInstanceResidentEvidence({ ...controlFixture("heartbeat"), activeInstanceIds: residents }, "5", "heartbeat");
+    assert.equal(evidence.kind, "malformed", JSON.stringify(residents));
+  }
+  // Neither carrier is ever read as the other, and a node that cannot host instances claims nothing.
+  assert.equal(classifyInstanceResidentEvidence(controlFixture("sync"), "5", "heartbeat").kind, "malformed");
+  assert.equal(classifyInstanceResidentEvidence(controlFixture("heartbeat"), "5", "sync.complete").kind, "malformed");
+  assert.deepEqual(classifyInstanceResidentEvidence(controlFixture("heartbeat"), "4", "heartbeat"), { kind: "absent" });
 });

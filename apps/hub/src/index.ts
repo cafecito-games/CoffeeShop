@@ -34,6 +34,7 @@ import { detachEveryAttachmentInState, postOperatorMessageInState, type Operator
 import { createHubToolHandler, hubToolError } from "./hubTools.js";
 import {
   applyInstanceLifecycle,
+  applyNodeResidencyInState,
   classifyInstanceResidentEvidence,
   classifyReportedInstanceCount,
   currentAllocationInState,
@@ -794,7 +795,7 @@ wss.on("connection", (socket, request) => {
        * empty, and malformed stay three distinct answers: only an absent claim opens the barrier
        * with nothing to apply, and a malformed one leaves it closed.
        */
-      const residentEvidence = classifyInstanceResidentEvidence(decoded, protocolVersion);
+      const residentEvidence = classifyInstanceResidentEvidence(decoded, protocolVersion, "sync.complete");
       const barrier = instanceDeliveryBarrier(residentEvidence);
       if (residentEvidence.kind === "malformed") {
         console.warn(redactor.redact(`refused resident evidence from ${nodeId}: ${residentEvidence.reason}`));
@@ -823,14 +824,44 @@ wss.on("connection", (socket, request) => {
       requestScheduling();
     } else if (message.type === "heartbeat") {
       let capacityChanged = false;
+      const ownHeartbeat = message.nodeId === nodeId && isCurrentSocket();
       // The reported resident count is validated before it is applied, so a malformed count neither
       // reaches the node record nor passes for an omitted one: the last known usage stands.
-      const reportedCount = message.nodeId === nodeId ? classifyReportedInstanceCount(decoded, protocolVersion) : { kind: "absent" as const };
+      const reportedCount = ownHeartbeat ? classifyReportedInstanceCount(decoded, protocolVersion) : { kind: "absent" as const };
       if (reportedCount.kind === "malformed") {
         console.warn(redactor.redact(`refused reported instance usage from ${nodeId}: ${reportedCount.reason}`));
       }
       const reportedInstances = reportedCount.kind === "reported" ? reportedCount.count : undefined;
       await store.transact((state) => { const node = state.nodes.find((item) => item.id === message.nodeId); if (node) { capacityChanged = node.activeRuns !== message.activeRuns || (reportedInstances !== undefined && node.activeInstances !== reportedInstances); node.lastSeen = message.at; node.activeRuns = message.activeRuns; if (reportedInstances !== undefined) node.activeInstances = reportedInstances; node.status = message.activeRuns ? "busy" : "online"; } });
+      /*
+       * A heartbeat carries the node's resident identities (#114), classified by the same tri-state
+       * reader as the reconnect barrier's: absent infers nothing, an explicitly empty set is an
+       * authoritative zero, and a malformed one is refused rather than read as an omission. Applying
+       * it here is what makes the hub's residency record current truth — staleness is bounded by one
+       * heartbeat interval — so the capacity derivation never has to infer vacancy from anything else.
+       *
+       * Only the residency record and the outbox it authorizes are written. Allocation loss and
+       * command replay stay with the reconnect barrier: a beat that races a provision the node has not
+       * applied yet would otherwise declare that allocation lost.
+       */
+      const residentEvidence = ownHeartbeat
+        ? classifyInstanceResidentEvidence(decoded, protocolVersion, "heartbeat")
+        : { kind: "absent" as const };
+      if (residentEvidence.kind === "malformed") {
+        console.warn(redactor.redact(`refused resident evidence from ${nodeId}: ${residentEvidence.reason}`));
+      }
+      if (residentEvidence.kind === "authoritative") {
+        const residents = residentEvidence.residents;
+        let residencyChanged = false;
+        await store.transact((state) => {
+          residencyChanged = applyNodeResidencyInState(state, message.nodeId, residents, message.at);
+          return residencyChanged;
+        });
+        if (residencyChanged) {
+          capacityChanged = true;
+          await runInstanceMaintenance();
+        }
+      }
       broadcast();
       if (capacityChanged) requestScheduling();
     } else if (decodedType === "instance.ready" || decodedType === "instance.failed" || decodedType === "instance.released") {

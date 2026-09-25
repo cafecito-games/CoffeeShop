@@ -51,20 +51,6 @@ import { appendInitialTaskInState, initialTaskOrigin } from "./tasks.js";
 
 /** The resident-intent statuses: an allocation in one of these holds a node slot. */
 export const occupyingAllocationStatuses: readonly AllocationStatus[] = ["reserved", "provisioning", "active"];
-/**
- * The one allocation status that is the node's own proof the resident slot is free, and therefore the
- * only status that may be discounted against a residency snapshot still naming the identity.
- *
- * Barista deletes the resident from its own table *before* it reports `instance.released`, and on a
- * release-cleanup failure it *retains* the resident and then reports `instance.failed`
- * (`apps/control-agent/internal/controlplane/instances.go`). So `released` is proof and `failed` is
- * not: a failed allocation keeps occupying its slot until the node's own next authoritative snapshot
- * stops naming the identity. A provisioning failure, where the node never added the resident at all,
- * keeps occupying on the same rule — the `instance.failed` frame carries only a free-text `error`
- * diagnostic, nothing that distinguishes the two, and deferring a placement is the safe direction
- * where overbooking is not.
- */
-export const vacatedAllocationStatuses: readonly AllocationStatus[] = ["released"];
 /** Statuses from which an instance may still be placed, replaced, or released. */
 export const nonTerminalInstanceStatuses: readonly InstanceStatus[] = ["requested", "provisioning", "ready", "busy", "idle"];
 export const terminalInstanceStatuses: readonly InstanceStatus[] = ["released", "failed"];
@@ -162,62 +148,21 @@ export interface RemoteReleaseRequest {
 }
 
 /**
- * The authoritative resident set of one node, replaced wholesale by each `sync.complete` that carries
- * resident evidence. It is the hub's single record of who is resident on a node it did not place
- * itself, and — beside the hub's own occupying allocations — the only source of resident occupancy.
+ * The resident set of one node, replaced wholesale by each report that carries resident identities —
+ * every heartbeat as well as the `sync.complete` behind the replay barrier (#114). It is the hub's
+ * single record of who is resident on a node, and — beside the hub's own occupying allocations — the
+ * only source of resident occupancy.
  *
- * Wholesale replacement is what makes it authoritative: a snapshot that reports nothing supersedes
- * every earlier claim about that node, including the `activeInstances` scalar of an older heartbeat,
- * so a stale count can no longer keep blocking valid reservations.
+ * Wholesale replacement is what makes it authoritative: a report that names nothing supersedes every
+ * earlier claim about that node, the `activeInstances` scalar included. Arriving on every beat is
+ * what makes it *current*: an identity the node has stopped hosting disappears within one heartbeat
+ * interval, so the hub never has to infer vacancy from its own local status.
  */
 export interface NodeInstanceResidency {
   nodeId: string;
-  /** Every instance identity the node reported resident in its latest authoritative snapshot. */
+  /** Every instance identity the node reported resident in its latest report. */
   instanceIds: string[];
   observedAt: string;
-}
-
-/**
- * One node's statement that a single identity is no longer resident on it: the `instance.released`
- * acknowledgement the owning node sent for that identity's allocation.
- *
- * Residency *evidence* and lifecycle *authority* are separate. A node's snapshot is its complete
- * resident set, but it is produced only on connection attachment, so between two snapshots the
- * acknowledgement is the only current word the hub has about one identity. Whether that
- * acknowledgement is also a legal allocation transition is a different question with a different
- * answer: a terminal allocation still refuses the transition, and the report is still rejected as
- * lifecycle. Discarding it wholesale for that reason threw away the node's own statement that the
- * slot is free, which is how a capacity-1 node stayed unavailable after the node had actually freed
- * its slot.
- *
- * The record is deduplicated by node and identity, which is what makes a replayed acknowledgement
- * idempotent: a statement is a fact, never a counter, so repeating it frees nothing twice.
- *
- * Ordering against a snapshot is the hub's own transaction order rather than any comparison of
- * timestamps: both writers run inside `store.transact`, so the later transaction is by construction
- * the later word. A snapshot that names the identity again *refutes* the statement instead of
- * deleting it, and a refuted statement can never be revived — so a stale or replayed acknowledgement
- * arriving after that snapshot cannot free a slot the node has re-reported as held. Refuting rather
- * than deleting is what makes the rule one-way; the cost of refuting a statement that was in fact
- * true is one deferral, because the node's next snapshot no longer names the identity and the record
- * itself then frees the slot.
- */
-export interface NodeResidencyVacancy {
-  nodeId: string;
-  instanceId: string;
-  /**
-   * The allocation generation whose acknowledgement carried the statement. It is the authentication
-   * that survives persistence: the allocation must still name this node and this instance, so a
-   * statement can never discount a slot no allocation of the node's own ever backed.
-   */
-  allocationId: string;
-  reportedAt: string;
-  /**
-   * Set when an authoritative snapshot named this identity resident after the statement arrived. The
-   * node's own newer word wins, and the tombstone keeps a replay of the same acknowledgement from
-   * reviving the discount.
-   */
-  refutedAt?: string;
 }
 
 export type InstanceLifecycleEvidence = Extract<InstanceControlMessage, { type: "instance.ready" | "instance.failed" | "instance.released" }>;
@@ -234,15 +179,32 @@ export type InstanceResidentEvidence =
   | { kind: "malformed"; reason: string };
 
 /**
- * Classifies the resident evidence of a `sync.complete` frame. The protocol validator runs before
- * the classification, so no decision is ever taken on an unvalidated field: a present but malformed
- * `activeInstanceIds` is reported as malformed instead of collapsing into absent.
+ * The two control frames that carry a node's resident identities. `sync.complete` carries the set
+ * once per connection, behind the replay barrier; `heartbeat` carries the same set on every beat
+ * (#114), which is what makes the hub's residency record current truth rather than an attachment-time
+ * observation.
  */
-export function classifyInstanceResidentEvidence(frame: unknown, version: ControlProtocolVersion): InstanceResidentEvidence {
+export type InstanceResidencyCarrier = "sync.complete" | "heartbeat";
+
+/**
+ * Classifies the resident evidence of a control frame. The protocol validator runs before the
+ * classification, so no decision is ever taken on an unvalidated field: a present but malformed
+ * `activeInstanceIds` is reported as malformed instead of collapsing into absent.
+ *
+ * Both carriers are classified here rather than by a second, parallel reader. The wire field, its
+ * validator and its `instanceLimits.collectionEntries` bound are shared, so the evidence a heartbeat
+ * carries is the same evidence with the same three outcomes, and the caller names the carrier it is
+ * reading so a frame of the other kind can never be mistaken for it.
+ */
+export function classifyInstanceResidentEvidence(
+  frame: unknown,
+  version: ControlProtocolVersion,
+  carrier: InstanceResidencyCarrier
+): InstanceResidentEvidence {
   if (!supportsControlCapability(version, "instances")) return { kind: "absent" };
   const validated = validateInstanceControlMessage(frame, version);
   if (!validated.ok) return { kind: "malformed", reason: validated.reason };
-  if (validated.value.type !== "sync.complete") return { kind: "malformed", reason: "the frame is not a reconciliation barrier" };
+  if (validated.value.type !== carrier) return { kind: "malformed", reason: `the frame is not ${carrier === "heartbeat" ? "a heartbeat" : "a reconciliation barrier"}` };
   const residents = validated.value.activeInstanceIds;
   return residents === undefined ? { kind: "absent" } : { kind: "authoritative", residents };
 }
@@ -304,92 +266,61 @@ export interface ResidentInstanceUsage {
  * Resident usage for one node. A node without `instanceCapacity` is incapable of hosting instances
  * (zero capacity).
  *
- * Every residency state a node can be in is derived here, and each is derived from evidence rather
- * than from a default:
+ * Every residency state a node can be in is derived here, and each from evidence rather than a
+ * default:
  *
- * - **An authoritative record exists.** Residency is a set of identities, and the record is the
- *   node's own complete resident set. Usage is the union, by identity, of the occupying allocations
- *   this hub persists for the node — whether or not the node has reported them yet, so reconnect lag
- *   cannot overbook — and the identities the record names that the hub does not own. An overlap is
- *   counted once. An identity whose allocation on this node is `released` is discounted, and only
- *   that one status: an acknowledged release is the node's own proof it deleted the resident, so the
- *   record naming it is older than that proof and the slot is free. An acknowledged *failure* is not
- *   such proof — Barista retains the resident when release cleanup fails — so a failed allocation
- *   keeps its slot until the node's next authoritative snapshot stops naming the identity; see
- *   `vacatedAllocationStatuses`. Discounting in the reader rather than editing the record keeps the
- *   record a faithful copy of what the node reported, which is what the release outbox and its load
- *   validation depend on.
+ * - **A resident record exists.** Residency is a set of identities, and the record is the node's own
+ *   complete resident set as of its latest report. Usage is the union, by identity, of the occupying
+ *   allocations this hub persists for the node — whether or not the node has reported them yet, so a
+ *   provision in flight cannot overbook — and the identities the record names that the hub does not
+ *   own. An overlap is counted once.
  *
- *   The same proof also arrives in acknowledgements the lifecycle rejects. Once an allocation is
- *   terminal it can take no further transition, so a release the node completes on a later retry
- *   never reaches `released` status — and the identity would keep its slot until the node reconnected
- *   yet again. An unrefuted `NodeResidencyVacancy` is therefore discounted exactly like a `released`
- *   allocation: it is the same statement from the same producer, authenticated the same way, and
- *   read here rather than written into the record for the same reason.
- * - **An authoritative record exists and is empty.** The union is the hub's own occupying
- *   allocations, so an empty record means zero unowned residency, authoritatively, however stale the
- *   scalar count is.
- * - **No authoritative record has ever arrived.** `activeInstances` is a count, and a count cannot
- *   be reconciled with a set of identities: the hub cannot tell whether it names the instances it
- *   already owns or others entirely. Residency therefore lies between `max(owned, count)` and
- *   `owned + count`, and only the upper bound is safe to place a reservation against, so the count is
- *   added to the owned identities rather than maxed against them. Overbooking a node produces a
- *   provision Barista must reject and a lifecycle failure the hub already recorded; refusing a
- *   candidate only defers it until the node's first authoritative snapshot, which then supersedes the
- *   count entirely. A count of zero costs nothing, because the upper and lower bounds coincide there.
+ *   Nothing the hub knows locally discounts an identity the record names. The node reports its
+ *   residents on every heartbeat (#114), so the record is newer evidence than any allocation status
+ *   the hub has settled against it, and reading that status back over the record is exactly what
+ *   produced six successive wrong accounting rules: a `released` allocation whose pruning destroyed
+ *   the discount, a `failed` one whose resident Barista had in fact retained, and an acknowledgement
+ *   the lifecycle rejected being read as residency evidence. The cost of trusting the record is that
+ *   a resident the node has just deleted keeps its slot until the node's next beat — bounded lag in
+ *   the safe direction, where overbooking is not.
+ * - **A resident record exists and is empty.** The union is the hub's own occupying allocations, so an
+ *   empty record means zero unowned residency, authoritatively.
+ * - **No resident record has ever arrived.** `activeInstanceIds` is optional on the wire, so a node
+ *   may report only the `activeInstances` count, and a count cannot be reconciled with a set of
+ *   identities: the hub cannot tell whether it names the instances it already owns or others
+ *   entirely. Residency therefore lies between `max(owned, count)` and `owned + count`, and only the
+ *   upper bound is safe to place a reservation against, so the count is added to the owned identities
+ *   rather than maxed against them. Overbooking produces a provision Barista must reject; refusing a
+ *   candidate only defers it until the node's first identity report, which supersedes the count
+ *   entirely. A count of zero costs nothing, because the two bounds coincide there.
  * - **The count is absent or malformed.** It is unknown, never zero and never a default: it
  *   contributes nothing, and only the hub's own occupying allocations count.
  */
 export function residentInstanceUsage(
   node: ComputeNode,
   allocations: readonly InstanceAllocation[],
-  residency?: NodeInstanceResidency,
-  vacancies: readonly NodeResidencyVacancy[] = []
+  residency?: NodeInstanceResidency
 ): ResidentInstanceUsage {
   const capacity = Number.isSafeInteger(node.instanceCapacity) && node.instanceCapacity! > 0 ? node.instanceCapacity! : 0;
-  const onNode = allocations.filter((allocation) => allocation.nodeId === node.id);
-  const owned = new Set(onNode
-    .filter((allocation) => occupyingAllocationStatuses.includes(allocation.status))
+  const owned = new Set(allocations
+    .filter((allocation) => allocation.nodeId === node.id && occupyingAllocationStatuses.includes(allocation.status))
     .map((allocation) => allocation.instanceId));
   if (residency !== undefined && residency.nodeId === node.id) {
-    const vacated = new Set(onNode
-      .filter((allocation) => vacatedAllocationStatuses.includes(allocation.status))
-      .map((allocation) => allocation.instanceId));
-    for (const vacancy of vacancies) {
-      if (vacancy.nodeId !== node.id || vacancy.refutedAt !== undefined) continue;
-      vacated.add(vacancy.instanceId);
-    }
-    const unowned = new Set(residency.instanceIds.filter((instanceId) => !owned.has(instanceId) && !vacated.has(instanceId)));
+    const unowned = new Set(residency.instanceIds.filter((instanceId) => !owned.has(instanceId)));
     return { capacity, used: owned.size + unowned.size };
   }
-  /*
-   * A statement never lowers the scalar branch. The count names no identities, so a statement about
-   * one cannot be subtracted from it without assuming the count included that identity — the same
-   * irreconcilability that makes the union an upper bound here. The node's first authoritative
-   * snapshot supersedes the count entirely and the statements apply from then on.
-   */
   const unnamedResidents = Number.isSafeInteger(node.activeInstances) && node.activeInstances! > 0 ? node.activeInstances! : 0;
   return { capacity, used: owned.size + unnamedResidents };
 }
 
-/** The node's authoritative resident set, if it has produced one. */
+/** The node's resident set, if it has ever reported one. */
 export function nodeResidencyInState(state: Readonly<State>, nodeId: string): NodeInstanceResidency | undefined {
   return (state.nodeInstanceResidency ?? []).find((record) => record.nodeId === nodeId);
 }
 
-/** The residency statements this node has made about single identities, refuted ones included. */
-export function nodeResidencyVacanciesInState(state: Readonly<State>, nodeId: string): NodeResidencyVacancy[] {
-  return (state.nodeResidencyVacancies ?? []).filter((vacancy) => vacancy.nodeId === nodeId);
-}
-
-/**
- * Resident usage for one node derived from every piece of residency evidence the hub holds: its own
- * occupying allocations, the node's latest snapshot, and the node's statements about single
- * identities. This is the only correct way to derive usage from persisted state — reading
- * `residentInstanceUsage` with the snapshot alone would miss a statement that arrived after it.
- */
+/** Resident usage for one node: its own occupying allocations and the node's latest resident report. */
 export function residentInstanceUsageInState(state: Readonly<State>, node: ComputeNode): ResidentInstanceUsage {
-  return residentInstanceUsage(node, state.allocations ?? [], nodeResidencyInState(state, node.id), nodeResidencyVacanciesInState(state, node.id));
+  return residentInstanceUsage(node, state.allocations ?? [], nodeResidencyInState(state, node.id));
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
@@ -847,35 +778,20 @@ export async function receiveInstanceLifecycleReport(
     const current = currentAllocationInState(state, instance.id);
     const isCurrentGeneration = current !== undefined && current.id === allocation.id;
     /*
-     * Residency evidence is separate from lifecycle authority, and this is where they part. An
-     * `instance.released` from the owning node is its statement that it deleted the resident — Barista
-     * deletes the resident from its table before sending the frame — and that statement is true
-     * whatever the hub's transition table can still do with the allocation. Recording it before the
-     * branches below is what keeps a report the lifecycle rejects from also discarding what it validly
-     * carries: after a release-cleanup failure the allocation is terminal `failed`, so the retry's
-     * acknowledgement is not a legal transition and never will be, yet it is the node's only word that
-     * the slot is free until the node reconnects again.
-     *
-     * Only `instance.released` says this. `instance.failed` does not: on a release-cleanup failure
-     * Barista keeps the resident in its table and reports the failure afterwards, so a failure is
-     * evidence of nothing about residency and must not vacate a slot. `instance.ready` carries
-     * residency *presence*, which can only raise occupancy, and occupancy is already charged without
-     * it.
-     *
-     * A superseded generation states nothing usable either: when a newer allocation of the same
-     * instance is occupying this node, that allocation holds the slot and an older generation's
-     * acknowledgement is not a statement about it.
+     * An acknowledgement is lifecycle authority only; it carries no residency weight of its own. Who
+     * is resident on a node is the node's own report, which now arrives with every heartbeat, so a
+     * report the transition table refuses is refused outright and writes nothing. Reading residency
+     * out of an acknowledgement instead — which the hub had to do while the report refreshed only on
+     * connection attachment — is what let a rejected frame free a slot, and what made the tombstone
+     * guarding its replay able to suppress the next genuine report.
      */
-    const statedVacancy = message.type === "instance.released" && (current === undefined || current.id === allocation.id)
-      ? recordResidencyVacancy(state, nodeId, allocation, at)
-      : false;
     const rejected = (reason: string): boolean => {
-      outcome = { kind: "rejected", changed: statedVacancy, reason };
-      return statedVacancy;
+      outcome = { kind: "rejected", changed: false, reason };
+      return false;
     };
     const ignored = (): boolean => {
-      outcome = { kind: "ignored", changed: statedVacancy };
-      return statedVacancy;
+      outcome = { kind: "ignored", changed: false };
+      return false;
     };
     if (message.type === "instance.ready") {
       if (allocation.status === "active" && nonTerminalInstanceStatuses.includes(instance.status)) return ignored();
@@ -940,25 +856,6 @@ function settleTerminalInstance(state: State, instance: AgentInstance, at: strin
 }
 
 /**
- * Records the node's statement that one identity is no longer resident on it, and reports whether
- * state moved.
- *
- * Deduplicated by node and identity, which is the whole of replay idempotence: a statement is a fact,
- * not a counter, so the second delivery of the same acknowledgement finds it already recorded and
- * changes nothing. A statement an authoritative snapshot has refuted is never revived either — the
- * node's newer word about the identity outranks a redelivered older one, and the only cost of that
- * ordering is a deferral, because the node's next snapshot no longer naming the identity frees the
- * slot through the record itself.
- */
-function recordResidencyVacancy(state: State, nodeId: string, allocation: InstanceAllocation, at: string): boolean {
-  state.nodeResidencyVacancies ??= [];
-  const existing = state.nodeResidencyVacancies.find((vacancy) => vacancy.nodeId === nodeId && vacancy.instanceId === allocation.instanceId);
-  if (existing !== undefined) return false;
-  state.nodeResidencyVacancies.push({ nodeId, instanceId: allocation.instanceId, allocationId: allocation.id, reportedAt: at });
-  return true;
-}
-
-/**
  * Reconciles explicit resident evidence reported after a version-5 replay barrier. Residents the
  * hub expected but Barista no longer supervises become `lost` exactly once — never freed or reused
  * as active evidence — and their non-draining instances return to `requested` for replacement. A
@@ -966,23 +863,15 @@ function recordResidencyVacancy(state: State, nodeId: string, allocation: Instan
  * resident is never adopted: the hub asks the node to release it. Absent evidence must never reach
  * this function; the caller classifies the sync with `classifyInstanceResidentEvidence` first.
  *
- * The snapshot is also the authority that retires outbox entries: a release for a resident the node
- * still reports is re-armed for replay, and a remote release request for a resident it no longer
- * reports is retired. Both directions are needed for the outbox to be finite as well as sufficient.
- *
- * This function is the single writer of `state.nodeInstanceResidency`. It replaces the node's record
- * wholesale, which is what makes the record authoritative over every earlier claim about that node —
- * the scalar heartbeat count included — and is why reservation and the release outbox may both read
- * it without consulting any other representation of residency.
+ * The residency record and the outbox it authorizes are written by `applyNodeResidencyInState`, which
+ * a heartbeat carrying the same identities calls on its own. What stays here is what only a reconnect
+ * can decide: which allocations the node has lost, and which already-written commands must replay
+ * because the socket that carried them is gone.
  */
 export function reconcileNodeInstancesInState(state: State, nodeId: string, activeInstanceIds: readonly string[], at: string): boolean {
   const reported = new Set(activeInstanceIds);
   const instancesById = new Map((state.instances ?? []).map((instance) => [instance.id, instance]));
   const expected = (state.allocations ?? []).filter((allocation) => allocation.nodeId === nodeId && occupyingAllocationStatuses.includes(allocation.status));
-  const expectedInstanceIds = new Set(expected.flatMap((allocation) => {
-    const instance = instancesById.get(allocation.instanceId);
-    return instance ? [instance.id] : [];
-  }));
   let changed = false;
   for (const allocation of expected) {
     const instance = instancesById.get(allocation.instanceId);
@@ -1011,72 +900,60 @@ export function reconcileNodeInstancesInState(state: State, nodeId: string, acti
     changed = true;
   }
   changed = rearmUnacknowledgedReleases(state, nodeId, reported, at) || changed;
-  if (recordNodeResidency(state, nodeId, activeInstanceIds, at)) changed = true;
-  if (supersedeResidencyVacancies(state, nodeId, reported, at)) changed = true;
-  for (const instanceId of activeInstanceIds) {
-    if (expectedInstanceIds.has(instanceId)) continue;
-    state.remoteReleaseRequests ??= [];
-    const existing = state.remoteReleaseRequests.find((request) => request.nodeId === nodeId && request.instanceId === instanceId);
-    if (existing === undefined) {
-      state.remoteReleaseRequests.push({ nodeId, instanceId, requestedAt: at });
-      changed = true;
-      continue;
-    }
-    /*
-     * The node still reports this resident after an authoritative snapshot, which is proof it has not
-     * acted on the request the hub already wrote to its socket. The request is re-armed in place so it
-     * replays; reusing the record keeps the outbox from growing per reconnect, and re-arming happens
-     * only per authoritative snapshot, so a Barista that legitimately refuses to release cannot make
-     * this loop — it costs one resend per reconnect, exactly like an owned release.
-     */
-    if (existing.deliveredAt !== undefined) {
-      delete existing.deliveredAt;
-      changed = true;
-    }
-  }
+  if (applyNodeResidencyInState(state, nodeId, activeInstanceIds, at)) changed = true;
   /*
-   * This snapshot is the complete resident set of the node, so a request for a resident it no longer
-   * reports has nothing left to act on and is retired. Nothing actionable is discarded: only a
-   * resident the node itself stopped reporting is dropped, and if it reappears in a later snapshot
-   * the request is written again. Each node's requests are therefore bounded by the resident set a
-   * snapshot may carry (`instanceLimits.collectionEntries`) and cannot grow across reconnects.
+   * A resident the node still reports after an authoritative reconnect is proof it never acted on the
+   * remote release the hub had already written to the previous socket, so the request is re-armed in
+   * place and replays. Re-arming belongs to the reconnect and not to the heartbeats that carry the
+   * same identities: a socket write is only in doubt when the connection that carried it is gone, and
+   * re-arming per beat would resend the same release for as long as the node kept reporting the
+   * resident. Reusing the record keeps the outbox from growing per reconnect, so a Barista that
+   * legitimately refuses to release costs one resend per reconnect, exactly like an owned release.
    */
-  const requests = state.remoteReleaseRequests ?? [];
-  const retained = requests.filter((request) => request.nodeId !== nodeId || reported.has(request.instanceId));
-  if (retained.length !== requests.length) {
-    state.remoteReleaseRequests = retained;
+  for (const request of state.remoteReleaseRequests ?? []) {
+    if (request.nodeId !== nodeId || !reported.has(request.instanceId) || request.deliveredAt === undefined) continue;
+    delete request.deliveredAt;
     changed = true;
   }
   return changed;
 }
 
 /**
- * Applies an authoritative snapshot to the node's residency statements. The snapshot is the node's
- * complete resident set, so it supersedes every earlier claim about that node, its statements
- * included: an identity the snapshot names again *refutes* the statement about it, and an identity it
- * does not name needs no statement at all, because the record the statement is read against no longer
- * names the identity either.
+ * Applies a node's own resident identity report: the record, and the release outbox that record
+ * authorizes. Barista sends this set on every heartbeat as well as with its reconnect barrier (#114),
+ * so the record is the node's current word about who is resident rather than an attachment-time
+ * observation, and the capacity derivation reads nothing else about unowned residency.
  *
- * Refuting rather than dropping is what makes the ordering one-way. A dropped statement could be
- * written again by a redelivered acknowledgement and would then free a slot the node has just
- * re-reported as held; a tombstone cannot.
- *
- * A snapshot repeating the known resident set is not a change to the residency record, but it is
- * still a fresh observation, so refutation keys off the snapshot rather than off whether the record
- * moved.
- *
- * Statements for a node therefore never outlive its next snapshot beyond the identities that snapshot
- * names, which bounds them by `instanceLimits.collectionEntries` per node, exactly as the record and
- * the release outbox are bounded.
+ * Three writes belong to the report itself, none of which depend on the connection being new. The
+ * record is replaced wholesale, which is what makes it authoritative over every earlier claim about
+ * the node, the `activeInstances` scalar included. A resident the hub holds no occupying allocation
+ * for is asked to release, because the hub never adopts a resident it did not place. A request for a
+ * resident the node no longer reports is retired, because the command has nothing left to act on —
+ * which is what keeps the outbox finite and keeps every persisted request backed by residency
+ * evidence, as the relationship load validation requires. Each node's requests are therefore bounded
+ * by the resident set one report may carry (`instanceLimits.collectionEntries`).
  */
-function supersedeResidencyVacancies(state: State, nodeId: string, reported: ReadonlySet<string>, at: string): boolean {
-  const vacancies = state.nodeResidencyVacancies ?? [];
-  const retained = vacancies.filter((vacancy) => vacancy.nodeId !== nodeId || reported.has(vacancy.instanceId));
-  let changed = retained.length !== vacancies.length;
-  if (changed) state.nodeResidencyVacancies = retained;
-  for (const vacancy of retained) {
-    if (vacancy.nodeId !== nodeId || vacancy.refutedAt !== undefined) continue;
-    vacancy.refutedAt = at;
+export function applyNodeResidencyInState(state: State, nodeId: string, activeInstanceIds: readonly string[], at: string): boolean {
+  const reported = new Set(activeInstanceIds);
+  const instancesById = new Map((state.instances ?? []).map((instance) => [instance.id, instance]));
+  const expectedInstanceIds = new Set((state.allocations ?? [])
+    .filter((allocation) => allocation.nodeId === nodeId && occupyingAllocationStatuses.includes(allocation.status))
+    .flatMap((allocation) => {
+      const instance = instancesById.get(allocation.instanceId);
+      return instance ? [instance.id] : [];
+    }));
+  let changed = recordNodeResidency(state, nodeId, activeInstanceIds, at);
+  for (const instanceId of reported) {
+    if (expectedInstanceIds.has(instanceId)) continue;
+    state.remoteReleaseRequests ??= [];
+    if (state.remoteReleaseRequests.some((request) => request.nodeId === nodeId && request.instanceId === instanceId)) continue;
+    state.remoteReleaseRequests.push({ nodeId, instanceId, requestedAt: at });
+    changed = true;
+  }
+  const requests = state.remoteReleaseRequests ?? [];
+  const retained = requests.filter((request) => request.nodeId !== nodeId || reported.has(request.instanceId));
+  if (retained.length !== requests.length) {
+    state.remoteReleaseRequests = retained;
     changed = true;
   }
   return changed;
@@ -1313,20 +1190,15 @@ export function listThreadInstances(state: Readonly<State>, threadId: string, in
  * are never touched, and an actionable outbox entry — an undelivered provision, release, or remote
  * release request — is never pruned; only a successful delivery removes it.
  *
- * An identity a node's authoritative residency record still names is pinned and never pruned,
- * whatever its status. The record is the node's own snapshot and the hub never edits it, so the
- * identity's allocation is the only evidence that says whether the named identity still occupies a
- * slot; pruning it would leave the record naming an identity with nothing left to discount it, which
- * counts as occupancy for as long as the record stands. That is not self-healing: Barista sends
- * identity snapshots on connection attachment, not on heartbeats, so a node that stays connected
- * never refreshes the record and the phantom occupancy would be permanent. The pin therefore lasts
- * exactly as long as the node keeps naming the identity, and the node's next snapshot releases it.
+ * Nothing is pinned against the bound by residency. A terminal record the node still names is pruned
+ * like any other, and the record then names an identity the hub no longer owns, which reads as one
+ * occupied slot until the node's next heartbeat stops naming it — bounded lag in the safe direction
+ * rather than the permanent phantom occupancy an attachment-only snapshot would have left.
  */
 export function pruneInstanceAuditRecords(state: State): boolean {
   let changed = false;
-  const pinned = residencyPinnedInstanceIds(state);
   const terminal = (state.instances ?? [])
-    .filter((instance) => terminalInstanceStatuses.includes(instance.status) && !pinned.has(instance.id))
+    .filter((instance) => terminalInstanceStatuses.includes(instance.status))
     .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   if (terminal.length > instanceAuditLimits.retainedTerminalInstances) {
     const dropped = new Set(terminal.slice(instanceAuditLimits.retainedTerminalInstances).map((instance) => instance.id));
@@ -1334,10 +1206,6 @@ export function pruneInstanceAuditRecords(state: State): boolean {
     state.allocations = (state.allocations ?? []).filter((allocation) => !dropped.has(allocation.instanceId));
     state.instanceReleaseIntents = (state.instanceReleaseIntents ?? []).filter((intent) => !dropped.has(intent.instanceId));
     state.instanceDeliveries = (state.instanceDeliveries ?? []).filter((record) => !dropped.has(commandInstanceId(record.message)));
-    // A statement is authenticated by the allocation it names, so it cannot outlive that allocation.
-    // Nothing discountable is lost: an identity a residency record still names is pinned above, and one
-    // no record names has nothing left to discount.
-    state.nodeResidencyVacancies = (state.nodeResidencyVacancies ?? []).filter((vacancy) => !dropped.has(vacancy.instanceId));
     changed = true;
   }
   // Receipts and the submissions derived from them are retired in one place, keyed off the instances
@@ -1346,10 +1214,6 @@ export function pruneInstanceAuditRecords(state: State): boolean {
   if (retireSettledDeliveries(state)) changed = true;
   return changed;
 }
-
-/** Every instance identity some node's authoritative residency record still names. */
-const residencyPinnedInstanceIds = (state: Readonly<State>): ReadonlySet<string> =>
-  new Set((state.nodeInstanceResidency ?? []).flatMap((record) => record.instanceIds));
 
 /**
  * Retires receipts that can no longer answer anything: a receipt whose instance the hub has stopped
@@ -1433,7 +1297,7 @@ export function assertPersistedInstanceState(state: State) {
     ["instances", state.instances], ["allocations", state.allocations], ["templates", state.templates],
     ["instanceLifecycleReceipts", state.instanceLifecycleReceipts], ["instanceReleaseIntents", state.instanceReleaseIntents],
     ["instanceDeliveries", state.instanceDeliveries], ["remoteReleaseRequests", state.remoteReleaseRequests],
-    ["nodeInstanceResidency", state.nodeInstanceResidency], ["nodeResidencyVacancies", state.nodeResidencyVacancies]
+    ["nodeInstanceResidency", state.nodeInstanceResidency]
   ] as const) {
     if (!Array.isArray(collection)) throw new Error(`Persisted ${name} collection is not an array`);
   }
@@ -1550,31 +1414,6 @@ export function assertPersistedInstanceState(state: State) {
     if (new Set(record.instanceIds).size !== record.instanceIds.length) throw new Error(`${context} repeats a resident instance`);
     if (residencyByNode.has(record.nodeId)) throw new Error(`${context} repeats node ${record.nodeId}`);
     residencyByNode.set(record.nodeId, new Set(record.instanceIds as string[]));
-  }
-  const vacancyKeys = new Set<string>();
-  for (const [index, vacancy] of (state.nodeResidencyVacancies ?? []).entries()) {
-    const context = `Persisted node residency vacancy ${index}`;
-    if (!isRecord(vacancy) || !isNonEmptyString(vacancy.nodeId) || !isNonEmptyString(vacancy.instanceId)
-      || !isNonEmptyString(vacancy.allocationId) || !isNonEmptyString(vacancy.reportedAt) || !isOptionalNonEmptyString(vacancy.refutedAt)) {
-      throw new Error(`${context} is malformed`);
-    }
-    // One statement per node and identity is what makes a replayed acknowledgement idempotent, so a
-    // snapshot carrying two of them is rejected rather than letting the reader pick one.
-    const key = `${vacancy.nodeId}\u0000${vacancy.instanceId}`;
-    if (vacancyKeys.has(key)) throw new Error(`${context} repeats its node and instance`);
-    vacancyKeys.add(key);
-    /*
-     * A statement discounts a slot, so its authentication has to survive the reload that its sender
-     * does not: the allocation it names must exist and must be the one tying this node to this
-     * instance. Otherwise a persisted statement could free a slot on a node that never held the
-     * identity, which is exactly what authenticating the acknowledgement prevents while it is live.
-     */
-    const allocation = allocationsById.get(vacancy.allocationId);
-    if (!allocation) throw new Error(`${context} names unknown allocation ${vacancy.allocationId}`);
-    if (allocation.nodeId !== vacancy.nodeId) throw new Error(`${context} names a node that does not hold allocation ${vacancy.allocationId}`);
-    if (allocation.instanceId !== vacancy.instanceId) {
-      throw new Error(`${context} names an instance that does not own allocation ${vacancy.allocationId}`);
-    }
   }
   const remoteRequestKeys = new Set<string>();
   for (const [index, request] of (state.remoteReleaseRequests ?? []).entries()) {
