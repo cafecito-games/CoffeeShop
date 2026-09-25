@@ -26,7 +26,14 @@ import {
   type TimelineEvent
 } from "@coffee-shop/protocol";
 import type { HarnessEventStream, StoredHarnessEvent } from "./harnessEvents.js";
-import { assertPersistedInstanceState, type InstanceDeliveryRecord, type InstanceLifecycleReceipt, type InstanceReleaseIntent, type RemoteReleaseRequest } from "./instances.js";
+import {
+  assertPersistedInstanceState,
+  type InstanceDeliveryRecord,
+  type InstanceLifecycleReceipt,
+  type InstanceReleaseIntent,
+  type NodeInstanceResidency,
+  type RemoteReleaseRequest
+} from "./instances.js";
 import { assertPersistedSessionState } from "./persistedSessionState.js";
 import { recordTaskEvents, type TaskEventEntry, type TaskEventStream } from "./taskEvents.js";
 
@@ -87,6 +94,11 @@ interface HubOnlyState {
   instanceReleaseIntents?: InstanceReleaseIntent[];
   instanceDeliveries?: InstanceDeliveryRecord[];
   remoteReleaseRequests?: RemoteReleaseRequest[];
+  /**
+   * The authoritative resident set of each node, replaced wholesale by its latest `sync.complete`.
+   * Written only by instance reconciliation; it is the hub's single record of unowned residency.
+   */
+  nodeInstanceResidency?: NodeInstanceResidency[];
   /** Prevents a deliberately emptied catalog from re-importing the legacy profiles file. */
   projectProfilesImported?: boolean;
 }
@@ -112,6 +124,7 @@ const emptyState = (): State => withOrchestrationDefaults({
   instanceReleaseIntents: [],
   instanceDeliveries: [],
   remoteReleaseRequests: [],
+  nodeInstanceResidency: [],
   taskSubmissions: [],
   taskUpdates: [],
   taskEventJournal: [],
@@ -160,6 +173,7 @@ export function addInstanceDefaults(state: State) {
   if (state.instanceReleaseIntents === undefined) state.instanceReleaseIntents = [];
   if (state.instanceDeliveries === undefined) state.instanceDeliveries = [];
   if (state.remoteReleaseRequests === undefined) state.remoteReleaseRequests = [];
+  if (state.nodeInstanceResidency === undefined) state.nodeInstanceResidency = [];
 }
 
 /** Rejects malformed or duplicate persisted profiles before they can affect scheduling. */
@@ -608,6 +622,7 @@ export class Store {
       harnessEventStreams: _harnessEventStreams, harnessEvents: _harnessEvents,
       instanceLifecycleReceipts: _instanceLifecycleReceipts, instanceReleaseIntents: _instanceReleaseIntents,
       instanceDeliveries: _instanceDeliveries, remoteReleaseRequests: _remoteReleaseRequests,
+      nodeInstanceResidency: _nodeInstanceResidency,
       projectProfilesImported: _projectProfilesImported, orchestratorClients, ...published
     } = this.state;
     return structuredClone({
