@@ -569,6 +569,39 @@ func TestActivateHarnessRejectsVersionDisagreement(t *testing.T) {
 	require.Equal(t, good.Ref(), active.Ref())
 }
 
+// TestRollbackHarnessProbesTheRetainedVersionNotTheDeclaredOne proves the version the probe compares
+// against is the version being activated, not whatever the manifest currently declares. A retained
+// rollback target is the ordinary case where the two differ: once a manifest bump declares the newer
+// version, the retained one is no longer declared, and comparing against the declared version would
+// make every rollback fail the instant Barista was upgraded.
+func TestRollbackHarnessProbesTheRetainedVersionNotTheDeclaredOne(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the harness fixtures are shell scripts")
+	}
+	previous := harnessProbeEntry(t, "claude-cli", "anthropic", "1.0.0")
+	current := harnessProbeEntry(t, "claude-cli", "anthropic", "2.1.231")
+	fixture := newHarnessProbeFixture(t, previous, literalVersionScript(t, "claude 1.0.0 (Claude Code)\n"))
+	fixture.installScript(t, current, fixtureVersionScript(t, claudeVersionOutputFixturePath, 0))
+
+	_, err := activateHarness(t, fixture, previous)
+	require.NoError(t, err)
+	fixture.declareVersion(t, current, current.Version)
+	promoted, err := activateHarness(t, fixture, current)
+	require.NoError(t, err)
+	require.NotNil(t, promoted.Previous)
+	require.Equal(t, previous.Ref(), *promoted.Previous)
+
+	// 1.0.0 is no longer declared by the manifest, and its executable reports 1.0.0 — not the
+	// declared 2.1.231. Rollback must accept it.
+	_, declared := manifestEntryFor(fixture.manifest, previous.Ref())
+	require.False(t, declared, "the retained version is deliberately no longer declared")
+	rolled, err := Rollback(context.Background(), fixture.context(ProbeHarnessVersion, nil),
+		ComponentSelector{Kind: ComponentKindHarness, ID: previous.ID})
+	require.NoError(t, err)
+	require.Equal(t, previous.Ref(), rolled.Active)
+	require.Nil(t, rolled.Previous, "rollback consumes the retained target rather than swapping it")
+}
+
 // TestActivateHarnessRejectsMalformedAbsentAndUnknownVersionOutput proves every non-agreeing probe
 // outcome refuses activation, and that the reasons stay distinguishable: malformed output is never
 // reported as "this harness reports no version", and a probe that could not run is never reported as
