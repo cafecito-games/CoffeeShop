@@ -77,8 +77,27 @@ func (driver nativeDriver) Execute(ctx context.Context, invocation Invocation) (
 	return strings.TrimSpace(final), nil
 }
 
+// profile returns the harness's natively discovered profile. Only a harness whose native CLI was
+// found and passed its version check is available, which is what native execution, native
+// fallback, and harness-version reporting require.
 func (r *Runner) profile(id string) (protocol.HarnessProfile, bool) {
-	for _, profile := range r.profiles {
+	for _, profile := range r.nativeProfiles {
+		if profile.ID == id && profile.Available {
+			return profile, true
+		}
+	}
+	return protocol.HarnessProfile{}, false
+}
+
+// advertisedProfile returns the harness's profile as this node advertises it to the hub, which
+// admission reads. A harness installed only through ACP is available here even though profile
+// refuses it; without an advertised set the native profiles are the advertisement.
+func (r *Runner) advertisedProfile(id string) (protocol.HarnessProfile, bool) {
+	advertised := r.advertisedProfiles
+	if advertised == nil {
+		advertised = r.nativeProfiles
+	}
+	for _, profile := range advertised {
 		if profile.ID == id && profile.Available {
 			return profile, true
 		}

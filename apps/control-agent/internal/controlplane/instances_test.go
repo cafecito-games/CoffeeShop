@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/acp"
+	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/acp/acptest"
 	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/config"
 	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/harness"
 	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/protocol"
@@ -231,6 +233,80 @@ func TestProvisionValidatesEveryPrerequisiteBeforeReserving(t *testing.T) {
 		require.NotNil(t, failed)
 		require.Contains(t, *failed.Error, "no harness inventory")
 	})
+}
+
+// advertisingClaudeCLIDriver builds an ACP driver whose claude-cli adapter replays the named
+// acptest scenario, plus the native discovery profiles of a node whose Claude CLI is not installed
+// natively: claude-cli is reachable only through ACP.
+func advertisingClaudeCLIDriver(t *testing.T, scenario string) (*harness.ACPDriver, string, []protocol.HarnessProfile) {
+	t.Helper()
+	executable, err := os.Executable()
+	require.NoError(t, err)
+	record := filepath.Join(t.TempDir(), "frames.jsonl")
+	driver := harness.NewACPDriver(harness.ACPDriverOptions{
+		Adapters: map[string]harness.ACPAdapter{"claude-cli": {
+			Binary: executable, Environment: acptest.Environment(scenario, record),
+			ID: "claude-acp", Version: acptest.ClaudeAdapterVersion, Source: protocol.ACPAdapterSourceSetupLedger,
+		}},
+		RequestTimeout: 5 * time.Second,
+	})
+	t.Cleanup(func() { acptest.KillDescendants(t, record) })
+	nativeProfiles := []protocol.HarnessProfile{{
+		ID: "claude-cli", Label: "Claude Code", Description: "Not installed", Binary: "claude",
+		Available: false, Transports: []string{harness.TransportNative},
+	}}
+	return driver, record, nativeProfiles
+}
+
+// An allocation the hub selected from this node's advertised capabilities — a harness available
+// only through ACP, over acp-v1, with a model the adapter's probe contributed — must provision.
+func TestProvisionAcceptsAllocationsSelectedFromAdvertisedACPCapabilities(t *testing.T) {
+	driver, _, nativeProfiles := advertisingClaudeCLIDriver(t, "claude-probe-models")
+	advertised, failures := harness.AdvertiseACP(context.Background(), nativeProfiles, driver)
+	require.Empty(t, failures)
+	require.True(t, advertised[0].Available, "the probed adapter makes claude-cli available without its native CLI")
+	require.Equal(t, []string{harness.TransportACP}, advertised[0].Transports)
+
+	runner := harness.NewRunner(nativeProfiles).WithAdvertisedProfiles(advertised).WithACP(driver)
+	client := NewClient(config.Config{
+		Concurrency: 1, InstanceCapacity: 1, WorkspaceRoots: []string{t.TempDir()},
+	}, protocol.ComputeNode{ID: "node-one", Harnesses: advertised}, runner, emptyCapabilityReport)
+
+	instance, allocation := testInstanceAndAllocation(client.config.WorkspaceRoots[0])
+	allocation.HarnessID = "claude-cli"
+	allocation.Model = acptest.ClaudeModel
+	allocation.Transport = harness.TransportACP
+	client.handleInstanceMessage(context.Background(), testProvisionMessage(instance, allocation))
+	failed := waitForInstanceMessage(t, client, "instance.failed", allocation.ID)
+	if failed != nil {
+		t.Fatalf("an allocation selected from the advertised ACP capabilities must provision, not fail: %s", *failed.Error)
+	}
+	require.NotNil(t, waitForInstanceMessage(t, client, "instance.ready", allocation.ID))
+	require.Equal(t, 1, client.activeInstanceCount())
+}
+
+// A harness whose ACP adapter failed its startup probe is absent from the advertised capabilities
+// and must not be admitted: the adapter is disabled, so neither admission check accepts it.
+func TestProvisionRefusesHarnessesWhoseACPProbeFailed(t *testing.T) {
+	driver, _, nativeProfiles := advertisingClaudeCLIDriver(t, "claude-version-mismatch")
+	advertised, failures := harness.AdvertiseACP(context.Background(), nativeProfiles, driver)
+	require.ErrorIs(t, failures["claude-cli"], acp.ErrAdapterVersionMismatch)
+	require.Equal(t, nativeProfiles, advertised, "a failed probe must not change what the node advertises")
+
+	runner := harness.NewRunner(nativeProfiles).WithAdvertisedProfiles(advertised).WithACP(driver)
+	client := NewClient(config.Config{
+		Concurrency: 1, InstanceCapacity: 1, WorkspaceRoots: []string{t.TempDir()},
+	}, protocol.ComputeNode{ID: "node-one", Harnesses: advertised}, runner, emptyCapabilityReport)
+
+	instance, allocation := testInstanceAndAllocation(client.config.WorkspaceRoots[0])
+	allocation.HarnessID = "claude-cli"
+	allocation.Model = acptest.ClaudeModel
+	allocation.Transport = harness.TransportACP
+	client.handleInstanceMessage(context.Background(), testProvisionMessage(instance, allocation))
+	failed := waitForInstanceMessage(t, client, "instance.failed", allocation.ID)
+	require.NotNil(t, failed)
+	require.Contains(t, *failed.Error, "not installed")
+	require.Zero(t, client.activeInstanceCount())
 }
 
 func TestProvisionCapacityZeroDisabledFullAndFree(t *testing.T) {

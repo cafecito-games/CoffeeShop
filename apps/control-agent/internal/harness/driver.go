@@ -93,19 +93,36 @@ type Driver interface {
 
 // Runner selects the driver for a run's transport. The native CLI driver is always registered.
 type Runner struct {
-	profiles       []protocol.HarnessProfile
-	native         Driver
-	acp            *ACPDriver
-	nativeFallback map[string]bool
+	// nativeProfiles are the harnesses this Barista can execute through their native CLIs. Native
+	// execution, native fallback, and harness-version reporting read this set: a harness without an
+	// installed, version-checked native CLI is never natively runnable.
+	nativeProfiles []protocol.HarnessProfile
+	// advertisedProfiles are the harness profiles this node advertises to the hub, which include
+	// harnesses reachable only through ACP and models an adapter's probe contributed. Admission
+	// (AdmitModel) reads this set, so what the hub may select and what Barista will admit cannot
+	// diverge.
+	advertisedProfiles []protocol.HarnessProfile
+	native             Driver
+	acp                *ACPDriver
+	nativeFallback     map[string]bool
 	// approvalPolicies is the administrator's approval policy per harness; see ApprovalPolicies.
 	approvalPolicies ApprovalPolicies
 	now              func() time.Time
 }
 
 func NewRunner(profiles []protocol.HarnessProfile) *Runner {
-	runner := &Runner{profiles: profiles, nativeFallback: map[string]bool{}, now: time.Now}
+	runner := &Runner{nativeProfiles: profiles, nativeFallback: map[string]bool{}, now: time.Now}
 	runner.native = nativeDriver{runner: runner}
 	return runner
+}
+
+// WithAdvertisedProfiles records the harness profiles this node advertises to the hub — the set
+// AdvertiseACP built from the native profiles and every adapter that passed its startup probe.
+// Admission accepts exactly this set. Without it, admission reads the constructor's native
+// profiles, which is the advertised set of a node with no ACP adapters.
+func (r *Runner) WithAdvertisedProfiles(profiles []protocol.HarnessProfile) *Runner {
+	r.advertisedProfiles = profiles
+	return r
 }
 
 // WithACP registers the ACP driver used for runs whose transport is acp-v1.
@@ -173,12 +190,14 @@ func (r *Runner) AdmitResume(harnessID string) error {
 	return r.acp.SupportsResume(harnessID)
 }
 
-// AdmitModel reports whether the harness is installed and advertises the model. A harness whose
-// advertised model list is empty accepts any model identifier, because its CLI chooses defaults
-// on its own. It performs no execution and is safe to call before a run or a resident instance is
-// accepted.
+// AdmitModel reports whether the harness is installed and advertises the model. It reads the
+// profiles the node advertises to the hub, so a harness available only through ACP and a model an
+// adapter's probe contributed are admissible exactly when the node advertises them. A harness
+// whose advertised model list is empty accepts any model identifier, because its CLI chooses
+// defaults on its own. It performs no execution and is safe to call before a run or a resident
+// instance is accepted.
 func (r *Runner) AdmitModel(harnessID, model string) error {
-	profile, available := r.profile(harnessID)
+	profile, available := r.advertisedProfile(harnessID)
 	if !available {
 		return fmt.Errorf("harness %s is not installed or did not pass its version check", harnessID)
 	}

@@ -144,3 +144,49 @@ func TestAdmitModelChecksInstallationAndAdvertisementWithoutExecuting(t *testing
 	require.ErrorContains(t, runner.AdmitModel("claude-cli", "sonnet"), "harness claude-cli is not installed")
 	require.ErrorContains(t, runner.AdmitModel("unknown-cli", "sonnet"), "harness unknown-cli is not installed")
 }
+
+// advertisedACPOnlyClaude is the profile set a node advertises when its Claude CLI is not installed
+// natively but the claude-cli adapter passed its startup probe: available over acp-v1 only, with the
+// models the probe contributed.
+func advertisedACPOnlyClaude() []protocol.HarnessProfile {
+	return []protocol.HarnessProfile{{
+		ID: "claude-cli", Label: "Claude Code", Description: "ACP adapter 0.79.0", Binary: "claude",
+		Available: true, Transports: []string{TransportACP}, Models: []string{"default", "claude-sonnet-4-6"},
+	}}
+}
+
+func nativeACPOnlyClaude() []protocol.HarnessProfile {
+	return []protocol.HarnessProfile{{
+		ID: "claude-cli", Label: "Claude Code", Description: "Not installed", Binary: "claude",
+		Available: false, Transports: []string{TransportNative},
+	}}
+}
+
+// Admission must read the advertised profiles, so a harness the node advertises as available over
+// ACP and the models its adapter contributed are admissible even without a native CLI.
+func TestAdmitModelAdmitsTheAdvertisedACPCapabilities(t *testing.T) {
+	runner := NewRunner(nativeACPOnlyClaude()).WithAdvertisedProfiles(advertisedACPOnlyClaude())
+
+	require.NoError(t, runner.AdmitModel("claude-cli", "default"))
+	require.NoError(t, runner.AdmitModel("claude-cli", "claude-sonnet-4-6"))
+	require.ErrorContains(t, runner.AdmitModel("claude-cli", "claude-unreleased-9"), "model claude-unreleased-9 is not advertised by harness claude-cli")
+}
+
+// The advertised set never widens native execution or native fallback: both keep reading the
+// natively discovered profiles, so a harness installed only through ACP is never run natively.
+func TestAdvertisedProfilesNeverMakeAHarnessNativelyRunnable(t *testing.T) {
+	runner := NewRunner(nativeACPOnlyClaude()).
+		WithAdvertisedProfiles(advertisedACPOnlyClaude()).
+		WithNativeFallback("claude-cli")
+
+	require.NoError(t, runner.AdmitModel("claude-cli", "default"), "admission reads the advertised set")
+
+	_, executionErr := runner.Execute(context.Background(), Invocation{
+		Run:   protocol.Run{ID: "run-native", HarnessID: "claude-cli", Transport: TransportNative, Model: "default"},
+		Agent: protocol.Agent{}, Output: func(string) {},
+	})
+	require.ErrorContains(t, executionErr, "harness claude-cli is not installed")
+
+	require.ErrorIs(t, runner.Admit("claude-cli", TransportACP, TransportNative), ErrDriverUnavailable,
+		"native fallback must still require the native CLI even when the dispatch permits it")
+}
