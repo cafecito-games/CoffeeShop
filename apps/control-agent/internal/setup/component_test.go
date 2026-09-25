@@ -844,3 +844,56 @@ func TestUninstallRejectsASelectorThatNamesNothing(t *testing.T) {
 		t.Fatalf("Uninstall() for the wrong kind removed %v", recordPaths(result.Removed))
 	}
 }
+
+// TestExpectedCurrentStateVocabularyIsClosed proves the planner only ever produces states in the
+// vocabulary and that Apply's dispatch covers each one, refusing anything else instead of installing
+// over a target whose state it never established.
+func TestExpectedCurrentStateVocabularyIsClosed(t *testing.T) {
+	for _, state := range ExpectedCurrentStates {
+		if !state.Valid() {
+			t.Fatalf("ExpectedCurrentStates contains %q which ExpectedCurrentState.Valid rejects", state)
+		}
+	}
+	if ExpectedCurrentState("recently-verified").Valid() {
+		t.Fatal("ExpectedCurrentState.Valid accepted a value outside the vocabulary")
+	}
+	// observeCurrentState is the only producer of the value the plan carries; every path through it
+	// must land in the vocabulary.
+	dataRoot := t.TempDir()
+	absentPath := filepath.Join(dataRoot, "absent")
+	presentPath := filepath.Join(dataRoot, "present")
+	if err := os.WriteFile(presentPath, []byte("payload"), 0o644); err != nil {
+		t.Fatalf("write present file: %v", err)
+	}
+	ownedPath := filepath.Join(dataRoot, "owned")
+	if err := os.WriteFile(ownedPath, []byte("owned payload"), 0o644); err != nil {
+		t.Fatalf("write owned file: %v", err)
+	}
+	ownedLedger := OwnershipLedger{}.WithRecord(OwnershipRecord{
+		Path:          ownedPath,
+		Component:     ComponentRef{Kind: ComponentKindACPAdapter, ID: "fixture-acp", Version: "1.0.0"},
+		HarnessID:     "fixture-cli",
+		ContentSHA256: sha256Hex([]byte("owned payload")),
+		SizeBytes:     int64(len("owned payload")),
+		InstalledAt:   "2026-01-01T00:00:00Z",
+	})
+	observations := map[string]ExpectedCurrentState{
+		absentPath:  observeCurrentState(absentPath, OwnershipLedger{}),
+		presentPath: observeCurrentState(presentPath, OwnershipLedger{}),
+		ownedPath:   observeCurrentState(ownedPath, ownedLedger),
+	}
+	for path, state := range observations {
+		if !state.Valid() {
+			t.Fatalf("observeCurrentState(%s) produced %q which is outside the vocabulary", path, state)
+		}
+	}
+	if observations[absentPath] != ExpectedAbsent {
+		t.Fatalf("observeCurrentState() on an absent target = %q, want absent", observations[absentPath])
+	}
+	if observations[presentPath] != ExpectedUnownedExists {
+		t.Fatalf("observeCurrentState() on an unowned target = %q, want unowned-exists", observations[presentPath])
+	}
+	if observations[ownedPath] != ExpectedOwnedMatch {
+		t.Fatalf("observeCurrentState() on an owned matching target = %q, want owned-match", observations[ownedPath])
+	}
+}

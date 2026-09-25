@@ -69,6 +69,16 @@ const (
 	ExpectedUnownedExists ExpectedCurrentState = "unowned-exists" // something exists at the target that this tool did not create — always refused, never overwritten
 )
 
+// ExpectedCurrentStates is the single enumeration of every observable target state. Apply switches
+// on all three and refuses anything else rather than treating an unrecognized state as "absent",
+// which would install over a target whose state it never actually established.
+var ExpectedCurrentStates = []ExpectedCurrentState{ExpectedAbsent, ExpectedOwnedMatch, ExpectedUnownedExists}
+
+// Valid reports whether state is in the closed vocabulary.
+func (state ExpectedCurrentState) Valid() bool {
+	return slices.Contains(ExpectedCurrentStates, state)
+}
+
 // postconditionMaximumBytes bounds each human-readable postcondition string.
 const postconditionMaximumBytes = 256
 

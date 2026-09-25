@@ -97,12 +97,19 @@ func Apply(ctx context.Context, plan Plan, manifestBytes []byte, ledger Ownershi
 		return result, errors.New("supplied plan does not match the manifest and current node state; run setup plan again")
 	}
 	for _, operation := range derivedPlan.Operations {
-		if operation.ExpectedCurrentState == ExpectedUnownedExists {
+		// Every observable state is handled explicitly; an unrecognized state refuses the whole apply
+		// rather than falling through to the install branch, so a state this code never established
+		// can never be treated as "absent".
+		switch operation.ExpectedCurrentState {
+		case ExpectedUnownedExists:
 			return result, fmt.Errorf("component %s target %s holds a file this tool did not create", operation.Component, operation.TargetPath)
-		}
-		if operation.ExpectedCurrentState == ExpectedOwnedMatch {
+		case ExpectedOwnedMatch:
 			result.Skipped = append(result.Skipped, operation)
 			continue
+		case ExpectedAbsent:
+			// Fall through to install.
+		default:
+			return result, fmt.Errorf("component %s target state %q is unknown; run setup plan again", operation.Component, operation.ExpectedCurrentState)
 		}
 		record, err := installOperation(ctx, operation, dataRoot, options)
 		if err != nil {
