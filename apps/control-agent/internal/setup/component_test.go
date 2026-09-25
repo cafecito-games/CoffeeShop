@@ -708,12 +708,18 @@ func TestParseOwnershipLedgerRejectsUnmappableLegacyRecords(t *testing.T) {
 			if err == nil {
 				t.Fatalf("ParseOwnershipLedger() accepted %s, want rejection", testCase.name)
 			}
-			var migrationErr *LedgerMigrationError
-			if !errors.As(err, &migrationErr) {
-				t.Fatalf("ParseOwnershipLedger() error = %v, want a *LedgerMigrationError naming the record", err)
+			var rejection *LedgerRejectionError
+			if !errors.As(err, &rejection) {
+				t.Fatalf("ParseOwnershipLedger() error = %v, want a *LedgerRejectionError naming the record", err)
 			}
-			if len(migrationErr.Rejections) == 0 {
-				t.Fatal("LedgerMigrationError carries no rejections")
+			if len(rejection.Rejections) == 0 {
+				t.Fatal("LedgerRejectionError carries no rejections")
+			}
+			if rejection.SourceGeneration != LegacyOwnershipLedgerVersion {
+				t.Fatalf("rejection reports source generation %q, want the legacy %q", rejection.SourceGeneration, LegacyOwnershipLedgerVersion)
+			}
+			if !strings.Contains(err.Error(), "legacy ownership ledger cannot be migrated") {
+				t.Fatalf("ParseOwnershipLedger() error = %v, want it to name the legacy migration", err)
 			}
 			if !strings.Contains(err.Error(), testCase.wantErr) {
 				t.Fatalf("ParseOwnershipLedger() error = %v, want it to contain %q", err, testCase.wantErr)
@@ -895,5 +901,73 @@ func TestExpectedCurrentStateVocabularyIsClosed(t *testing.T) {
 	}
 	if observations[ownedPath] != ExpectedOwnedMatch {
 		t.Fatalf("observeCurrentState() on an owned matching target = %q, want owned-match", observations[ownedPath])
+	}
+}
+
+// TestParseOwnershipLedgerNamesTheGenerationItRejected proves the rejection points an operator at the
+// repair that actually applies: a current-generation ledger with an invalid record must not be
+// reported as a legacy ledger that failed to migrate, and must still reject fail-closed without
+// claiming any record.
+func TestParseOwnershipLedgerNamesTheGenerationItRejected(t *testing.T) {
+	data := `{"ledgerVersion":"` + OwnershipLedgerVersion + `","records":[{"path":"/var/lib/barista/adapters/claude-cli/claude-acp/0.79.0/bin/a","component":{"kind":"acp-adapter","id":"claude-acp","version":"0.79.0"},"harnessId":"claude-cli","contentSha256":"deadbeef","sizeBytes":1,"installedAt":"2026-09-24T18:12:05Z"}]}`
+	ledger, _, err := ParseOwnershipLedger([]byte(data), legacyLedgerFixtureDataRoot)
+	if err == nil {
+		t.Fatal("ParseOwnershipLedger() accepted a current-generation ledger with an invalid digest, want rejection")
+	}
+	var rejection *LedgerRejectionError
+	if !errors.As(err, &rejection) {
+		t.Fatalf("ParseOwnershipLedger() error = %v, want a *LedgerRejectionError", err)
+	}
+	if rejection.SourceGeneration != OwnershipLedgerVersion {
+		t.Fatalf("rejection reports source generation %q, want %q", rejection.SourceGeneration, OwnershipLedgerVersion)
+	}
+	if strings.Contains(err.Error(), "legacy") || strings.Contains(err.Error(), "migrated") {
+		t.Fatalf("a current-generation rejection is reported as a failed legacy migration: %v", err)
+	}
+	if !strings.Contains(err.Error(), "generation "+OwnershipLedgerVersion+" cannot be accepted") {
+		t.Fatalf("ParseOwnershipLedger() error = %v, want it to name the current generation", err)
+	}
+	if len(ledger.Records) != 0 {
+		t.Fatalf("a rejected ledger returned %d records, want none", len(ledger.Records))
+	}
+}
+
+// TestParseOwnershipLedgerAppliesPathGrammarToBothGenerations proves the path check is enforced at
+// the same strictness on both generations — the class-level fix for a check that previously existed
+// only on the legacy path — while a record naming a path outside the data root stays loadable so
+// rollback and doctor can still report it instead of it being silently discarded.
+func TestParseOwnershipLedgerAppliesPathGrammarToBothGenerations(t *testing.T) {
+	record := func(path string) string {
+		return `{"path":"` + path + `","component":{"kind":"acp-adapter","id":"claude-acp","version":"0.79.0"},"harnessId":"claude-cli","contentSha256":"` + strings.Repeat("a", 64) + `","sizeBytes":1,"installedAt":"2026-09-24T18:12:05Z"}`
+	}
+	legacyRecord := func(path string) string {
+		return `{"path":"` + path + `","adapterId":"claude-acp","adapterVersion":"0.79.0","contentSha256":"` + strings.Repeat("a", 64) + `","sizeBytes":1,"installedAt":"2026-09-24T18:12:05Z"}`
+	}
+	for _, badPath := range []string{"adapters/claude-cli/claude-acp/0.79.0/bin/a", "/var/lib/barista/adapters/claude-cli/../claude-cli/claude-acp/0.79.0/bin/a", ""} {
+		for name, data := range map[string]string{
+			"current": `{"ledgerVersion":"` + OwnershipLedgerVersion + `","records":[` + record(badPath) + `]}`,
+			"legacy":  `{"records":[` + legacyRecord(badPath) + `]}`,
+		} {
+			if _, _, err := ParseOwnershipLedger([]byte(data), legacyLedgerFixtureDataRoot); err == nil {
+				t.Fatalf("ParseOwnershipLedger() accepted %s-generation path %q, want rejection", name, badPath)
+			}
+		}
+	}
+	// An absolute, clean path outside the data root remains loadable under the current generation:
+	// rollback's own containment check is what refuses to delete it, and dropping it here would hide
+	// the record an operator has to act on.
+	outside := `{"ledgerVersion":"` + OwnershipLedgerVersion + `","records":[` + record("/elsewhere/planted-adapter") + `]}`
+	ledger, generation, err := ParseOwnershipLedger([]byte(outside), legacyLedgerFixtureDataRoot)
+	if err != nil {
+		t.Fatalf("ParseOwnershipLedger() dropped an out-of-root record instead of keeping it reportable: %v", err)
+	}
+	if generation != OwnershipLedgerVersion || len(ledger.Records) != 1 {
+		t.Fatalf("ParseOwnershipLedger() = generation %q with %d records, want the current generation with 1", generation, len(ledger.Records))
+	}
+	// A legacy record naming a path outside the data root is still unmigratable, because the legacy
+	// schema recorded its harness nowhere but that path.
+	legacyOutside := `{"records":[` + legacyRecord("/elsewhere/planted-adapter") + `]}`
+	if _, _, err := ParseOwnershipLedger([]byte(legacyOutside), legacyLedgerFixtureDataRoot); err == nil {
+		t.Fatal("ParseOwnershipLedger() migrated a legacy record from outside the data root, want rejection")
 	}
 }

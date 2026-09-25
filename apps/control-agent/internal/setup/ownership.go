@@ -58,22 +58,28 @@ type LedgerRecordRejection struct {
 	Reason      string
 }
 
-// LedgerMigrationError reports that a legacy ownership ledger could not be migrated to the current
-// generation. Every rejected record is listed. Nothing is written and nothing is dropped: the
-// ledger file and every target file stay exactly as they were, and no record is claimed as owned
-// under the new schema, because a record whose legacy invariants are no longer provable must not be
-// silently converted into an ownership claim.
-type LedgerMigrationError struct {
-	Rejections []LedgerRecordRejection
+// LedgerRejectionError reports that an ownership ledger could not be accepted: either a legacy
+// ledger whose records cannot be migrated to the current generation, or a current-generation ledger
+// whose records do not validate. SourceGeneration says which, so the message points an operator at
+// the repair that actually applies rather than always blaming a migration. Every rejected record is
+// listed. Nothing is written and nothing is dropped: the ledger file and every target file stay
+// exactly as they were, and no record is claimed as owned, because a record whose invariants are not
+// provable must not be silently converted into an ownership claim.
+type LedgerRejectionError struct {
+	SourceGeneration string
+	Rejections       []LedgerRecordRejection
 }
 
-func (err *LedgerMigrationError) Error() string {
+func (err *LedgerRejectionError) Error() string {
 	reasons := make([]string, 0, len(err.Rejections))
 	for _, rejection := range err.Rejections {
 		reasons = append(reasons, fmt.Sprintf("record %d: %s", rejection.RecordIndex, rejection.Reason))
 	}
-	return "legacy ownership ledger cannot be migrated to generation " + OwnershipLedgerVersion +
-		"; it was left unchanged and no record is treated as owned: " + strings.Join(reasons, "; ")
+	prefix := fmt.Sprintf("ownership ledger generation %s cannot be accepted", err.SourceGeneration)
+	if err.SourceGeneration == LegacyOwnershipLedgerVersion {
+		prefix = "legacy ownership ledger cannot be migrated to generation " + OwnershipLedgerVersion
+	}
+	return prefix + "; it was left unchanged and no record is treated as owned: " + strings.Join(reasons, "; ")
 }
 
 // ownershipDocument is the wire shape of a ledger file. Both generations' record fields are decoded
@@ -194,6 +200,9 @@ func (document ownershipDocument) current() (OwnershipLedger, error) {
 			reason = "duplicates an earlier record's path"
 		}
 		if reason == "" {
+			reason = validateRecordPathGrammar(record.Path)
+		}
+		if reason == "" {
 			if err := record.Component.Validate(); err != nil {
 				reason = err.Error()
 			}
@@ -216,7 +225,7 @@ func (document ownershipDocument) current() (OwnershipLedger, error) {
 		})
 	}
 	if len(rejections) > 0 {
-		return OwnershipLedger{}, &LedgerMigrationError{Rejections: rejections}
+		return OwnershipLedger{}, &LedgerRejectionError{SourceGeneration: OwnershipLedgerVersion, Rejections: rejections}
 	}
 	return OwnershipLedger{LedgerVersion: OwnershipLedgerVersion, Records: records}, nil
 }
@@ -258,7 +267,7 @@ func (document ownershipDocument) migratedFromLegacy(dataRoot string) (Ownership
 		})
 	}
 	if len(rejections) > 0 {
-		return OwnershipLedger{}, &LedgerMigrationError{Rejections: rejections}
+		return OwnershipLedger{}, &LedgerRejectionError{SourceGeneration: LegacyOwnershipLedgerVersion, Rejections: rejections}
 	}
 	return OwnershipLedger{LedgerVersion: OwnershipLedgerVersion, Records: records}, nil
 }
@@ -281,8 +290,8 @@ func legacyRecordHarnessID(record ownershipRecordDocument, dataRoot string) (str
 	if !filepath.IsAbs(dataRoot) {
 		return "", "the owning data root is not an absolute path"
 	}
-	if !filepath.IsAbs(record.Path) || filepath.Clean(record.Path) != record.Path {
-		return "", "path is not an absolute, already-clean path"
+	if reason := validateRecordPathGrammar(record.Path); reason != "" {
+		return "", reason
 	}
 	relative, err := filepath.Rel(dataRoot, record.Path)
 	if err != nil {
@@ -299,6 +308,24 @@ func legacyRecordHarnessID(record ownershipRecordDocument, dataRoot string) (str
 		return "", "path does not match the record's own adapter id and version"
 	}
 	return segments[1], ""
+}
+
+// validateRecordPathGrammar is the path check both generations share: a record's path must be an
+// absolute, already-clean path, because every consumer treats it as an exact filesystem identity and
+// compares it literally. Containment inside the data root deliberately is *not* enforced here: a
+// record naming a path outside the root must stay loadable so rollback and doctor can report it
+// (recordIsSafelyRemovable in rollback.go re-derives absoluteness and containment before any delete,
+// and lookups are keyed by manifest-derived absolute paths, so a foreign path can never be matched
+// or followed). Dropping such a record at parse time would silently discard the very evidence an
+// operator needs.
+func validateRecordPathGrammar(path string) string {
+	if path == "" {
+		return "path is empty"
+	}
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return "path is not an absolute, already-clean path"
+	}
+	return ""
 }
 
 // validateRecordIntegrityFields checks the fields both generations share and that rollback and
