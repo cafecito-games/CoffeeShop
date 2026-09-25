@@ -892,11 +892,13 @@ func TestHeartbeatAndRegistrationReportIndependentResidentCounts(t *testing.T) {
 	heartbeat := client.heartbeatMessage()
 	require.Equal(t, 0, *heartbeat.ActiveInstances)
 	require.Equal(t, 0, heartbeat.ActiveRuns)
-	require.Nil(t, heartbeat.ActiveInstanceIDs, "only sync.complete carries identity evidence")
+	require.NotNil(t, heartbeat.ActiveInstanceIDs, "every heartbeat carries identity evidence")
+	require.Empty(t, *heartbeat.ActiveInstanceIDs, "zero residents are an explicit empty array, not an absent field")
 
 	provisionReady(t, client, instance, allocation)
 	heartbeat = client.heartbeatMessage()
 	require.Equal(t, 1, *heartbeat.ActiveInstances)
+	require.Equal(t, []string{"instance-one"}, *heartbeat.ActiveInstanceIDs)
 
 	instanceIDs := client.activeInstanceIDs()
 	require.Equal(t, []string{"instance-one"}, instanceIDs)

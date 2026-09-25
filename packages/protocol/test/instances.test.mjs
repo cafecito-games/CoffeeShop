@@ -52,8 +52,23 @@ test("resident evidence distinguishes absent, empty, duplicate, and malformed da
   }
 });
 
+test("heartbeat residency evidence follows the sync.complete rule and capability gate", () => {
+  const heartbeat = { type: "heartbeat", nodeId: "node-one", activeRuns: 0, at };
+  assert.equal(protocol.validateInstanceControlMessage(heartbeat, "5").ok, true);
+  assert.equal(protocol.hasAuthoritativeInstanceEvidence(heartbeat), false, "an omitted list is absent evidence");
+  assert.equal(protocol.hasAuthoritativeInstanceEvidence({ ...heartbeat, activeInstanceIds: [] }), true, "an explicit empty array reports zero residents");
+  for (const ids of [null, ["same", "same"], [""], ["bad/id"], "none"]) {
+    assert.equal(protocol.validateInstanceControlMessage({ ...heartbeat, activeInstanceIds: ids }, "5").ok, false, `malformed list must reject: ${JSON.stringify(ids)}`);
+  }
+  for (const version of ["1", "2", "3", "4"]) {
+    assert.equal(protocol.canAcceptFromControlAgent(heartbeat, version), true, `${version}: a heartbeat without instance fields stays unchanged`);
+    assert.equal(protocol.canAcceptFromControlAgent({ ...heartbeat, activeInstances: 1 }, version), false, `${version}: the scalar count already requires the instances capability`);
+    assert.equal(protocol.canAcceptFromControlAgent({ ...heartbeat, activeInstanceIds: [] }, version), false, `${version}: resident identities require the instances capability`);
+  }
+});
+
 test("Go-produced fixtures validate and round-trip byte-for-byte through the TypeScript encoder", () => {
-  for (const name of ["provision", "dispatch", "release", "ready", "released", "failed", "register", "heartbeat", "sync", "sync-empty", "sync-absent", "create", "template"]) {
+  for (const name of ["provision", "dispatch", "release", "ready", "released", "failed", "register", "heartbeat", "heartbeat-empty", "sync", "sync-empty", "sync-absent", "create", "template"]) {
     const bytes = readFileSync(new URL(`./fixtures/control-v5/${name}.json`, import.meta.url), "utf8");
     const value = JSON.parse(bytes);
     const validate = ["provision", "dispatch", "release"].includes(name) ? protocol.validateInstanceHubMessage

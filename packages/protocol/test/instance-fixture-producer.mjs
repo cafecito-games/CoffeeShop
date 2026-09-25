@@ -44,6 +44,8 @@ export function invalidInstanceFixtures() {
   mutate("dispatch draining instance", "hub", "dispatch", (v) => { v.instance.status = "draining"; });
   for (const ids of [null, ["same", "same"], [""], ["bad/id"]]) mutate(`invalid resident IDs ${JSON.stringify(ids)}`, "control", "sync", (v) => { v.activeInstanceIds = ids; });
   mutate("too many resident IDs", "control", "sync", (v) => { v.activeInstanceIds = Array.from({ length: 1025 }, (_, n) => `i-${n}`); });
+  for (const ids of [null, ["same", "same"], [""], ["bad/id"]]) mutate(`invalid heartbeat resident IDs ${JSON.stringify(ids)}`, "control", "heartbeat", (v) => { v.activeInstanceIds = ids; });
+  mutate("too many heartbeat resident IDs", "control", "heartbeat", (v) => { v.activeInstanceIds = Array.from({ length: 1025 }, (_, n) => `i-${n}`); });
   for (const count of [-1, 1.5, 65536, null, "0"]) mutate(`invalid count ${JSON.stringify(count)}`, "control", "heartbeat", (v) => { v.activeInstances = count; });
   mutate("registration unknown nested field", "control", "register", (v) => { v.node.harnesses[0].extra = true; });
   mutate("registration over capacity", "control", "register", (v) => { v.node.activeInstances = 5; });
