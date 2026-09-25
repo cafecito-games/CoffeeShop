@@ -8,6 +8,7 @@ import express from "express";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
 import {
   canSendToControlAgent,
+  hasAuthoritativeInstanceEvidence,
   isControlProtocolVersion,
   isTerminalTaskStatus,
   isTerminalWorkspaceLeaseStatus,
@@ -16,12 +17,14 @@ import {
   threadOrchestrator,
   validateProjectProfile,
   validateNodeCapabilityReport,
+  validateInstanceControlMessage,
   validateOrchestrationControlAgentMessage,
   type Agent,
   type ComputeNode,
   type ControlAgentToHub,
   type ControlProtocolVersion,
   type HubToControlAgent,
+  type InstanceHubMessage,
   type Run
 } from "@coffee-shop/protocol";
 import { createConfiguredAgent, markDisconnectedNodesOffline, updateConfiguredAgent } from "./agentConfiguration.js";
@@ -30,6 +33,17 @@ import { applyRunLifecycle, cancelPersistedRun, coalesceAsync, failLostTaskAttem
 import { CoordinationError } from "./coordination.js";
 import { detachEveryAttachmentInState, postOperatorMessageInState, type OperatorMessage } from "./externalOrchestrators.js";
 import { createHubToolHandler, hubToolError } from "./hubTools.js";
+import {
+  applyInstanceLifecycle,
+  currentAllocationInState,
+  flushPendingInstanceDeliveries,
+  listThreadInstances,
+  maintainInstanceLifecycle,
+  operatorInstanceCreator,
+  receiveInstanceLifecycleReport,
+  reconcileNodeInstancesInState,
+  type InstanceLifecycleEvidence
+} from "./instances.js";
 import { TaskEventWaiters } from "./mailbox.js";
 import { forgetNodeCapabilityReport, getNodeCapabilityReport, recordNodeCapabilityReport } from "./nodeCapabilities.js";
 import { registeredComputeNode } from "./nodeRegistration.js";
@@ -86,11 +100,24 @@ orchestratorClientRevocations.onOrchestratorClientRevoked((clientId) => {
 });
 
 const sendToControlAgent = (nodeId: string, message: HubToControlAgent) => controlAgents.send(nodeId, message);
+/** Instance commands reach only the node's current, synced, protocol-v5 connection. */
+const sendInstanceCommand = (nodeId: string, message: InstanceHubMessage) => controlAgents.sendInstanceCommand(nodeId, message);
 /** Lease cleanup requests wait for the reconnect barrier so Barista's replayed reports land first. */
 const sendAfterBarrier = (nodeId: string, message: HubToControlAgent) => {
   const connection = controlAgents.current(nodeId);
   return connection !== undefined && controlAgents.barrierPassed(connection) && controlAgents.send(nodeId, message);
 };
+
+/**
+ * Expires idle instance leases, converges draining instances, prunes audit records, and writes any
+ * persisted instance command whose node now has a current synced v5 connection. Bursts collapse
+ * into one pass and passes never overlap.
+ */
+const runInstanceMaintenance = coalesceAsync(async () => {
+  const changed = await maintainInstanceLifecycle(store);
+  const delivered = await flushPendingInstanceDeliveries(store, sendInstanceCommand);
+  if (changed || delivered) broadcast();
+}, (error) => console.error("instance lifecycle maintenance failed", error));
 
 type DispatchMessage = Extract<HubToControlAgent, { type: "dispatch" }>;
 /** The connection a dispatch may be approved against now: current, past its barrier, and version-compatible. */
@@ -360,6 +387,111 @@ app.post("/api/workspace-leases/:id/cleanup", async (req, res) => {
   }
 });
 
+/*
+ * Operator instance lifecycle endpoints. Every mutation goes through the shared instance service,
+ * which is the single authority for statuses, receipts, and delivery decisions; a thread's
+ * instances are visible only from that thread, and an unknown thread and a foreign instance are
+ * indistinguishable to the caller.
+ */
+const instanceRequestFailure = (response: express.Response, error: unknown) => {
+  const failure = error instanceof CoordinationError ? error : new CoordinationError("internal_error", "The instance request failed", true);
+  const status = failure.code === "not_found" || failure.code === "not_attached" ? 404
+    : failure.code === "forbidden" ? 403
+      : failure.code === "idempotency_conflict" || failure.code === "thread_inactive" || failure.code === "conflict" ? 409
+        : 400;
+  response.status(status).json({ error: failure.message });
+};
+
+const operatorIdempotencyKey = (body: unknown): string | undefined => {
+  const key = typeof (body as { idempotencyKey?: unknown } | undefined)?.idempotencyKey === "string"
+    ? (body as { idempotencyKey: string }).idempotencyKey.trim()
+    : "";
+  return key ? key : undefined;
+};
+
+app.post("/api/threads/:threadId/instances", async (req, res) => {
+  const idempotencyKey = operatorIdempotencyKey(req.body);
+  if (!idempotencyKey) return res.status(400).json({ error: "idempotencyKey is required" });
+  try {
+    const result = await applyInstanceLifecycle(store, operatorInstanceCreator, {
+      operation: "create",
+      threadId: req.params.threadId,
+      idempotency: { caller: operatorInstanceCreator, key: idempotencyKey },
+      purpose: req.body?.purpose,
+      requirements: req.body?.requirements,
+      idleTimeoutSeconds: req.body?.idleTimeoutSeconds,
+      initialTask: req.body?.initialTask
+    });
+    if (!result.replayed) {
+      broadcast();
+      requestScheduling();
+    }
+    res.status(result.replayed ? 200 : 201).json(result);
+  } catch (error) {
+    instanceRequestFailure(res, error);
+  }
+});
+
+app.get("/api/threads/:threadId/instances", (req, res) => {
+  const threadId = req.params.threadId;
+  const view = store.read((state) => ({
+    exists: state.threads?.some((thread) => thread.id === threadId) ?? false,
+    listing: listThreadInstances(state, threadId, req.query.includeTerminal === "true" || req.query.includeTerminal === "1")
+  }));
+  if (!view.exists) return res.status(404).json({ error: "Thread not found" });
+  res.json(view.listing);
+});
+
+app.get("/api/threads/:threadId/instances/:instanceId", (req, res) => {
+  const view = store.read((state) => {
+    const instance = (state.instances ?? []).find((item) => item.id === req.params.instanceId && item.threadId === req.params.threadId);
+    if (!instance) return undefined;
+    const allocation = currentAllocationInState(state, instance.id);
+    return { instance: structuredClone(instance), ...(allocation ? { allocation: structuredClone(allocation) } : {}) };
+  });
+  if (!view) return res.status(404).json({ error: "Instance not found" });
+  res.json(view);
+});
+
+app.post("/api/threads/:threadId/instances/:instanceId/renew", async (req, res) => {
+  const idempotencyKey = operatorIdempotencyKey(req.body);
+  if (!idempotencyKey) return res.status(400).json({ error: "idempotencyKey is required" });
+  try {
+    const result = await applyInstanceLifecycle(store, operatorInstanceCreator, {
+      operation: "renew",
+      threadId: req.params.threadId,
+      instanceId: req.params.instanceId,
+      idempotency: { caller: operatorInstanceCreator, key: idempotencyKey },
+      idleTimeoutSeconds: req.body?.idleTimeoutSeconds
+    });
+    if (result.replayed === false) broadcast();
+    res.json(result);
+  } catch (error) {
+    instanceRequestFailure(res, error);
+  }
+});
+
+app.post("/api/threads/:threadId/instances/:instanceId/release", async (req, res) => {
+  const idempotencyKey = operatorIdempotencyKey(req.body);
+  if (!idempotencyKey) return res.status(400).json({ error: "idempotencyKey is required" });
+  if (req.body?.mode !== "drain" && req.body?.mode !== "cancel") return res.status(400).json({ error: "mode must be drain or cancel" });
+  try {
+    const result = await applyInstanceLifecycle(store, operatorInstanceCreator, {
+      operation: "release",
+      threadId: req.params.threadId,
+      instanceId: req.params.instanceId,
+      idempotency: { caller: operatorInstanceCreator, key: idempotencyKey },
+      mode: req.body.mode
+    });
+    broadcast();
+    requestScheduling();
+    void runInstanceMaintenance();
+    res.status(result.replayed ? 200 : 202).json(result);
+  } catch (error) {
+    instanceRequestFailure(res, error);
+  }
+});
+
 app.get("/api/approvals", (req, res) => {
   const status = typeof req.query.status === "string" ? req.query.status : undefined;
   const runId = typeof req.query.runId === "string" ? req.query.runId : undefined;
@@ -609,14 +741,21 @@ wss.on("connection", (socket, request) => {
       return;
     }
     if (typeof decoded !== "object" || decoded === null || !("type" in decoded) || typeof decoded.type !== "string") return;
+    const decodedType = decoded.type;
     const message = decoded as ControlAgentToHub;
     if (message.type === "register") {
       if (message.protocolVersion !== undefined && !isControlProtocolVersion(message.protocolVersion)) return socket.close(1002, "unsupported control protocol");
       if (typeof message.node?.id !== "string" || !controlAgents.admits(message.node.id, socket)) {
         return socket.close(1008, "node is already connected");
       }
-      nodeId = message.node.id;
       protocolVersion = message.protocolVersion ?? "1";
+      // A version-5 registration carries resident instance capacity, so it must be well formed
+      // before the hub records the node as instance-capable.
+      if (supportsControlCapability(protocolVersion, "instances")) {
+        const registration = validateInstanceControlMessage(decoded, protocolVersion);
+        if (!registration.ok) return socket.close(1002, "invalid v5 registration");
+      }
+      nodeId = message.node.id;
       controlAgents.register(nodeId, socket, protocolVersion);
       // Acknowledges the registration: Barista replays its queued lifecycle messages only after this,
       // so nothing it queued is ever written to a socket the hub refused.
@@ -650,12 +789,43 @@ wss.on("connection", (socket, request) => {
       }
       if (supportsControlCapability(protocolVersion, "orchestration") && activeRunIds !== undefined
         && await reconcileApprovals(store, nodeId, activeRunIds, sendToControlAgent)) broadcast();
+      // Explicit resident evidence is authoritative: absent evidence (no valid activeInstanceIds)
+      // changes nothing. Everything the node still reports stays, missing allocations become lost,
+      // and unknown residents are asked to release without ever being adopted.
+      if (supportsControlCapability(protocolVersion, "instances") && hasAuthoritativeInstanceEvidence(decoded)) {
+        const residents = (decoded as { activeInstanceIds: string[] }).activeInstanceIds;
+        let reconciled = false;
+        await store.transact((state) => {
+          reconciled = reconcileNodeInstancesInState(state, nodeId, residents, new Date().toISOString());
+          return reconciled;
+        });
+        if (reconciled) broadcast();
+      }
+      await runInstanceMaintenance();
       requestScheduling();
     } else if (message.type === "heartbeat") {
       let capacityChanged = false;
-      await store.transact((state) => { const node = state.nodes.find((item) => item.id === message.nodeId); if (node) { capacityChanged = node.activeRuns !== message.activeRuns; node.lastSeen = message.at; node.activeRuns = message.activeRuns; node.status = message.activeRuns ? "busy" : "online"; } });
+      const reportedInstances = supportsControlCapability(protocolVersion, "instances")
+        && message.nodeId === nodeId && message.activeInstances !== undefined && Number.isSafeInteger(message.activeInstances)
+        ? message.activeInstances
+        : undefined;
+      await store.transact((state) => { const node = state.nodes.find((item) => item.id === message.nodeId); if (node) { capacityChanged = node.activeRuns !== message.activeRuns || node.activeInstances !== reportedInstances; node.lastSeen = message.at; node.activeRuns = message.activeRuns; if (reportedInstances !== undefined) node.activeInstances = reportedInstances; node.status = message.activeRuns ? "busy" : "online"; } });
       broadcast();
       if (capacityChanged) requestScheduling();
+    } else if (decodedType === "instance.ready" || decodedType === "instance.failed" || decodedType === "instance.released") {
+      if (!supportsControlCapability(protocolVersion, "instances") || !nodeId || !isCurrentSocket()) return;
+      const validated = validateInstanceControlMessage(decoded, protocolVersion);
+      if (!validated.ok) {
+        console.warn(redactor.redact(`rejected ${decodedType} from ${nodeId || "an unregistered Barista"}: ${validated.reason}`));
+        return;
+      }
+      const outcome = await receiveInstanceLifecycleReport(store, nodeId, validated.value as InstanceLifecycleEvidence, new Date().toISOString());
+      if (outcome.kind === "rejected") console.warn(`rejected ${decodedType} from ${nodeId}: ${outcome.reason}`);
+      if (outcome.changed) {
+        broadcast();
+        requestScheduling();
+        await runInstanceMaintenance();
+      }
     } else if (message.type === "hub.rpc.request") {
       if (!supportsControlCapability(protocolVersion, "hub-rpc") || !nodeId || typeof message.requestId !== "string" || typeof message.runId !== "string") return;
       const source = store.getRun(message.runId);
@@ -780,6 +950,11 @@ setInterval(() => {
   // A ring can also fall due without any commit, when a pending approval nears its expiry.
   orchestratorClients.ringAttachedThreads();
 }, 30_000).unref();
+// Idle instance leases expire, draining instances converge, and persisted instance commands are
+// written to any current synced v5 connection, all through the shared lifecycle service.
+setInterval(() => {
+  void runInstanceMaintenance();
+}, 15_000).unref();
 setInterval(() => {
   void expireDueApprovals(store, sendToControlAgent)
     .then((changed) => { if (changed) broadcast(); })

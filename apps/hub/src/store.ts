@@ -26,6 +26,7 @@ import {
   type TimelineEvent
 } from "@coffee-shop/protocol";
 import type { HarnessEventStream, StoredHarnessEvent } from "./harnessEvents.js";
+import { assertPersistedInstanceState, type InstanceDeliveryRecord, type InstanceLifecycleReceipt, type InstanceReleaseIntent, type RemoteReleaseRequest } from "./instances.js";
 import { assertPersistedSessionState } from "./persistedSessionState.js";
 import { recordTaskEvents, type TaskEventEntry, type TaskEventStream } from "./taskEvents.js";
 
@@ -75,6 +76,11 @@ interface HubOnlyState {
   taskEventStreams?: TaskEventStream[];
   harnessEventStreams?: HarnessEventStream[];
   harnessEvents?: StoredHarnessEvent[];
+  /** Version-5 instance lifecycle idempotency receipts, release intents, and delivery decisions. */
+  instanceLifecycleReceipts?: InstanceLifecycleReceipt[];
+  instanceReleaseIntents?: InstanceReleaseIntent[];
+  instanceDeliveries?: InstanceDeliveryRecord[];
+  remoteReleaseRequests?: RemoteReleaseRequest[];
   /** Prevents a deliberately emptied catalog from re-importing the legacy profiles file. */
   projectProfilesImported?: boolean;
 }
@@ -93,6 +99,13 @@ const emptyState = (): State => withOrchestrationDefaults({
   threads: [],
   delegations: [],
   artifacts: [],
+  instances: [],
+  allocations: [],
+  templates: [],
+  instanceLifecycleReceipts: [],
+  instanceReleaseIntents: [],
+  instanceDeliveries: [],
+  remoteReleaseRequests: [],
   taskSubmissions: [],
   taskUpdates: [],
   taskEventJournal: [],
@@ -123,6 +136,22 @@ export function addOrchestrationDefaults(state: State) {
   state.orchestratorClients ??= [];
   state.orchestratorAttachments ??= [];
   return changed;
+}
+
+/**
+ * Initializes the version-5 instance collections of a snapshot persisted before they existed. Empty
+ * defaults are deterministic: no legacy record is migrated into an instance or allocation, and an
+ * absent collection is not a migration, so a legacy file the hub loads is not rewritten for this —
+ * the defaults reach disk with the next real transaction.
+ */
+export function addInstanceDefaults(state: State) {
+  state.instances ??= [];
+  state.allocations ??= [];
+  state.templates ??= [];
+  state.instanceLifecycleReceipts ??= [];
+  state.instanceReleaseIntents ??= [];
+  state.instanceDeliveries ??= [];
+  state.remoteReleaseRequests ??= [];
 }
 
 /** Rejects malformed or duplicate persisted profiles before they can affect scheduling. */
@@ -539,6 +568,7 @@ export class Store {
     const addedThreadOrchestrators = addThreadOrchestratorDefaults(loaded);
     const addedThreads = addThreadDefaults(loaded);
     const addedOrchestration = addOrchestrationDefaults(loaded);
+    addInstanceDefaults(loaded);
     if (this.sqlite) loaded.projectProfiles ??= [];
     const addedApprovalResolvers = addApprovalResolverDefaults(loaded);
     assertPersistedTaskState(loaded);
@@ -547,6 +577,7 @@ export class Store {
     assertPersistedSessionState(loaded);
     assertPersistedOrchestratorClientState(loaded);
     assertPersistedProjectProfiles(loaded);
+    assertPersistedInstanceState(loaded);
     if (this.sqlite || removedDemoRecords || addedAgentAvatars || addedCoordination || addedThreads || addedOrchestration
       || addedThreadOrchestrators || addedApprovalResolvers) await this.save(loaded);
     this.state = loaded;
@@ -566,6 +597,8 @@ export class Store {
     const {
       taskSubmissions: _taskSubmissions, taskUpdates: _taskUpdates, taskEventJournal: _taskEventJournal, taskEventStreams: _taskEventStreams,
       harnessEventStreams: _harnessEventStreams, harnessEvents: _harnessEvents,
+      instanceLifecycleReceipts: _instanceLifecycleReceipts, instanceReleaseIntents: _instanceReleaseIntents,
+      instanceDeliveries: _instanceDeliveries, remoteReleaseRequests: _remoteReleaseRequests,
       projectProfilesImported: _projectProfilesImported, orchestratorClients, ...published
     } = this.state;
     return structuredClone({
@@ -583,6 +616,8 @@ export class Store {
   getAgent(id: string) { return this.state.agents.find((agent) => agent.id === id); }
   getRun(id: string) { return this.state.runs.find((run) => run.id === id); }
   getThread(id: string) { return this.state.threads?.find((thread) => thread.id === id); }
+  getInstance(id: string) { return this.state.instances?.find((instance) => instance.id === id); }
+  getInstanceAllocation(id: string) { return this.state.allocations?.find((allocation) => allocation.id === id); }
 
   async writeArtifactContent(id: string, content: Buffer) {
     const directory = resolve(dirname(this.path), "artifacts");

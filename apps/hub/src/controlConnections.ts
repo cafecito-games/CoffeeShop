@@ -1,4 +1,4 @@
-import { canSendToControlAgent, supportsControlCapability, type ControlProtocolVersion, type HubToControlAgent } from "@coffee-shop/protocol";
+import { canSendToControlAgent, supportsControlCapability, type ControlProtocolVersion, type HubToControlAgent, type InstanceHubMessage } from "@coffee-shop/protocol";
 
 export interface ControlSocket {
   readonly readyState: number;
@@ -126,6 +126,22 @@ export class ControlConnectionRegistry<Socket extends ControlSocket> {
     }
     const connection = this.current(nodeId);
     if (!connection || !canSendToControlAgent(message, connection.protocolVersion)) return false;
+    try {
+      connection.socket.send(JSON.stringify(message));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Sends a version-5 instance command to the node's current connection once it has passed its
+   * reconnect barrier. A stale or pre-v5 connection records no delivery, so the persisted command
+   * replays after the node's next authoritative sync.
+   */
+  sendInstanceCommand(nodeId: string, message: InstanceHubMessage) {
+    const connection = this.current(nodeId);
+    if (!connection || !this.barrierPassed(connection) || !canSendToControlAgent(message, connection.protocolVersion)) return false;
     try {
       connection.socket.send(JSON.stringify(message));
       return true;
