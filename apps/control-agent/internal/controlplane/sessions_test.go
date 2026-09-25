@@ -346,8 +346,9 @@ func TestACPPermissionRoundTripThroughTheControlSession(t *testing.T) {
 }
 
 func TestRegisteredVersionEnablesEventForwardingAndApprovals(t *testing.T) {
-	require.Equal(t, "4", protocol.Version)
+	require.Equal(t, "5", protocol.Version)
 	require.True(t, protocol.SupportsCapability(protocol.Version, protocol.CapabilityOrchestration))
+	require.True(t, protocol.SupportsCapability(protocol.Version, protocol.CapabilityInstances))
 }
 
 func TestRejectedDispatchNeverStartsTheAdapterOrOpensASession(t *testing.T) {

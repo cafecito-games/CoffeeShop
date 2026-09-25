@@ -41,11 +41,12 @@ func instanceFixtureProducer() map[string]any {
 	}}
 	result := map[string]any{
 		"provision": provision, "dispatch": dispatch,
-		"release":     InstanceHubMessage{Type: "instance.release", InstanceID: i.ID, AllocationID: a.ID, Mode: "drain"},
-		"heartbeat":   InstanceControlMessage{Type: "heartbeat", NodeID: a.NodeID, ActiveRuns: instancePointer(0), ActiveInstances: instancePointer(1), At: instanceAt},
-		"sync":        InstanceControlMessage{Type: "sync.complete", NodeID: a.NodeID, ActiveRunIDs: instancePointer([]string{}), ActiveInstanceIDs: instancePointer([]string{i.ID}), At: instanceAt},
-		"sync-empty":  InstanceControlMessage{Type: "sync.complete", NodeID: a.NodeID, ActiveInstanceIDs: instancePointer([]string{}), At: instanceAt},
-		"sync-absent": InstanceControlMessage{Type: "sync.complete", NodeID: a.NodeID, At: instanceAt},
+		"release":         InstanceHubMessage{Type: "instance.release", InstanceID: i.ID, AllocationID: a.ID, Mode: "drain"},
+		"heartbeat":       InstanceControlMessage{Type: "heartbeat", NodeID: a.NodeID, ActiveRuns: instancePointer(0), ActiveInstances: instancePointer(1), ActiveInstanceIDs: instancePointer([]string{i.ID}), At: instanceAt},
+		"heartbeat-empty": InstanceControlMessage{Type: "heartbeat", NodeID: a.NodeID, ActiveRuns: instancePointer(0), ActiveInstances: instancePointer(0), ActiveInstanceIDs: instancePointer([]string{}), At: instanceAt},
+		"sync":            InstanceControlMessage{Type: "sync.complete", NodeID: a.NodeID, ActiveRunIDs: instancePointer([]string{}), ActiveInstanceIDs: instancePointer([]string{i.ID}), At: instanceAt},
+		"sync-empty":      InstanceControlMessage{Type: "sync.complete", NodeID: a.NodeID, ActiveInstanceIDs: instancePointer([]string{}), At: instanceAt},
+		"sync-absent":     InstanceControlMessage{Type: "sync.complete", NodeID: a.NodeID, At: instanceAt},
 		"register": InstanceControlMessage{Type: "register", ProtocolVersion: LatestVersion, Node: &ComputeNode{
 			ID: a.NodeID, Name: "Build Mac", Kind: "local", Platform: "darwin/arm64", Status: "online", LastSeen: instanceAt,
 			ActiveRuns: 0, Concurrency: 2, InstanceCapacity: instancePointer(4), ActiveInstances: instancePointer(1),
@@ -156,6 +157,13 @@ func TestInstanceReconciliationEvidence(t *testing.T) {
 		message, err := DecodeInstanceControlMessage(data, "5")
 		require.NoError(t, err)
 		require.Equal(t, name != "sync-absent", message.HasAuthoritativeInstanceEvidence())
+	}
+	for _, name := range []string{"heartbeat", "heartbeat-empty"} {
+		data, err := os.ReadFile(filepath.Join(instanceFixtureDirectory, name+".json"))
+		require.NoError(t, err)
+		message, err := DecodeInstanceControlMessage(data, "5")
+		require.NoError(t, err)
+		require.True(t, message.HasAuthoritativeInstanceEvidence(), "%s carries resident identity evidence", name)
 	}
 }
 

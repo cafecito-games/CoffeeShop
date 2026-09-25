@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -92,19 +93,116 @@ type Driver interface {
 
 // Runner selects the driver for a run's transport. The native CLI driver is always registered.
 type Runner struct {
-	profiles       []protocol.HarnessProfile
-	native         Driver
-	acp            *ACPDriver
-	nativeFallback map[string]bool
+	// nativeProfiles are the harnesses this Barista can execute through their native CLIs. Native
+	// execution, native fallback, and harness-version reporting read this set: a harness without an
+	// installed, version-checked native CLI is never natively runnable.
+	nativeProfiles []protocol.HarnessProfile
+	// advertisedProfiles are the harness profiles this node advertises to the hub, which include
+	// harnesses reachable only through ACP and models an adapter's probe contributed. Admission
+	// (AdmitModel) reads this set, so what the hub may select and what Barista will admit cannot
+	// diverge.
+	advertisedProfiles []protocol.HarnessProfile
+	native             Driver
+	acp                *ACPDriver
+	nativeFallback     map[string]bool
 	// approvalPolicies is the administrator's approval policy per harness; see ApprovalPolicies.
 	approvalPolicies ApprovalPolicies
 	now              func() time.Time
+	// managedHarnesses are the activated managed harness executables this node launches, keyed by
+	// harness ID. Their Verify re-checks the selected bytes before every launch.
+	managedHarnesses map[string]ManagedHarness
+	// usageMutex guards executableUsage.
+	usageMutex sync.Mutex
+	// executableUsage counts the invocations currently supervising each absolute executable path.
+	// It is the in-memory active-run usage a local activation, rollback, or prune must find empty
+	// before it touches that executable. It is deliberately per-process: another process cannot see
+	// this daemon's runs, which is why a running daemon never adopts a selection change in place.
+	executableUsage map[string]int
 }
 
 func NewRunner(profiles []protocol.HarnessProfile) *Runner {
-	runner := &Runner{profiles: profiles, nativeFallback: map[string]bool{}, now: time.Now}
+	runner := &Runner{
+		nativeProfiles:   profiles,
+		nativeFallback:   map[string]bool{},
+		now:              time.Now,
+		managedHarnesses: map[string]ManagedHarness{},
+		executableUsage:  map[string]int{},
+	}
 	runner.native = nativeDriver{runner: runner}
 	return runner
+}
+
+// WithManagedHarnesses records the activated managed harness executables this node resolved, so
+// every native launch re-verifies the selected bytes first.
+func (r *Runner) WithManagedHarnesses(managed map[string]ManagedHarness) *Runner {
+	r.managedHarnesses = map[string]ManagedHarness{}
+	for harnessID, entry := range managed {
+		r.managedHarnesses[harnessID] = entry
+	}
+	return r
+}
+
+// verifyManagedHarness re-verifies the harness's managed executable, if it has one. A harness with
+// no managed entry is an external installation and has nothing for Barista to verify against; a
+// managed entry without a verification function is refused rather than trusted.
+func (r *Runner) verifyManagedHarness(harnessID string) error {
+	entry, managed := r.managedHarnesses[harnessID]
+	if !managed {
+		return nil
+	}
+	if entry.Verify == nil {
+		return fmt.Errorf("managed harness %s has no verification function", harnessID)
+	}
+	if err := entry.Verify(); err != nil {
+		return fmt.Errorf("managed harness %s failed verification: %w", harnessID, err)
+	}
+	return nil
+}
+
+// holdExecutable records that one invocation is about to supervise path and returns the release the
+// caller must defer. ExecutableInUse reports true for as long as any hold is outstanding.
+func (r *Runner) holdExecutable(path string) func() {
+	if path == "" {
+		return func() {}
+	}
+	r.usageMutex.Lock()
+	r.executableUsage[path]++
+	r.usageMutex.Unlock()
+	released := false
+	return func() {
+		r.usageMutex.Lock()
+		defer r.usageMutex.Unlock()
+		if released {
+			return
+		}
+		released = true
+		if r.executableUsage[path] <= 1 {
+			delete(r.executableUsage, path)
+			return
+		}
+		r.executableUsage[path]--
+	}
+}
+
+// ExecutableInUse reports whether a run in this process is currently supervising the executable at
+// path. It is what setup.ActivationContext.InUse is wired to inside the daemon, so a component
+// whose executable supervises work can never have its selection changed or its bytes pruned.
+func (r *Runner) ExecutableInUse(path string) bool {
+	if path == "" {
+		return false
+	}
+	r.usageMutex.Lock()
+	defer r.usageMutex.Unlock()
+	return r.executableUsage[path] > 0
+}
+
+// WithAdvertisedProfiles records the harness profiles this node advertises to the hub — the set
+// AdvertiseACP built from the native profiles and every adapter that passed its startup probe.
+// Admission accepts exactly this set. Without it, admission reads the constructor's native
+// profiles, which is the advertised set of a node with no ACP adapters.
+func (r *Runner) WithAdvertisedProfiles(profiles []protocol.HarnessProfile) *Runner {
+	r.advertisedProfiles = profiles
+	return r
 }
 
 // WithACP registers the ACP driver used for runs whose transport is acp-v1.
@@ -149,8 +247,12 @@ func (r *Runner) Run(ctx context.Context, run protocol.Run, agent protocol.Agent
 // run is accepted.
 func (r *Runner) Admit(harnessID, transport, fallbackTransport string) error {
 	switch transport {
-	case "", TransportNative:
+	case "":
+		// A dispatch that omits the transport is a legacy v1-v4 request whose implicit transport is
+		// the native CLI; native execution still requires the natively discovered profile.
 		return nil
+	case TransportNative:
+		return r.nativeTransportAdmitted(harnessID)
 	case TransportACP:
 		err := r.acpAvailable(harnessID)
 		if err == nil || r.fallbackPermitted(harnessID, fallbackTransport) {
@@ -162,6 +264,22 @@ func (r *Runner) Admit(harnessID, transport, fallbackTransport string) error {
 	}
 }
 
+// nativeTransportAdmitted reports whether the harness advertises the native CLI transport. An
+// explicit native-cli request is admissible exactly when the advertised profile carries it, so a
+// harness this node reaches only through ACP is refused before it can reserve capacity for work
+// the native driver cannot execute. A profile without a transport list predates transport
+// advertisement and keeps its native-only meaning. A harness absent from the advertised set keeps
+// the legacy verdict of the omitted-transport case above: v4 native dispatch performs no harness
+// admission (native execution itself still requires the natively discovered profile), and a v5
+// provision passes AdmitModel first, which refuses a harness the node does not advertise.
+func (r *Runner) nativeTransportAdmitted(harnessID string) error {
+	profile, available := r.advertisedProfile(harnessID)
+	if available && len(profile.Transports) > 0 && !slices.Contains(profile.Transports, TransportNative) {
+		return fmt.Errorf("%w: harness %s does not advertise the %s transport", ErrDriverUnavailable, harnessID, TransportNative)
+	}
+	return nil
+}
+
 // AdmitResume reports whether an acp-v1 run of the harness may ask to resume a provider session:
 // a verified adapter is available and its startup probe negotiated session resume or load. It
 // performs no execution.
@@ -170,6 +288,23 @@ func (r *Runner) AdmitResume(harnessID string) error {
 		return err
 	}
 	return r.acp.SupportsResume(harnessID)
+}
+
+// AdmitModel reports whether the harness is installed and advertises the model. It reads the
+// profiles the node advertises to the hub, so a harness available only through ACP and a model an
+// adapter's probe contributed are admissible exactly when the node advertises them. A harness
+// whose advertised model list is empty accepts any model identifier, because its CLI chooses
+// defaults on its own. It performs no execution and is safe to call before a run or a resident
+// instance is accepted.
+func (r *Runner) AdmitModel(harnessID, model string) error {
+	profile, available := r.advertisedProfile(harnessID)
+	if !available {
+		return fmt.Errorf("harness %s is not installed or did not pass its version check", harnessID)
+	}
+	if len(profile.Models) > 0 && !slices.Contains(profile.Models, model) {
+		return fmt.Errorf("model %s is not advertised by harness %s on this Barista", model, harnessID)
+	}
+	return nil
 }
 
 // Execute dispatches the invocation to the driver for its transport.
@@ -199,7 +334,11 @@ func (r *Runner) executeACP(ctx context.Context, invocation Invocation) (string,
 	}
 	var started atomic.Bool
 	selection := protocol.RunTransportSelection{RequestedTransport: TransportACP, SelectedTransport: TransportACP, Adapter: r.acp.provenance(harnessID)}
+	// The adapter executable is in use for the whole ACP execution, so a local activation, rollback,
+	// or prune of that adapter component is refused while the run is live.
+	releaseAdapter := r.holdExecutable(r.acp.AdapterBinary(harnessID))
 	result, err := r.acp.Execute(ctx, r.beginning(invocation, selection, &started))
+	releaseAdapter()
 	if err == nil || started.Load() || !permitted || ctx.Err() != nil {
 		return result, err
 	}

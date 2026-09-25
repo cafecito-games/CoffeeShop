@@ -65,6 +65,11 @@ type Config struct {
 	Accelerators     []string
 	Toolchains       []Toolchain
 	MemoryMegabytes  int // 0 means "not configured"; never reported as evidence when 0
+	// InstanceCapacity is the maximum number of simultaneous resident instances this node hosts,
+	// independent of run Concurrency. Zero disables instance hosting; an unset configuration
+	// defaults it to the run concurrency so an upgraded node can host residents without new
+	// configuration.
+	InstanceCapacity int
 	// DataRoot is the Barista-owned data root whose setup-installed adapters are loaded.
 	DataRoot string
 	// AdapterManifestPath names an adapter manifest file; empty means the embedded manifest.
@@ -115,7 +120,11 @@ func Parse(args []string) (Config, error) {
 		return Config{}, fmt.Errorf("read working directory: %w", err)
 	}
 
-	concurrency, err := envPositiveInt("BARISTA_CONCURRENCY", 2)
+	concurrency, err := DefaultConcurrency()
+	if err != nil {
+		return Config{}, err
+	}
+	instanceCapacityDefault, err := InstanceCapacityDefault()
 	if err != nil {
 		return Config{}, err
 	}
@@ -143,6 +152,7 @@ func Parse(args []string) (Config, error) {
 	set.Var(&accelerators, "accelerator", "hardware accelerator available on this node (lowercase letters, numbers, and hyphens); repeat the flag for multiple accelerators")
 	set.Var(&toolchains, "toolchain", "toolchain available on this node, as <id> or <id>@<version> (lowercase letters, numbers, and hyphens; dotted numeric version); repeat the flag for multiple toolchains")
 	limit := set.Int("concurrency", concurrency, "maximum number of simultaneous runs")
+	instanceCapacity := set.Int("instance-capacity", instanceCapacityDefault, "maximum number of simultaneous resident instances, independent of run concurrency (0 disables instance hosting; defaults to concurrency)")
 	memory := set.Int("memory-megabytes", memoryMegabytes, "configured system memory in megabytes (0 means not configured)")
 	token := set.String("token", os.Getenv("COFFEE_SHOP_TOKEN"), "control-plane token (prefer COFFEE_SHOP_TOKEN)")
 	versionOnly := set.Bool("version", false, "print the Barista version")
@@ -181,6 +191,17 @@ func Parse(args []string) (Config, error) {
 	}
 	if *limit < 1 {
 		return Config{}, errors.New("concurrency must be at least one")
+	}
+	// A reconnect's sync.complete must carry every active run id and every resident instance id,
+	// and the protocol caps both collections at InstanceCollectionEntries. Concurrency bounds the
+	// active runs and instance capacity bounds the residents, so either setting above that cap is
+	// a state the node can reach but never encode in a valid sync.complete; configuration refuses
+	// it here rather than letting the node discover the overflow mid-flight.
+	if *limit > protocol.InstanceCollectionEntries {
+		return Config{}, fmt.Errorf("concurrency must not exceed %d, the protocol's bound on the ids a reconnect must reconcile", protocol.InstanceCollectionEntries)
+	}
+	if *instanceCapacity < 0 || *instanceCapacity > protocol.InstanceCollectionEntries {
+		return Config{}, fmt.Errorf("instance capacity must be between 0 and %d, the protocol's bound on the ids a reconnect must reconcile", protocol.InstanceCollectionEntries)
 	}
 	for _, project := range projects {
 		if !projectIDPattern.MatchString(project) {
@@ -243,6 +264,8 @@ func Parse(args []string) (Config, error) {
 		Accelerators:     validatedAccelerators,
 		Toolchains:       validatedToolchains,
 		MemoryMegabytes:  *memory,
+
+		InstanceCapacity: *instanceCapacity,
 
 		DataRoot:            filepath.Clean(*dataRoot),
 		AdapterManifestPath: *adapterManifest,
@@ -531,6 +554,31 @@ func envPositiveInt(key string, fallback int) (int, error) {
 	parsed, err := strconv.Atoi(value)
 	if err != nil || parsed < 1 {
 		return 0, fmt.Errorf("%s must be a positive integer", key)
+	}
+	return parsed, nil
+}
+
+// DefaultConcurrency resolves the daemon's run-concurrency default from BARISTA_CONCURRENCY.
+// Commands that report what the daemon would do, such as doctor, resolve it the same way.
+func DefaultConcurrency() (int, error) {
+	return envPositiveInt("BARISTA_CONCURRENCY", 2)
+}
+
+// InstanceCapacityDefault resolves the resident-instance capacity default exactly as the daemon
+// does: BARISTA_INSTANCE_CAPACITY when it is set — including an explicit 0, which disables
+// instance hosting — and otherwise the effective run concurrency.
+func InstanceCapacityDefault() (int, error) {
+	concurrency, err := DefaultConcurrency()
+	if err != nil {
+		return 0, err
+	}
+	value := strings.TrimSpace(os.Getenv("BARISTA_INSTANCE_CAPACITY"))
+	if value == "" {
+		return concurrency, nil
+	}
+	parsed, parseErr := strconv.Atoi(value)
+	if parseErr != nil || parsed < 0 {
+		return 0, fmt.Errorf("BARISTA_INSTANCE_CAPACITY must be a non-negative integer")
 	}
 	return parsed, nil
 }

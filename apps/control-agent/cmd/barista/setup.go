@@ -23,14 +23,18 @@ import (
 // the connection immediately on success.
 const doctorDialTimeout = 3 * time.Second
 
-// applyHTTPTimeout bounds every adapter archive download one apply performs.
+// applyHTTPTimeout bounds every component archive download one apply performs.
 const applyHTTPTimeout = 2 * time.Minute
 
-// runSetup dispatches the setup subcommands. Only `plan` and `apply` exist; anything else names
-// both valid subcommands on stderr and fails closed with exit code 2.
+// setupSubcommands is the single enumeration of every `barista setup` subcommand, used both to
+// dispatch and to name the valid set in an error, so the two can never disagree.
+var setupSubcommands = []string{"plan", "apply", "activate", "rollback", "prune"}
+
+// runSetup dispatches the setup subcommands. Anything else names every valid subcommand on stderr
+// and fails closed with exit code 2.
 func runSetup(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "setup requires a subcommand: plan or apply")
+		fmt.Fprintf(os.Stderr, "setup requires a subcommand: %s\n", strings.Join(setupSubcommands, ", "))
 		return 2
 	}
 	switch args[0] {
@@ -38,8 +42,14 @@ func runSetup(args []string) int {
 		return runSetupPlan(args[1:])
 	case "apply":
 		return runSetupApply(args[1:])
+	case "activate":
+		return runSetupActivate(args[1:])
+	case "rollback":
+		return runSetupRollback(args[1:])
+	case "prune":
+		return runSetupPrune(args[1:])
 	default:
-		fmt.Fprintf(os.Stderr, "unknown setup subcommand %q; valid subcommands are plan and apply\n", args[0])
+		fmt.Fprintf(os.Stderr, "unknown setup subcommand %q; valid subcommands are %s\n", args[0], strings.Join(setupSubcommands, ", "))
 		return 2
 	}
 }
@@ -90,11 +100,11 @@ func loadSetupManifest(manifestPath string) ([]byte, setup.Manifest, error) {
 	}
 	manifestBytes, err := os.ReadFile(manifestPath)
 	if err != nil {
-		return nil, setup.Manifest{}, fmt.Errorf("read adapter manifest: %w", err)
+		return nil, setup.Manifest{}, fmt.Errorf("read component manifest: %w", err)
 	}
 	manifest, err := setup.ParseManifest(manifestBytes)
 	if err != nil {
-		return nil, setup.Manifest{}, fmt.Errorf("adapter manifest at %s: %w", manifestPath, err)
+		return nil, setup.Manifest{}, fmt.Errorf("component manifest at %s: %w", manifestPath, err)
 	}
 	return manifestBytes, manifest, nil
 }
@@ -111,7 +121,7 @@ func runSetupPlan(args []string) int {
 	set := flag.NewFlagSet("setup plan", flag.ContinueOnError)
 	set.SetOutput(os.Stderr)
 	dataRoot := set.String("data-root", setup.DefaultDataRoot(), "Barista-owned data root; never $HOME itself")
-	manifestPath := set.String("manifest", "", "path to an adapter manifest JSON file (default: the manifest embedded in this binary)")
+	manifestPath := set.String("manifest", "", "path to a component manifest JSON file (default: the manifest embedded in this binary)")
 	outPath := set.String("out", "", "write the plan JSON to this path (default: stdout)")
 	if err := set.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -159,8 +169,8 @@ func runSetupPlan(args []string) int {
 		fmt.Fprintf(os.Stderr, "setup plan: write plan: %v\n", err)
 		return 2
 	}
-	for _, harnessID := range skipped {
-		fmt.Fprintf(os.Stderr, "skipped: %s has no platform distribution for %s\n", harnessID, currentPlatform())
+	for _, component := range skipped {
+		fmt.Fprintf(os.Stderr, "skipped: %s has no platform distribution for %s\n", component, currentPlatform())
 	}
 	return 0
 }
@@ -169,12 +179,12 @@ func runSetupApply(args []string) int {
 	set := flag.NewFlagSet("setup apply", flag.ContinueOnError)
 	set.SetOutput(os.Stderr)
 	dataRoot := set.String("data-root", setup.DefaultDataRoot(), "Barista-owned data root; never $HOME itself")
-	manifestPath := set.String("manifest", "", "path to an adapter manifest JSON file (default: the manifest embedded in this binary)")
+	manifestPath := set.String("manifest", "", "path to a component manifest JSON file (default: the manifest embedded in this binary)")
 	planPath := set.String("plan", "", "path to the plan JSON file produced by `barista setup plan` (required)")
 	var allowedHosts, manualArtifactValues, manualChecksumValues repeatedFlag
-	set.Var(&allowedHosts, "allowed-host", "download host an archive adapter may redirect to; repeat the flag for multiple hosts")
-	set.Var(&manualArtifactValues, "manual-artifact", "adapterID=PATH local artifact for a manual adapter; repeat the flag per adapter")
-	set.Var(&manualChecksumValues, "manual-checksum", "adapterID=SHA256 operator-asserted checksum for a manual adapter; repeat the flag per adapter")
+	set.Var(&allowedHosts, "allowed-host", "download host an archive component may redirect to; repeat the flag for multiple hosts")
+	set.Var(&manualArtifactValues, "manual-artifact", "componentID=PATH local artifact for a manual component; repeat the flag per component")
+	set.Var(&manualChecksumValues, "manual-checksum", "componentID=SHA256 operator-asserted checksum for a manual component; repeat the flag per component")
 	if err := set.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -213,15 +223,22 @@ func runSetupApply(args []string) int {
 		fmt.Fprintf(os.Stderr, "setup apply: parse plan: %v\n", err)
 		return 1
 	}
-	manifestBytes, manifest, err := loadSetupManifest(*manifestPath)
+	manifestBytes, _, err := loadSetupManifest(*manifestPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "setup apply: %v\n", err)
 		return 1
 	}
-	ledger, err := setup.LoadOwnershipLedger(*dataRoot)
+	// Apply is the only mutating command, so it is also where a legacy adapter-generation ownership
+	// ledger is rewritten in the current generation — atomically, and only once every legacy record
+	// has been proven to map to exactly one ACP adapter. A ledger that cannot be migrated fails the
+	// command with its previous bytes still in place rather than being partially claimed.
+	ledger, migrated, err := setup.MigrateOwnershipLedgerFile(*dataRoot)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "setup apply: %v\n", err)
 		return 1
+	}
+	if migrated {
+		fmt.Printf("migrated the ownership ledger to generation %s\n", setup.OwnershipLedgerVersion)
 	}
 	// Apply stages every download and extraction under the data root, so apply — the one mutating
 	// command — creates the root it owns when it does not exist yet. Planning and doctor never do.
@@ -241,16 +258,14 @@ func runSetupApply(args []string) int {
 	}
 	// Apply persists the ownership ledger itself after every completed operation, so this command
 	// never writes the ledger a second time.
-	harnessByAdapter := make(map[string]string, len(manifest.Adapters))
-	for index := range manifest.Adapters {
-		harnessByAdapter[manifest.Adapters[index].ID] = manifest.Adapters[index].HarnessID
-	}
 	for _, operation := range result.Applied {
-		fmt.Printf("installed: %s@%s\n", operation.AdapterID, operation.AdapterVersion)
-		fmt.Print(config.AdapterConfigSnippet(harnessByAdapter[operation.AdapterID], operation.TargetPath))
+		fmt.Printf("installed: %s\n", operation.Component)
+		if operation.Component.Kind == setup.ComponentKindACPAdapter {
+			fmt.Print(config.AdapterConfigSnippet(operation.HarnessID, operation.TargetPath))
+		}
 	}
 	for _, operation := range result.Skipped {
-		fmt.Printf("already installed: %s\n", operation.AdapterID)
+		fmt.Printf("already installed: %s\n", operation.Component)
 	}
 	return 0
 }
@@ -262,10 +277,16 @@ func runDoctor(args []string) int {
 	set := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	set.SetOutput(os.Stderr)
 	dataRoot := set.String("data-root", setup.DefaultDataRoot(), "Barista-owned data root; never $HOME itself")
-	manifestPath := set.String("manifest", "", "path to an adapter manifest JSON file (default: the manifest embedded in this binary)")
+	manifestPath := set.String("manifest", "", "path to a component manifest JSON file (default: the manifest embedded in this binary)")
 	controlEndpoint := set.String("control-endpoint", config.DefaultEndpoint, "Coffee Shop URL or WebSocket endpoint to test for reachability")
 	claudeACPAuthMode := set.String("claude-acp-auth-mode", os.Getenv("BARISTA_CLAUDE_ACP_AUTH_MODE"), "administrator auth-mode policy that would be required before Claude ACP loads: local-subscription or api")
 	asJSON := set.Bool("json", false, "print the report as JSON instead of a human-readable summary")
+	instanceCapacityDefault, err := config.InstanceCapacityDefault()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "doctor: %v\n", err)
+		return 2
+	}
+	instanceCapacity := set.Int("instance-capacity", instanceCapacityDefault, "maximum number of simultaneous resident instances the daemon would host, independent of run concurrency (0 disables instance hosting; defaults to concurrency)")
 	approvalPolicyEntries := config.ApprovalPolicyEnvironment()
 	config.ApprovalPolicyFlag(set, &approvalPolicyEntries)
 	if err := set.Parse(args); err != nil {
@@ -293,11 +314,16 @@ func runDoctor(args []string) int {
 		fmt.Fprintf(os.Stderr, "doctor: %v\n", err)
 		return 1
 	}
-	// Doctor reuses the same read-only --version discovery the daemon performs at startup; it is
-	// the existing capability, not a new one.
-	profiles := harness.Discover(context.Background())
-	report := setup.RunDoctor(context.Background(), manifest, ledger, *dataRoot, currentPlatform(), profiles, *controlEndpoint, dialHubEndpoint)
-	addClaudeACPAuthModeNote(report.Adapters, strings.TrimSpace(*claudeACPAuthMode))
+	// A rejected activation ledger is reported, never treated as absent and never a command failure:
+	// doctor exists to say what is wrong with it.
+	activation := setup.LoadActivationState(*dataRoot)
+	// Doctor reuses the same read-only discovery the daemon performs at startup, including the
+	// managed activated versions, so what it reports is what the daemon would launch.
+	managed, _ := managedHarnesses(manifest, ledger, activation, *dataRoot)
+	resolutions := harness.Resolve(context.Background(), managed)
+	profiles := harness.Profiles(resolutions)
+	report := setup.RunDoctor(context.Background(), manifest, ledger, *dataRoot, currentPlatform(), activation, profiles, *controlEndpoint, dialHubEndpoint)
+	addClaudeACPAuthModeNote(report.Components, strings.TrimSpace(*claudeACPAuthMode))
 	report.ApprovalPolicies = map[string]string{}
 	for _, harnessID := range harness.ApprovalPolicyHarnessIDs {
 		report.ApprovalPolicies[harnessID] = approvalPolicies.For(harnessID)
@@ -311,20 +337,33 @@ func runDoctor(args []string) int {
 		fmt.Println(string(encoded))
 		return 0
 	}
-	for _, entry := range report.Adapters {
-		fmt.Printf("%s (%s): harness=%s adapter=%s auth=%s launch=%s\n",
-			entry.AdapterID, entry.HarnessID,
+	for _, entry := range report.Components {
+		fmt.Printf("%s (%s): harness=%s component=%s auth=%s launch=%s provenance=%s active=%s rollback=%s\n",
+			entry.Component, entry.HarnessID,
 			installedOrMissing(entry.HarnessInstalled),
-			installedOrMissing(entry.AdapterInstalled),
+			installedOrMissing(entry.ComponentInstalled),
 			entry.AuthReadiness,
-			readyOrNot(entry.ACPLaunchReady))
+			readyOrNot(entry.ACPLaunchReady),
+			entry.Provenance,
+			orNone(entry.ActiveVersion),
+			orNone(entry.RollbackVersion))
 		for _, note := range entry.Notes {
 			fmt.Printf("  note: %s\n", note)
 		}
 	}
+	fmt.Printf("activation ledger: generation=%s accepted=%t\n", orNone(report.Activation.Generation), report.Activation.Accepted)
+	if !report.Activation.Accepted {
+		fmt.Printf("  rejection: %s\n", report.Activation.Rejection)
+		fmt.Printf("  repair: %s\n", report.Activation.Repair)
+	}
 	for _, harnessID := range harness.ApprovalPolicyHarnessIDs {
 		policy := report.ApprovalPolicies[harnessID]
 		fmt.Printf("approval policy for %s: %s (%s)\n", harnessID, policy, harness.ApprovalPolicyEffect(policy))
+	}
+	if *instanceCapacity == 0 {
+		fmt.Printf("resident instance hosting: disabled (instance capacity 0)\n")
+	} else {
+		fmt.Printf("resident instance capacity: %d\n", *instanceCapacity)
 	}
 	fmt.Printf("hub %s: %s\n", report.HubConnectivity.Endpoint, reachableSummary(report.HubConnectivity))
 	fmt.Printf("project readiness: %s\n", report.ProjectReadiness)
@@ -336,6 +375,15 @@ func installedOrMissing(installed bool) string {
 		return "installed"
 	}
 	return "missing"
+}
+
+// orNone renders an absent optional value as "none" rather than as an empty column, so an absent
+// selection is never visually indistinguishable from a missing field.
+func orNone(value string) string {
+	if value == "" {
+		return "none"
+	}
+	return value
 }
 
 func readyOrNot(ready bool) string {
@@ -411,9 +459,9 @@ func hostPortFromEndpoint(raw string) (string, error) {
 // daemon, without depending on the daemon's own launch environment having already been screened:
 // doctor evaluates the gate itself against the current process environment so an operator sees the
 // same reason `barista doctor` and the daemon would each report for the current configuration.
-func addClaudeACPAuthModeNote(adapters []setup.AdapterDoctorEntry, claudeACPAuthMode string) {
+func addClaudeACPAuthModeNote(adapters []setup.ComponentDoctorEntry, claudeACPAuthMode string) {
 	for index := range adapters {
-		if adapters[index].HarnessID != "claude-cli" {
+		if adapters[index].HarnessID != "claude-cli" || adapters[index].Component.Kind != setup.ComponentKindACPAdapter {
 			continue
 		}
 		if authMode, err := harness.ClaudeACPAuthGate(claudeACPAuthMode, os.Environ()); err != nil {

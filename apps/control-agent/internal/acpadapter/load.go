@@ -22,6 +22,10 @@ type Options struct {
 	Manifest  setup.Manifest
 	Platform  string
 	Overrides []config.ACPAdapterOverride
+	// Activation is the loaded activation evidence. Which installed adapter version Barista may
+	// launch comes from here and nowhere else: an absent record means no version is selected, and a
+	// rejected file means every managed adapter is unavailable with that reason.
+	Activation setup.ActivationState
 }
 
 // Result holds the adapters that may be launched, keyed by harness ID, and a non-secret reason for
@@ -31,21 +35,25 @@ type Result struct {
 	Skipped  map[string]string
 }
 
-// Load verifies every administrator override and every setup-installed adapter. An override that
-// cannot be verified is an error, because the administrator explicitly asked for that executable
-// and running without it, or with the setup-installed one instead, would silently ignore that
-// choice. A setup-installed adapter that fails verification is only skipped: its harness keeps the
-// native transport, and the reason is reported.
+// Load verifies every administrator override and every activated setup-installed adapter. An
+// override that cannot be verified is an error, because the administrator explicitly asked for that
+// executable and running without it, or with the setup-installed one instead, would silently ignore
+// that choice — and an override always wins over an activation record for the same harness, which is
+// the precedence Barista has always applied. A managed adapter that is not activated, or whose
+// activated version fails verification, is only skipped: its harness keeps the native transport, and
+// the reason is reported.
 func Load(options Options) (Result, error) {
 	result := Result{Adapters: map[string]harness.ACPAdapter{}, Skipped: map[string]string{}}
-	entries := map[string][]setup.AdapterManifestEntry{}
-	for _, entry := range options.Manifest.Adapters {
+	// Only ACP adapter components can be launched as an adapter; a harness component in the same
+	// manifest is not a candidate here and must never be substituted for one.
+	entries := map[string][]setup.ComponentManifestEntry{}
+	for _, entry := range options.Manifest.ComponentsOfKind(setup.ComponentKindACPAdapter) {
 		entries[entry.HarnessID] = append(entries[entry.HarnessID], entry)
 	}
 	for index, override := range options.Overrides {
 		candidates := entries[override.HarnessID]
 		if len(candidates) != 1 {
-			return Result{}, fmt.Errorf("acp adapter at index %d names a harness without exactly one manifest adapter", index)
+			return Result{}, fmt.Errorf("acp adapter at index %d names a harness without exactly one manifest ACP adapter", index)
 		}
 		adapter, err := verifiedOverride(candidates[0], override)
 		if err != nil {
@@ -63,33 +71,50 @@ func Load(options Options) (Result, error) {
 			result.Skipped[harnessID] = "the ownership ledger could not be read"
 			continue
 		}
-		verified := []setup.InstalledAdapter{}
+		if options.Activation.Rejection != nil {
+			result.Skipped[harnessID] = "the activation ledger could not be accepted"
+			continue
+		}
+		// Selection is by component identity, which is the activation ledger's key: two installed
+		// versions of one adapter resolve to the one version its activation record selects rather
+		// than being refused as ambiguous. Two *different* adapter components for one harness both
+		// being activated stays ambiguous, because nothing chose between them.
+		selected := []setup.InstalledComponent{}
+		seen := map[setup.ComponentIdentity]bool{}
 		for _, entry := range candidates {
-			installed, err := setup.VerifyInstalledAdapter(options.DataRoot, entry, options.Platform, ledger)
-			if errors.Is(err, setup.ErrAdapterNotInstalled) {
+			identity := entry.Ref().Identity()
+			if seen[identity] {
 				continue
 			}
-			if err != nil {
-				result.Skipped[harnessID] = "installed adapter failed verification: " + err.Error()
-				verified = nil
+			seen[identity] = true
+			installed, err := setup.ActiveInstalledComponent(options.DataRoot, options.Manifest, options.Platform, ledger, options.Activation, identity)
+			switch {
+			case errors.Is(err, setup.ErrComponentNotActivated), errors.Is(err, setup.ErrComponentNotInstalled):
+				continue
+			case err != nil:
+				result.Skipped[harnessID] = "the activated adapter failed verification: " + err.Error()
+				selected = nil
+			default:
+				selected = append(selected, installed)
+			}
+			if result.Skipped[harnessID] != "" {
 				break
 			}
-			verified = append(verified, installed)
 		}
 		switch {
 		case result.Skipped[harnessID] != "":
-		case len(verified) == 0:
-			result.Skipped[harnessID] = "no adapter is installed"
-		case len(verified) > 1:
-			result.Skipped[harnessID] = "more than one installed adapter matches the harness"
+		case len(selected) == 0:
+			result.Skipped[harnessID] = "no adapter version is activated for this harness"
+		case len(selected) > 1:
+			result.Skipped[harnessID] = "more than one activated adapter matches the harness"
 		default:
-			result.Adapters[harnessID] = installedAdapter(verified[0])
+			result.Adapters[harnessID] = installedAdapter(selected[0])
 		}
 	}
 	return result, nil
 }
 
-func installedAdapter(installed setup.InstalledAdapter) harness.ACPAdapter {
+func installedAdapter(installed setup.InstalledComponent) harness.ACPAdapter {
 	return harness.ACPAdapter{
 		Binary:      installed.Path,
 		Arguments:   installed.Entry.Launch.Arguments,
@@ -101,7 +126,7 @@ func installedAdapter(installed setup.InstalledAdapter) harness.ACPAdapter {
 	}
 }
 
-func verifiedOverride(entry setup.AdapterManifestEntry, override config.ACPAdapterOverride) (harness.ACPAdapter, error) {
+func verifiedOverride(entry setup.ComponentManifestEntry, override config.ACPAdapterOverride) (harness.ACPAdapter, error) {
 	verify := func() error { return verifyPinnedExecutable(override.Path, override.SHA256) }
 	if err := verify(); err != nil {
 		return harness.ACPAdapter{}, err

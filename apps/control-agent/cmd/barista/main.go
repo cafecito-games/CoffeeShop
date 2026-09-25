@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"maps"
 	"os"
 	"os/signal"
 	"slices"
@@ -52,8 +53,58 @@ func run(args []string) int {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	nativeProfiles := harness.Discover(ctx)
-	driver, claudeACPAuthMode, err := acpDriver(cfg, nativeProfiles)
+	// Both ledgers are read once, here, and the selection they establish is what this process
+	// launches for its whole lifetime. A rejected activation ledger makes every managed component
+	// unavailable with that reason rather than being treated as an absent selection.
+	activation := setup.LoadActivationState(cfg.DataRoot)
+	if activation.Rejection != nil {
+		log.Printf("component activation: %v", activation.Rejection)
+		log.Printf("component activation: %s", setup.ActivationRepairGuidance)
+	}
+	_, componentManifest, err := loadSetupManifest(cfg.AdapterManifestPath)
+	if err != nil {
+		log.Printf("component manifest: %v", err)
+		return 2
+	}
+	ownership, ownershipErr := setup.LoadOwnershipLedger(cfg.DataRoot)
+	if ownershipErr != nil {
+		// Managed components are all unavailable without the ownership ledger; the daemon still
+		// starts on its external PATH harnesses, exactly as acpadapter.Load already degrades.
+		log.Printf("ownership ledger could not be read, so no managed component is available: %v", ownershipErr)
+		ownership = setup.OwnershipLedger{}
+	}
+	managed, unresolvedManaged := managedHarnesses(componentManifest, ownership, activation, cfg.DataRoot)
+	resolutions := harness.Resolve(ctx, managed)
+	// A manifest may declare a harness component for a harness this build has no provider policy for,
+	// which Resolve therefore never returns. Its unresolved reason is reported first so the
+	// "never silent" property has no blind spot exactly where the harness is also unlaunchable.
+	reported := map[string]bool{}
+	for _, resolution := range resolutions {
+		reported[resolution.HarnessID] = true
+	}
+	for _, harnessID := range slices.Sorted(maps.Keys(unresolvedManaged)) {
+		if !reported[harnessID] {
+			log.Printf("harness %s: the activated managed version is not usable (%s); Barista has no provider policy for this harness, so it is unavailable", harnessID, unresolvedManaged[harnessID])
+		}
+	}
+	for _, resolution := range resolutions {
+		// Every way a managed selection can fail to be honored is logged, so falling back to an
+		// external PATH installation is never silent and never diverges from what doctor reports.
+		if reason, unresolved := unresolvedManaged[resolution.HarnessID]; unresolved {
+			log.Printf("harness %s: the activated managed version is not usable (%s); %s", resolution.HarnessID, reason, fallbackDescription(resolution))
+			continue
+		}
+		if resolution.ManagedRejected != "" {
+			log.Printf("harness %s: the activated managed version was rejected (%s); %s", resolution.HarnessID, resolution.ManagedRejected, fallbackDescription(resolution))
+			continue
+		}
+		if resolution.Managed != nil && resolution.External != nil {
+			log.Printf("harness %s: a managed version %s and an external installation are both present; the managed version is selected", resolution.HarnessID, resolution.Managed.Version)
+		}
+	}
+	nativeProfiles := harness.Profiles(resolutions)
+	activationWatch := newActivationWatcher(cfg.DataRoot, activation)
+	driver, claudeACPAuthMode, err := acpDriver(cfg, componentManifest, activation, nativeProfiles)
 	if err != nil {
 		log.Printf("ACP adapters: %v", err)
 		return 2
@@ -95,6 +146,11 @@ func run(args []string) int {
 	}
 	log.Printf("discovered harnesses: %s", strings.Join(available, ", "))
 	log.Printf("allowed workspace roots: %s", strings.Join(cfg.WorkspaceRoots, ", "))
+	if cfg.InstanceCapacity == 0 {
+		log.Printf("resident instance hosting is disabled (instance capacity 0)")
+	} else {
+		log.Printf("resident instance capacity: %d (run concurrency %d)", cfg.InstanceCapacity, cfg.Concurrency)
+	}
 
 	node := protocol.ComputeNode{
 		ID:             cfg.NodeID,
@@ -109,6 +165,11 @@ func run(args []string) int {
 		Version:        version,
 	}
 	buildCapabilityReport := func(buildContext context.Context) protocol.NodeCapabilityReport {
+		// The daemon keeps the selection it verified at startup; a record that changed since then is
+		// only reported, never adopted in place, so no in-flight run has its launch target swapped.
+		if notice := activationWatch.RestartNotice(); notice != "" {
+			log.Print(notice)
+		}
 		return readiness.BuildCapabilityReport(buildContext, cfg, profiles)
 	}
 	report := buildCapabilityReport(ctx)
@@ -119,13 +180,31 @@ func run(args []string) int {
 		}
 	}
 	log.Printf("node capability report ready: %d of %d evidence entries succeeded", succeeded, len(report.Evidence))
-	runner := harness.NewRunner(nativeProfiles).WithACP(driver).WithNativeFallback(cfg.ACPNativeFallback...).WithApprovalPolicies(cfg.ApprovalPolicies)
+	runner := newRunner(nativeProfiles, profiles, driver, cfg).WithManagedHarnesses(harness.ManagedHarnesses(resolutions))
 	client := controlplane.NewClient(cfg, node, runner, buildCapabilityReport)
 	if err := client.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		log.Printf("Barista stopped: %v", err)
 		return 1
 	}
 	return 0
+}
+
+// fallbackDescription names what a harness falls back to when its managed selection is not usable,
+// so one log line carries both the failure and its consequence.
+func fallbackDescription(resolution harness.HarnessResolution) string {
+	if resolution.External != nil {
+		return "falling back to the external installation found on PATH"
+	}
+	return "this harness is unavailable"
+}
+
+// newRunner wires the node's Runner from both views of its harness capability. Native execution
+// and native fallback read the natively discovered profiles, while admission reads exactly the
+// profiles the node advertises to the hub, so an allocation the hub selected from the advertised
+// set — including a harness or model available only through ACP — is always admissible.
+func newRunner(nativeProfiles, advertisedProfiles []protocol.HarnessProfile, driver *harness.ACPDriver, cfg config.Config) *harness.Runner {
+	return harness.NewRunner(nativeProfiles).WithAdvertisedProfiles(advertisedProfiles).WithACP(driver).
+		WithNativeFallback(cfg.ACPNativeFallback...).WithApprovalPolicies(cfg.ApprovalPolicies)
 }
 
 // acpDriver loads the ACP adapters this node may launch: administrator overrides, which must
@@ -136,12 +215,8 @@ func run(args []string) int {
 // Barista's own environment. The second return value is the auth mode the gate resolved for
 // claude-cli ("" when Claude ACP did not load), so the caller can reflect it on the advertised
 // harness profile once the adapter has actually proven itself over ACP.
-func acpDriver(cfg config.Config, nativeProfiles []protocol.HarnessProfile) (*harness.ACPDriver, string, error) {
-	_, manifest, err := loadSetupManifest(cfg.AdapterManifestPath)
-	if err != nil {
-		return nil, "", err
-	}
-	loaded, err := acpadapter.Load(acpadapter.Options{DataRoot: cfg.DataRoot, Manifest: manifest, Platform: setup.CurrentPlatform(), Overrides: cfg.ACPAdapters})
+func acpDriver(cfg config.Config, manifest setup.Manifest, activation setup.ActivationState, nativeProfiles []protocol.HarnessProfile) (*harness.ACPDriver, string, error) {
+	loaded, err := acpadapter.Load(acpadapter.Options{DataRoot: cfg.DataRoot, Manifest: manifest, Platform: setup.CurrentPlatform(), Overrides: cfg.ACPAdapters, Activation: activation})
 	if err != nil {
 		return nil, "", err
 	}

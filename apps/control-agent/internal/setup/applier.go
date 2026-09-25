@@ -31,11 +31,11 @@ import (
 type ApplyOptions struct {
 	HTTPClient   *http.Client
 	AllowedHosts []string // forwarded to DownloadVerified for every install-archive operation
-	// ManualArtifactSources maps an adapter ID to a local filesystem path the operator asserts
+	// ManualArtifactSources maps a component ID to a local filesystem path the operator asserts
 	// holds the correct executable for a manual-placement-check operation.
 	ManualArtifactSources map[string]string
-	// ManualChecksums maps an adapter ID to the SHA-256 the operator asserts for that path. Apply
-	// refuses the operation when this is missing for a manual adapter present in the plan — no
+	// ManualChecksums maps a component ID to the SHA-256 the operator asserts for that path. Apply
+	// refuses the operation when this is missing for a manual component present in the plan — no
 	// artifact is ever installed or accepted without an explicit checksum from somewhere.
 	ManualChecksums map[string]string
 }
@@ -97,12 +97,19 @@ func Apply(ctx context.Context, plan Plan, manifestBytes []byte, ledger Ownershi
 		return result, errors.New("supplied plan does not match the manifest and current node state; run setup plan again")
 	}
 	for _, operation := range derivedPlan.Operations {
-		if operation.ExpectedCurrentState == ExpectedUnownedExists {
-			return result, fmt.Errorf("adapter %s target %s holds a file this tool did not create", operation.AdapterID, operation.TargetPath)
-		}
-		if operation.ExpectedCurrentState == ExpectedOwnedMatch {
+		// Every observable state is handled explicitly; an unrecognized state refuses the whole apply
+		// rather than falling through to the install branch, so a state this code never established
+		// can never be treated as "absent".
+		switch operation.ExpectedCurrentState {
+		case ExpectedUnownedExists:
+			return result, fmt.Errorf("component %s target %s holds a file this tool did not create", operation.Component, operation.TargetPath)
+		case ExpectedOwnedMatch:
 			result.Skipped = append(result.Skipped, operation)
 			continue
+		case ExpectedAbsent:
+			// Fall through to install.
+		default:
+			return result, fmt.Errorf("component %s target state %q is unknown; run setup plan again", operation.Component, operation.ExpectedCurrentState)
 		}
 		record, err := installOperation(ctx, operation, dataRoot, options)
 		if err != nil {
@@ -110,7 +117,7 @@ func Apply(ctx context.Context, plan Plan, manifestBytes []byte, ledger Ownershi
 		}
 		ledger = ledger.WithRecord(record)
 		if err := ledger.Save(dataRoot); err != nil {
-			return result, fmt.Errorf("persist ownership ledger after installing adapter %s: %w", operation.AdapterID, err)
+			return result, fmt.Errorf("persist ownership ledger after installing component %s: %w", operation.Component, err)
 		}
 		result.Applied = append(result.Applied, operation)
 	}
@@ -132,7 +139,7 @@ func installOperation(ctx context.Context, operation Operation, dataRoot string,
 	case OperationManualPlacementCheck:
 		return installManualArtifact(operation, dataRoot, options)
 	default:
-		return OwnershipRecord{}, fmt.Errorf("adapter %s operation kind is unknown", operation.AdapterID)
+		return OwnershipRecord{}, fmt.Errorf("component %s operation kind %q is unknown", operation.Component, operation.Kind)
 	}
 }
 
@@ -143,12 +150,12 @@ func installOperation(ctx context.Context, operation Operation, dataRoot string,
 func installArchive(ctx context.Context, operation Operation, dataRoot string, options ApplyOptions) (OwnershipRecord, error) {
 	parsedURL, err := url.Parse(operation.Source.URL)
 	if err != nil {
-		return OwnershipRecord{}, fmt.Errorf("adapter %s source url cannot be parsed", operation.AdapterID)
+		return OwnershipRecord{}, fmt.Errorf("component %s source url cannot be parsed", operation.Component)
 	}
 	lowercasePath := strings.ToLower(parsedURL.Path)
 	isZip := strings.HasSuffix(lowercasePath, ".zip")
 	if !isZip && !strings.HasSuffix(lowercasePath, ".tar.gz") {
-		return OwnershipRecord{}, fmt.Errorf("adapter %s archive must be a .tar.gz or .zip distribution", operation.AdapterID)
+		return OwnershipRecord{}, fmt.Errorf("component %s archive must be a .tar.gz or .zip distribution", operation.Component)
 	}
 	stagingDirectory, err := os.MkdirTemp(dataRoot, "setup-staging-*")
 	if err != nil {
@@ -162,11 +169,11 @@ func installArchive(ctx context.Context, operation Operation, dataRoot string, o
 		AllowedHosts:   options.AllowedHosts,
 	})
 	if err != nil {
-		return OwnershipRecord{}, fmt.Errorf("adapter %s archive download failed: %w", operation.AdapterID, err)
+		return OwnershipRecord{}, fmt.Errorf("component %s archive download failed: %w", operation.Component, err)
 	}
 	entryReader, closeEntry, err := openArchiveEntry(archivePath, operation.Source.ExecutablePath, isZip)
 	if err != nil {
-		return OwnershipRecord{}, fmt.Errorf("adapter %s archive extraction failed: %w", operation.AdapterID, err)
+		return OwnershipRecord{}, fmt.Errorf("component %s archive extraction failed: %w", operation.Component, err)
 	}
 	defer closeEntry()
 	// The archive itself was already checksum-verified in full by DownloadVerified; there is no
@@ -181,16 +188,16 @@ func installArchive(ctx context.Context, operation Operation, dataRoot string, o
 // while hashing and staging it, so a source that changes on disk between the operator computing
 // its checksum and apply running is caught by the checksum comparison on the one read that
 // happens, not by two reads that could observe different content. Failures here name only the
-// adapter ID: the operator's source path is not this tool's to publish into logs or errors.
+// component identity: the operator's source path is not this tool's to publish into logs or errors.
 func installManualArtifact(operation Operation, dataRoot string, options ApplyOptions) (OwnershipRecord, error) {
-	source, hasSource := options.ManualArtifactSources[operation.AdapterID]
-	assertedChecksum, hasChecksum := options.ManualChecksums[operation.AdapterID]
+	source, hasSource := options.ManualArtifactSources[operation.Component.ID]
+	assertedChecksum, hasChecksum := options.ManualChecksums[operation.Component.ID]
 	if !hasSource || source == "" || !hasChecksum || assertedChecksum == "" {
-		return OwnershipRecord{}, fmt.Errorf("adapter %s requires both a manual artifact source and a manual checksum", operation.AdapterID)
+		return OwnershipRecord{}, fmt.Errorf("component %s requires both a manual artifact source and a manual checksum", operation.Component)
 	}
 	sourceFile, err := os.Open(source)
 	if err != nil {
-		return OwnershipRecord{}, fmt.Errorf("adapter %s manual artifact could not be opened", operation.AdapterID)
+		return OwnershipRecord{}, fmt.Errorf("component %s manual artifact could not be opened", operation.Component)
 	}
 	defer sourceFile.Close()
 	return stageAndInstall(dataRoot, operation, sourceFile, assertedChecksum)
@@ -224,11 +231,11 @@ func stageAndInstall(dataRoot string, operation Operation, reader io.Reader, exp
 	targetDirectory := filepath.Dir(operation.TargetPath)
 	resolvedDirectory, err := ensureDirectoryWithinRoot(dataRoot, targetDirectory)
 	if err != nil {
-		return OwnershipRecord{}, fmt.Errorf("adapter %s install directory is not safely usable: %w", operation.AdapterID, err)
+		return OwnershipRecord{}, fmt.Errorf("component %s install directory is not safely usable: %w", operation.Component, err)
 	}
 	tempFile, err := os.CreateTemp(resolvedDirectory, "setup-tmp-*")
 	if err != nil {
-		return OwnershipRecord{}, fmt.Errorf("adapter %s could not stage a temporary file: %w", operation.AdapterID, err)
+		return OwnershipRecord{}, fmt.Errorf("component %s could not stage a temporary file: %w", operation.Component, err)
 	}
 	tempPath := tempFile.Name()
 	// The temporary file is always removed by this defer, on every path: once published via
@@ -242,22 +249,22 @@ func stageAndInstall(dataRoot string, operation Operation, reader io.Reader, exp
 	digest := sha256.New()
 	written, err := io.Copy(io.MultiWriter(tempFile, digest), reader)
 	if err != nil {
-		return OwnershipRecord{}, fmt.Errorf("adapter %s artifact could not be staged: %w", operation.AdapterID, err)
+		return OwnershipRecord{}, fmt.Errorf("component %s artifact could not be staged: %w", operation.Component, err)
 	}
 	contentSHA256 := hex.EncodeToString(digest.Sum(nil))
 	if expectedChecksum != "" && !strings.EqualFold(contentSHA256, expectedChecksum) {
-		return OwnershipRecord{}, fmt.Errorf("adapter %s artifact failed checksum verification", operation.AdapterID)
+		return OwnershipRecord{}, fmt.Errorf("component %s artifact failed checksum verification", operation.Component)
 	}
 	if runtime.GOOS != "windows" {
 		if err := tempFile.Chmod(0o755); err != nil {
-			return OwnershipRecord{}, fmt.Errorf("adapter %s artifact could not be marked executable: %w", operation.AdapterID, err)
+			return OwnershipRecord{}, fmt.Errorf("component %s artifact could not be marked executable: %w", operation.Component, err)
 		}
 	}
 	if err := tempFile.Sync(); err != nil {
-		return OwnershipRecord{}, fmt.Errorf("adapter %s artifact could not be synced: %w", operation.AdapterID, err)
+		return OwnershipRecord{}, fmt.Errorf("component %s artifact could not be synced: %w", operation.Component, err)
 	}
 	if err := tempFile.Close(); err != nil {
-		return OwnershipRecord{}, fmt.Errorf("adapter %s artifact could not be finalized: %w", operation.AdapterID, err)
+		return OwnershipRecord{}, fmt.Errorf("component %s artifact could not be finalized: %w", operation.Component, err)
 	}
 
 	// Re-verify immediately before publishing: a symlink or foreign file planted anywhere in the
@@ -265,29 +272,29 @@ func stageAndInstall(dataRoot string, operation Operation, reader io.Reader, exp
 	// that ran before staging began. os.Link below is what makes the final step itself atomic
 	// against anything that appears in the instant after this check.
 	if _, err := ensureDirectoryWithinRoot(dataRoot, targetDirectory); err != nil {
-		return OwnershipRecord{}, fmt.Errorf("adapter %s install directory changed unsafely during install: %w", operation.AdapterID, err)
+		return OwnershipRecord{}, fmt.Errorf("component %s install directory changed unsafely during install: %w", operation.Component, err)
 	}
 	if _, err := os.Lstat(operation.TargetPath); err == nil {
-		return OwnershipRecord{}, fmt.Errorf("adapter %s target %s appeared unexpectedly during install", operation.AdapterID, operation.TargetPath)
+		return OwnershipRecord{}, fmt.Errorf("component %s target %s appeared unexpectedly during install", operation.Component, operation.TargetPath)
 	} else if !errors.Is(err, fs.ErrNotExist) {
-		return OwnershipRecord{}, fmt.Errorf("adapter %s target could not be inspected: %w", operation.AdapterID, err)
+		return OwnershipRecord{}, fmt.Errorf("component %s target could not be inspected: %w", operation.Component, err)
 	}
 	if err := os.Link(tempPath, operation.TargetPath); err != nil {
 		if errors.Is(err, fs.ErrExist) {
-			return OwnershipRecord{}, fmt.Errorf("adapter %s target %s appeared unexpectedly during install", operation.AdapterID, operation.TargetPath)
+			return OwnershipRecord{}, fmt.Errorf("component %s target %s appeared unexpectedly during install", operation.Component, operation.TargetPath)
 		}
 		// A filesystem that cannot hard-link here (for example a cross-device data root, or one
 		// that disallows hard links entirely) fails closed rather than falling back to a replacing
 		// rename, which would reopen exactly the race this function exists to close.
-		return OwnershipRecord{}, fmt.Errorf("adapter %s could not be installed without replacement: %w", operation.AdapterID, err)
+		return OwnershipRecord{}, fmt.Errorf("component %s could not be installed without replacement: %w", operation.Component, err)
 	}
 	return OwnershipRecord{
-		Path:           operation.TargetPath,
-		AdapterID:      operation.AdapterID,
-		AdapterVersion: operation.AdapterVersion,
-		ContentSHA256:  contentSHA256,
-		SizeBytes:      written,
-		InstalledAt:    time.Now().UTC().Format(time.RFC3339Nano),
+		Path:          operation.TargetPath,
+		Component:     operation.Component,
+		HarnessID:     operation.HarnessID,
+		ContentSHA256: contentSHA256,
+		SizeBytes:     written,
+		InstalledAt:   time.Now().UTC().Format(time.RFC3339Nano),
 	}, nil
 }
 

@@ -89,15 +89,15 @@ func archiveServerFixture(t *testing.T, alphaArchive []byte, betaArchive []byte)
 func archiveManifestFixture(t *testing.T, serverURL string, alphaChecksum string, betaChecksum string, alphaSize int, betaSize int) ([]byte, Manifest) {
 	t.Helper()
 	manifestJSON := fmt.Sprintf(`{
-		"manifestVersion": "1",
-		"adapters": [
+		"manifestVersion": "2",
+		"components": [
 			{
-				"id": "alpha-acp", "harnessId": "alpha-cli", "provider": "alpha-vendor",
+				"id": "alpha-acp", "kind": "acp-adapter", "harnessId": "alpha-cli", "provider": "alpha-vendor",
 				"label": "Alpha ACP adapter", "version": "1.0.0",
 				"platforms": {"%s": {"kind": "archive", "url": "%s/alpha/adapter.tar.gz", "sha256": "%s", "sizeBytes": %d, "executablePath": "bin/adapter"}}
 			},
 			{
-				"id": "beta-acp", "harnessId": "beta-cli", "provider": "beta-vendor",
+				"id": "beta-acp", "kind": "acp-adapter", "harnessId": "beta-cli", "provider": "beta-vendor",
 				"label": "Beta ACP adapter", "version": "2.0.0",
 				"platforms": {"%s": {"kind": "archive", "url": "%s/beta/adapter.zip", "sha256": "%s", "sizeBytes": %d, "executablePath": "bin/adapter"}}
 			}
@@ -114,10 +114,10 @@ func archiveManifestFixture(t *testing.T, serverURL string, alphaChecksum string
 func manualManifestFixture(t *testing.T) ([]byte, Manifest) {
 	t.Helper()
 	manifestJSON := []byte(fmt.Sprintf(`{
-		"manifestVersion": "1",
-		"adapters": [
+		"manifestVersion": "2",
+		"components": [
 			{
-				"id": "manual-acp", "harnessId": "manual-cli", "provider": "manual-vendor",
+				"id": "manual-acp", "kind": "acp-adapter", "harnessId": "manual-cli", "provider": "manual-vendor",
 				"label": "Manual ACP adapter", "version": "0.4.0",
 				"platforms": {"%s": {"kind": "manual", "executablePath": "bin/adapter"}}
 			}
@@ -138,20 +138,20 @@ func assertInstalledExecutable(t *testing.T, path string, content []byte) {
 	t.Helper()
 	information, err := os.Lstat(path)
 	if err != nil {
-		t.Fatalf("stat installed adapter %s: %v", path, err)
+		t.Fatalf("stat installed component %s: %v", path, err)
 	}
 	if !information.Mode().IsRegular() {
-		t.Fatalf("installed adapter %s is not a regular file: %s", path, information.Mode())
+		t.Fatalf("installed component %s is not a regular file: %s", path, information.Mode())
 	}
 	if information.Mode().Perm()&0o111 == 0 {
-		t.Fatalf("installed adapter %s is not executable: %s", path, information.Mode().Perm())
+		t.Fatalf("installed component %s is not executable: %s", path, information.Mode().Perm())
 	}
 	installed, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("read installed adapter %s: %v", path, err)
+		t.Fatalf("read installed component %s: %v", path, err)
 	}
 	if !bytes.Equal(installed, content) {
-		t.Fatalf("installed adapter %s content mismatch", path)
+		t.Fatalf("installed component %s content mismatch", path)
 	}
 }
 
@@ -309,10 +309,10 @@ func TestApplyRejectsPlanBuiltForAnotherPlatform(t *testing.T) {
 		t.Fatal("test fixture error: otherPlatform collides with testPlatform")
 	}
 	manifestJSON := []byte(fmt.Sprintf(`{
-		"manifestVersion": "1",
-		"adapters": [
+		"manifestVersion": "2",
+		"components": [
 			{
-				"id": "manual-acp", "harnessId": "manual-cli", "provider": "manual-vendor",
+				"id": "manual-acp", "kind": "acp-adapter", "harnessId": "manual-cli", "provider": "manual-vendor",
 				"label": "Manual ACP adapter", "version": "0.4.0",
 				"platforms": {
 					"%s": {"kind": "manual", "executablePath": "bin/adapter"},
@@ -443,10 +443,10 @@ func TestApplyRejectsUnsupportedArchiveExtension(t *testing.T) {
 	}))
 	defer server.Close()
 	manifestJSON := fmt.Sprintf(`{
-		"manifestVersion": "1",
-		"adapters": [
+		"manifestVersion": "2",
+		"components": [
 			{
-				"id": "alpha-acp", "harnessId": "alpha-cli", "provider": "alpha-vendor",
+				"id": "alpha-acp", "kind": "acp-adapter", "harnessId": "alpha-cli", "provider": "alpha-vendor",
 				"label": "Alpha ACP adapter", "version": "1.0.0",
 				"platforms": {"%s": {"kind": "archive", "url": "%s/alpha/adapter.bin", "sha256": "%s", "sizeBytes": 10, "executablePath": "bin/adapter"}}
 			}
@@ -512,7 +512,7 @@ func TestApplyManualPlacementCheck(t *testing.T) {
 		}
 	})
 
-	t.Run("missing checksum fails naming only the adapter", func(t *testing.T) {
+	t.Run("missing checksum fails naming only the component", func(t *testing.T) {
 		dataRoot := t.TempDir()
 		plan, _, err := BuildPlan(manifestBytes, manifest, testPlatform, dataRoot, OwnershipLedger{})
 		if err != nil {
@@ -525,7 +525,7 @@ func TestApplyManualPlacementCheck(t *testing.T) {
 			t.Fatal("Apply() accepted a manual install without an operator checksum, want rejection")
 		}
 		if !strings.Contains(err.Error(), "manual-acp") {
-			t.Fatalf("Apply() error = %v, want it to name the adapter id", err)
+			t.Fatalf("Apply() error = %v, want it to name the component id", err)
 		}
 		if strings.Contains(err.Error(), source) || strings.Contains(err.Error(), sourceDirectory) {
 			t.Fatalf("Apply() error leaked the operator source path: %v", err)
@@ -561,7 +561,7 @@ func TestApplyManualPlacementCheck(t *testing.T) {
 // were forged to escape the data root: hand-editing TargetPath and recomputing a self-consistent
 // Digest for the tampered content is not enough, because Apply never trusts plan.Operations at
 // all — it re-derives its own operations from the manifest and current state, and only checks the
-// supplied plan's digest against that derived one. AdapterTargetPath can never itself produce an
+// supplied plan's digest against that derived one. ComponentTargetPath can never itself produce an
 // escaping path from a valid manifest, so the derived plan's digest will not match the forged
 // plan's, and the escape attempt is rejected before anything resembling installation runs.
 func TestApplyRejectsTargetOutsideDataRoot(t *testing.T) {

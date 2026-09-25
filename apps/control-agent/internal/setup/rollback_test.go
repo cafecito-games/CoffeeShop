@@ -8,7 +8,7 @@ import (
 
 // writeOwnedArtifact creates a real file at dataRoot/relativePath and returns the ledger record
 // describing it, so tests can install ledger state without going through Apply.
-func writeOwnedArtifact(t *testing.T, dataRoot string, relativePath string, adapterID string, adapterVersion string, content []byte) OwnershipRecord {
+func writeOwnedArtifact(t *testing.T, dataRoot string, relativePath string, component ComponentRef, harnessID string, content []byte) OwnershipRecord {
 	t.Helper()
 	path := filepath.Join(dataRoot, filepath.FromSlash(relativePath))
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -18,13 +18,18 @@ func writeOwnedArtifact(t *testing.T, dataRoot string, relativePath string, adap
 		t.Fatalf("write artifact: %v", err)
 	}
 	return OwnershipRecord{
-		Path:           path,
-		AdapterID:      adapterID,
-		AdapterVersion: adapterVersion,
-		ContentSHA256:  sha256Hex(content),
-		SizeBytes:      int64(len(content)),
-		InstalledAt:    "2026-01-01T00:00:00Z",
+		Path:          path,
+		Component:     component,
+		HarnessID:     harnessID,
+		ContentSHA256: sha256Hex(content),
+		SizeBytes:     int64(len(content)),
+		InstalledAt:   "2026-01-01T00:00:00Z",
 	}
+}
+
+// acpAdapterRef is the identity shorthand every rollback fixture uses.
+func acpAdapterRef(id string, version string) ComponentRef {
+	return ComponentRef{Kind: ComponentKindACPAdapter, ID: id, Version: version}
 }
 
 func recordPaths(records []OwnershipRecord) []string {
@@ -37,10 +42,10 @@ func recordPaths(records []OwnershipRecord) []string {
 
 func TestUninstallRemovesOnlyMatchingArtifacts(t *testing.T) {
 	dataRoot := t.TempDir()
-	intact := writeOwnedArtifact(t, dataRoot, "adapters/alpha-cli/alpha-acp/1.0.0/bin/adapter", "alpha-acp", "1.0.0", []byte("intact bytes"))
-	drifted := writeOwnedArtifact(t, dataRoot, "adapters/alpha-cli/alpha-acp/1.1.0/bin/adapter", "alpha-acp", "1.1.0", []byte("original bytes"))
-	missing := writeOwnedArtifact(t, dataRoot, "adapters/alpha-cli/alpha-acp/1.2.0/bin/adapter", "alpha-acp", "1.2.0", []byte("missing bytes"))
-	unrelated := writeOwnedArtifact(t, dataRoot, "adapters/beta-cli/beta-acp/1.0.0/bin/adapter", "beta-acp", "1.0.0", []byte("beta bytes"))
+	intact := writeOwnedArtifact(t, dataRoot, "adapters/alpha-cli/alpha-acp/1.0.0/bin/adapter", acpAdapterRef("alpha-acp", "1.0.0"), "alpha-cli", []byte("intact bytes"))
+	drifted := writeOwnedArtifact(t, dataRoot, "adapters/alpha-cli/alpha-acp/1.1.0/bin/adapter", acpAdapterRef("alpha-acp", "1.1.0"), "alpha-cli", []byte("original bytes"))
+	missing := writeOwnedArtifact(t, dataRoot, "adapters/alpha-cli/alpha-acp/1.2.0/bin/adapter", acpAdapterRef("alpha-acp", "1.2.0"), "alpha-cli", []byte("missing bytes"))
+	unrelated := writeOwnedArtifact(t, dataRoot, "adapters/beta-cli/beta-acp/1.0.0/bin/adapter", acpAdapterRef("beta-acp", "1.0.0"), "beta-cli", []byte("beta bytes"))
 	// A record pointing outside the data root must never be followed to a delete, even when the
 	// file it names really exists and matches its digest.
 	outsideParent := t.TempDir()
@@ -49,12 +54,12 @@ func TestUninstallRemovesOnlyMatchingArtifacts(t *testing.T) {
 		t.Fatalf("write outside artifact: %v", err)
 	}
 	outside := OwnershipRecord{
-		Path:           outsidePath,
-		AdapterID:      "alpha-acp",
-		AdapterVersion: "1.3.0",
-		ContentSHA256:  sha256Hex([]byte("outside bytes")),
-		SizeBytes:      int64(len("outside bytes")),
-		InstalledAt:    "2026-01-01T00:00:00Z",
+		Path:          outsidePath,
+		Component:     acpAdapterRef("alpha-acp", "1.3.0"),
+		HarnessID:     "alpha-cli",
+		ContentSHA256: sha256Hex([]byte("outside bytes")),
+		SizeBytes:     int64(len("outside bytes")),
+		InstalledAt:   "2026-01-01T00:00:00Z",
 	}
 	// Simulate post-install drift on the 1.1.0 artifact and delete the 1.2.0 one entirely.
 	if err := os.WriteFile(drifted.Path, []byte("modified after install"), 0o755); err != nil {
@@ -68,7 +73,7 @@ func TestUninstallRemovesOnlyMatchingArtifacts(t *testing.T) {
 		t.Fatalf("Save() error = %v", err)
 	}
 
-	result, updated, err := Uninstall(dataRoot, ledger, "alpha-acp", "")
+	result, updated, err := Uninstall(dataRoot, ledger, ComponentSelector{Kind: ComponentKindACPAdapter, ID: "alpha-acp"})
 	if err != nil {
 		t.Fatalf("Uninstall() error = %v", err)
 	}
@@ -107,11 +112,11 @@ func TestUninstallRemovesOnlyMatchingArtifacts(t *testing.T) {
 
 func TestUninstallVersionScoped(t *testing.T) {
 	dataRoot := t.TempDir()
-	first := writeOwnedArtifact(t, dataRoot, "adapters/alpha-cli/alpha-acp/1.0.0/bin/adapter", "alpha-acp", "1.0.0", []byte("first bytes"))
-	second := writeOwnedArtifact(t, dataRoot, "adapters/alpha-cli/alpha-acp/2.0.0/bin/adapter", "alpha-acp", "2.0.0", []byte("second bytes"))
+	first := writeOwnedArtifact(t, dataRoot, "adapters/alpha-cli/alpha-acp/1.0.0/bin/adapter", acpAdapterRef("alpha-acp", "1.0.0"), "alpha-cli", []byte("first bytes"))
+	second := writeOwnedArtifact(t, dataRoot, "adapters/alpha-cli/alpha-acp/2.0.0/bin/adapter", acpAdapterRef("alpha-acp", "2.0.0"), "alpha-cli", []byte("second bytes"))
 	ledger := OwnershipLedger{Records: []OwnershipRecord{first, second}}
 
-	result, updated, err := Uninstall(dataRoot, ledger, "alpha-acp", "1.0.0")
+	result, updated, err := Uninstall(dataRoot, ledger, ComponentSelector{Kind: ComponentKindACPAdapter, ID: "alpha-acp", Version: "1.0.0"})
 	if err != nil {
 		t.Fatalf("Uninstall() error = %v", err)
 	}
@@ -128,7 +133,7 @@ func TestUninstallVersionScoped(t *testing.T) {
 
 func TestUninstallRetainsSymlinkedTarget(t *testing.T) {
 	dataRoot := t.TempDir()
-	record := writeOwnedArtifact(t, dataRoot, "adapters/alpha-cli/alpha-acp/1.0.0/bin/adapter", "alpha-acp", "1.0.0", []byte("symlinked bytes"))
+	record := writeOwnedArtifact(t, dataRoot, "adapters/alpha-cli/alpha-acp/1.0.0/bin/adapter", acpAdapterRef("alpha-acp", "1.0.0"), "alpha-cli", []byte("symlinked bytes"))
 	if err := os.Remove(record.Path); err != nil {
 		t.Fatalf("remove original artifact: %v", err)
 	}
@@ -144,7 +149,7 @@ func TestUninstallRetainsSymlinkedTarget(t *testing.T) {
 		t.Fatalf("Save() error = %v", err)
 	}
 
-	result, _, err := Uninstall(dataRoot, ledger, "alpha-acp", "")
+	result, _, err := Uninstall(dataRoot, ledger, ComponentSelector{Kind: ComponentKindACPAdapter, ID: "alpha-acp"})
 	if err != nil {
 		t.Fatalf("Uninstall() error = %v", err)
 	}

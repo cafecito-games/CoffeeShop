@@ -327,7 +327,7 @@ export type HubToControlAgent =
 export type ControlAgentToHub =
   | { type: "register"; protocolVersion?: ControlProtocolVersion; node: ComputeNode }
   | { type: "sync.complete"; nodeId: string; activeRunIds?: string[]; activeInstanceIds?: string[]; at: string }
-  | { type: "heartbeat"; nodeId: string; activeRuns: number; activeInstances?: number; at: string }
+  | { type: "heartbeat"; nodeId: string; activeRuns: number; activeInstances?: number; activeInstanceIds?: string[]; at: string }
   | { type: "run.started"; runId: string; at: string; transport?: RunTransportSelection }
   /**
    * Carries a text `chunk`, a `providerSessionId`, or both. `providerSessionId` is sent at most once,
@@ -422,7 +422,7 @@ export function requiredCapabilityForControlAgentMessage(message: ControlAgentTo
     case "register":
       return message.node.instanceCapacity !== undefined || message.node.activeInstances !== undefined ? "instances" : undefined;
     case "heartbeat":
-      return message.activeInstances !== undefined ? "instances" : undefined;
+      return message.activeInstances !== undefined || message.activeInstanceIds !== undefined ? "instances" : undefined;
     case "run.started":
     case "run.output":
     case "run.completed":
@@ -2841,8 +2841,8 @@ export function validateInstanceControlMessage(value: unknown, version: ControlP
       || !instanceStrings(node.workspaceRoots, absoluteInstancePath) || !Array.isArray(node.harnesses) || node.harnesses.length > instanceLimits.requirementEntries
       || !node.harnesses.every(instanceHarnessProfile) || new Set(node.harnesses.map((harness) => harness.id)).size !== node.harnesses.length) return reject("invalid v5 registration");
   } else if (value.type === "heartbeat") {
-    if (!hasOnlyKeys(value, ["type", "nodeId", "activeRuns", "activeInstances", "at"]) || !instanceID(value.nodeId) || !isTimestamp(value.at)
-      || !instanceCount(value.activeRuns) || !isOptional(value.activeInstances, instanceCount)) return reject("invalid v5 heartbeat");
+    if (!hasOnlyKeys(value, ["type", "nodeId", "activeRuns", "activeInstances", "activeInstanceIds", "at"]) || !instanceID(value.nodeId) || !isTimestamp(value.at)
+      || !instanceCount(value.activeRuns) || !isOptional(value.activeInstances, instanceCount) || !isOptional(value.activeInstanceIds, instanceIDs)) return reject("invalid v5 heartbeat");
   } else if (value.type === "sync.complete") {
     if (!hasOnlyKeys(value, ["type", "nodeId", "activeRuns", "activeRunIds", "activeInstanceIds", "at"]) || !instanceID(value.nodeId) || !isTimestamp(value.at)
       || !isOptional(value.activeRuns, instanceCount) || !isOptional(value.activeRunIds, instanceIDs) || !isOptional(value.activeInstanceIds, instanceIDs)) return reject("invalid v5 reconciliation evidence");

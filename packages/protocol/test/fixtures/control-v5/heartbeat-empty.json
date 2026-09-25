@@ -2,9 +2,7 @@
   "type": "heartbeat",
   "nodeId": "node-one",
   "activeRuns": 0,
-  "activeInstances": 1,
-  "activeInstanceIds": [
-    "instance-one"
-  ],
+  "activeInstances": 0,
+  "activeInstanceIds": [],
   "at": "2026-09-24T12:00:00Z"
 }

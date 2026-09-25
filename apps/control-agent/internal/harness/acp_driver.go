@@ -135,6 +135,16 @@ func (driver *ACPDriver) SupportsResume(harnessID string) error {
 	return nil
 }
 
+// AdapterBinary returns the absolute executable path configured for the harness's adapter, or ""
+// when none is configured. It is what the Runner records as in-use while an ACP run is live.
+func (driver *ACPDriver) AdapterBinary(harnessID string) string {
+	adapter, configured := driver.options.Adapters[harnessID]
+	if !configured {
+		return ""
+	}
+	return adapter.Binary
+}
+
 // Disable makes the harness's adapter unavailable for the lifetime of the driver.
 func (driver *ACPDriver) Disable(harnessID string, reason error) {
 	driver.mu.Lock()

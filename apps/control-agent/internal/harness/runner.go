@@ -35,13 +35,25 @@ func (driver nativeDriver) Execute(ctx context.Context, invocation Invocation) (
 	if !available {
 		return "", fmt.Errorf("harness %s is not installed or did not pass its version check", run.HarnessID)
 	}
-	binary, args, err := commandFor(run, invocation.Agent, mcpConfig, invocation.approvalPolicy)
+	// A managed harness re-verifies ownership, containment, file type, and digest before every
+	// launch, exactly as an ACP adapter already does through ACPAdapter.Verify. Drift refuses the
+	// launch rather than falling back to a different installed version or to PATH.
+	if err := driver.runner.verifyManagedHarness(run.HarnessID); err != nil {
+		return "", err
+	}
+	args, err := harnessArguments(run, invocation.Agent, mcpConfig, invocation.approvalPolicy)
 	if err != nil {
 		return "", err
 	}
-	if profile.Binary != "" {
-		binary = profile.Binary
+	// The executable is always the one the resolved profile names — a managed activated version's
+	// absolute install path, or the external binary PATH discovery resolved. There is no second
+	// resolution path and no hardcoded binary name.
+	binary := profile.Binary
+	if binary == "" {
+		return "", fmt.Errorf("harness %s has no resolved executable", run.HarnessID)
 	}
+	releaseExecutable := driver.runner.holdExecutable(binary)
+	defer releaseExecutable()
 	command := exec.CommandContext(ctx, binary, args...)
 	configureProcessCancellation(command)
 	command.Dir = invocation.Workspace
@@ -77,8 +89,27 @@ func (driver nativeDriver) Execute(ctx context.Context, invocation Invocation) (
 	return strings.TrimSpace(final), nil
 }
 
+// profile returns the harness's natively discovered profile. Only a harness whose native CLI was
+// found and passed its version check is available, which is what native execution, native
+// fallback, and harness-version reporting require.
 func (r *Runner) profile(id string) (protocol.HarnessProfile, bool) {
-	for _, profile := range r.profiles {
+	for _, profile := range r.nativeProfiles {
+		if profile.ID == id && profile.Available {
+			return profile, true
+		}
+	}
+	return protocol.HarnessProfile{}, false
+}
+
+// advertisedProfile returns the harness's profile as this node advertises it to the hub, which
+// admission reads. A harness installed only through ACP is available here even though profile
+// refuses it; without an advertised set the native profiles are the advertisement.
+func (r *Runner) advertisedProfile(id string) (protocol.HarnessProfile, bool) {
+	advertised := r.advertisedProfiles
+	if advertised == nil {
+		advertised = r.nativeProfiles
+	}
+	for _, profile := range advertised {
 		if profile.ID == id && profile.Available {
 			return profile, true
 		}
@@ -110,7 +141,10 @@ func nativeCodexSandboxArguments(approvalPolicy string) []string {
 	return []string{"--sandbox", "workspace-write"}
 }
 
-func commandFor(run protocol.Run, agent protocol.Agent, mcpConfig mcpserver.Config, approvalPolicy string) (string, []string, error) {
+// harnessArguments builds the argument list for one native harness invocation. It deliberately
+// returns no executable: the executable comes from the resolved harness profile, which is the one
+// place a managed activated version and an external PATH installation are ever chosen between.
+func harnessArguments(run protocol.Run, agent protocol.Agent, mcpConfig mcpserver.Config, approvalPolicy string) ([]string, error) {
 	prompt := composePrompt(run, agent)
 	switch run.HarnessID {
 	case "claude-cli":
@@ -120,7 +154,7 @@ func commandFor(run protocol.Run, agent protocol.Agent, mcpConfig mcpserver.Conf
 				"type": "http", "url": mcpConfig.URL, "headers": map[string]string{"Authorization": "Bearer ${COFFEE_SHOP_MCP_TOKEN}"},
 			}}})
 			if err != nil {
-				return "", nil, err
+				return nil, err
 			}
 			allowed := make([]string, 0, len(protocol.HubToolNames))
 			for _, name := range mcpserver.ToolNames(mcpConfig.CanDelegate) {
@@ -128,7 +162,7 @@ func commandFor(run protocol.Run, agent protocol.Agent, mcpConfig mcpserver.Conf
 			}
 			args = append(args, "--mcp-config", string(configuration), "--allowedTools", strings.Join(allowed, ","))
 		}
-		return "claude", args, nil
+		return args, nil
 	case "codex-cli":
 		args := append([]string{"exec", "--json"}, nativeCodexSandboxArguments(approvalPolicy)...)
 		if run.Model != "" && run.Model != "default" {
@@ -142,9 +176,9 @@ func commandFor(run protocol.Run, agent protocol.Agent, mcpConfig mcpserver.Conf
 				"-c", `mcp_servers.coffee_shop_hub.default_tools_approval_mode="approve"`,
 			)
 		}
-		return "codex", append(args, prompt), nil
+		return append(args, prompt), nil
 	default:
-		return "", nil, fmt.Errorf("harness %s is not executable by Barista", run.HarnessID)
+		return nil, fmt.Errorf("harness %s is not executable by Barista", run.HarnessID)
 	}
 }
 

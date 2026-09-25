@@ -38,22 +38,22 @@ func captureOutput(t *testing.T, fn func() int) (string, string, int) {
 	return string(stdout), string(stderr), code
 }
 
-// cliManualManifestFixture writes a one-manual-adapter manifest for this test binary's platform.
+// cliManualManifestFixture writes a one-manual-component manifest for this test binary's platform.
 func cliManualManifestFixture(t *testing.T) (string, string) {
 	t.Helper()
 	platform := runtime.GOOS + "-" + runtime.GOARCH
 	manifestJSON := fmt.Sprintf(`{
-		"manifestVersion": "1",
-		"adapters": [
+		"manifestVersion": "2",
+		"components": [
 			{
-				"id": "manual-acp", "harnessId": "manual-cli", "provider": "manual-vendor",
+				"id": "manual-acp", "kind": "acp-adapter", "harnessId": "manual-cli", "provider": "manual-vendor",
 				"label": "Manual ACP adapter", "version": "0.4.0",
 				"platforms": {"%s": {"kind": "manual", "executablePath": "bin/adapter"}},
 				"launch": {}
 			}
 		]
 	}`, platform)
-	manifestPath := filepath.Join(t.TempDir(), "adapters.json")
+	manifestPath := filepath.Join(t.TempDir(), "components.json")
 	require.NoError(t, os.WriteFile(manifestPath, []byte(manifestJSON), 0o644))
 	return platform, manifestPath
 }
@@ -73,7 +73,8 @@ func TestSetupPlanWritesPlanWithoutTouchingTheDataRoot(t *testing.T) {
 	require.NoError(t, err)
 	var plan setup.Plan
 	require.NoError(t, json.Unmarshal(planBytes, &plan))
-	require.Equal(t, "manual-acp", plan.Operations[0].AdapterID)
+	require.Equal(t, setup.ComponentRef{Kind: setup.ComponentKindACPAdapter, ID: "manual-acp", Version: "0.4.0"}, plan.Operations[0].Component)
+	require.Equal(t, "manual-cli", plan.Operations[0].HarnessID)
 	require.Equal(t, plan.Digest, setup.ComputePlanDigest(plan))
 
 	// Planning is read-only: the data root directory is never created just to observe state.
@@ -121,7 +122,7 @@ func TestSetupApplyInstallsManualArtifactEndToEnd(t *testing.T) {
 		})
 	})
 	require.Equal(t, 0, code, "stderr: %s", stderr)
-	require.Contains(t, stdout, "installed: manual-acp@0.4.0")
+	require.Contains(t, stdout, "installed: acp-adapter/manual-acp@0.4.0")
 	require.Contains(t, stdout, "Barista loads it at startup from the same --data-root")
 
 	targetPath := filepath.Join(dataRoot, "adapters", "manual-cli", "manual-acp", "0.4.0", "bin", "adapter")
@@ -148,12 +149,45 @@ func TestSetupApplyWithoutPlanFailsClosedWithoutMutating(t *testing.T) {
 	require.True(t, os.IsNotExist(err))
 }
 
-func TestSetupRejectsUnknownSubcommand(t *testing.T) {
+// TestRunSetupSubcommandDispatch proves every valid subcommand is reachable and that an unknown one
+// fails closed with exit code 2 while still naming the whole valid set.
+func TestRunSetupSubcommandDispatch(t *testing.T) {
+	for _, subcommand := range setupSubcommands {
+		t.Run(subcommand, func(t *testing.T) {
+			// -h exercises dispatch and flag registration without performing any work; a dispatched
+			// subcommand returns 0 for help, while an unknown one could never reach it.
+			_, _, code := captureOutput(t, func() int {
+				return runSetup([]string{subcommand, "-h"})
+			})
+			require.Equal(t, 0, code)
+		})
+	}
+
 	_, stderr, code := captureOutput(t, func() int {
 		return runSetup([]string{"frobnicate"})
 	})
 	require.Equal(t, 2, code)
-	require.Contains(t, stderr, "valid subcommands are plan and apply")
+	for _, subcommand := range setupSubcommands {
+		require.Contains(t, stderr, subcommand)
+	}
+	require.Contains(t, stderr, "unknown setup subcommand")
+
+	// An activation subcommand with no component named refuses on the grammar, before any
+	// filesystem access, and never reads an empty field as a wildcard.
+	for _, subcommand := range []string{"activate", "rollback", "prune"} {
+		_, stderr, code := captureOutput(t, func() int {
+			return runSetup([]string{subcommand, "--data-root", t.TempDir()})
+		})
+		require.Equal(t, 2, code, subcommand)
+		require.Contains(t, stderr, "component kind is unknown", subcommand)
+	}
+
+	// activate requires an exact version; rollback and prune refuse one.
+	_, stderr, code = captureOutput(t, func() int {
+		return runSetup([]string{"activate", "--data-root", t.TempDir(), "--kind", "acp-adapter", "--id", "codex-acp"})
+	})
+	require.Equal(t, 2, code)
+	require.Contains(t, stderr, "--version is required")
 }
 
 func TestSetupApplyRejectsMalformedManualArtifactBeforeAnyWork(t *testing.T) {
@@ -186,7 +220,9 @@ func TestSetupApplyWithoutSubcommandNamesTheValidOnes(t *testing.T) {
 		return runSetup(nil)
 	})
 	require.Equal(t, 2, code)
-	require.Contains(t, stderr, "plan or apply")
+	for _, subcommand := range setupSubcommands {
+		require.Contains(t, stderr, subcommand)
+	}
 }
 
 // TestSetupApplyNeverEchoesRejectedFlagValueToStderr proves the fix-6 property directly: Go's flag
