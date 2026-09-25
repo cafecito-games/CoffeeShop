@@ -12,6 +12,15 @@ Anthropic documents all of the pieces Coffee Shop uses:
 
 Coffee Shop therefore starts the installed, official CLI as a child process on the subscriber's own compute machine. It does not imitate Anthropic's private network calls, extract OAuth credentials, use a Claude subscription token against the API, or set an API key.
 
+## Barista may install the CLI, but never its credential
+
+Barista can optionally manage the Claude Code CLI itself as a `harness` component (`claude-cli`, pinned to `@anthropic-ai/claude-code` 2.1.231; see `docs/operations.md#installing-and-activating-managed-harnesses`). That changes nothing about the boundary this document describes, and it deliberately changes nothing about authentication.
+
+- **Only the software moves, never the account.** A node administrator packages the vendor's own per-platform executable, asserts its SHA-256, and Barista installs and activates exactly those bytes under its own data root. It downloads nothing from Anthropic, runs no installer or bootstrap script, and re-hosts and re-distributes nothing — the operator obtains the artifact from Anthropic themselves under Anthropic's own terms.
+- **Authentication stays a separate, later, human action.** After installing, the operator runs `claude` once on that compute node and signs in. The login lives in Claude Code's own locally owned credential storage, exactly as it does for a hand-installed CLI. Barista never creates, reads, copies, exports, migrates, or forwards it, does not carry it across a version bump or a rollback, and never substitutes an API key to approximate a subscription. The hub never receives it.
+- **Installing proves nothing about authentication.** `barista doctor` reports installation and activation separately from a coarse `authReadiness` derived only from an exit code, where `unknown` means "absent or timed out" and never "not authenticated". No scheduling path claims a node is runnable on the strength of an install alone.
+- **The version a node runs is the version its records claim.** Activation refuses a managed candidate whose own `--version` output does not report the pinned version, so this document's "official CLI, known version" assumption is enforced rather than assumed. Raw `--version` output is never logged or reported, because process output can carry credentials.
+
 ## The ACP adapter is experimental, and is an alternate transport for the same local CLI, not a new account
 
 Barista can also drive Claude through `claude-agent-acp`, the official Agent Client Protocol adapter built on the Claude Agent SDK (see `docs/control-agent.md#claude-over-acp`). **This transport is experimental.** Treat it as API-mode-capable infrastructure rather than a proven subscription-equivalent path, and keep native `claude -p` as the recommended default until you have re-verified the current boundary below for your own deployment.
