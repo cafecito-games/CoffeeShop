@@ -867,13 +867,23 @@ func TestReleaseNamingAnInstanceWhoseAllocationIsUnknownEvictsTheResident(t *tes
 	require.Equal(t, 1, cleanups, "the replay must not run the resident's cleanup again")
 }
 
+// Admission refuses to host an instance under a second concurrent allocation, so the ambiguous
+// match this test provokes can no longer be produced through provisioning. The duplicate state is
+// injected directly into the table to keep the release-side guard exercised — it is defense in
+// depth for a table that structurally permits what admission now refuses, so it must keep refusing
+// rather than guess.
 func TestAmbiguousInstanceMatchOnAnUnknownAllocationReleaseIsRefused(t *testing.T) {
 	directory := t.TempDir()
 	client := instanceTestClient(t, quickHarnessBinary(t, directory), directory, 2, 2, nil)
 	firstInstance, firstAllocation := testInstanceAndAllocationFor("instance-shared", "allocation-one", directory)
 	provisionReady(t, client, firstInstance, firstAllocation)
 	secondInstance, secondAllocation := testInstanceAndAllocationFor("instance-shared", "allocation-two", directory)
-	provisionReady(t, client, secondInstance, secondAllocation)
+	client.residents.mu.Lock()
+	client.residents.residentsTable[secondAllocation.ID] = &residentInstance{
+		instance: secondInstance, allocation: secondAllocation, state: residentReady,
+		runs: map[string]struct{}{}, closers: map[string]func() error{},
+	}
+	client.residents.mu.Unlock()
 
 	message := testReleaseMessage(firstAllocation, "drain")
 	message.AllocationID = "allocation-unknown"
@@ -882,6 +892,66 @@ func TestAmbiguousInstanceMatchOnAnUnknownAllocationReleaseIsRefused(t *testing.
 	require.NotNil(t, failed)
 	require.Contains(t, *failed.Error, "multiple resident allocations")
 	require.Equal(t, 2, client.activeInstanceCount(), "an ambiguous match must not guess and evict either resident")
+}
+
+// A provision that would host an instance under a second concurrent allocation is refused before
+// any resident state changes: an instance is hosted by one allocation at a time — the same
+// invariant the hub's load validation states — because a duplicate resident would make the
+// heartbeat identity list either invalid (a repeated ID fails the protocol's uniqueness check) or,
+// if deduplicated, an under-count of the slots the instance family occupies.
+func TestProvisionRefusesASecondConcurrentResidentForAnInstance(t *testing.T) {
+	directory := t.TempDir()
+	client := instanceTestClient(t, quickHarnessBinary(t, directory), directory, 2, 2, nil)
+	instance, allocation := testInstanceAndAllocation(directory)
+	provisionReady(t, client, instance, allocation)
+
+	replacementInstance, replacementAllocation := testInstanceAndAllocationFor(instance.ID, "allocation-two", directory)
+	client.handleInstanceMessage(context.Background(), testProvisionMessage(replacementInstance, replacementAllocation))
+	failed := waitForInstanceMessage(t, client, "instance.failed", replacementAllocation.ID)
+	require.NotNil(t, failed)
+	require.Contains(t, *failed.Error, "already hosted by allocation "+allocation.ID)
+	require.Equal(t, 1, client.activeInstanceCount(), "a refused duplicate must not become a second resident")
+
+	// An exact replay of the hosted allocation stays idempotent: it is answered by the replay
+	// lookup, never mistaken for a second resident.
+	client.handleInstanceMessage(context.Background(), testProvisionMessage(instance, allocation))
+	waitForInstanceMessageCount(t, client, "instance.ready", allocation.ID, 2)
+	require.Equal(t, 1, client.activeInstanceCount(), "an exact replay must neither reserve nor free a slot")
+
+	// Replacement after release is legitimate: only a concurrently resident duplicate is refused.
+	client.handleInstanceMessage(context.Background(), testReleaseMessage(allocation, "drain"))
+	require.NotNil(t, waitForInstanceMessage(t, client, "instance.released", allocation.ID))
+	client.handleInstanceMessage(context.Background(), testProvisionMessage(replacementInstance, replacementAllocation))
+	require.NotNil(t, waitForInstanceMessage(t, client, "instance.ready", replacementAllocation.ID), "a released instance may be hosted again under a new allocation")
+	require.Equal(t, 1, client.activeInstanceCount())
+}
+
+// The heartbeat identity list is unique by construction and its length is the resident count, so it
+// is accurate occupancy evidence the hub can count directly.
+func TestHeartbeatInstanceIdentitiesAreUniqueAndCountTheResidents(t *testing.T) {
+	directory := t.TempDir()
+	client := instanceTestClient(t, quickHarnessBinary(t, directory), directory, 3, 3, nil)
+	for index := 0; index < 3; index++ {
+		instance, allocation := testInstanceAndAllocationFor(fmt.Sprintf("instance-%d", index), fmt.Sprintf("allocation-%d", index), directory)
+		provisionReady(t, client, instance, allocation)
+	}
+	heartbeat := client.heartbeatMessage()
+	identities := *heartbeat.ActiveInstanceIDs
+	require.Equal(t, []string{"instance-0", "instance-1", "instance-2"}, identities, "the snapshot is sorted")
+	require.Equal(t, client.activeInstanceCount(), len(identities), "the identity count is the resident count")
+	seen := map[string]struct{}{}
+	for _, identity := range identities {
+		require.NotContains(t, seen, identity, "an instance is hosted by one allocation at a time, so no identity repeats")
+		seen[identity] = struct{}{}
+	}
+
+	// A duplicate the admission invariant refuses never reaches the list.
+	duplicateInstance, duplicateAllocation := testInstanceAndAllocationFor("instance-1", "allocation-duplicate", directory)
+	client.handleInstanceMessage(context.Background(), testProvisionMessage(duplicateInstance, duplicateAllocation))
+	require.NotNil(t, waitForInstanceMessage(t, client, "instance.failed", duplicateAllocation.ID))
+	nextHeartbeat := client.heartbeatMessage()
+	require.Equal(t, identities, *nextHeartbeat.ActiveInstanceIDs)
+	require.Equal(t, 3, *nextHeartbeat.ActiveInstances)
 }
 
 func TestHeartbeatAndRegistrationReportIndependentResidentCounts(t *testing.T) {
