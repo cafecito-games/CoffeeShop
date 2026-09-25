@@ -190,3 +190,45 @@ func TestDoctorNeverLeaksEndpointCredentialsThroughConnectivityFailure(t *testin
 	require.NotContains(t, stdout, secretLikeUserinfo)
 	require.NotContains(t, stdout, "hunter2")
 }
+
+func TestDoctorReportsTheInstanceCapacityTheDaemonWouldUse(t *testing.T) {
+	emptyPATH(t)
+	manifestPath := doctorManifestFixture(t)
+
+	t.Run("unset capacity resolves to the daemon's concurrency default", func(t *testing.T) {
+		t.Setenv("BARISTA_CONCURRENCY", "3")
+		t.Setenv("BARISTA_INSTANCE_CAPACITY", "")
+		stdout, _, code := captureOutput(t, func() int {
+			return runDoctor([]string{"--manifest", manifestPath, "--data-root", t.TempDir(), "--control-endpoint", "http://127.0.0.1:1"})
+		})
+		require.Equal(t, 0, code)
+		require.Contains(t, stdout, "resident instance capacity: 3\n")
+	})
+
+	t.Run("an explicit zero reports disabled hosting", func(t *testing.T) {
+		t.Setenv("BARISTA_INSTANCE_CAPACITY", "0")
+		stdout, _, code := captureOutput(t, func() int {
+			return runDoctor([]string{"--manifest", manifestPath, "--data-root", t.TempDir(), "--control-endpoint", "http://127.0.0.1:1"})
+		})
+		require.Equal(t, 0, code)
+		require.Contains(t, stdout, "resident instance hosting: disabled (instance capacity 0)\n")
+	})
+
+	t.Run("the flag overrides the environment", func(t *testing.T) {
+		t.Setenv("BARISTA_INSTANCE_CAPACITY", "4")
+		stdout, _, code := captureOutput(t, func() int {
+			return runDoctor([]string{"--manifest", manifestPath, "--data-root", t.TempDir(), "--control-endpoint", "http://127.0.0.1:1", "--instance-capacity", "9"})
+		})
+		require.Equal(t, 0, code)
+		require.Contains(t, stdout, "resident instance capacity: 9\n")
+	})
+
+	t.Run("a malformed environment value is rejected", func(t *testing.T) {
+		t.Setenv("BARISTA_INSTANCE_CAPACITY", "many")
+		_, stderr, code := captureOutput(t, func() int {
+			return runDoctor([]string{"--manifest", manifestPath, "--data-root", t.TempDir(), "--control-endpoint", "http://127.0.0.1:1"})
+		})
+		require.Equal(t, 2, code)
+		require.Contains(t, stderr, "BARISTA_INSTANCE_CAPACITY must be a non-negative integer")
+	})
+}

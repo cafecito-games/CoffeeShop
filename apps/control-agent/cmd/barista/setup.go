@@ -266,6 +266,12 @@ func runDoctor(args []string) int {
 	controlEndpoint := set.String("control-endpoint", config.DefaultEndpoint, "Coffee Shop URL or WebSocket endpoint to test for reachability")
 	claudeACPAuthMode := set.String("claude-acp-auth-mode", os.Getenv("BARISTA_CLAUDE_ACP_AUTH_MODE"), "administrator auth-mode policy that would be required before Claude ACP loads: local-subscription or api")
 	asJSON := set.Bool("json", false, "print the report as JSON instead of a human-readable summary")
+	instanceCapacityDefault, err := config.InstanceCapacityDefault()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "doctor: %v\n", err)
+		return 2
+	}
+	instanceCapacity := set.Int("instance-capacity", instanceCapacityDefault, "maximum number of simultaneous resident instances the daemon would host, independent of run concurrency (0 disables instance hosting; defaults to concurrency)")
 	approvalPolicyEntries := config.ApprovalPolicyEnvironment()
 	config.ApprovalPolicyFlag(set, &approvalPolicyEntries)
 	if err := set.Parse(args); err != nil {
@@ -325,6 +331,11 @@ func runDoctor(args []string) int {
 	for _, harnessID := range harness.ApprovalPolicyHarnessIDs {
 		policy := report.ApprovalPolicies[harnessID]
 		fmt.Printf("approval policy for %s: %s (%s)\n", harnessID, policy, harness.ApprovalPolicyEffect(policy))
+	}
+	if *instanceCapacity == 0 {
+		fmt.Printf("resident instance hosting: disabled (instance capacity 0)\n")
+	} else {
+		fmt.Printf("resident instance capacity: %d\n", *instanceCapacity)
 	}
 	fmt.Printf("hub %s: %s\n", report.HubConnectivity.Endpoint, reachableSummary(report.HubConnectivity))
 	fmt.Printf("project readiness: %s\n", report.ProjectReadiness)

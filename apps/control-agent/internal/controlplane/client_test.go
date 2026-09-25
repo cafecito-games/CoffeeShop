@@ -241,6 +241,24 @@ func TestDispatchWithNativeCliExecutionIsNotRejectedByTheExecutionGuard(t *testi
 	require.Equal(t, "", unsupportedExecutionReason(protocol.Run{Transport: "native-cli"}, &protocol.DispatchExecution{Transport: "native-cli"}, nil, nil, nil))
 }
 
+// A version-4 dispatch may omit the transport entirely; the omitted transport is the legacy native
+// default and must keep working end to end for a natively available harness even though admission
+// of an explicit native-cli request now reads the harness's advertised transports.
+func TestV4DispatchWithoutATransportRunsANativelyAvailableHarness(t *testing.T) {
+	directory := t.TempDir()
+	client := instanceTestClient(t, quickHarnessBinary(t, directory), directory, 1, 0, []string{"default"})
+	client.handle(context.Background(), protocol.Inbound{
+		Type:  "dispatch",
+		Run:   protocol.Run{ID: "run-legacy", HarnessID: "codex-cli", Model: "default", Workspace: directory, Prompt: "do the work"},
+		Agent: protocol.Agent{ID: "agent-one"},
+	})
+
+	message := waitForMessage(t, client, "run.completed")
+	require.Equal(t, "run-legacy", message.RunID)
+	require.Equal(t, "done", message.Output)
+	require.Zero(t, client.activeRuns())
+}
+
 func TestDispatchRejectsUnsupportedTransportOnTheRunWithNoExecutionObject(t *testing.T) {
 	// A hub could set run.transport directly without an execution object at all; the guard must
 	// still reject it instead of letting the run start natively.

@@ -95,6 +95,11 @@ func run(args []string) int {
 	}
 	log.Printf("discovered harnesses: %s", strings.Join(available, ", "))
 	log.Printf("allowed workspace roots: %s", strings.Join(cfg.WorkspaceRoots, ", "))
+	if cfg.InstanceCapacity == 0 {
+		log.Printf("resident instance hosting is disabled (instance capacity 0)")
+	} else {
+		log.Printf("resident instance capacity: %d (run concurrency %d)", cfg.InstanceCapacity, cfg.Concurrency)
+	}
 
 	node := protocol.ComputeNode{
 		ID:             cfg.NodeID,
@@ -119,13 +124,22 @@ func run(args []string) int {
 		}
 	}
 	log.Printf("node capability report ready: %d of %d evidence entries succeeded", succeeded, len(report.Evidence))
-	runner := harness.NewRunner(nativeProfiles).WithACP(driver).WithNativeFallback(cfg.ACPNativeFallback...).WithApprovalPolicies(cfg.ApprovalPolicies)
+	runner := newRunner(nativeProfiles, profiles, driver, cfg)
 	client := controlplane.NewClient(cfg, node, runner, buildCapabilityReport)
 	if err := client.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		log.Printf("Barista stopped: %v", err)
 		return 1
 	}
 	return 0
+}
+
+// newRunner wires the node's Runner from both views of its harness capability. Native execution
+// and native fallback read the natively discovered profiles, while admission reads exactly the
+// profiles the node advertises to the hub, so an allocation the hub selected from the advertised
+// set — including a harness or model available only through ACP — is always admissible.
+func newRunner(nativeProfiles, advertisedProfiles []protocol.HarnessProfile, driver *harness.ACPDriver, cfg config.Config) *harness.Runner {
+	return harness.NewRunner(nativeProfiles).WithAdvertisedProfiles(advertisedProfiles).WithACP(driver).
+		WithNativeFallback(cfg.ACPNativeFallback...).WithApprovalPolicies(cfg.ApprovalPolicies)
 }
 
 // acpDriver loads the ACP adapters this node may launch: administrator overrides, which must
