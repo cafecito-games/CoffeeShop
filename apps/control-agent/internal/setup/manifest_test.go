@@ -334,21 +334,32 @@ func TestLoadDefaultManifest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadDefaultManifest() error = %v", err)
 	}
-	harnessIDs := make(map[string]ComponentManifestEntry, len(manifest.Components))
+	// Several entries can share one harness ID — an ACP adapter and the harness itself both name
+	// their harness — so entries are collected per harness rather than overwritten, which would
+	// silently check only whichever one happened to come last.
+	entriesByHarness := make(map[string][]ComponentManifestEntry, len(manifest.Components))
 	for _, entry := range manifest.Components {
-		harnessIDs[entry.HarnessID] = entry
+		entriesByHarness[entry.HarnessID] = append(entriesByHarness[entry.HarnessID], entry)
 	}
 	for _, harnessID := range []string{"claude-cli", "codex-cli"} {
-		entry, supported := harnessIDs[harnessID]
+		entries, supported := entriesByHarness[harnessID]
 		if !supported {
 			t.Fatalf("LoadDefaultManifest() has no entry for harness %s", harnessID)
 		}
-		distribution, ok := entry.Platforms["darwin-arm64"]
-		if !ok {
-			t.Fatalf("LoadDefaultManifest() entry for %s has no darwin-arm64 distribution", harnessID)
-		}
-		if distribution.Kind != DistributionKindManual {
-			t.Fatalf("LoadDefaultManifest() entry for %s is %q, want manual", harnessID, distribution.Kind)
+		for _, entry := range entries {
+			distribution, ok := entry.Platforms["darwin-arm64"]
+			if !ok {
+				t.Fatalf("LoadDefaultManifest() entry %s has no darwin-arm64 distribution", entry.ID)
+			}
+			// The kind is whatever the vendor's real distribution supports; what must hold for every
+			// shipped entry is that it is in the closed vocabulary and fully pinned for that kind, so
+			// a half-filled archive entry can never ship.
+			if !distribution.Kind.Valid() {
+				t.Fatalf("LoadDefaultManifest() entry %s declares unknown distribution kind %q", entry.ID, distribution.Kind)
+			}
+			if err := validatePlatformDistribution(distribution); err != nil {
+				t.Fatalf("LoadDefaultManifest() entry %s has an invalid darwin-arm64 distribution: %v", entry.ID, err)
+			}
 		}
 		if _, hasCompiledProbe := AuthProbeAllowlist[harnessID]; !hasCompiledProbe {
 			t.Fatalf("LoadDefaultManifest() harness %s has no compiled-in AuthProbeAllowlist entry", harnessID)

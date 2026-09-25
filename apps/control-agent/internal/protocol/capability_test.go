@@ -179,6 +179,39 @@ func TestVersionGrammarMatchesTheTypeScriptSourceOfTruth(t *testing.T) {
 	}
 }
 
+// TestExtractNormalizedVersionIsTheOneAnswerForReportedVersions covers the single definition of
+// "what version did this executable report", which both harness PATH discovery and Barista setup's
+// managed activation probe call. An output that carries nothing normalized yields "" rather than a
+// guess; whether "" is tolerated or refused is the caller's decision, never this function's.
+func TestExtractNormalizedVersionIsTheOneAnswerForReportedVersions(t *testing.T) {
+	for _, testCase := range []struct {
+		output   string
+		expected string
+	}{
+		// The two captures below are the exact bytes the released Claude Code and Codex CLIs print.
+		{output: "2.1.231 (Claude Code)\n", expected: "2.1.231"},
+		{output: "codex-cli 0.147.0\n", expected: "0.147.0"},
+		{output: "claude 2.1.3 (Claude Code)", expected: "2.1.3"},
+		{output: "0.2", expected: "0.2"},
+		// Malformed, absent, and prose-only outputs all resolve to "" — never to a partial version.
+		{output: "", expected: ""},
+		{output: "Installed", expected: ""},
+		{output: "version 2", expected: ""},
+		{output: "v01.2", expected: ""},
+		// The first dotted match is the only candidate: an over-long dotted sequence is dropped whole
+		// rather than trimmed into something that would pass.
+		{output: "1.2.3.4.5", expected: ""},
+		{output: "12345.1", expected: ""},
+	} {
+		t.Run(testCase.output, func(t *testing.T) {
+			extracted := ExtractNormalizedVersion(testCase.output)
+			require.Equal(t, testCase.expected, extracted)
+			require.True(t, extracted == "" || IsNormalizedVersion(extracted),
+				"a non-empty result always satisfies the normalized-version grammar")
+		})
+	}
+}
+
 func TestParseVersionConstraintAcceptsEveryComparatorAndDefaultsToEquality(t *testing.T) {
 	expectations := []struct {
 		raw        string

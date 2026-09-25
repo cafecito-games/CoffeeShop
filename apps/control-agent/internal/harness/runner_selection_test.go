@@ -122,16 +122,14 @@ func TestNormalizedHarnessVersion(t *testing.T) {
 		{description: "v01.2", expected: ""},
 	} {
 		t.Run(testCase.description, func(t *testing.T) {
-			version := normalizedHarnessVersion(testCase.description)
+			version := protocol.ExtractNormalizedVersion(testCase.description)
 			require.Equal(t, testCase.expected, version)
 			require.True(t, version == "" || protocol.IsNormalizedVersion(version))
 		})
 	}
 
 	// The first dotted match in "1.2.3.4.5" is not a normalized version, so it is dropped whole.
-	first := harnessVersionPattern.FindString("1.2.3.4.5")
-	require.False(t, protocol.IsNormalizedVersion(first))
-	require.Equal(t, "", normalizedHarnessVersion("1.2.3.4.5"))
+	require.Equal(t, "", protocol.ExtractNormalizedVersion("1.2.3.4.5"))
 }
 
 func TestFallbackReasonClassifiesPrePromptFailures(t *testing.T) {

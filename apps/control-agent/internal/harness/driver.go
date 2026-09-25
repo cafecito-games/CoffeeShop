@@ -372,7 +372,7 @@ func (r *Runner) beginning(invocation Invocation, selection protocol.RunTranspor
 	selection.ApprovalPolicy = reportedApprovalPolicy(invocation.approvalPolicy)
 	if selection.SelectedTransport == TransportNative {
 		if profile, available := r.profile(invocation.Run.HarnessID); available {
-			selection.HarnessVersion = normalizedHarnessVersion(profile.Description)
+			selection.HarnessVersion = protocol.ExtractNormalizedVersion(profile.Description)
 		}
 	}
 	var once sync.Once

@@ -12,6 +12,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/protocol"
 )
 
 // activationLedgerFilename is the activation ledger's fixed location under the data root. It is a
@@ -385,18 +387,61 @@ var HarnessVersionProbeAllowlist = map[string]AuthProbeSpec{
 	"codex-cli":  {Arguments: []string{"--version"}, SuccessExitCode: 0},
 }
 
+// Fixed reasons ProbeHarnessVersion refuses a candidate. Each names a distinguishable input
+// condition and nothing else: the error it is embedded in carries only the component identity, so a
+// reason must never quote probe output, a path, or an operator argument. They are separate values
+// rather than one generic reason because the fail-closed contract distinguishes them — an output
+// that cannot be parsed is malformed, a probe that could not run at all is unknown, and neither is
+// ever read as agreement.
+const (
+	// harnessVersionProbeUnansweredReason is a probe that ran and exited unsuccessfully.
+	harnessVersionProbeUnansweredReason = "did not answer its version contract"
+	// harnessVersionProbeUnknownReason is a probe that could not start, timed out, or produced
+	// secret-like output. It is deliberately not reported as an unsuccessful answer.
+	harnessVersionProbeUnknownReason = "could not be probed for its version contract"
+	// harnessVersionProbeMalformedReason is a successful probe whose output carries no parsable
+	// normalized version. It is deliberately not reported as "reports no version": a pinned version
+	// that cannot be confirmed is not a pin.
+	harnessVersionProbeMalformedReason = "reported no parsable version for its version contract"
+	// harnessVersionProbeMismatchReason is a successful, parsable probe naming another version.
+	harnessVersionProbeMismatchReason = "reported a version other than the one pinned for it"
+)
+
 // ProbeHarnessVersion runs the candidate harness executable's compiled-in --version contract, the
-// same shape harness discovery already applies to an external binary. The executable is always the
-// absolute path VerifyInstalledComponent resolved and verified, never anything the manifest named.
-// The returned error names only the component identity and a fixed reason: raw probe output may
-// carry credentials and is never surfaced.
+// same shape harness discovery already applies to an external binary, and refuses the candidate
+// unless the version it reports for itself is exactly the version the manifest pinned. The
+// executable is always the absolute path VerifyInstalledComponent resolved and verified, never
+// anything the manifest named, and the reported version is normalized through the single
+// protocol.ExtractNormalizedVersion definition harness discovery uses, so the two can never disagree
+// about what an executable reported.
+//
+// Unlike an external PATH binary — which stays accepted with no version, because an
+// operator-installed harness that worked before managed components existed must keep working — a
+// managed candidate whose output carries no parsable version is refused: activating it would record
+// a pinned version nothing ever confirmed.
+//
+// The returned error names only the component identity and one of the fixed reasons above: raw probe
+// output may carry credentials and is never surfaced, not even the version parsed out of it.
 func ProbeHarnessVersion(ctx context.Context, installed InstalledComponent) error {
 	spec, allowed := HarnessVersionProbeAllowlist[installed.Entry.HarnessID]
 	if !allowed {
 		return fmt.Errorf("%s has no compiled-in version contract, so it cannot be activated", installed.Ref())
 	}
-	if RunAuthProbe(ctx, installed.Path, spec.Arguments, spec.SuccessExitCode) != AuthReadinessReady {
-		return fmt.Errorf("%s did not answer its version contract", installed.Ref())
+	readiness, output := runProbeCapturingOutput(ctx, installed.Path, spec.Arguments, spec.SuccessExitCode)
+	switch readiness {
+	case AuthReadinessReady:
+	case AuthReadinessNotReady:
+		return fmt.Errorf("%s %s", installed.Ref(), harnessVersionProbeUnansweredReason)
+	default:
+		// AuthReadinessUnknown, and any value a later vocabulary addition introduces, fails closed.
+		return fmt.Errorf("%s %s", installed.Ref(), harnessVersionProbeUnknownReason)
+	}
+	reported := protocol.ExtractNormalizedVersion(output)
+	if reported == "" {
+		return fmt.Errorf("%s %s", installed.Ref(), harnessVersionProbeMalformedReason)
+	}
+	if reported != installed.Ref().Version {
+		return fmt.Errorf("%s %s", installed.Ref(), harnessVersionProbeMismatchReason)
 	}
 	return nil
 }

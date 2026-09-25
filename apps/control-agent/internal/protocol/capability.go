@@ -172,6 +172,26 @@ func IsNormalizedVersion(value string) bool {
 	return true
 }
 
+// reportedVersionPattern finds the first dotted version number in a tool's self-reported version
+// output. It is deliberately the only such pattern in the Go tree: it lives beside
+// IsNormalizedVersion because "what version did this executable report" must have exactly one
+// answer, whether the executable was found on PATH by harness discovery or installed and activated
+// by Barista setup.
+var reportedVersionPattern = regexp.MustCompile(`\d+(\.\d+)+`)
+
+// ExtractNormalizedVersion extracts the normalized dotted version a tool reported in its own
+// version output, or "" when the output carries none that satisfies IsNormalizedVersion. An
+// unparsable output always yields "" — the caller, not this function, decides whether that is
+// tolerated (an unowned PATH binary that worked before managed components existed) or refused (a
+// managed component whose pinned version could otherwise never be confirmed).
+func ExtractNormalizedVersion(output string) string {
+	version := reportedVersionPattern.FindString(output)
+	if !IsNormalizedVersion(version) {
+		return ""
+	}
+	return version
+}
+
 // ParseVersionConstraint checks comparator prefixes longest-first, defaulting to "=" when none
 // matches, and rejects an empty or unnormalized version part.
 func ParseVersionConstraint(raw string) (VersionConstraint, error) {
