@@ -237,6 +237,15 @@ func managedCandidate(managed map[string]ManagedHarness, harnessID string) (Harn
 
 // externalCandidate is the PATH discovery Barista has always performed: look the binary up on PATH
 // and accept it only after its own --version command succeeds.
+//
+// The version is normalized through protocol.ExtractNormalizedVersion, the single definition of
+// "what version did this executable report" that setup.ProbeHarnessVersion also uses. The two sides
+// deliberately draw opposite conclusions from an empty result, and that asymmetry must be preserved:
+// an external binary Barista does not own is merely described, so an unparsable --version output
+// leaves Version "" and the candidate is still accepted — an operator-installed harness that worked
+// before managed components existed must keep working. A managed candidate with no parsable version
+// is refused activation instead, because a pinned version that cannot be confirmed is not a pin.
+
 func externalCandidate(ctx context.Context, binary string) (HarnessCandidate, bool) {
 	path, err := exec.LookPath(binary)
 	if err != nil {
@@ -255,7 +264,7 @@ func externalCandidate(ctx context.Context, binary string) (HarnessCandidate, bo
 	return HarnessCandidate{
 		Provenance:  HarnessProvenanceExternal,
 		Binary:      path,
-		Version:     normalizedHarnessVersion(description),
+		Version:     protocol.ExtractNormalizedVersion(description),
 		Description: description,
 	}, true
 }
@@ -267,19 +276,6 @@ func Available(profiles []protocol.HarnessProfile, id string) bool {
 		}
 	}
 	return false
-}
-
-// harnessVersionPattern finds the first dotted version number in a harness's --version output.
-var harnessVersionPattern = regexp.MustCompile(`\d+(\.\d+)+`)
-
-// normalizedHarnessVersion extracts a normalized version from a discovered description, or "" when
-// the description carries none.
-func normalizedHarnessVersion(description string) string {
-	version := harnessVersionPattern.FindString(description)
-	if !protocol.IsNormalizedVersion(version) {
-		return ""
-	}
-	return version
 }
 
 // acpProbeTimeout bounds each adapter's startup initialize handshake.

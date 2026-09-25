@@ -32,6 +32,38 @@
       },
       "launch": {},
       "authDocsUrl": "https://github.com/agentclientprotocol/codex-acp#authentication"
+    },
+    {
+      "id": "claude-cli",
+      "kind": "harness",
+      "harnessId": "claude-cli",
+      "provider": "anthropic",
+      "label": "Claude Code CLI (@anthropic-ai/claude-code)",
+      "version": "2.1.231",
+      "platforms": {
+        "darwin-amd64": { "kind": "manual", "executablePath": "bin/claude" },
+        "darwin-arm64": { "kind": "manual", "executablePath": "bin/claude" },
+        "linux-amd64": { "kind": "manual", "executablePath": "bin/claude" },
+        "linux-arm64": { "kind": "manual", "executablePath": "bin/claude" }
+      },
+      "launch": {},
+      "authDocsUrl": "https://code.claude.com/docs/en/overview"
+    },
+    {
+      "id": "codex-cli",
+      "kind": "harness",
+      "harnessId": "codex-cli",
+      "provider": "openai",
+      "label": "Codex CLI (@openai/codex)",
+      "version": "0.147.0",
+      "platforms": {
+        "darwin-amd64": { "kind": "manual", "executablePath": "bin/codex" },
+        "darwin-arm64": { "kind": "manual", "executablePath": "bin/codex" },
+        "linux-amd64": { "kind": "manual", "executablePath": "bin/codex" },
+        "linux-arm64": { "kind": "manual", "executablePath": "bin/codex" }
+      },
+      "launch": {},
+      "authDocsUrl": "https://developers.openai.com/codex"
     }
   ]
 }

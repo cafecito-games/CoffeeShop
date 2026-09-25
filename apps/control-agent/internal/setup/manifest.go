@@ -338,6 +338,14 @@ func (manifest Manifest) Validate() error {
 		if entry.Kind == ComponentKindHarness && entry.HarnessID != entry.ID {
 			return fmt.Errorf("component at index %d: a harness component's harnessId must equal its id", index)
 		}
+		// Native harness execution builds its own arguments and environment (internal/harness/runner.go)
+		// and reads no manifest launch template, so a harness entry that declared one would be making a
+		// promise Barista does not keep. Nothing consumes it, so it is refused rather than silently
+		// ignored — an operator pointing --manifest at a file with harness arguments must be told they
+		// have no effect, not left believing a sandbox or permission flag was applied.
+		if entry.Kind == ComponentKindHarness && (len(entry.Launch.Arguments) > 0 || len(entry.Launch.Environment) > 0) {
+			return fmt.Errorf("component at index %d: a harness component's launch template must be empty", index)
+		}
 		if entry.Provider == "" || !protocol.LabelOrAcceleratorPattern.MatchString(entry.Provider) {
 			return fmt.Errorf("component at index %d: provider is not kebab-case", index)
 		}

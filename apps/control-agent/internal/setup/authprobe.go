@@ -62,8 +62,23 @@ var AuthProbeAllowlist = map[string]AuthProbeSpec{
 // an exit code that might have been influenced by unexpectedly credential-bearing output. The raw
 // output itself is never part of the return value.
 func RunAuthProbe(ctx context.Context, binaryPath string, arguments []string, successExitCode int) AuthReadiness {
+	readiness, _ := runProbeCapturingOutput(ctx, binaryPath, arguments, successExitCode)
+	return readiness
+}
+
+// runProbeCapturingOutput is the one child-process reader every compiled-in probe in this package
+// goes through. It is RunAuthProbe's whole implementation and additionally returns the bounded,
+// already secret-screened combined output, for the one caller that must read the executable's own
+// claim rather than only its exit status: ProbeHarnessVersion, which has to compare the reported
+// version against the pinned one.
+//
+// The returned output is non-empty only alongside AuthReadinessReady, and never when the output
+// looked secret-like — a secret-like output is AuthReadinessUnknown with no output at all, so no
+// caller can accidentally surface it. Callers must still keep it out of every error, log, and
+// report: it is process output, not a diagnostic.
+func runProbeCapturingOutput(ctx context.Context, binaryPath string, arguments []string, successExitCode int) (AuthReadiness, string) {
 	if !filepath.IsAbs(binaryPath) {
-		return AuthReadinessUnknown
+		return AuthReadinessUnknown, ""
 	}
 	timeoutContext, cancel := context.WithTimeout(ctx, authProbeTimeout)
 	defer cancel()
@@ -73,23 +88,24 @@ func RunAuthProbe(ctx context.Context, binaryPath string, arguments []string, su
 	command.Stderr = &captured
 	runErr := command.Run()
 	if timeoutContext.Err() == context.DeadlineExceeded {
-		return AuthReadinessUnknown
+		return AuthReadinessUnknown, ""
 	}
-	if protocol.LooksSecretLike(captured.String()) {
-		return AuthReadinessUnknown
+	output := captured.String()
+	if protocol.LooksSecretLike(output) {
+		return AuthReadinessUnknown, ""
 	}
 	exitCode := 0
 	if runErr != nil {
 		var exitErr *exec.ExitError
 		if !errors.As(runErr, &exitErr) {
-			return AuthReadinessUnknown
+			return AuthReadinessUnknown, ""
 		}
 		exitCode = exitErr.ExitCode()
 	}
 	if exitCode == successExitCode {
-		return AuthReadinessReady
+		return AuthReadinessReady, output
 	}
-	return AuthReadinessNotReady
+	return AuthReadinessNotReady, ""
 }
 
 // authProbeOutput keeps at most authProbeMaximumOutputBytes of combined stdout+stderr. Write never

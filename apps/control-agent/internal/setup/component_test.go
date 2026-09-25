@@ -183,8 +183,10 @@ func TestParseManifestAcceptsTheEmbeddedManifestBytes(t *testing.T) {
 			t.Fatalf("embedded manifest component %s declares unknown kind %q", entry.ID, entry.Kind)
 		}
 	}
-	if len(manifest.ComponentsOfKind(ComponentKindACPAdapter)) != len(manifest.Components) {
-		t.Fatal("embedded manifest is expected to declare only ACP adapters until supported harness distributions land")
+	// Every kind in the closed vocabulary is accounted for by the two projections, so a kind added
+	// to the vocabulary without being projected here cannot slip through unexercised.
+	if len(manifest.ComponentsOfKind(ComponentKindACPAdapter))+len(manifest.ComponentsOfKind(ComponentKindHarness)) != len(manifest.Components) {
+		t.Fatal("embedded manifest declares a component whose kind neither projection returns")
 	}
 }
 
@@ -206,8 +208,16 @@ func TestParseManifestMigratesTheLegacyGenerationFixture(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseManifest(DefaultManifestBytes()) error = %v", err)
 	}
-	if !reflect.DeepEqual(legacy, current) {
-		t.Fatalf("migrated legacy manifest = %+v, want it identical to the embedded generation-2 manifest %+v", legacy, current)
+	// The generation-1 fixture is the adapter-only manifest this one replaced, so it is compared
+	// against the embedded manifest's adapter projection: harness entries declared later are new
+	// components a legacy file never carried, not a migration difference. Every adapter an
+	// administrator's kept file installs must still be byte-for-byte the adapter Barista ships.
+	if !reflect.DeepEqual(legacy.ComponentsOfKind(ComponentKindACPAdapter), current.ComponentsOfKind(ComponentKindACPAdapter)) {
+		t.Fatalf("migrated legacy adapters = %+v, want them identical to the embedded generation-2 adapters %+v",
+			legacy.ComponentsOfKind(ComponentKindACPAdapter), current.ComponentsOfKind(ComponentKindACPAdapter))
+	}
+	if len(legacy.Components) != len(legacy.ComponentsOfKind(ComponentKindACPAdapter)) {
+		t.Fatal("the generation-1 fixture must migrate to acp-adapter entries only")
 	}
 	for _, entry := range legacy.Components {
 		if entry.Kind != ComponentKindACPAdapter {
