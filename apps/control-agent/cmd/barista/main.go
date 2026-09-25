@@ -52,8 +52,35 @@ func run(args []string) int {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	nativeProfiles := harness.Discover(ctx)
-	driver, claudeACPAuthMode, err := acpDriver(cfg, nativeProfiles)
+	// Both ledgers are read once, here, and the selection they establish is what this process
+	// launches for its whole lifetime. A rejected activation ledger makes every managed component
+	// unavailable with that reason rather than being treated as an absent selection.
+	activation := setup.LoadActivationState(cfg.DataRoot)
+	if activation.Rejection != nil {
+		log.Printf("component activation: %v", activation.Rejection)
+		log.Printf("component activation: %s", setup.ActivationRepairGuidance)
+	}
+	_, componentManifest, err := loadSetupManifest(cfg.AdapterManifestPath)
+	if err != nil {
+		log.Printf("component manifest: %v", err)
+		return 2
+	}
+	ownership, ownershipErr := setup.LoadOwnershipLedger(cfg.DataRoot)
+	if ownershipErr != nil {
+		// Managed components are all unavailable without the ownership ledger; the daemon still
+		// starts on its external PATH harnesses, exactly as acpadapter.Load already degrades.
+		log.Printf("ownership ledger could not be read, so no managed component is available: %v", ownershipErr)
+		ownership = setup.OwnershipLedger{}
+	}
+	resolutions := harness.Resolve(ctx, managedHarnesses(componentManifest, ownership, activation, cfg.DataRoot))
+	for _, resolution := range resolutions {
+		if resolution.Managed != nil && resolution.External != nil {
+			log.Printf("harness %s: a managed version %s and an external installation are both present; the managed version is selected", resolution.HarnessID, resolution.Managed.Version)
+		}
+	}
+	nativeProfiles := harness.Profiles(resolutions)
+	activationWatch := newActivationWatcher(cfg.DataRoot, activation)
+	driver, claudeACPAuthMode, err := acpDriver(cfg, componentManifest, activation, nativeProfiles)
 	if err != nil {
 		log.Printf("ACP adapters: %v", err)
 		return 2
@@ -114,6 +141,11 @@ func run(args []string) int {
 		Version:        version,
 	}
 	buildCapabilityReport := func(buildContext context.Context) protocol.NodeCapabilityReport {
+		// The daemon keeps the selection it verified at startup; a record that changed since then is
+		// only reported, never adopted in place, so no in-flight run has its launch target swapped.
+		if notice := activationWatch.RestartNotice(); notice != "" {
+			log.Print(notice)
+		}
 		return readiness.BuildCapabilityReport(buildContext, cfg, profiles)
 	}
 	report := buildCapabilityReport(ctx)
@@ -124,7 +156,7 @@ func run(args []string) int {
 		}
 	}
 	log.Printf("node capability report ready: %d of %d evidence entries succeeded", succeeded, len(report.Evidence))
-	runner := newRunner(nativeProfiles, profiles, driver, cfg)
+	runner := newRunner(nativeProfiles, profiles, driver, cfg).WithManagedHarnesses(harness.ManagedHarnesses(resolutions))
 	client := controlplane.NewClient(cfg, node, runner, buildCapabilityReport)
 	if err := client.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		log.Printf("Barista stopped: %v", err)
@@ -150,12 +182,8 @@ func newRunner(nativeProfiles, advertisedProfiles []protocol.HarnessProfile, dri
 // Barista's own environment. The second return value is the auth mode the gate resolved for
 // claude-cli ("" when Claude ACP did not load), so the caller can reflect it on the advertised
 // harness profile once the adapter has actually proven itself over ACP.
-func acpDriver(cfg config.Config, nativeProfiles []protocol.HarnessProfile) (*harness.ACPDriver, string, error) {
-	_, manifest, err := loadSetupManifest(cfg.AdapterManifestPath)
-	if err != nil {
-		return nil, "", err
-	}
-	loaded, err := acpadapter.Load(acpadapter.Options{DataRoot: cfg.DataRoot, Manifest: manifest, Platform: setup.CurrentPlatform(), Overrides: cfg.ACPAdapters})
+func acpDriver(cfg config.Config, manifest setup.Manifest, activation setup.ActivationState, nativeProfiles []protocol.HarnessProfile) (*harness.ACPDriver, string, error) {
+	loaded, err := acpadapter.Load(acpadapter.Options{DataRoot: cfg.DataRoot, Manifest: manifest, Platform: setup.CurrentPlatform(), Overrides: cfg.ACPAdapters, Activation: activation})
 	if err != nil {
 		return nil, "", err
 	}

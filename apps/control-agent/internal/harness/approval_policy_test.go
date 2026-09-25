@@ -55,23 +55,23 @@ func TestACPModesFollowTheApprovalPolicy(t *testing.T) {
 func TestNativeArgumentsFollowTheApprovalPolicy(t *testing.T) {
 	configuration := mcpserver.Config{URL: "http://127.0.0.1:1234/mcp", Token: "do-not-leak"}
 	for _, policy := range []string{"", protocol.ApprovalPolicyManual, protocol.ApprovalPolicyAuto} {
-		_, claude, err := commandFor(protocol.Run{HarnessID: "claude-cli", Model: "default", Prompt: "fix it"}, protocol.Agent{}, configuration, policy)
+		claude, err := harnessArguments(protocol.Run{HarnessID: "claude-cli", Model: "default", Prompt: "fix it"}, protocol.Agent{}, configuration, policy)
 		require.NoError(t, err)
 		require.Equal(t, "auto", claude[slices.Index(claude, "--permission-mode")+1], "policy %q", policy)
 		require.Equal(t, "none", claude[slices.Index(claude, "--permission-prompts")+1])
 
-		_, codex, err := commandFor(protocol.Run{HarnessID: "codex-cli", Model: "default", Prompt: "fix it"}, protocol.Agent{}, configuration, policy)
+		codex, err := harnessArguments(protocol.Run{HarnessID: "codex-cli", Model: "default", Prompt: "fix it"}, protocol.Agent{}, configuration, policy)
 		require.NoError(t, err)
 		require.Equal(t, []string{"exec", "--json", "--sandbox", "workspace-write"}, codex[:4], "policy %q", policy)
 		require.NotContains(t, codex, "--dangerously-bypass-approvals-and-sandbox")
 	}
 
-	_, claude, err := commandFor(protocol.Run{HarnessID: "claude-cli", Model: "default", Prompt: "fix it"}, protocol.Agent{}, configuration, protocol.ApprovalPolicyBypass)
+	claude, err := harnessArguments(protocol.Run{HarnessID: "claude-cli", Model: "default", Prompt: "fix it"}, protocol.Agent{}, configuration, protocol.ApprovalPolicyBypass)
 	require.NoError(t, err)
 	require.Equal(t, "bypassPermissions", claude[slices.Index(claude, "--permission-mode")+1])
 	require.Equal(t, "none", claude[slices.Index(claude, "--permission-prompts")+1])
 
-	_, codex, err := commandFor(protocol.Run{HarnessID: "codex-cli", Model: "default", Prompt: "fix it"}, protocol.Agent{}, configuration, protocol.ApprovalPolicyBypass)
+	codex, err := harnessArguments(protocol.Run{HarnessID: "codex-cli", Model: "default", Prompt: "fix it"}, protocol.Agent{}, configuration, protocol.ApprovalPolicyBypass)
 	require.NoError(t, err)
 	require.Equal(t, []string{"exec", "--json", "--dangerously-bypass-approvals-and-sandbox"}, codex[:3])
 	require.NotContains(t, codex, "--sandbox")

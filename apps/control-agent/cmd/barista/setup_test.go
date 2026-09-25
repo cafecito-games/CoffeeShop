@@ -149,12 +149,45 @@ func TestSetupApplyWithoutPlanFailsClosedWithoutMutating(t *testing.T) {
 	require.True(t, os.IsNotExist(err))
 }
 
-func TestSetupRejectsUnknownSubcommand(t *testing.T) {
+// TestRunSetupSubcommandDispatch proves every valid subcommand is reachable and that an unknown one
+// fails closed with exit code 2 while still naming the whole valid set.
+func TestRunSetupSubcommandDispatch(t *testing.T) {
+	for _, subcommand := range setupSubcommands {
+		t.Run(subcommand, func(t *testing.T) {
+			// -h exercises dispatch and flag registration without performing any work; a dispatched
+			// subcommand returns 0 for help, while an unknown one could never reach it.
+			_, _, code := captureOutput(t, func() int {
+				return runSetup([]string{subcommand, "-h"})
+			})
+			require.Equal(t, 0, code)
+		})
+	}
+
 	_, stderr, code := captureOutput(t, func() int {
 		return runSetup([]string{"frobnicate"})
 	})
 	require.Equal(t, 2, code)
-	require.Contains(t, stderr, "valid subcommands are plan and apply")
+	for _, subcommand := range setupSubcommands {
+		require.Contains(t, stderr, subcommand)
+	}
+	require.Contains(t, stderr, "unknown setup subcommand")
+
+	// An activation subcommand with no component named refuses on the grammar, before any
+	// filesystem access, and never reads an empty field as a wildcard.
+	for _, subcommand := range []string{"activate", "rollback", "prune"} {
+		_, stderr, code := captureOutput(t, func() int {
+			return runSetup([]string{subcommand, "--data-root", t.TempDir()})
+		})
+		require.Equal(t, 2, code, subcommand)
+		require.Contains(t, stderr, "component kind is unknown", subcommand)
+	}
+
+	// activate requires an exact version; rollback and prune refuse one.
+	_, stderr, code = captureOutput(t, func() int {
+		return runSetup([]string{"activate", "--data-root", t.TempDir(), "--kind", "acp-adapter", "--id", "codex-acp"})
+	})
+	require.Equal(t, 2, code)
+	require.Contains(t, stderr, "--version is required")
 }
 
 func TestSetupApplyRejectsMalformedManualArtifactBeforeAnyWork(t *testing.T) {
@@ -187,7 +220,9 @@ func TestSetupApplyWithoutSubcommandNamesTheValidOnes(t *testing.T) {
 		return runSetup(nil)
 	})
 	require.Equal(t, 2, code)
-	require.Contains(t, stderr, "plan or apply")
+	for _, subcommand := range setupSubcommands {
+		require.Contains(t, stderr, subcommand)
+	}
 }
 
 // TestSetupApplyNeverEchoesRejectedFlagValueToStderr proves the fix-6 property directly: Go's flag

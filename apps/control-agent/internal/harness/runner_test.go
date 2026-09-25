@@ -104,7 +104,7 @@ func TestRunnerExecutesDiscoveredBinaryAndNormalizesOutput(t *testing.T) {
 }
 
 func TestClaudeWorkersAreNotAllowedDelegationTools(t *testing.T) {
-	_, args, err := commandFor(protocol.Run{HarnessID: "claude-cli", Model: "default", Prompt: "test"}, protocol.Agent{}, mcpserver.Config{URL: "http://127.0.0.1:1234/mcp", Token: "worker"}, protocol.ApprovalPolicyManual)
+	args, err := harnessArguments(protocol.Run{HarnessID: "claude-cli", Model: "default", Prompt: "test"}, protocol.Agent{}, mcpserver.Config{URL: "http://127.0.0.1:1234/mcp", Token: "worker"}, protocol.ApprovalPolicyManual)
 	require.NoError(t, err)
 	joined := strings.Join(args, " ")
 	require.Contains(t, joined, "mcp__coffee_shop_hub__send_task_message")
@@ -116,7 +116,7 @@ func TestClaudeWorkersAreNotAllowedDelegationTools(t *testing.T) {
 func TestHarnessCommandsInjectRunScopedMCPWithoutPuttingTokenInArguments(t *testing.T) {
 	configuration := mcpserver.Config{URL: "http://127.0.0.1:1234/mcp", Token: "do-not-leak", CanDelegate: true}
 	for _, harnessID := range []string{"claude-cli", "codex-cli"} {
-		_, args, err := commandFor(protocol.Run{HarnessID: harnessID, Model: "default", Prompt: "test"}, protocol.Agent{}, configuration, protocol.ApprovalPolicyManual)
+		args, err := harnessArguments(protocol.Run{HarnessID: harnessID, Model: "default", Prompt: "test"}, protocol.Agent{}, configuration, protocol.ApprovalPolicyManual)
 		require.NoError(t, err)
 		joined := strings.Join(args, " ")
 		require.Contains(t, joined, "coffee_shop_hub")

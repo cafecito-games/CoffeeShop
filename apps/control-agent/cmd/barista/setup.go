@@ -26,11 +26,15 @@ const doctorDialTimeout = 3 * time.Second
 // applyHTTPTimeout bounds every component archive download one apply performs.
 const applyHTTPTimeout = 2 * time.Minute
 
-// runSetup dispatches the setup subcommands. Only `plan` and `apply` exist; anything else names
-// both valid subcommands on stderr and fails closed with exit code 2.
+// setupSubcommands is the single enumeration of every `barista setup` subcommand, used both to
+// dispatch and to name the valid set in an error, so the two can never disagree.
+var setupSubcommands = []string{"plan", "apply", "activate", "rollback", "prune"}
+
+// runSetup dispatches the setup subcommands. Anything else names every valid subcommand on stderr
+// and fails closed with exit code 2.
 func runSetup(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "setup requires a subcommand: plan or apply")
+		fmt.Fprintf(os.Stderr, "setup requires a subcommand: %s\n", strings.Join(setupSubcommands, ", "))
 		return 2
 	}
 	switch args[0] {
@@ -38,8 +42,14 @@ func runSetup(args []string) int {
 		return runSetupPlan(args[1:])
 	case "apply":
 		return runSetupApply(args[1:])
+	case "activate":
+		return runSetupActivate(args[1:])
+	case "rollback":
+		return runSetupRollback(args[1:])
+	case "prune":
+		return runSetupPrune(args[1:])
 	default:
-		fmt.Fprintf(os.Stderr, "unknown setup subcommand %q; valid subcommands are plan and apply\n", args[0])
+		fmt.Fprintf(os.Stderr, "unknown setup subcommand %q; valid subcommands are %s\n", args[0], strings.Join(setupSubcommands, ", "))
 		return 2
 	}
 }
@@ -304,10 +314,14 @@ func runDoctor(args []string) int {
 		fmt.Fprintf(os.Stderr, "doctor: %v\n", err)
 		return 1
 	}
-	// Doctor reuses the same read-only --version discovery the daemon performs at startup; it is
-	// the existing capability, not a new one.
-	profiles := harness.Discover(context.Background())
-	report := setup.RunDoctor(context.Background(), manifest, ledger, *dataRoot, currentPlatform(), profiles, *controlEndpoint, dialHubEndpoint)
+	// A rejected activation ledger is reported, never treated as absent and never a command failure:
+	// doctor exists to say what is wrong with it.
+	activation := setup.LoadActivationState(*dataRoot)
+	// Doctor reuses the same read-only discovery the daemon performs at startup, including the
+	// managed activated versions, so what it reports is what the daemon would launch.
+	resolutions := harness.Resolve(context.Background(), managedHarnesses(manifest, ledger, activation, *dataRoot))
+	profiles := harness.Profiles(resolutions)
+	report := setup.RunDoctor(context.Background(), manifest, ledger, *dataRoot, currentPlatform(), activation, profiles, *controlEndpoint, dialHubEndpoint)
 	addClaudeACPAuthModeNote(report.Components, strings.TrimSpace(*claudeACPAuthMode))
 	report.ApprovalPolicies = map[string]string{}
 	for _, harnessID := range harness.ApprovalPolicyHarnessIDs {
@@ -323,15 +337,23 @@ func runDoctor(args []string) int {
 		return 0
 	}
 	for _, entry := range report.Components {
-		fmt.Printf("%s (%s): harness=%s component=%s auth=%s launch=%s\n",
+		fmt.Printf("%s (%s): harness=%s component=%s auth=%s launch=%s provenance=%s active=%s rollback=%s\n",
 			entry.Component, entry.HarnessID,
 			installedOrMissing(entry.HarnessInstalled),
 			installedOrMissing(entry.ComponentInstalled),
 			entry.AuthReadiness,
-			readyOrNot(entry.ACPLaunchReady))
+			readyOrNot(entry.ACPLaunchReady),
+			entry.Provenance,
+			orNone(entry.ActiveVersion),
+			orNone(entry.RollbackVersion))
 		for _, note := range entry.Notes {
 			fmt.Printf("  note: %s\n", note)
 		}
+	}
+	fmt.Printf("activation ledger: generation=%s accepted=%t\n", orNone(report.Activation.Generation), report.Activation.Accepted)
+	if !report.Activation.Accepted {
+		fmt.Printf("  rejection: %s\n", report.Activation.Rejection)
+		fmt.Printf("  repair: %s\n", report.Activation.Repair)
 	}
 	for _, harnessID := range harness.ApprovalPolicyHarnessIDs {
 		policy := report.ApprovalPolicies[harnessID]
@@ -352,6 +374,15 @@ func installedOrMissing(installed bool) string {
 		return "installed"
 	}
 	return "missing"
+}
+
+// orNone renders an absent optional value as "none" rather than as an empty column, so an absent
+// selection is never visually indistinguishable from a missing field.
+func orNone(value string) string {
+	if value == "" {
+		return "none"
+	}
+	return value
 }
 
 func readyOrNot(ready bool) string {

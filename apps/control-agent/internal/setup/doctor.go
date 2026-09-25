@@ -2,7 +2,9 @@ package setup
 
 import (
 	"context"
+	"errors"
 	"net/url"
+	"slices"
 	"strings"
 
 	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/protocol"
@@ -15,9 +17,66 @@ const hubDetailMaximumBytes = 256
 // URL can carry a query-string token, and net errors embed the dialed address verbatim.
 const hubConnectivityGenericDetail = "connection attempt failed"
 
+// activationRejectionMaximumBytes bounds the activation rejection detail doctor reports. A strict
+// decoder's own message can quote a field name taken straight from the file, which is untrusted
+// input, so the detail is bounded and secret-screened exactly like a hub connectivity detail.
+const activationRejectionMaximumBytes = 512
+
+// activationRejectionGenericDetail replaces an activation rejection message that looks secret-like.
+const activationRejectionGenericDetail = "the activation ledger could not be parsed"
+
+// ActivationRepairGuidance is the fixed repair doctor prints for an activation ledger it could not
+// accept. Barista never repairs the file itself: it is the only record of which managed version an
+// administrator selected, and rewriting it automatically would silently choose for them.
+const ActivationRepairGuidance = "Barista left the file unchanged and will launch no managed component: inspect activation.json under the data root, remove it, and re-run `barista setup activate` for each managed component."
+
 // hubEndpointInvalidDisplay is shown in place of a control endpoint this doctor could not parse
 // well enough to sanitize; an endpoint that cannot be sanitized is never echoed verbatim instead.
 const hubEndpointInvalidDisplay = "invalid control endpoint"
+
+// ComponentProvenance is the closed vocabulary of where this node would obtain one component. It is
+// reported, never inferred from a path or a version ordering.
+type ComponentProvenance string
+
+const (
+	// ComponentProvenanceManaged is a Barista-owned installed version the activation record selects.
+	ComponentProvenanceManaged ComponentProvenance = "managed"
+	// ComponentProvenanceExternal is an installation outside Barista ownership — for a harness
+	// component, the PATH-discovered binary that keeps working exactly as it did before activation
+	// existed.
+	ComponentProvenanceExternal ComponentProvenance = "external"
+	// ComponentProvenanceNone is neither a selected managed version nor an external installation.
+	ComponentProvenanceNone ComponentProvenance = "none"
+	// ComponentProvenanceRejected is an activation ledger that could not be accepted, so no
+	// provenance can be established at all. It is deliberately distinct from "none": a rejected file
+	// is never reported as an absent selection.
+	ComponentProvenanceRejected ComponentProvenance = "rejected"
+)
+
+// ComponentProvenances is the single enumeration of every provenance value.
+var ComponentProvenances = []ComponentProvenance{
+	ComponentProvenanceManaged,
+	ComponentProvenanceExternal,
+	ComponentProvenanceNone,
+	ComponentProvenanceRejected,
+}
+
+// Valid reports whether provenance is in the closed vocabulary.
+func (provenance ComponentProvenance) Valid() bool {
+	return slices.Contains(ComponentProvenances, provenance)
+}
+
+// ActivationLedgerStatus reports the activation ledger's own state so an operator can tell an
+// absent selection from an unreadable file.
+type ActivationLedgerStatus struct {
+	// Generation is the generation the file declared, "" when no file exists yet.
+	Generation string `json:"generation"`
+	Accepted   bool   `json:"accepted"`
+	// Rejection is the bounded, secret-screened reason the file was not accepted.
+	Rejection string `json:"rejection,omitempty"`
+	// Repair is ActivationRepairGuidance when the file was not accepted.
+	Repair string `json:"repair,omitempty"`
+}
 
 // ComponentDoctorEntry reports one manifest component's status on this node. Component is the same
 // shared identity the plan and the ownership ledger use, so doctor cannot describe a component in
@@ -32,8 +91,16 @@ type ComponentDoctorEntry struct {
 	// ACPLaunchReady is meaningful only for an ACP adapter: it is the conjunction of a discovered
 	// harness, a verified installed adapter, and ready authentication. A harness component is never
 	// reported as ACP-launch-ready, because it is not the thing that speaks ACP.
-	ACPLaunchReady bool     `json:"acpLaunchReady"`
-	Notes          []string `json:"notes,omitempty"` // bounded, non-secret human-readable gaps, e.g. "no platform distribution for linux-arm64"
+	ACPLaunchReady bool `json:"acpLaunchReady"`
+	// ActiveVersion is the version the activation record selects for this component's identity, ""
+	// when nothing is selected. It is never inferred from the installed set.
+	ActiveVersion string `json:"activeVersion,omitempty"`
+	// RollbackVersion is the retained previously verified version a rollback would return to, ""
+	// when none is retained.
+	RollbackVersion string `json:"rollbackVersion,omitempty"`
+	// Provenance is how this node would obtain the component; see ComponentProvenance.
+	Provenance ComponentProvenance `json:"provenance"`
+	Notes      []string            `json:"notes,omitempty"` // bounded, non-secret human-readable gaps, e.g. "no platform distribution for linux-arm64"
 }
 
 // HubConnectivity reports whether the configured control endpoint accepted a bounded, read-only
@@ -53,6 +120,8 @@ type Report struct {
 	Components       []ComponentDoctorEntry `json:"components"`
 	HubConnectivity  HubConnectivity        `json:"hubConnectivity"`
 	ProjectReadiness string                 `json:"projectReadiness"`
+	// Activation reports the activation ledger's own generation and acceptance.
+	Activation ActivationLedgerStatus `json:"activation"`
 	// ApprovalPolicies is the effective approval policy per harness that the given configuration
 	// would run under; the doctor command fills it in from its --approval-policy setting.
 	ApprovalPolicies map[string]string `json:"approvalPolicies,omitempty"`
@@ -81,6 +150,7 @@ func RunDoctor(
 	ledger OwnershipLedger,
 	dataRoot string,
 	platform string,
+	activation ActivationState,
 	harnesses []protocol.HarnessProfile,
 	controlEndpoint string,
 	dial func(ctx context.Context, endpoint string) error,
@@ -90,6 +160,7 @@ func RunDoctor(
 		DataRoot:         dataRoot,
 		Components:       make([]ComponentDoctorEntry, 0, len(manifest.Components)),
 		ProjectReadiness: ProjectReadinessNotAvailable,
+		Activation:       activationStatus(activation),
 	}
 	for index := range manifest.Components {
 		entry := manifest.Components[index]
@@ -99,7 +170,9 @@ func RunDoctor(
 			HarnessID:        entry.HarnessID,
 			HarnessInstalled: discovered && harnessProfile.Available,
 			AuthReadiness:    AuthReadinessUnknown,
+			Provenance:       ComponentProvenanceNone,
 		}
+		describeActivation(&doctorEntry, activation, discovered && harnessProfile.Available)
 		distribution, supported := entry.Platforms[platform]
 		if !supported {
 			// A component with no distribution for this platform stays visible in the report with a
@@ -122,12 +195,18 @@ func RunDoctor(
 		// over a deleted or corrupted file must not report as installed. observeCurrentState makes
 		// exactly that distinction, and anything ambiguous classifies as not installed.
 		doctorEntry.ComponentInstalled = observeCurrentState(targetPath, ledger) == ExpectedOwnedMatch
+		if doctorEntry.ComponentInstalled && doctorEntry.ActiveVersion == "" && activation.Rejection == nil {
+			// Installation and activation are separate operations, so an installed-but-unselected
+			// version is a reportable gap rather than a silent one.
+			doctorEntry.Notes = append(doctorEntry.Notes, "installed but not activated; run `barista setup activate`")
+		}
 		if spec, allowed := AuthProbeAllowlist[entry.HarnessID]; allowed && doctorEntry.HarnessInstalled {
 			doctorEntry.AuthReadiness = RunAuthProbe(ctx, harnessProfile.Binary, spec.Arguments, spec.SuccessExitCode)
 		}
 		doctorEntry.ACPLaunchReady = entry.Kind == ComponentKindACPAdapter &&
 			doctorEntry.HarnessInstalled &&
 			doctorEntry.ComponentInstalled &&
+			doctorEntry.ActiveVersion == entry.Version &&
 			doctorEntry.AuthReadiness == AuthReadinessReady
 		report.Components = append(report.Components, doctorEntry)
 	}
@@ -140,6 +219,53 @@ func RunDoctor(
 		report.HubConnectivity.Reachable = true
 	}
 	return report
+}
+
+// activationStatus projects the loaded activation evidence onto the report, bounding and screening
+// the rejection reason: a strict decoder quotes an unknown field name from the file itself, which is
+// untrusted input.
+func activationStatus(activation ActivationState) ActivationLedgerStatus {
+	status := ActivationLedgerStatus{Generation: activation.Generation, Accepted: activation.Rejection == nil}
+	if activation.Rejection == nil {
+		return status
+	}
+	bounded := truncateAtRuneBoundary(activation.Rejection.Error(), activationRejectionMaximumBytes)
+	if protocol.LooksSecretLike(bounded) {
+		bounded = activationRejectionGenericDetail
+	}
+	status.Rejection = bounded
+	status.Repair = ActivationRepairGuidance
+	var rejection *ActivationRejectionError
+	if errors.As(activation.Rejection, &rejection) {
+		status.Generation = rejection.SourceGeneration
+	}
+	return status
+}
+
+// describeActivation fills one entry's active version, retained rollback target, and provenance from
+// the activation evidence alone. A rejected ledger reports no versions and the rejected provenance:
+// an unreadable selection is never reported as an absent one, and never as the external fallback.
+func describeActivation(entry *ComponentDoctorEntry, activation ActivationState, harnessAvailable bool) {
+	if activation.Rejection != nil {
+		entry.Provenance = ComponentProvenanceRejected
+		return
+	}
+	record, activated := activation.Ledger.RecordFor(entry.Component.Identity())
+	if activated {
+		entry.ActiveVersion = record.Active.Component.Version
+		if record.Previous != nil {
+			entry.RollbackVersion = record.Previous.Component.Version
+		}
+		entry.Provenance = ComponentProvenanceManaged
+		return
+	}
+	// With nothing selected, a harness component falls back to the documented external PATH
+	// compatibility path; an adapter has no external path at all.
+	if entry.Component.Kind == ComponentKindHarness && harnessAvailable {
+		entry.Provenance = ComponentProvenanceExternal
+		return
+	}
+	entry.Provenance = ComponentProvenanceNone
 }
 
 // findHarnessProfile looks up harnessID's discovered profile, which carries the absolute resolved
