@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -114,31 +115,40 @@ func TestHarnessDistributionPlatformsAreHonestlyClassified(t *testing.T) {
 			require.Contains(t, supportedHarnessPlatformKeys, platformKey,
 				"%s declares %s, which Barista does not support", entry.ID, platformKey)
 			require.True(t, distribution.Kind.Valid())
+			// Whatever the kind, the README must document this component at this platform: a pin is
+			// only reviewable if its provenance is written down beside it.
+			require.Contains(t, readmeText, entry.ID)
+			require.Contains(t, readmeText, platformKey)
 			switch distribution.Kind {
 			case DistributionKindArchive:
 				require.True(t, strings.HasPrefix(distribution.URL, "https://"),
 					"%s/%s archive url must be https", entry.ID, platformKey)
 				require.Regexp(t, ChecksumPattern, distribution.SHA256)
 				require.Positive(t, distribution.SizeBytes)
+				require.LessOrEqual(t, distribution.SizeBytes, int64(MaximumDownloadBytes),
+					"%s/%s pins a size the downloader would refuse outright", entry.ID, platformKey)
 				lowered := strings.ToLower(distribution.URL)
 				require.True(t, strings.HasSuffix(lowered, ".tar.gz") || strings.HasSuffix(lowered, ".zip"),
 					"%s/%s archive must be a .tar.gz or .zip container", entry.ID, platformKey)
+				// The pinned values themselves must appear in the README, so an administrator can
+				// review the pin against its recorded source without reading the JSON.
+				require.Contains(t, readmeText, distribution.URL,
+					"%s/%s archive url must be recorded in the README", entry.ID, platformKey)
+				require.Contains(t, readmeText, fmt.Sprintf("%d", distribution.SizeBytes),
+					"%s/%s archive sizeBytes must be recorded in the README", entry.ID, platformKey)
 			case DistributionKindManual:
 				require.Empty(t, distribution.URL, "%s/%s manual distribution must carry no url", entry.ID, platformKey)
 				require.Empty(t, distribution.SHA256, "%s/%s manual distribution must carry no sha256", entry.ID, platformKey)
 				require.Zero(t, distribution.SizeBytes, "%s/%s manual distribution pins no size", entry.ID, platformKey)
-				// A manual platform is only an honest answer when the README says how to produce its
-				// bytes, so the README must name the component and the platform key.
-				require.Contains(t, readmeText, entry.ID)
-				require.Contains(t, readmeText, platformKey)
 			}
 		}
-		// Every supported key Barista honours is either declared or documented as omitted, so an
-		// accidentally dropped platform cannot pass as a deliberate one.
+		// Every supported key Barista honours is either declared or documented as omitted. The check
+		// requires the omission to be stated as such rather than merely for the key to appear
+		// somewhere in the README, which a packaging table would satisfy without explaining anything.
 		for _, platformKey := range supportedHarnessPlatformKeys {
 			if _, declared := entry.Platforms[platformKey]; !declared {
-				require.Contains(t, readmeText, platformKey,
-					"%s omits %s, so the README must record the vendor fact that made it unsupported", entry.ID, platformKey)
+				require.True(t, documentsUnsupportedPlatform(readmeText, platformKey),
+					"%s omits %s, so the README must state on one line that it is unsupported and why", entry.ID, platformKey)
 			}
 		}
 	}
@@ -150,8 +160,37 @@ func TestHarnessDistributionPlatformsAreHonestlyClassified(t *testing.T) {
 			require.False(t, declared, "%s must not declare %s", entry.ID, windowsKey)
 		}
 	}
-	require.Contains(t, strings.ToLower(readmeText), "windows")
-	require.Contains(t, strings.ToLower(readmeText), "unsupported")
+	for _, windowsKey := range []string{"windows-amd64", "windows-arm64"} {
+		require.True(t, documentsUnsupportedPlatform(readmeText, windowsKey),
+			"the README must state on one line that %s is unsupported", windowsKey)
+	}
+
+	// Every archive host Barista would fetch from, and the host its redirect lands on, must be
+	// documented together with --allowed-host: the redirect allowlist is empty by default, so an
+	// undocumented host is an apply that fails for a reason the operator was never told about.
+	for _, entry := range manifest.ComponentsOfKind(ComponentKindHarness) {
+		for _, distribution := range entry.Platforms {
+			if distribution.Kind != DistributionKindArchive {
+				continue
+			}
+			parsed, err := url.Parse(distribution.URL)
+			require.NoError(t, err)
+			require.Contains(t, readmeText, "--allowed-host "+parsed.Hostname(),
+				"the README must tell the operator to allow %s", parsed.Hostname())
+		}
+	}
+}
+
+// documentsUnsupportedPlatform reports whether one README line names platformKey and marks it
+// unsupported. Requiring both on the same line is what makes the statement an explanation rather
+// than a coincidence of the key appearing in some unrelated table.
+func documentsUnsupportedPlatform(readmeText string, platformKey string) bool {
+	for _, line := range strings.Split(readmeText, "\n") {
+		if strings.Contains(line, platformKey) && strings.Contains(strings.ToLower(line), "unsupported") {
+			return true
+		}
+	}
+	return false
 }
 
 // TestParseManifestRejectsAHarnessLaunchTemplate proves the one new schema rule: native harness
@@ -291,6 +330,52 @@ func TestApplyInstallsHarnessArchiveAndManualFixtures(t *testing.T) {
 		require.True(t, owned)
 		require.Equal(t, ComponentRef{Kind: ComponentKindHarness, ID: "fixture-cli", Version: "3.4.5"}, record.Component)
 	})
+}
+
+// TestShippedHarnessArchiveShapeInstallsFromLocalFixtureBytes proves the shipped archive entry's own
+// declared shape installs — specifically that its executablePath is a bare filename with no
+// directory component, which is what OpenAI's release archives actually contain and which no other
+// test in this package exercises (every other archive fixture uses a "bin/..." entry). The bytes are
+// built locally and served from an in-process TLS server: the shape is the shipped entry's, the
+// content is not a vendor download, so this stays fully offline.
+func TestShippedHarnessArchiveShapeInstallsFromLocalFixtureBytes(t *testing.T) {
+	manifest := embeddedManifest_(t)
+	shipped := harnessEntryFor(t, manifest, "codex-cli")
+	distribution, supported := shipped.Platforms[testPlatform]
+	if !supported || distribution.Kind != DistributionKindArchive {
+		t.Skipf("the shipped codex-cli entry declares no archive distribution for %s", testPlatform)
+	}
+	require.NotContains(t, distribution.ExecutablePath, "/",
+		"the shipped archive entry is a single bare filename, which is the shape this test covers")
+	require.NoError(t, validateExecutablePath(distribution.ExecutablePath))
+
+	executable := []byte("#!/bin/sh\necho 'codex-cli " + shipped.Version + "'\n")
+	archive := buildTarGzipArchive(t, distribution.ExecutablePath, executable)
+	server := harnessArchiveServer(t, "/release/codex.tar.gz", archive)
+	manifestBytes, fixtureManifest := harnessManifestFixture(t, "codex-cli", shipped.Version, fmt.Sprintf(
+		`{"kind":"archive","url":%q,"sha256":%q,"sizeBytes":%d,"executablePath":%q}`,
+		server.URL+"/release/codex.tar.gz", sha256Hex(archive), len(archive), distribution.ExecutablePath))
+	dataRoot := t.TempDir()
+	plan, _, err := BuildPlan(manifestBytes, fixtureManifest, testPlatform, dataRoot, OwnershipLedger{})
+	require.NoError(t, err)
+	result, err := Apply(context.Background(), plan, manifestBytes, OwnershipLedger{}, dataRoot, applyOptions(server))
+	require.NoError(t, err)
+	require.Len(t, result.Applied, 1)
+
+	wantTarget := filepath.Join(dataRoot, "harnesses", "codex-cli", "codex-cli", shipped.Version, distribution.ExecutablePath)
+	assertInstalledExecutable(t, wantTarget, executable)
+	ledger, err := LoadOwnershipLedger(dataRoot)
+	require.NoError(t, err)
+	record, owned := ledger.RecordFor(wantTarget)
+	require.True(t, owned)
+	require.Equal(t, ComponentRef{Kind: ComponentKindHarness, ID: "codex-cli", Version: shipped.Version}, record.Component)
+
+	// The installed executable answers the shipped pin's own version contract, so an install of this
+	// shape is activatable rather than installed-but-unselectable.
+	if runtime.GOOS != "windows" {
+		require.NoError(t, ProbeHarnessVersion(context.Background(),
+			InstalledComponent{Entry: fixtureManifest.Components[0], Path: wantTarget}))
+	}
 }
 
 // TestApplyRejectsHarnessArchiveIntegrityFailures proves a harness archive is held to the same

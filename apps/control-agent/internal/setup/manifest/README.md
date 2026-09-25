@@ -2,7 +2,7 @@
 
 The previous adapter-only schema (generation `1`: an `adapters` array with no `kind`) is still accepted by `barista setup --manifest <path>` for the transition. Every entry migrates to `acp-adapter` and resolves to exactly the same install path, so an administrator who kept their old manifest file installs the same thing. A document that mixes the two generations, or declares a generation nobody supports, is rejected whole rather than resolved in either generation's favour. `../testdata/manifest-legacy-generation-1.json` is the exact generation-1 bytes this manifest replaced, kept as the migration fixture.
 
-Every shipped entry currently uses the distribution `kind: "manual"` (`platforms.<GOOS-GOARCH>.kind`, distinct from the component `kind`) because no pinned vendor artifact clears the archive test below; the operator places the executable themselves and asserts its SHA-256 at apply time. When a vendor publishes a pinned release, switch the entry to `kind: "archive"` with the real HTTPS URL, `sha256`, and `sizeBytes` — automated verified download then works with no code change anywhere else.
+Distribution kinds differ per entry (`platforms.<GOOS-GOARCH>.kind`, distinct from the component `kind`), because what each vendor actually publishes differs. `codex-cli` is `kind: "archive"` on all four platforms: OpenAI publishes per-platform release archives whose SHA-256 and exact byte size are both obtainable, so Barista downloads and verifies them itself. The other three entries are `kind: "manual"`: the operator places the executable and asserts its SHA-256 at apply time. When a vendor starts publishing a digest and size for a pinned release, switching a `manual` entry to `archive` is a change to this file alone — no code changes with it.
 
 ## How a platform's distribution kind is decided
 
@@ -58,34 +58,52 @@ Authentication is a **separate operator action after installation**, never part 
 ### `codex-cli` — Codex
 
 * Pin: `@openai/codex` **0.147.0**, provider `openai`, licence Apache-2.0.
-* Source consulted: the vendor package's own `package.json` and `README.md` as installed on the implementation machine, plus <https://developers.openai.com/codex>. Retrieved 2026-09-25.
-* Decision: **`manual` on all four platforms.** This one comes closest to clearing step 1: the vendor's README documents GitHub Release archives per platform, states that "each archive contains a single entry with the platform baked into the name", and the licence is Apache-2.0, so container, internal layout, and terms are all satisfied. Step 1 still fails because **no SHA-256 and no exact byte size is published for those archives** in any vendor source, and an archive pin without a reviewable digest and size is not a pin. The vendor's other documented mechanisms — `curl -fsSL https://chatgpt.com/codex/install.sh | sh`, `npm install -g @openai/codex`, `brew install --cask codex` — are a bootstrap script and package managers, which step 2 sends here by rule. **If OpenAI publishes per-asset digests and sizes for a tagged release, this entry is the one to promote to `kind: "archive"`;** that is the only change needed, and no code changes with it.
-* What the operator packages, preferred route — the vendor's own standalone release archive, whose single entry is the executable:
+* Sources consulted, all retrieved **2026-09-25**:
+  * the vendor package's own `package.json` and `README.md` as installed on the implementation machine, for the version, the licence, the documented installation mechanisms, and the release-asset names;
+  * OpenAI's own release channel for the pinned tag, `https://github.com/openai/codex/releases/tag/rust-v0.147.0`, read through `gh api repos/openai/codex/releases/tags/rust-v0.147.0`, which reports each asset's `size` and `digest`;
+  * <https://developers.openai.com/codex> for authentication.
+* Decision: **`archive` on all four platforms.** Every clause of step 1 was checked, and each one was verified by downloading the asset rather than by trusting the listing:
 
-  | Barista platform key | GitHub Release asset |
+  | step-1 clause | how it was verified |
   | --- | --- |
-  | `darwin-amd64` | `codex-x86_64-apple-darwin.tar.gz` |
-  | `darwin-arm64` | `codex-aarch64-apple-darwin.tar.gz` |
-  | `linux-amd64` | `codex-x86_64-unknown-linux-musl.tar.gz` |
-  | `linux-arm64` | `codex-aarch64-unknown-linux-musl.tar.gz` |
+  | versioned URL | the asset path carries the release tag `rust-v0.147.0`. GitHub does permit an asset to be replaced on an existing release, so the URL alone is not the guarantee — the pinned `sha256` is: substituted bytes fail verification and install nothing. |
+  | obtainable, reviewable SHA-256 | the release API reports `digest: sha256:…` per asset; each one was re-derived locally with `sha256sum` on the downloaded bytes and matched exactly. |
+  | exact byte size | the release API reports `size` per asset; each matched the downloaded file's own size exactly. All four are well under `MaximumDownloadBytes` (512 MiB). |
+  | `.tar.gz` or `.zip` container | all four assets are `.tar.gz`. |
+  | one stable relative path inside | `tar -tzf` on each archive lists **exactly one entry**, named for the platform with no directory component — matching the vendor README's own statement that "each archive contains a single entry with the platform baked into the name". That bare name is the entry's `executablePath`, so the installed file is named after its platform rather than `codex`; nothing depends on the executable's filename. |
+  | terms permit automated download | Apache-2.0 (`package.json` `license`). |
+  | normalized version string | `0.147.0`. The extracted `codex-x86_64-unknown-linux-musl` entry was run directly and printed `codex-cli 0.147.0`, exiting 0 — so the pinned version is the version the pinned bytes report, which is exactly what activation re-checks. |
+
+  The pins, exactly as they appear in `components.json`, so the manifest can be reviewed against
+  this record without reading the JSON. Re-derive any of them with
+  `curl -sSL <url> | sha256sum` and `curl -sSLo /dev/null -w '%%{size_download}\n' <url>`:
+
+* `darwin-amd64` — `https://github.com/openai/codex/releases/download/rust-v0.147.0/codex-x86_64-apple-darwin.tar.gz`
+  * `sizeBytes` `95851149`
+  * `sha256` `36e782f71d8164cc37c2b89c64948f2180e9a2f8456b27e660da75bc6b5574e2`
+* `darwin-arm64` — `https://github.com/openai/codex/releases/download/rust-v0.147.0/codex-aarch64-apple-darwin.tar.gz`
+  * `sizeBytes` `87984231`
+  * `sha256` `75984b81f92a71b0c0f4b3b5cad80e5c57177e4d8c8b4b1e13db703b20dc4358`
+* `linux-amd64` — `https://github.com/openai/codex/releases/download/rust-v0.147.0/codex-x86_64-unknown-linux-musl.tar.gz`
+  * `sizeBytes` `98970270`
+  * `sha256` `0246e2e773834e07f0fb5249ed6ebad12e4591e608f8c7bb97dd6a9690544c36`
+* `linux-arm64` — `https://github.com/openai/codex/releases/download/rust-v0.147.0/codex-aarch64-unknown-linux-musl.tar.gz`
+  * `sizeBytes` `91607658`
+  * `sha256` `eb677c80f666b1ab8b4b1d083b66e8d614b1281d960bb6f9fd8ca98f58b38b90`
+
+* **`--allowed-host` is required.** `https://github.com/.../releases/download/...` answers with a redirect to `release-assets.githubusercontent.com`, and Barista refuses every redirect not named by `--allowed-host` — an empty allowlist rejects all of them, which is the fail-closed default. So an apply that installs this entry needs both hosts:
 
   ```bash
-  # Download the asset for version 0.147.0 from the vendor's own releases page
-  # (https://github.com/openai/codex/releases) with a browser or the operator's own tooling.
-  tar -xzf codex-x86_64-unknown-linux-musl.tar.gz
-  mv codex-x86_64-unknown-linux-musl codex
-  ./codex --version            # must print 0.147.0
-  sha256sum codex
-
   barista setup plan --data-root <path> --out plan.json
   barista setup apply --plan plan.json \
-    --manual-artifact codex-cli=$PWD/codex \
-    --manual-checksum codex-cli=<sha256>
+    --allowed-host github.com \
+    --allowed-host release-assets.githubusercontent.com
   barista setup activate --component harness/codex-cli --version 0.147.0
   ```
 
-  Alternative route via `npm pack @openai/codex@0.147.0-linux-x64` works the same way, but note that the npm platform package lays the binary out as `package/vendor/<target-triple>/bin/codex` **beside auxiliary sandbox resources** (`codex-resources/bwrap`, `codex-resources/zsh`) that a Barista-managed install does not carry, because a managed install is exactly one executable file. Prefer the release archive entry, which the vendor publishes as a single self-contained file.
-* Authentication: run `codex` once on the node and choose "Sign in with ChatGPT", or configure an API key per <https://developers.openai.com/codex>. The credential stays in Codex's own local storage.
+  No `--manual-artifact` or `--manual-checksum` is needed for this entry. Barista downloads the archive once, hashes it while writing, refuses it on any digest or size mismatch, and extracts only the single declared entry. Re-verify the host list against the redirect if GitHub changes it; a changed redirect target fails closed rather than downloading from somewhere unexpected.
+* Why the other documented mechanisms are not used: `curl -fsSL https://chatgpt.com/codex/install.sh | sh` is a bootstrap script, and `npm install -g @openai/codex` / `brew install --cask codex` are package managers. Barista runs none of them at any point. The npm platform package is also a poor fit for a managed install on its own terms: it lays the binary out as `package/vendor/<target-triple>/bin/codex` beside auxiliary sandbox resources (`codex-resources/bwrap`, `codex-resources/zsh`) that a one-executable managed install does not carry. The release archive entry is the vendor's own single self-contained file, which is why it is the pinned artifact.
+* Authentication: run `codex` once on the node and choose "Sign in with ChatGPT", or configure an API key per <https://developers.openai.com/codex>. The credential stays in Codex's own local storage; Barista installs, copies, and forwards none of it.
 
 ## ACP adapter entries
 

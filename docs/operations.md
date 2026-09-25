@@ -52,7 +52,7 @@ The compiled-in managed component manifest (`apps/control-agent/internal/setup/m
 - `codex-acp` (`@agentclientprotocol/codex-acp`) **1.12.0**, harness `codex-cli`, `"kind": "acp-adapter"`;
 - `claude-acp` (`@agentclientprotocol/claude-agent-acp`) **0.79.0**, harness `claude-cli`, `"kind": "acp-adapter"`;
 - `claude-cli` (`@anthropic-ai/claude-code`) **2.1.231**, `"kind": "harness"` (see [managed harnesses](#installing-and-activating-managed-harnesses));
-- `codex-cli` (`@openai/codex`) **0.147.0**, `"kind": "harness"`.
+- `codex-cli` (`@openai/codex`) **0.147.0**, `"kind": "harness"`, and the one entry with a real pinned `archive` distribution.
 
 An ACP adapter installs at `<data-root>/adapters/<harnessId>/<componentId>/<version>/<executablePath>` — unchanged from the adapter-only schema, so an existing install is never relocated — and a harness component at `<data-root>/harnesses/<harnessId>/<componentId>/<version>/<executablePath>`.
 
@@ -87,28 +87,42 @@ Claude ACP additionally requires the auth-mode gate described in the next sectio
 
 Barista can also manage the provider CLIs themselves. This is entirely optional: a node that installed `claude` and `codex` by hand keeps working exactly as before, and a PATH-discovered harness stays the fallback whenever no managed version is selected or a selected one stops verifying. Only a node administrator running `barista setup` can install or select one, and the Hub can display the inventory but never apply an update.
 
-Every declared platform for both harnesses is `kind: "manual"`: neither vendor publishes an artifact with a reviewable SHA-256 and exact byte size that Barista could pin, and the only mechanisms they document are package managers and bootstrap scripts. **Barista never runs `npm`, `npx`, `brew`, `pipx`, or `curl … | sh`, at any point.** The administrator produces the single executable file themselves, asserts its digest out of band, and hands both to apply. `apps/control-agent/internal/setup/manifest/README.md` records, per harness and per platform, the exact packaging commands, the vendor source page, and the retrieval date behind every pin — including which platforms are omitted and why.
+The two harnesses are distributed differently, because what their vendors publish differs. **Barista never runs `npm`, `npx`, `brew`, `pipx`, or `curl … | sh`, at any point** — neither vendor's own installer or package manager is ever invoked.
+
+- **`codex-cli` is `kind: "archive"` on all four platforms.** OpenAI publishes per-platform release archives whose SHA-256 and exact byte size are both obtainable, so the manifest pins them and Barista downloads and verifies the bytes itself — no operator artifact needed. Because `github.com` redirects release downloads to `release-assets.githubusercontent.com`, and Barista refuses any redirect not named by `--allowed-host` (an empty allowlist rejects all of them), an apply that installs it needs `--allowed-host github.com --allowed-host release-assets.githubusercontent.com`.
+- **`claude-cli` is `kind: "manual"` on all four platforms.** The only mechanism Anthropic documents is `npm install -g`, and the package grants no redistribution, so there is nothing Barista could honestly pin. The administrator produces the single executable file themselves, asserts its digest out of band, and hands both to apply.
+
+`apps/control-agent/internal/setup/manifest/README.md` records, per harness and per platform, the chosen kind and why, the vendor source consulted, the retrieval date, the full pinned values for every archive platform, the exact packaging commands for every manual platform, and which platforms are omitted and why.
 
 Barista supports exactly four platform keys: `darwin-amd64`, `darwin-arm64`, `linux-amd64`, `linux-arm64`. **Windows is unsupported by omission of the platform key**, for harnesses and adapters alike. There is no fallback platform: `barista doctor` reports `no platform distribution for <platform>` and planning emits no operation.
 
-The full flow, using Claude Code on `linux-amd64` as the example:
+The archive flow, using Codex — nothing to package, because the manifest already pins the bytes:
 
 ```bash
-# 1. Produce the executable (operator workstation; see the manifest README for each platform's package)
+barista setup plan --data-root <path> --out plan.json
+barista setup apply --plan plan.json \
+  --allowed-host github.com \
+  --allowed-host release-assets.githubusercontent.com
+barista setup activate --component harness/codex-cli --version 0.147.0
+barista doctor            # activeVersion, rollbackVersion, provenance, authReadiness
+```
+
+The manual flow, using Claude Code on `linux-amd64` (see the manifest README for each platform's package):
+
+```bash
+# 1. Produce the executable on an operator workstation
 npm pack @anthropic-ai/claude-code-linux-x64@2.1.231
 tar -xzf anthropic-ai-claude-code-linux-x64-2.1.231.tgz    # extracts package/claude
 ./package/claude --version                                  # must print 2.1.231
 sha256sum package/claude
 
 # 2. Install it side by side with any existing version, verified on the single read that stages it
-barista setup plan --data-root <path> --out plan.json
 barista setup apply --plan plan.json \
   --manual-artifact claude-cli=$PWD/package/claude \
   --manual-checksum claude-cli=<sha256>
 
 # 3. Select it atomically. The previously active version is retained as the rollback target.
 barista setup activate --component harness/claude-cli --version 2.1.231
-barista doctor            # activeVersion, rollbackVersion, provenance, authReadiness
 ```
 
 Activation is verified-then-recorded, and the verification now includes the candidate's own claim about itself: **Barista refuses to activate a managed harness whose `--version` output does not report exactly the pinned version.** An output that names another version, carries no parsable version at all, looks secret-like, exits non-zero, cannot start, or exceeds the bounded timeout all refuse the selection — each with a distinct fixed reason naming only the component identity, because raw probe output may carry credentials and is never logged, reported, or surfaced. A refused activation leaves the activation ledger, the ownership ledger, and every installed file byte-identical, so the previously active version stays active and `barista setup rollback --component harness/claude-cli` still returns to the retained one.

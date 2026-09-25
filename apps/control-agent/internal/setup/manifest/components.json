@@ -57,10 +57,34 @@
       "label": "Codex CLI (@openai/codex)",
       "version": "0.147.0",
       "platforms": {
-        "darwin-amd64": { "kind": "manual", "executablePath": "bin/codex" },
-        "darwin-arm64": { "kind": "manual", "executablePath": "bin/codex" },
-        "linux-amd64": { "kind": "manual", "executablePath": "bin/codex" },
-        "linux-arm64": { "kind": "manual", "executablePath": "bin/codex" }
+        "darwin-amd64": {
+          "kind": "archive",
+          "url": "https://github.com/openai/codex/releases/download/rust-v0.147.0/codex-x86_64-apple-darwin.tar.gz",
+          "sha256": "36e782f71d8164cc37c2b89c64948f2180e9a2f8456b27e660da75bc6b5574e2",
+          "sizeBytes": 95851149,
+          "executablePath": "codex-x86_64-apple-darwin"
+        },
+        "darwin-arm64": {
+          "kind": "archive",
+          "url": "https://github.com/openai/codex/releases/download/rust-v0.147.0/codex-aarch64-apple-darwin.tar.gz",
+          "sha256": "75984b81f92a71b0c0f4b3b5cad80e5c57177e4d8c8b4b1e13db703b20dc4358",
+          "sizeBytes": 87984231,
+          "executablePath": "codex-aarch64-apple-darwin"
+        },
+        "linux-amd64": {
+          "kind": "archive",
+          "url": "https://github.com/openai/codex/releases/download/rust-v0.147.0/codex-x86_64-unknown-linux-musl.tar.gz",
+          "sha256": "0246e2e773834e07f0fb5249ed6ebad12e4591e608f8c7bb97dd6a9690544c36",
+          "sizeBytes": 98970270,
+          "executablePath": "codex-x86_64-unknown-linux-musl"
+        },
+        "linux-arm64": {
+          "kind": "archive",
+          "url": "https://github.com/openai/codex/releases/download/rust-v0.147.0/codex-aarch64-unknown-linux-musl.tar.gz",
+          "sha256": "eb677c80f666b1ab8b4b1d083b66e8d614b1281d960bb6f9fd8ca98f58b38b90",
+          "sizeBytes": 91607658,
+          "executablePath": "codex-aarch64-unknown-linux-musl"
+        }
       },
       "launch": {},
       "authDocsUrl": "https://developers.openai.com/codex"
