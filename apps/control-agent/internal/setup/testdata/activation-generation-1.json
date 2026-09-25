@@ -1,0 +1,36 @@
+{
+  "ledgerVersion": "1",
+  "records": [
+    {
+      "active": {
+        "component": {
+          "kind": "acp-adapter",
+          "id": "codex-acp",
+          "version": "2.0.0"
+        },
+        "path": "/var/lib/barista/adapters/codex-cli/codex-acp/2.0.0/bin/codex-acp",
+        "contentSha256": "2222222222222222222222222222222222222222222222222222222222222222"
+      },
+      "previous": {
+        "component": {
+          "kind": "acp-adapter",
+          "id": "codex-acp",
+          "version": "1.0.0"
+        },
+        "path": "/var/lib/barista/adapters/codex-cli/codex-acp/1.0.0/bin/codex-acp",
+        "contentSha256": "1111111111111111111111111111111111111111111111111111111111111111"
+      }
+    },
+    {
+      "active": {
+        "component": {
+          "kind": "harness",
+          "id": "claude-cli",
+          "version": "2.1.0"
+        },
+        "path": "/var/lib/barista/harnesses/claude-cli/claude-cli/2.1.0/bin/claude",
+        "contentSha256": "3333333333333333333333333333333333333333333333333333333333333333"
+      }
+    }
+  ]
+}

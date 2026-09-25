@@ -97,7 +97,7 @@ func TestRunDoctorReportsComponentAndHubStatus(t *testing.T) {
 	ledger := OwnershipLedger{}
 	// ready-acp is installed; notready-acp deliberately is not, so its auth probe still runs (the
 	// harness itself is installed) but the adapter is not.
-	ledger, _ = installOwnedComponent(t, dataRoot, ledger, manifest.Components[0], []byte("ready adapter bytes"))
+	ledger, readyPath := installOwnedComponent(t, dataRoot, ledger, manifest.Components[0], []byte("ready adapter bytes"))
 	ledger, driftedPath := installOwnedComponent(t, dataRoot, ledger, manifest.Components[2], []byte("original bytes"))
 	// Corrupt the drifted adapter after recording it: doctor must trust the file, not the ledger.
 	require.NoError(t, os.WriteFile(driftedPath, []byte("tampered bytes"), 0o755))
@@ -110,7 +110,16 @@ func TestRunDoctorReportsComponentAndHubStatus(t *testing.T) {
 		{ID: "drifted-cli", Available: true},
 	}
 
-	report := RunDoctor(context.Background(), manifest, ledger, dataRoot, "darwin-arm64", harnesses, "http://hub.example:8787", func(context.Context, string) error {
+	// ACP launch readiness now also requires that the installed version is the activated one, so the
+	// ready adapter is selected the way setup.Activate would select it.
+	activation := ActivationState{
+		Generation: ActivationLedgerVersion,
+		Ledger: ActivationLedger{}.WithRecord(ActivationRecord{Active: ActivationTarget{
+			Component: manifest.Components[0].Ref(), Path: readyPath, ContentSHA256: sha256Hex([]byte("ready adapter bytes")),
+		}}),
+	}
+
+	report := RunDoctor(context.Background(), manifest, ledger, dataRoot, "darwin-arm64", activation, harnesses, "http://hub.example:8787", func(context.Context, string) error {
 		return nil
 	})
 
@@ -175,7 +184,7 @@ func TestRunDoctorNeverRunsAuthProbeForUninstalledHarness(t *testing.T) {
 	require.NoError(t, err)
 
 	// No harness profile at all for claude-cli: discovery did not find it.
-	report := RunDoctor(context.Background(), manifest, OwnershipLedger{}, t.TempDir(), "darwin-arm64", nil, "https://hub.example", func(context.Context, string) error {
+	report := RunDoctor(context.Background(), manifest, OwnershipLedger{}, t.TempDir(), "darwin-arm64", ActivationState{}, nil, "https://hub.example", func(context.Context, string) error {
 		return nil
 	})
 	entry := doctorEntryFor(report, "claude-acp")
@@ -187,14 +196,14 @@ func TestRunDoctorReportsUnreachableHubWithScreenedDetail(t *testing.T) {
 	manifest := doctorManifestFixture(t)
 	harnesses := []protocol.HarnessProfile{{ID: "claude-cli", Available: true}}
 
-	plain := RunDoctor(context.Background(), manifest, OwnershipLedger{}, t.TempDir(), "darwin-arm64", harnesses, "http://127.0.0.1:1", func(context.Context, string) error {
+	plain := RunDoctor(context.Background(), manifest, OwnershipLedger{}, t.TempDir(), "darwin-arm64", ActivationState{}, harnesses, "http://127.0.0.1:1", func(context.Context, string) error {
 		return errors.New("dial tcp 127.0.0.1:1: connection refused")
 	})
 	require.False(t, plain.HubConnectivity.Reachable)
 	require.Equal(t, "dial tcp 127.0.0.1:1: connection refused", plain.HubConnectivity.Detail)
 
 	// A URL can carry a query-string token, so a secret-looking error message is replaced wholesale.
-	secret := RunDoctor(context.Background(), manifest, OwnershipLedger{}, t.TempDir(), "darwin-arm64", harnesses, "https://hub.example", func(context.Context, string) error {
+	secret := RunDoctor(context.Background(), manifest, OwnershipLedger{}, t.TempDir(), "darwin-arm64", ActivationState{}, harnesses, "https://hub.example", func(context.Context, string) error {
 		return errors.New("dial https://hub.example?token=ghp_abcdefghij1234 failed")
 	})
 	require.False(t, secret.HubConnectivity.Reachable)
@@ -211,7 +220,7 @@ func TestRunDoctorSanitizesControlEndpointForDisplay(t *testing.T) {
 	rawEndpoint := "https://" + secretLikeUserinfo + "@hub.example:8787/control-agent?token=" + secretLikeUserinfo + "#fragment"
 
 	var dialedEndpoint string
-	report := RunDoctor(context.Background(), manifest, OwnershipLedger{}, t.TempDir(), "darwin-arm64", nil, rawEndpoint, func(_ context.Context, endpoint string) error {
+	report := RunDoctor(context.Background(), manifest, OwnershipLedger{}, t.TempDir(), "darwin-arm64", ActivationState{}, nil, rawEndpoint, func(_ context.Context, endpoint string) error {
 		dialedEndpoint = endpoint
 		return nil
 	})
@@ -254,14 +263,20 @@ func TestRunDoctorNeverReportsAHarnessComponentAsACPLaunchReady(t *testing.T) {
 	require.NoError(t, err)
 	dataRoot := t.TempDir()
 	ledger := OwnershipLedger{}
+	activation := ActivationLedger{}
 	for _, entry := range manifest.Components {
-		ledger, _ = installOwnedComponent(t, dataRoot, ledger, entry, []byte("payload for "+entry.ID))
+		var installedPath string
+		ledger, installedPath = installOwnedComponent(t, dataRoot, ledger, entry, []byte("payload for "+entry.ID))
+		activation = activation.WithRecord(ActivationRecord{Active: ActivationTarget{
+			Component: entry.Ref(), Path: installedPath, ContentSHA256: sha256Hex([]byte("payload for " + entry.ID)),
+		}})
 	}
 	harnesses := []protocol.HarnessProfile{{ID: "claude-cli", Available: true, Binary: probePath}}
 
-	report := RunDoctor(context.Background(), manifest, ledger, dataRoot, "darwin-arm64", harnesses, "http://hub.example:8787", func(context.Context, string) error {
-		return nil
-	})
+	report := RunDoctor(context.Background(), manifest, ledger, dataRoot, "darwin-arm64",
+		ActivationState{Generation: ActivationLedgerVersion, Ledger: activation}, harnesses, "http://hub.example:8787", func(context.Context, string) error {
+			return nil
+		})
 
 	harnessEntry := doctorEntryFor(report, "claude-cli")
 	require.Equal(t, ComponentKindHarness, harnessEntry.Component.Kind)

@@ -240,6 +240,18 @@ func componentRelativeTargetPath(entry ComponentManifestEntry, distribution Plat
 	return filepath.Join(directory, entry.HarnessID, entry.ID, entry.Version, filepath.FromSlash(distribution.ExecutablePath)), nil
 }
 
+// componentVersionDirectory is the deterministic absolute directory every file of one component
+// version lives under, derived from the same layout componentRelativeTargetPath uses so there is
+// still only one definition of where a component version is installed. It takes the version
+// explicitly because a retained version is no longer the entry's own declared one.
+func componentVersionDirectory(dataRoot string, entry ComponentManifestEntry, version string) (string, error) {
+	directory, known := componentKindDirectories[entry.Kind]
+	if !known {
+		return "", fmt.Errorf("component kind %q has no install location", entry.Kind)
+	}
+	return filepath.Join(dataRoot, directory, entry.HarnessID, entry.ID, version), nil
+}
+
 // ComponentTargetPath is the single deterministic absolute install location for one component entry
 // at one pinned version under dataRoot.
 func ComponentTargetPath(dataRoot string, entry ComponentManifestEntry, distribution PlatformDistribution) (string, error) {
