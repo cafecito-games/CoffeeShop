@@ -89,6 +89,12 @@ type HarnessResolution struct {
 	// Barista's compiled-in provider table, never from a candidate, so no candidate's metadata can
 	// stand in for another's.
 	Profile protocol.HarnessProfile
+	// ManagedRejected is the fixed reason a managed entry supplied for this harness was not usable as
+	// a candidate, and "" when none was supplied or it was accepted. A rejected managed entry falls
+	// back to the external installation rather than taking the harness offline — that is the
+	// migration-compatibility behavior — but the fallback is never silent: every caller reports this
+	// reason, so the operator sees that an administrator selection is no longer being honored.
+	ManagedRejected string
 	// verified is the managed executable Resolve accepted, kept unexported so the reported
 	// candidate stays plain data while the Runner can still reach the verification closure.
 	verified *ManagedHarness
@@ -103,9 +109,11 @@ func Discover(ctx context.Context) []protocol.HarnessProfile {
 
 // Resolve resolves every supported harness from the managed, activated versions in managed (keyed
 // by harness ID) and from external PATH discovery, applying HarnessResolution's documented
-// precedence. A managed entry whose Verify fails is not a candidate at all: a selection whose bytes
-// no longer verify must never be launched, and it must never silently promote the external binary
-// either — the harness is reported unavailable so the operator sees the drift.
+// precedence. A managed entry that is not an absolute path, or whose Verify fails, is not a candidate
+// at all: a selection whose bytes no longer verify is never launched. Such a harness falls back to
+// its external PATH installation, because an operator-installed harness that worked before managed
+// components existed must keep working — but the fall back is recorded in ManagedRejected, which
+// every caller reports, so the demotion of an administrator selection is never silent.
 func Resolve(ctx context.Context, managed map[string]ManagedHarness) []HarnessResolution {
 	resolutions := make([]HarnessResolution, 0, len(providers))
 	for _, item := range providers {
@@ -126,7 +134,11 @@ func Resolve(ctx context.Context, managed map[string]ManagedHarness) []HarnessRe
 				Transports: []string{TransportNative},
 			},
 		}
-		if candidate, entry, present := managedCandidate(managed, item.id); present {
+		candidate, entry, rejection := managedCandidate(managed, item.id)
+		switch {
+		case rejection != "":
+			resolution.ManagedRejected = rejection
+		case entry.Binary != "":
 			resolution.Managed = &candidate
 			resolution.verified = &entry
 		}
@@ -186,18 +198,30 @@ func ManagedHarnesses(resolutions []HarnessResolution) map[string]ManagedHarness
 	return harnesses
 }
 
-// managedCandidate turns a caller-supplied managed harness into a candidate, refusing anything that
-// is not an absolute path or whose content no longer verifies.
-func managedCandidate(managed map[string]ManagedHarness, harnessID string) (HarnessCandidate, ManagedHarness, bool) {
+// Reasons a managed harness entry was not usable as a candidate. Each is a fixed structural string
+// that names no path and no process output.
+const (
+	ManagedRejectedNotAbsolute  = "the activated version's path is not absolute"
+	ManagedRejectedUnverifiable = "the activated version has no verification function"
+	ManagedRejectedDrifted      = "the activated version no longer verifies against the ownership ledger"
+)
+
+// managedCandidate turns a caller-supplied managed harness into a candidate, or returns the fixed
+// reason it is not one. A harness with no managed entry at all returns no reason: nothing was
+// selected, which is not a rejection.
+func managedCandidate(managed map[string]ManagedHarness, harnessID string) (HarnessCandidate, ManagedHarness, string) {
 	entry, present := managed[harnessID]
-	if !present || !filepath.IsAbs(entry.Binary) {
-		return HarnessCandidate{}, ManagedHarness{}, false
+	if !present {
+		return HarnessCandidate{}, ManagedHarness{}, ""
+	}
+	if !filepath.IsAbs(entry.Binary) {
+		return HarnessCandidate{}, ManagedHarness{}, ManagedRejectedNotAbsolute
 	}
 	if entry.Verify == nil {
-		return HarnessCandidate{}, ManagedHarness{}, false
+		return HarnessCandidate{}, ManagedHarness{}, ManagedRejectedUnverifiable
 	}
 	if err := entry.Verify(); err != nil {
-		return HarnessCandidate{}, ManagedHarness{}, false
+		return HarnessCandidate{}, ManagedHarness{}, ManagedRejectedDrifted
 	}
 	description := "Managed harness"
 	if entry.Version != "" {
@@ -208,7 +232,7 @@ func managedCandidate(managed map[string]ManagedHarness, harnessID string) (Harn
 		Binary:      entry.Binary,
 		Version:     entry.Version,
 		Description: description,
-	}, entry, true
+	}, entry, ""
 }
 
 // externalCandidate is the PATH discovery Barista has always performed: look the binary up on PATH

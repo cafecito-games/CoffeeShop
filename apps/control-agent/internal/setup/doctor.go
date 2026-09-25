@@ -172,7 +172,10 @@ func RunDoctor(
 			AuthReadiness:    AuthReadinessUnknown,
 			Provenance:       ComponentProvenanceNone,
 		}
-		describeActivation(&doctorEntry, activation, discovered && harnessProfile.Available)
+		// The activated version is resolved through the one launch-resolution path, so doctor can
+		// never report a provenance the daemon would not act on. The resolution is read-only.
+		activeInstalled, activeErr := ActiveInstalledComponent(dataRoot, manifest, platform, ledger, activation, entry.Ref().Identity())
+		describeActivation(&doctorEntry, activation, activeErr, discovered && harnessProfile.Available)
 		distribution, supported := entry.Platforms[platform]
 		if !supported {
 			// A component with no distribution for this platform stays visible in the report with a
@@ -203,11 +206,20 @@ func RunDoctor(
 		if spec, allowed := AuthProbeAllowlist[entry.HarnessID]; allowed && doctorEntry.HarnessInstalled {
 			doctorEntry.AuthReadiness = RunAuthProbe(ctx, harnessProfile.Binary, spec.Arguments, spec.SuccessExitCode)
 		}
+		// ACP launch readiness is exactly the conjunction of the three inputs the adapter launch path
+		// itself requires: a discovered harness, an activated adapter version that re-verifies right
+		// now (activeErr == nil, which is what acpadapter.Load resolves), and ready authentication. It
+		// deliberately does not require the *manifest-pinned* version to be the activated one: a
+		// retained version the manifest no longer declares still launches, so reporting it as
+		// not-ready would contradict the daemon.
 		doctorEntry.ACPLaunchReady = entry.Kind == ComponentKindACPAdapter &&
 			doctorEntry.HarnessInstalled &&
-			doctorEntry.ComponentInstalled &&
-			doctorEntry.ActiveVersion == entry.Version &&
+			activeErr == nil &&
 			doctorEntry.AuthReadiness == AuthReadinessReady
+		if activeErr == nil && activeInstalled.Ref().Version != entry.Version {
+			doctorEntry.Notes = append(doctorEntry.Notes,
+				"the active version is retained from an earlier manifest and is no longer declared by this one")
+		}
 		report.Components = append(report.Components, doctorEntry)
 	}
 	report.HubConnectivity = HubConnectivity{Endpoint: sanitizeEndpointForDisplay(controlEndpoint)}
@@ -229,11 +241,7 @@ func activationStatus(activation ActivationState) ActivationLedgerStatus {
 	if activation.Rejection == nil {
 		return status
 	}
-	bounded := truncateAtRuneBoundary(activation.Rejection.Error(), activationRejectionMaximumBytes)
-	if protocol.LooksSecretLike(bounded) {
-		bounded = activationRejectionGenericDetail
-	}
-	status.Rejection = bounded
+	status.Rejection = screenedActivationDetail(activation.Rejection.Error())
 	status.Repair = ActivationRepairGuidance
 	var rejection *ActivationRejectionError
 	if errors.As(activation.Rejection, &rejection) {
@@ -242,10 +250,24 @@ func activationStatus(activation ActivationState) ActivationLedgerStatus {
 	return status
 }
 
-// describeActivation fills one entry's active version, retained rollback target, and provenance from
-// the activation evidence alone. A rejected ledger reports no versions and the rejected provenance:
-// an unreadable selection is never reported as an absent one, and never as the external fallback.
-func describeActivation(entry *ComponentDoctorEntry, activation ActivationState, harnessAvailable bool) {
+// screenedActivationDetail bounds an activation diagnostic and replaces it wholesale when it looks
+// secret-like. A strict decoder's own message quotes an unknown field name straight from the file,
+// which is untrusted input, so no activation diagnostic reaches a report unscreened.
+func screenedActivationDetail(detail string) string {
+	bounded := truncateAtRuneBoundary(detail, activationRejectionMaximumBytes)
+	if protocol.LooksSecretLike(bounded) {
+		return activationRejectionGenericDetail
+	}
+	return bounded
+}
+
+// describeActivation fills one entry's active version, retained rollback target, and provenance.
+// Provenance is what would actually launch, not merely what the record claims: a selection whose
+// bytes no longer resolve is reported as the fallback the daemon would really take, with a note, so
+// doctor and the daemon can never disagree about which executable runs. A rejected ledger reports no
+// versions and the rejected provenance — an unreadable selection is never reported as an absent one,
+// and never as the external fallback.
+func describeActivation(entry *ComponentDoctorEntry, activation ActivationState, activeErr error, harnessAvailable bool) {
 	if activation.Rejection != nil {
 		entry.Provenance = ComponentProvenanceRejected
 		return
@@ -256,7 +278,19 @@ func describeActivation(entry *ComponentDoctorEntry, activation ActivationState,
 		if record.Previous != nil {
 			entry.RollbackVersion = record.Previous.Component.Version
 		}
-		entry.Provenance = ComponentProvenanceManaged
+		if activeErr == nil {
+			entry.Provenance = ComponentProvenanceManaged
+			return
+		}
+		entry.Notes = append(entry.Notes, "the activated version could not be verified: "+screenedActivationDetail(activeErr.Error()))
+		// The managed selection is not honored. A harness keeps its documented external PATH
+		// compatibility path, which is why the demotion is reported rather than hidden; an adapter has
+		// no external path at all.
+		if entry.Component.Kind == ComponentKindHarness && harnessAvailable {
+			entry.Provenance = ComponentProvenanceExternal
+			return
+		}
+		entry.Provenance = ComponentProvenanceNone
 		return
 	}
 	// With nothing selected, a harness component falls back to the documented external PATH

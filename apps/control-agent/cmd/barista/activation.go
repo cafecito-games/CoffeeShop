@@ -22,19 +22,19 @@ const activationProbeTimeout = 30 * time.Second
 // version that still verifies, keyed by harness ID. It is the one place launch-time managed harness
 // resolution happens, and it consults only internal/setup's verified results — the ownership ledger
 // and the activation ledger are parsed there and nowhere else.
+//
+// The second return value is the reason, per harness, that an existing selection could not be
+// resolved. It is never dropped on the floor: a harness whose managed selection stopped verifying
+// falls back to its external PATH installation, and the operator must be told that rather than left
+// to infer it from a silently different binary.
 func managedHarnesses(
 	manifest setup.Manifest,
 	ledger setup.OwnershipLedger,
 	activation setup.ActivationState,
 	dataRoot string,
-) map[string]harness.ManagedHarness {
+) (map[string]harness.ManagedHarness, map[string]string) {
 	resolved := map[string]harness.ManagedHarness{}
-	if activation.Rejection != nil {
-		// A rejected activation ledger makes every managed component unavailable. Returning an empty
-		// map would let a harness silently fall back to its external PATH installation, so callers
-		// report the rejection; discovery is simply told about no managed candidate.
-		return resolved
-	}
+	unresolved := map[string]string{}
 	seen := map[setup.ComponentIdentity]bool{}
 	for _, entry := range manifest.ComponentsOfKind(setup.ComponentKindHarness) {
 		identity := entry.Ref().Identity()
@@ -42,17 +42,28 @@ func managedHarnesses(
 			continue
 		}
 		seen[identity] = true
-		installed, err := setup.ActiveInstalledComponent(dataRoot, manifest, setup.CurrentPlatform(), ledger, activation, identity)
-		if err != nil {
+		if activation.Rejection != nil {
+			// A rejected activation ledger makes every managed component unavailable. Discovery is
+			// told about no managed candidate at all, and the reason is reported here rather than
+			// letting the external fallback look like an ordinary "nothing selected".
+			unresolved[entry.HarnessID] = "the activation ledger could not be accepted"
 			continue
 		}
-		resolved[installed.Entry.HarnessID] = harness.ManagedHarness{
-			Binary:  installed.Path,
-			Version: installed.Ref().Version,
-			Verify:  installed.Verify,
+		installed, err := setup.ActiveInstalledComponent(dataRoot, manifest, setup.CurrentPlatform(), ledger, activation, identity)
+		switch {
+		case errors.Is(err, setup.ErrComponentNotActivated):
+			// Nothing was ever selected, which is not a failure: the documented external path applies.
+		case err != nil:
+			unresolved[entry.HarnessID] = "the activated version could not be verified"
+		default:
+			resolved[installed.Entry.HarnessID] = harness.ManagedHarness{
+				Binary:  installed.Path,
+				Version: installed.Ref().Version,
+				Verify:  installed.Verify,
+			}
 		}
 	}
-	return resolved
+	return resolved, unresolved
 }
 
 // componentProbe is the compiled-in candidate probe activation and rollback run before a selection

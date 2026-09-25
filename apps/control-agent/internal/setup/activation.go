@@ -500,8 +500,19 @@ func Activate(ctx context.Context, activationContext ActivationContext, selector
 	}
 	record := ActivationRecord{Active: targetFor(installed)}
 	if activated {
-		retained := current.Active
-		record.Previous = &retained
+		// The retained target must always name a *different* version than the active one — the
+		// parser rejects a record where they agree, so retaining the outgoing selection blindly
+		// would let Activate write a ledger it cannot read back. Re-selecting the same version with
+		// different bytes (a re-pinned source archive reinstalled at the same declared version)
+		// replaces the selection in place and keeps the genuinely older retained target.
+		switch {
+		case current.Active.Component.Version != record.Active.Component.Version:
+			retained := current.Active
+			record.Previous = &retained
+		case current.Previous != nil:
+			retained := *current.Previous
+			record.Previous = &retained
+		}
 	}
 	if err := activationContext.Activation.Ledger.WithRecord(record).Save(activationContext.DataRoot); err != nil {
 		return ActivationOutcome{}, fmt.Errorf("activate %s: %w", ref, err)
@@ -590,6 +601,21 @@ func resolveInstalledVersion(dataRoot string, manifest Manifest, platform string
 	}
 	if !owned {
 		return InstalledComponent{}, fmt.Errorf("%w: the ownership ledger records no file for this version", ErrComponentNotInstalled)
+	}
+	// The declared branch reaches its record by the exact path ComponentTargetPath derives, which
+	// binds the record's harness and version layout implicitly. This branch reaches its record by
+	// component identity instead, so both are checked explicitly rather than inherited: a record whose
+	// harness binding or version directory disagrees with the component it claims to be would make the
+	// launch template and the executable come from two different components.
+	if record.HarnessID != sibling.HarnessID {
+		return InstalledComponent{}, errors.New("the ownership ledger binds this component version to a different harness")
+	}
+	versionDirectory, err := componentVersionDirectory(dataRoot, sibling, ref.Version)
+	if err != nil {
+		return InstalledComponent{}, err
+	}
+	if !strings.HasPrefix(record.Path, versionDirectory+string(filepath.Separator)) {
+		return InstalledComponent{}, errors.New("the ownership ledger records this component version outside its own install directory")
 	}
 	entry := sibling
 	entry.Version = ref.Version

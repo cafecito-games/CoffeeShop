@@ -105,8 +105,8 @@ func TestDiscoverManagedAndExternalPrecedence(t *testing.T) {
 		require.Equal(t, Profiles(resolutions), Discover(context.Background()))
 	})
 
-	t.Run("a managed candidate that no longer verifies never promotes the external binary", func(t *testing.T) {
-		writeExternalHarness(t, "claude", "claude-code 1.2.3")
+	t.Run("a managed candidate that no longer verifies falls back to external with a reported reason", func(t *testing.T) {
+		externalPath := writeExternalHarness(t, "claude", "claude-code 1.2.3")
 		managedPath := writeManagedHarness(t, "9.9.9")
 
 		resolutions := Resolve(context.Background(), map[string]ManagedHarness{
@@ -114,24 +114,38 @@ func TestDiscoverManagedAndExternalPrecedence(t *testing.T) {
 		})
 
 		claude := resolutionFor(resolutions, "claude-cli")
-		require.Nil(t, claude.Managed)
+		require.Nil(t, claude.Managed, "a selection whose bytes no longer verify is never a candidate")
 		require.NotNil(t, claude.External)
-		require.Equal(t, HarnessProvenanceExternal, claude.Selected,
-			"drift on the managed candidate leaves the documented external fallback, which is the compatibility contract")
-		require.Empty(t, ManagedHarnesses(resolutions))
+		// An operator-installed harness that worked before managed components existed keeps working,
+		// which is the epic's compatibility decision — but the demotion is never silent.
+		require.Equal(t, HarnessProvenanceExternal, claude.Selected)
+		require.Equal(t, externalPath, claude.Profile.Binary)
+		require.Equal(t, ManagedRejectedDrifted, claude.ManagedRejected)
+		require.Empty(t, ManagedHarnesses(resolutions), "the drifted executable is never handed to the Runner")
 	})
 
-	t.Run("a relative or unverifiable managed entry is never a candidate", func(t *testing.T) {
+	t.Run("a relative or unverifiable managed entry is never a candidate and says why", func(t *testing.T) {
 		t.Setenv("PATH", t.TempDir())
 		resolutions := Resolve(context.Background(), map[string]ManagedHarness{
 			"claude-cli": {Binary: "claude", Version: "9.9.9", Verify: func() error { return nil }},
 			"codex-cli":  {Binary: writeManagedHarness(t, "1.0.0"), Version: "1.0.0"},
 		})
-		for _, harnessID := range []string{"claude-cli", "codex-cli"} {
+		expected := map[string]string{"claude-cli": ManagedRejectedNotAbsolute, "codex-cli": ManagedRejectedUnverifiable}
+		for harnessID, reason := range expected {
 			resolution := resolutionFor(resolutions, harnessID)
 			require.Nil(t, resolution.Managed, harnessID)
 			require.Equal(t, HarnessProvenanceAbsent, resolution.Selected, harnessID)
 			require.False(t, resolution.Profile.Available, harnessID)
+			require.Equal(t, reason, resolution.ManagedRejected, harnessID)
+			require.NotContains(t, resolution.ManagedRejected, resolution.HarnessID+"/", harnessID)
+		}
+	})
+
+	t.Run("a harness with no managed entry reports no rejection", func(t *testing.T) {
+		writeExternalHarness(t, "claude", "claude-code 1.2.3")
+		for _, resolution := range Resolve(context.Background(), nil) {
+			require.Empty(t, resolution.ManagedRejected, resolution.HarnessID,
+				"nothing selected is not a rejection")
 		}
 	})
 

@@ -952,3 +952,182 @@ func TestDoctorReportsExternalProvenanceForAnUnselectedHarness(t *testing.T) {
 	require.Empty(t, entry.ActiveVersion)
 	require.Empty(t, entry.RollbackVersion)
 }
+
+// TestActivateNeverWritesARecordItsOwnParserRejects is the regression for a defect review found: the
+// outgoing selection used to be retained as the rollback target without comparing versions, so
+// re-activating the *same* declared version after its bytes were reinstalled (a re-pinned source
+// archive) wrote a record whose previous and active versions agreed — exactly what
+// ParseActivationLedger rejects — and the whole activation ledger became unreadable for every
+// component on the node.
+func TestActivateNeverWritesARecordItsOwnParserRejects(t *testing.T) {
+	adapter := activationManifestFixture(t).Components[0]
+	fixture := newActivationFixture(t, adapter, versionedEntry(adapter, "2.0.0"))
+	_, err := fixture.activate(t, adapter, "1.0.0", acceptingProbe(nil), nil)
+	require.NoError(t, err)
+	_, err = fixture.activate(t, adapter, "2.0.0", acceptingProbe(nil), nil)
+	require.NoError(t, err)
+
+	// 2.0.0 is reinstalled with different bytes at the same declared version, the way a re-pinned
+	// archive would arrive, and re-activated.
+	replacement := []byte("re-pinned payload for " + versionedEntry(adapter, "2.0.0").Ref().String())
+	target := fixture.targetFor(t, versionedEntry(adapter, "2.0.0"))
+	require.NoError(t, os.WriteFile(target, replacement, 0o755))
+	record, owned := fixture.ledger.RecordFor(target)
+	require.True(t, owned)
+	record.ContentSHA256 = sha256Hex(replacement)
+	record.SizeBytes = int64(len(replacement))
+	fixture.ledger = fixture.ledger.WithRecord(record)
+	require.NoError(t, fixture.ledger.Save(fixture.dataRoot))
+
+	outcome, err := fixture.activate(t, adapter, "2.0.0", acceptingProbe(nil), nil)
+	require.NoError(t, err)
+	require.True(t, outcome.Changed, "the same version with different bytes is a new selection, not a replay")
+	require.NotNil(t, outcome.Previous)
+	require.Equal(t, "1.0.0", outcome.Previous.Version, "the genuinely older retained target survives")
+
+	// The written ledger must be readable back: previous and active can never name one version.
+	reloaded := LoadActivationState(fixture.dataRoot)
+	require.NoError(t, reloaded.Rejection)
+	written, activated := reloaded.Ledger.RecordFor(adapter.Ref().Identity())
+	require.True(t, activated)
+	require.Equal(t, "2.0.0", written.Active.Component.Version)
+	require.Equal(t, sha256Hex(replacement), written.Active.ContentSHA256)
+	require.NotNil(t, written.Previous)
+	require.NotEqual(t, written.Active.Component.Version, written.Previous.Component.Version)
+
+	// And the same is true on a first re-selection, where nothing older is retained at all.
+	single := newActivationFixture(t, adapter)
+	_, err = single.activate(t, adapter, "1.0.0", acceptingProbe(nil), nil)
+	require.NoError(t, err)
+	singleTarget := single.targetFor(t, adapter)
+	singlePayload := []byte("re-pinned single payload")
+	require.NoError(t, os.WriteFile(singleTarget, singlePayload, 0o755))
+	singleRecord, owned := single.ledger.RecordFor(singleTarget)
+	require.True(t, owned)
+	singleRecord.ContentSHA256 = sha256Hex(singlePayload)
+	single.ledger = single.ledger.WithRecord(singleRecord)
+	require.NoError(t, single.ledger.Save(single.dataRoot))
+	outcome, err = single.activate(t, adapter, "1.0.0", acceptingProbe(nil), nil)
+	require.NoError(t, err)
+	require.Nil(t, outcome.Previous)
+	require.NoError(t, LoadActivationState(single.dataRoot).Rejection)
+}
+
+// TestDoctorProvenanceMatchesWhatWouldLaunch is the regression for the second defect review found:
+// doctor reported provenance=managed from the activation record alone, so a drifted managed selection
+// showed as managed while the daemon actually launched the external PATH binary. Provenance now comes
+// from the same launch resolution the daemon uses.
+func TestDoctorProvenanceMatchesWhatWouldLaunch(t *testing.T) {
+	harnessEntry := activationManifestFixture(t).Components[2]
+	adapter := activationManifestFixture(t).Components[0]
+	fixture := newActivationFixture(t, harnessEntry, adapter)
+	_, err := fixture.activate(t, harnessEntry, harnessEntry.Version, acceptingProbe(nil), nil)
+	require.NoError(t, err)
+	_, err = fixture.activate(t, adapter, adapter.Version, acceptingProbe(nil), nil)
+	require.NoError(t, err)
+	// The harness keeps its external installation available, which is what the fallback would use.
+	harnesses := []protocol.HarnessProfile{{ID: "claude-cli", Available: true, Binary: filepath.Join(t.TempDir(), "claude")}}
+	report := func() Report {
+		return RunDoctor(context.Background(), fixture.manifest, fixture.ledger, fixture.dataRoot, fixture.platform,
+			LoadActivationState(fixture.dataRoot), harnesses, "", func(context.Context, string) error { return nil })
+	}
+	require.Equal(t, ComponentProvenanceManaged, doctorEntryFor(report(), "claude-cli").Provenance)
+
+	// Both activated versions drift.
+	require.NoError(t, os.WriteFile(fixture.targetFor(t, harnessEntry), []byte("tampered harness"), 0o755))
+	require.NoError(t, os.WriteFile(fixture.targetFor(t, adapter), []byte("tampered adapter"), 0o755))
+	drifted := report()
+
+	harnessDrift := doctorEntryFor(drifted, "claude-cli")
+	require.Equal(t, harnessEntry.Version, harnessDrift.ActiveVersion, "the record is still reported")
+	require.Equal(t, ComponentProvenanceExternal, harnessDrift.Provenance,
+		"a drifted managed selection reports the fallback the daemon would really take")
+	require.Contains(t, strings.Join(harnessDrift.Notes, " "), "the activated version could not be verified")
+
+	adapterDrift := doctorEntryFor(drifted, "codex-acp")
+	require.Equal(t, ComponentProvenanceNone, adapterDrift.Provenance, "an adapter has no external fallback")
+	require.False(t, adapterDrift.ACPLaunchReady)
+	require.Contains(t, strings.Join(adapterDrift.Notes, " "), "the activated version could not be verified")
+}
+
+// TestDoctorReportsARetainedActiveVersionAsLaunchable proves doctor does not contradict
+// acpadapter.Load for an adapter whose active version the current manifest no longer declares: the
+// retained version still launches, so it must not be reported as not-ready.
+func TestDoctorReportsARetainedActiveVersionAsLaunchable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the auth probe fixture is a shell script")
+	}
+	claudeAdapter := activationManifestFixture(t).Components[0]
+	claudeAdapter.ID = "claude-acp"
+	claudeAdapter.HarnessID = "claude-cli"
+	claudeAdapter.Provider = "anthropic"
+	fixture := newActivationFixture(t, claudeAdapter, versionedEntry(claudeAdapter, "2.0.0"))
+	_, err := fixture.activate(t, claudeAdapter, "1.0.0", acceptingProbe(nil), nil)
+	require.NoError(t, err)
+	// The manifest now declares only 2.0.0 while 1.0.0 stays active and owned.
+	fixture.declareVersion(t, claudeAdapter, "2.0.0")
+	_, declared := manifestEntryFor(fixture.manifest, claudeAdapter.Ref())
+	require.False(t, declared)
+
+	probePath := writeProbeScript(t, t.TempDir(), "probe-clean", "#!/bin/sh\nexit 0\n")
+	harnesses := []protocol.HarnessProfile{{ID: "claude-cli", Available: true, Binary: probePath}}
+	report := RunDoctor(context.Background(), fixture.manifest, fixture.ledger, fixture.dataRoot, fixture.platform,
+		LoadActivationState(fixture.dataRoot), harnesses, "", func(context.Context, string) error { return nil })
+
+	entry := doctorEntryFor(report, "claude-acp")
+	require.Equal(t, "1.0.0", entry.ActiveVersion)
+	require.Equal(t, ComponentProvenanceManaged, entry.Provenance)
+	require.True(t, entry.ACPLaunchReady, "a retained active version launches, so doctor must not call it not-ready")
+	require.Contains(t, strings.Join(entry.Notes, " "), "retained from an earlier manifest")
+}
+
+// TestResolveUndeclaredVersionValidatesAsStrictlyAsTheDeclaredBranch proves the two branches of
+// resolveInstalledVersion agree: the branch that reaches its record by component identity checks the
+// harness binding and the version install directory explicitly, which the declared branch gets for
+// free from resolving the path through ComponentTargetPath.
+func TestResolveUndeclaredVersionValidatesAsStrictlyAsTheDeclaredBranch(t *testing.T) {
+	adapter := activationManifestFixture(t).Components[0]
+	fixture := newActivationFixture(t, adapter, versionedEntry(adapter, "2.0.0"))
+	fixture.declareVersion(t, adapter, "2.0.0")
+	retained := versionedEntry(adapter, "1.0.0")
+	_, declared := manifestEntryFor(fixture.manifest, retained.Ref())
+	require.False(t, declared)
+
+	// The undeclared, retained version resolves on its own.
+	installed, err := resolveInstalledVersion(fixture.dataRoot, fixture.manifest, fixture.platform, fixture.ledger, retained.Ref())
+	require.NoError(t, err)
+	require.Equal(t, fixture.targetFor(t, retained), installed.Path)
+	require.Equal(t, "1.0.0", installed.Ref().Version)
+	require.Equal(t, adapter.HarnessID, installed.Entry.HarnessID)
+
+	original, owned := fixture.ledger.RecordFor(installed.Path)
+	require.True(t, owned)
+
+	// A record bound to another harness is refused rather than lending its bytes to this component.
+	rebound := original
+	rebound.HarnessID = "other-cli"
+	_, err = resolveInstalledVersion(fixture.dataRoot, fixture.manifest, fixture.platform,
+		fixture.ledger.WithRecord(rebound), retained.Ref())
+	require.ErrorContains(t, err, "different harness")
+
+	// A record whose path is outside this version's own install directory is refused, even though it
+	// is inside the data root and its digest matches.
+	foreign := original
+	foreign.Path = filepath.Join(fixture.dataRoot, "adapters", "codex-cli", "codex-acp", "2.0.0", "bin", "codex-acp")
+	require.NotEqual(t, original.Path, foreign.Path)
+	_, err = resolveInstalledVersion(fixture.dataRoot, fixture.manifest, fixture.platform,
+		OwnershipLedger{}.WithRecord(foreign), retained.Ref())
+	require.ErrorContains(t, err, "outside its own install directory")
+
+	// Two records claiming one version are ambiguous, never resolved in either's favor.
+	duplicate := original
+	duplicate.Path = filepath.Join(filepath.Dir(original.Path), "codex-acp-copy")
+	_, err = resolveInstalledVersion(fixture.dataRoot, fixture.manifest, fixture.platform,
+		fixture.ledger.WithRecord(duplicate), retained.Ref())
+	require.ErrorContains(t, err, "more than one file for this component version")
+
+	// A component the manifest does not declare at any version cannot borrow another's metadata.
+	_, err = resolveInstalledVersion(fixture.dataRoot, fixture.manifest, fixture.platform, fixture.ledger,
+		ComponentRef{Kind: ComponentKindACPAdapter, ID: "unknown-acp", Version: "1.0.0"})
+	require.ErrorContains(t, err, "does not declare this component")
+}

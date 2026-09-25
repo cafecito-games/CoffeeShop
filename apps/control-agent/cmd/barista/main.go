@@ -72,8 +72,19 @@ func run(args []string) int {
 		log.Printf("ownership ledger could not be read, so no managed component is available: %v", ownershipErr)
 		ownership = setup.OwnershipLedger{}
 	}
-	resolutions := harness.Resolve(ctx, managedHarnesses(componentManifest, ownership, activation, cfg.DataRoot))
+	managed, unresolvedManaged := managedHarnesses(componentManifest, ownership, activation, cfg.DataRoot)
+	resolutions := harness.Resolve(ctx, managed)
 	for _, resolution := range resolutions {
+		// Every way a managed selection can fail to be honored is logged, so falling back to an
+		// external PATH installation is never silent and never diverges from what doctor reports.
+		if reason, unresolved := unresolvedManaged[resolution.HarnessID]; unresolved {
+			log.Printf("harness %s: the activated managed version is not usable (%s); %s", resolution.HarnessID, reason, fallbackDescription(resolution))
+			continue
+		}
+		if resolution.ManagedRejected != "" {
+			log.Printf("harness %s: the activated managed version was rejected (%s); %s", resolution.HarnessID, resolution.ManagedRejected, fallbackDescription(resolution))
+			continue
+		}
 		if resolution.Managed != nil && resolution.External != nil {
 			log.Printf("harness %s: a managed version %s and an external installation are both present; the managed version is selected", resolution.HarnessID, resolution.Managed.Version)
 		}
@@ -163,6 +174,15 @@ func run(args []string) int {
 		return 1
 	}
 	return 0
+}
+
+// fallbackDescription names what a harness falls back to when its managed selection is not usable,
+// so one log line carries both the failure and its consequence.
+func fallbackDescription(resolution harness.HarnessResolution) string {
+	if resolution.External != nil {
+		return "falling back to the external installation found on PATH"
+	}
+	return "this harness is unavailable"
 }
 
 // newRunner wires the node's Runner from both views of its harness capability. Native execution

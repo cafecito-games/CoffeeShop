@@ -277,8 +277,10 @@ func TestManagedHarnessesRefusesUnverifiableSelections(t *testing.T) {
 	})
 	require.NoError(t, ownership.Save(dataRoot))
 
-	// Installed but never activated: not launchable.
-	require.Empty(t, managedHarnesses(manifest, ownership, setup.LoadActivationState(dataRoot), dataRoot))
+	// Installed but never activated: not launchable, and not a failure either — nothing was selected.
+	resolved, unresolved := managedHarnesses(manifest, ownership, setup.LoadActivationState(dataRoot), dataRoot)
+	require.Empty(t, resolved)
+	require.Empty(t, unresolved)
 
 	_, err = setup.Activate(context.Background(), setup.ActivationContext{
 		DataRoot: dataRoot, Manifest: manifest, Platform: platform, Ownership: ownership,
@@ -288,17 +290,24 @@ func TestManagedHarnessesRefusesUnverifiableSelections(t *testing.T) {
 	}, setup.ComponentSelector{Kind: setup.ComponentKindHarness, ID: "managed-cli", Version: "1.0.0"})
 	require.NoError(t, err)
 
-	resolved := managedHarnesses(manifest, ownership, setup.LoadActivationState(dataRoot), dataRoot)
+	resolved, unresolved = managedHarnesses(manifest, ownership, setup.LoadActivationState(dataRoot), dataRoot)
+	require.Empty(t, unresolved)
 	require.Len(t, resolved, 1)
 	require.Equal(t, target, resolved["managed-cli"].Binary)
 	require.Equal(t, "1.0.0", resolved["managed-cli"].Version)
 	require.NoError(t, resolved["managed-cli"].Verify())
 
-	// A rejected activation ledger yields no managed candidate at all.
-	require.Empty(t, managedHarnesses(manifest, ownership, setup.ActivationState{Rejection: fmt.Errorf("unreadable")}, dataRoot))
+	// A rejected activation ledger yields no managed candidate at all, and says so rather than
+	// looking like an ordinary "nothing selected".
+	rejected, rejectedReasons := managedHarnesses(manifest, ownership, setup.ActivationState{Rejection: fmt.Errorf("unreadable")}, dataRoot)
+	require.Empty(t, rejected)
+	require.Equal(t, "the activation ledger could not be accepted", rejectedReasons["managed-cli"])
 
-	// Drifted bytes are refused at resolution, and the live Verify keeps refusing afterwards.
+	// Drifted bytes are refused at resolution, the live Verify keeps refusing afterwards, and the
+	// demotion is reported instead of silently leaving the external PATH binary in charge.
 	require.NoError(t, os.WriteFile(target, []byte("tampered"), 0o755))
 	require.Error(t, resolved["managed-cli"].Verify())
-	require.Empty(t, managedHarnesses(manifest, ownership, setup.LoadActivationState(dataRoot), dataRoot))
+	drifted, driftedReasons := managedHarnesses(manifest, ownership, setup.LoadActivationState(dataRoot), dataRoot)
+	require.Empty(t, drifted)
+	require.Equal(t, "the activated version could not be verified", driftedReasons["managed-cli"])
 }

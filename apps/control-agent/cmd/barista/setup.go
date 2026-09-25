@@ -319,7 +319,8 @@ func runDoctor(args []string) int {
 	activation := setup.LoadActivationState(*dataRoot)
 	// Doctor reuses the same read-only discovery the daemon performs at startup, including the
 	// managed activated versions, so what it reports is what the daemon would launch.
-	resolutions := harness.Resolve(context.Background(), managedHarnesses(manifest, ledger, activation, *dataRoot))
+	managed, _ := managedHarnesses(manifest, ledger, activation, *dataRoot)
+	resolutions := harness.Resolve(context.Background(), managed)
 	profiles := harness.Profiles(resolutions)
 	report := setup.RunDoctor(context.Background(), manifest, ledger, *dataRoot, currentPlatform(), activation, profiles, *controlEndpoint, dialHubEndpoint)
 	addClaudeACPAuthModeNote(report.Components, strings.TrimSpace(*claudeACPAuthMode))
