@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"maps"
 	"os"
 	"os/signal"
 	"slices"
@@ -74,6 +75,18 @@ func run(args []string) int {
 	}
 	managed, unresolvedManaged := managedHarnesses(componentManifest, ownership, activation, cfg.DataRoot)
 	resolutions := harness.Resolve(ctx, managed)
+	// A manifest may declare a harness component for a harness this build has no provider policy for,
+	// which Resolve therefore never returns. Its unresolved reason is reported first so the
+	// "never silent" property has no blind spot exactly where the harness is also unlaunchable.
+	reported := map[string]bool{}
+	for _, resolution := range resolutions {
+		reported[resolution.HarnessID] = true
+	}
+	for _, harnessID := range slices.Sorted(maps.Keys(unresolvedManaged)) {
+		if !reported[harnessID] {
+			log.Printf("harness %s: the activated managed version is not usable (%s); Barista has no provider policy for this harness, so it is unavailable", harnessID, unresolvedManaged[harnessID])
+		}
+	}
 	for _, resolution := range resolutions {
 		// Every way a managed selection can fail to be honored is logged, so falling back to an
 		// external PATH installation is never silent and never diverges from what doctor reports.

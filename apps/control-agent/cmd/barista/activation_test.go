@@ -13,6 +13,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/harness"
 	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/setup"
 )
 
@@ -310,4 +311,36 @@ func TestManagedHarnessesRefusesUnverifiableSelections(t *testing.T) {
 	drifted, driftedReasons := managedHarnesses(manifest, ownership, setup.LoadActivationState(dataRoot), dataRoot)
 	require.Empty(t, drifted)
 	require.Equal(t, "the activated version could not be verified", driftedReasons["managed-cli"])
+}
+
+// TestManagedHarnessesReportsAHarnessWithoutAProviderPolicy proves the "never silent" property has no
+// blind spot for a manifest harness this build has no provider policy for: harness.Resolve never
+// returns such a harness, so its unresolved reason must still be reachable for the daemon to log.
+func TestManagedHarnessesReportsAHarnessWithoutAProviderPolicy(t *testing.T) {
+	platform := runtime.GOOS + "-" + runtime.GOARCH
+	manifestJSON := fmt.Sprintf(`{
+		"manifestVersion": "2",
+		"components": [
+			{
+				"id": "gemini-cli", "kind": "harness", "harnessId": "gemini-cli", "provider": "google",
+				"label": "Gemini CLI", "version": "1.0.0",
+				"platforms": {"%s": {"kind": "manual", "executablePath": "bin/gemini"}},
+				"launch": {}
+			}
+		]
+	}`, platform)
+	manifest, err := setup.ParseManifest([]byte(manifestJSON))
+	require.NoError(t, err)
+	dataRoot := t.TempDir()
+
+	// A rejected activation ledger is the simplest way to reach the unresolved branch for a harness
+	// whose bytes were never installed.
+	_, unresolved := managedHarnesses(manifest, setup.OwnershipLedger{}, setup.ActivationState{Rejection: fmt.Errorf("unreadable")}, dataRoot)
+	require.Equal(t, "the activation ledger could not be accepted", unresolved["gemini-cli"])
+
+	// The harness is absent from every resolution, which is exactly why the daemon reports the
+	// unresolved keys separately before walking the resolutions.
+	for _, resolution := range harness.Resolve(context.Background(), nil) {
+		require.NotEqual(t, "gemini-cli", resolution.HarnessID)
+	}
 }
