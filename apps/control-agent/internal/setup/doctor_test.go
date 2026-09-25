@@ -223,3 +223,57 @@ func TestRunDoctorSanitizesControlEndpointForDisplay(t *testing.T) {
 	require.NotContains(t, report.HubConnectivity.Endpoint, "#fragment")
 	require.Equal(t, "https://hub.example:8787/control-agent", report.HubConnectivity.Endpoint)
 }
+
+// TestRunDoctorNeverReportsAHarnessComponentAsACPLaunchReady proves the kind-aware half of the
+// readiness verdict: a harness component can be installed and its auth probe can pass, but it is
+// not the thing that speaks ACP, so ACPLaunchReady stays false for it while the adapter alongside it
+// is reported ready.
+func TestRunDoctorNeverReportsAHarnessComponentAsACPLaunchReady(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test fixtures are shell scripts")
+	}
+	probePath := writeProbeScript(t, t.TempDir(), "probe-clean", "#!/bin/sh\nexit 0\n")
+	manifestJSON := []byte(`{
+		"manifestVersion": "2",
+		"components": [
+			{
+				"id": "claude-cli", "kind": "harness", "harnessId": "claude-cli", "provider": "anthropic",
+				"label": "Claude Code", "version": "2.1.0",
+				"platforms": {"darwin-arm64": {"kind": "manual", "executablePath": "bin/claude"}},
+				"launch": {}
+			},
+			{
+				"id": "claude-acp", "kind": "acp-adapter", "harnessId": "claude-cli", "provider": "anthropic",
+				"label": "Claude ACP adapter", "version": "0.79.0",
+				"platforms": {"darwin-arm64": {"kind": "manual", "executablePath": "bin/claude-agent-acp"}},
+				"launch": {}
+			}
+		]
+	}`)
+	manifest, err := ParseManifest(manifestJSON)
+	require.NoError(t, err)
+	dataRoot := t.TempDir()
+	ledger := OwnershipLedger{}
+	for _, entry := range manifest.Components {
+		ledger, _ = installOwnedComponent(t, dataRoot, ledger, entry, []byte("payload for "+entry.ID))
+	}
+	harnesses := []protocol.HarnessProfile{{ID: "claude-cli", Available: true, Binary: probePath}}
+
+	report := RunDoctor(context.Background(), manifest, ledger, dataRoot, "darwin-arm64", harnesses, "http://hub.example:8787", func(context.Context, string) error {
+		return nil
+	})
+
+	harnessEntry := doctorEntryFor(report, "claude-cli")
+	require.Equal(t, ComponentKindHarness, harnessEntry.Component.Kind)
+	require.True(t, harnessEntry.HarnessInstalled)
+	require.True(t, harnessEntry.ComponentInstalled)
+	require.Equal(t, AuthReadinessReady, harnessEntry.AuthReadiness)
+	require.False(t, harnessEntry.ACPLaunchReady, "a harness component must never be reported as ACP-launch-ready")
+
+	adapterEntry := doctorEntryFor(report, "claude-acp")
+	require.Equal(t, ComponentKindACPAdapter, adapterEntry.Component.Kind)
+	require.True(t, adapterEntry.ComponentInstalled)
+	require.True(t, adapterEntry.ACPLaunchReady)
+	// The two kinds install under distinct directories, so neither shadows the other.
+	require.NotEqual(t, harnessEntry.ComponentPath, adapterEntry.ComponentPath)
+}
