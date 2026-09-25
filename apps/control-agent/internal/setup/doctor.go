@@ -82,9 +82,15 @@ type ActivationLedgerStatus struct {
 // shared identity the plan and the ownership ledger use, so doctor cannot describe a component in
 // terms the rest of setup would not recognize.
 type ComponentDoctorEntry struct {
-	Component          ComponentRef  `json:"component"`
-	HarnessID          string        `json:"harnessId"`
-	HarnessInstalled   bool          `json:"harnessInstalled"`   // from the discovered harness profile's Available flag, passed in
+	Component        ComponentRef `json:"component"`
+	HarnessID        string       `json:"harnessId"`
+	HarnessInstalled bool         `json:"harnessInstalled"` // from the discovered harness profile's Available flag, passed in
+	// HarnessApplicable reports whether HarnessInstalled is a meaningful question for this component's
+	// kind. A capability pack is harness-agnostic: it has no provider CLI of its own, so its
+	// HarnessInstalled is false and that false is *not* a gap. Presentation must read this field
+	// before it renders HarnessInstalled, or it will show an operator a missing harness to chase that
+	// was never supposed to exist.
+	HarnessApplicable  bool          `json:"harnessApplicable"`
 	ComponentInstalled bool          `json:"componentInstalled"` // ownership ledger has a matching-digest record at this platform's target path
 	ComponentPath      string        `json:"componentPath,omitempty"`
 	AuthReadiness      AuthReadiness `json:"authReadiness"`
@@ -169,13 +175,19 @@ func RunDoctor(
 			Component:        entry.Ref(),
 			HarnessID:        entry.HarnessID,
 			HarnessInstalled: discovered && harnessProfile.Available,
-			AuthReadiness:    AuthReadinessUnknown,
-			Provenance:       ComponentProvenanceNone,
+			// A kind with no harness of its own never claims one is installed, and says so explicitly
+			// rather than leaving a false to be read as a missing dependency.
+			HarnessApplicable: entry.Kind.HasHarnessOfItsOwn(),
+			AuthReadiness:     AuthReadinessUnknown,
+			Provenance:        ComponentProvenanceNone,
+		}
+		if !doctorEntry.HarnessApplicable {
+			doctorEntry.HarnessInstalled = false
 		}
 		// The activated version is resolved through the one launch-resolution path, so doctor can
 		// never report a provenance the daemon would not act on. The resolution is read-only.
 		activeInstalled, activeErr := ActiveInstalledComponent(dataRoot, manifest, platform, ledger, activation, entry.Ref().Identity())
-		describeActivation(&doctorEntry, activation, activeErr, discovered && harnessProfile.Available)
+		describeActivation(&doctorEntry, activation, activeErr, doctorEntry.HarnessInstalled)
 		distribution, supported := entry.Platforms[platform]
 		if !supported {
 			// A component with no distribution for this platform stays visible in the report with a

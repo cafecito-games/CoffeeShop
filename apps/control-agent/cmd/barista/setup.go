@@ -340,7 +340,7 @@ func runDoctor(args []string) int {
 	for _, entry := range report.Components {
 		fmt.Printf("%s (%s): harness=%s component=%s auth=%s launch=%s provenance=%s active=%s rollback=%s\n",
 			entry.Component, entry.HarnessID,
-			installedOrMissing(entry.HarnessInstalled),
+			harnessSummary(entry),
 			installedOrMissing(entry.ComponentInstalled),
 			entry.AuthReadiness,
 			readyOrNot(entry.ACPLaunchReady),
@@ -368,6 +368,17 @@ func runDoctor(args []string) int {
 	fmt.Printf("hub %s: %s\n", report.HubConnectivity.Endpoint, reachableSummary(report.HubConnectivity))
 	fmt.Printf("project readiness: %s\n", report.ProjectReadiness)
 	return 0
+}
+
+// harnessSummary renders a component's harness column. A component kind with no harness of its own —
+// a capability pack, which is harness-agnostic workflow content — reports "not-applicable" rather
+// than "missing", so an operator is never sent to install a provider CLI that this component neither
+// has nor needs.
+func harnessSummary(entry setup.ComponentDoctorEntry) string {
+	if !entry.HarnessApplicable {
+		return "not-applicable"
+	}
+	return installedOrMissing(entry.HarnessInstalled)
 }
 
 func installedOrMissing(installed bool) string {

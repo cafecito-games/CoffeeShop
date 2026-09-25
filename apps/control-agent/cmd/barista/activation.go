@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/capabilitypack"
 	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/harness"
 	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/protocol"
 	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/setup"
@@ -67,9 +68,10 @@ func managedHarnesses(
 }
 
 // componentProbe is the compiled-in candidate probe activation and rollback run before a selection
-// becomes durable: a managed harness answers its compiled-in --version contract, and an ACP adapter
-// completes the existing ACP startup handshake. A kind with no probe cannot be activated at all
-// rather than being activated unprobed. No probe result ever carries raw child-process output.
+// becomes durable: a managed harness answers its compiled-in --version contract, an ACP adapter
+// completes the existing ACP startup handshake, and a capability pack is re-validated through the
+// same validator that packaged it. A kind with no probe cannot be activated at all rather than being
+// activated unprobed. No probe result ever carries raw child-process output.
 func componentProbe(clientVersion string, nativeBinaries map[string]string) setup.ComponentProbe {
 	return func(ctx context.Context, installed setup.InstalledComponent) error {
 		switch installed.Ref().Kind {
@@ -77,12 +79,29 @@ func componentProbe(clientVersion string, nativeBinaries map[string]string) setu
 			return setup.ProbeHarnessVersion(ctx, installed)
 		case setup.ComponentKindACPAdapter:
 			return probeACPAdapter(ctx, installed, clientVersion, nativeBinaries)
+		case setup.ComponentKindCapabilityPack:
+			return probeCapabilityPack(installed)
 		default:
 			// Unreachable while setup.ComponentKinds and this switch agree; an unrecognized kind
 			// fails closed rather than being selected without any probe.
 			return fmt.Errorf("%s has no activation probe", installed.Ref())
 		}
 	}
+}
+
+// probeCapabilityPack validates an installed capability pack through internal/capabilitypack, the
+// same package that packaged it. It is deliberately not an execution: a pack is workflow prose, so
+// there is nothing to run and nothing to ask for a version — the artifact's own declared identity is
+// cross-checked against the component manifest entry instead, so a well-formed pack of some other
+// version can never be recorded as this one.
+//
+// The returned error carries the validator's reason, which is already bounded and secret-screened by
+// internal/capabilitypack and names only fields and validated paths, never packaged content.
+func probeCapabilityPack(installed setup.InstalledComponent) error {
+	if _, err := capabilitypack.ProbeInstalledArtifact(installed.Path, installed.Entry.ID, installed.Ref().Version); err != nil {
+		return fmt.Errorf("%s is not a valid Coffee Shop capability pack: %w", installed.Ref(), err)
+	}
+	return nil
 }
 
 // probeACPAdapter runs the candidate adapter through the existing ACP startup handshake. The

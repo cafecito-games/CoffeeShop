@@ -223,8 +223,9 @@ func ComputePlanDigest(plan Plan) string {
 // migration never silently relocates or orphans an installed file. A kind absent from this map has
 // no install location at all, which fails planning closed rather than inventing one.
 var componentKindDirectories = map[ComponentKind]string{
-	ComponentKindACPAdapter: "adapters",
-	ComponentKindHarness:    "harnesses",
+	ComponentKindACPAdapter:     "adapters",
+	ComponentKindHarness:        "harnesses",
+	ComponentKindCapabilityPack: "capability-packs",
 }
 
 // componentRelativeTargetPath is the data-root-relative install location for one component entry at
