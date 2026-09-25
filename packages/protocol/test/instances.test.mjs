@@ -133,6 +133,12 @@ test("lifecycle digest preserves identity and normalizes only semantic defaults 
     assert.equal(protocol.validateInstanceLifecycleRequest(request).ok, true);
     assert.notEqual(digest(request), digest({ ...request, instanceId: "other" }));
   }
+  // A renewal's omitted timeout preserves the instance's existing timeout, so it must digest
+  // differently from an explicit value, even the global default.
+  const renew = { operation: "renew", threadId: create.threadId, instanceId: "instance-one", idempotency: create.idempotency };
+  assert.notEqual(digest(renew), digest({ ...renew, idleTimeoutSeconds: 1800 }));
+  assert.notEqual(digest(renew), digest({ ...renew, idleTimeoutSeconds: 3600 }));
+  assert.equal(digest({ ...renew, idleTimeoutSeconds: 1800 }), digest({ ...renew, idleTimeoutSeconds: 1800 }));
 });
 
 test("legacy actor-only records remain readable but cannot become a v5 dispatch", () => {

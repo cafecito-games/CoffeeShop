@@ -339,7 +339,10 @@ type BatchPlan =
 function planTaskBatch(state: Readonly<State>, callerSource: CallerSource, batch: NormalizedTaskBatch, options: TaskBatchOptions): BatchPlan {
   const source = authorizeSource(state, callerSource);
   const digest = taskBatchDigest(batch, source.threadId, source.digestIdentity, options.placementOverrides);
-  const prior = state.taskSubmissions?.find((item) => item.threadId === source.threadId && item.idempotencyKey === batch.idempotencyKey);
+  // Caller-supplied keys live in their own space: a submission the hub derived for another caller's
+  // operation never answers, and never conflicts with, a key an ordinary caller chose.
+  const prior = state.taskSubmissions?.find((item) =>
+    item.threadId === source.threadId && item.origin === undefined && item.idempotencyKey === batch.idempotencyKey);
   if (prior) {
     if (prior.digest !== digest) throw new CoordinationError("idempotency_conflict", "The idempotency key was already used with a different task batch");
     return { kind: "replay", submission: prior };
@@ -491,6 +494,81 @@ export async function submitTaskBatchForSource(
   });
   if (!result) throw new CoordinationError("persistence_failed", "The task batch was not submitted", true);
   return result;
+}
+
+/**
+ * The key space of a task the hub derives for an instance lifecycle request. No caller-supplied
+ * batch can enter it, so a derived key and a caller-chosen key of the same string never meet.
+ */
+export const initialTaskOrigin = "instance-lifecycle" as const;
+
+/** The seed for the atomic initial task created with an instance, in the instance lifecycle transaction. */
+export interface InitialTaskSeed {
+  title: string;
+  instructions: string;
+  requirements?: ExecutionRequirements;
+  /** Derived over the caller principal, thread, and operation; see `initialTaskIdempotencyKey`. */
+  idempotencyKey: string;
+  /** The canonical principal identity of the instance lifecycle caller. */
+  sourceKey: string;
+}
+
+/**
+ * Appends one task inside the caller's transaction. It reuses the task-batch normalization, digest,
+ * and submission records so the initial task is indistinguishable from any other task once created;
+ * because it runs inside the instance lifecycle transaction, any failure rolls back both sides.
+ */
+export function appendInitialTaskInState(state: State, threadId: string, seed: InitialTaskSeed, at: string): Task {
+  const thread = state.threads?.find((item) => item.id === threadId);
+  if (!thread || thread.status !== "active") throw invalid("Task creation requires an active thread");
+  const batch = normalizeTaskBatch({
+    idempotencyKey: seed.idempotencyKey,
+    tasks: [{
+      key: "initial",
+      title: seed.title,
+      instructions: seed.instructions,
+      requirements: seed.requirements ?? {},
+      dependencies: []
+    }]
+  });
+  const digest = taskBatchDigest(batch, threadId, seed.sourceKey);
+  const prior = state.taskSubmissions?.find((item) =>
+    item.threadId === threadId && item.origin === initialTaskOrigin && item.idempotencyKey === seed.idempotencyKey);
+  if (prior) {
+    if (prior.digest !== digest) throw new CoordinationError("idempotency_conflict", "The idempotency key was already used with a different task batch");
+    const existing = state.tasks?.find((item) => prior.tasks.some((entry) => entry.taskId === item.id));
+    if (!existing) throw new CoordinationError("inconsistent_state", "A previously submitted task is unavailable", true);
+    return existing;
+  }
+  const task: Task = {
+    id: newId("task"),
+    threadId,
+    title: batch.tasks[0].title,
+    instructions: batch.tasks[0].instructions,
+    status: "pending",
+    requirements: structuredClone(batch.tasks[0].requirements),
+    dependencies: [],
+    sourceKey: seed.sourceKey,
+    idempotencyKey: seed.idempotencyKey,
+    attemptRunIds: [],
+    createdAt: at,
+    updatedAt: at
+  };
+  state.tasks ??= [];
+  state.tasks.push(task);
+  state.taskSubmissions ??= [];
+  state.taskSubmissions.push({
+    id: newId("tasksub"),
+    threadId,
+    sourceKey: seed.sourceKey,
+    idempotencyKey: seed.idempotencyKey,
+    origin: initialTaskOrigin,
+    digest,
+    tasks: [{ key: "initial", taskId: task.id }],
+    createdAt: at
+  });
+  settleDependents(state, at);
+  return task;
 }
 
 /** The only way task status changes; it enforces the protocol's monotonic transition table. */

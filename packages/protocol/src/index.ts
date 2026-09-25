@@ -2882,8 +2882,13 @@ export function validateInstanceLifecycleRequest(value: unknown): Validation<Ins
 export function instanceLifecycleDigestInput(request: InstanceLifecycleRequest): Validation<string> {
   const valid = validateInstanceLifecycleRequest(request);
   if (!valid.ok) return valid;
+  /*
+   * Only `create` coalesces an omitted idle timeout into the default, because creation applies that
+   * default, so the two requests are semantically identical. A renewal's omission preserves the
+   * instance's existing timeout instead, so it must digest differently from any explicit value.
+   */
   const normalized = { ...request, idempotency: { caller: request.idempotency.caller },
-    ...((request.operation === "create" || request.operation === "renew") ? { idleTimeoutSeconds: request.idleTimeoutSeconds ?? defaultInstanceIdleTimeoutSeconds } : {}) };
+    ...(request.operation === "create" ? { idleTimeoutSeconds: request.idleTimeoutSeconds ?? defaultInstanceIdleTimeoutSeconds } : {}) };
   const canonical = (item: unknown, key = ""): unknown => {
     if (Array.isArray(item)) return key === "preferences" ? item : [...item];
     if (!isRecord(item)) return item;

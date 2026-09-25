@@ -68,6 +68,36 @@ test("version 1 connections have no barrier, and version-4 dispatch content is r
   assert.equal(registry.deliveryConnection("node-three", dispatch()), undefined);
 });
 
+test("instance commands stay behind the resident snapshot even after the replay barrier opens", () => {
+  const registry = new ControlConnectionRegistry<FakeSocket>(open);
+  const socket = new FakeSocket();
+  const connection = registry.register("node-one", socket, "5");
+  const release = { type: "instance.release" as const, instanceId: "instance-one", allocationId: "allocation-one", mode: "cancel" as const };
+  assert.equal(registry.sendInstanceCommand("node-one", release), false, "an unsynced connection accepts no instance command");
+  registry.markSynced(connection);
+  assert.equal(registry.sendInstanceCommand("node-one", release), false, "the replay barrier alone must not open instance delivery");
+  assert.deepEqual(socket.sent, []);
+
+  assert.equal(registry.openInstanceDelivery(connection), true);
+  assert.equal(registry.sendInstanceCommand("node-one", release), true);
+  assert.equal(socket.sent.length, 1);
+
+  // A reconnect is a new generation: its instance delivery stays closed until it reconciles.
+  const replacementConnection = registry.register("node-one", new FakeSocket(), "5");
+  registry.markSynced(replacementConnection);
+  assert.equal(registry.sendInstanceCommand("node-one", release), false);
+});
+
+test("instance delivery is never opened for a stale connection", () => {
+  const registry = new ControlConnectionRegistry<FakeSocket>(open);
+  const socket = new FakeSocket();
+  const connection = registry.register("node-one", socket, "5");
+  registry.markSynced(connection);
+  const replacement = registry.register("node-one", new FakeSocket(), "5");
+  assert.equal(registry.openInstanceDelivery(connection), false);
+  assert.equal(registry.barrierPassed(replacement), false);
+});
+
 test("releasing a stale socket leaves the node's current connection in place", () => {
   const registry = new ControlConnectionRegistry<FakeSocket>(open);
   const oldSocket = new FakeSocket();

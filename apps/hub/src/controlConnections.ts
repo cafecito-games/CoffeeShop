@@ -1,4 +1,4 @@
-import { canSendToControlAgent, supportsControlCapability, type ControlProtocolVersion, type HubToControlAgent } from "@coffee-shop/protocol";
+import { canSendToControlAgent, supportsControlCapability, type ControlProtocolVersion, type HubToControlAgent, type InstanceHubMessage } from "@coffee-shop/protocol";
 
 export interface ControlSocket {
   readonly readyState: number;
@@ -12,6 +12,12 @@ export interface ControlConnection<Socket extends ControlSocket = ControlSocket>
   readonly protocolVersion: ControlProtocolVersion;
   readonly generation: number;
   synced: boolean;
+  /**
+   * Whether instance commands may be written to this connection yet. The replay barrier alone does
+   * not open it: the reported resident set behind the sync must be applied first, so a pending
+   * provision delivered in that window can never be judged lost against a pre-provision snapshot.
+   */
+  instanceDeliveryOpen: boolean;
   /** Runs dispatched on this connection; a run is dispatched at most once per connection. */
   readonly deliveredRunIds: Set<string>;
 }
@@ -48,7 +54,7 @@ export class ControlConnectionRegistry<Socket extends ControlSocket> {
     const previous = this.bySocket.get(socket);
     if (previous && this.byNode.get(previous.nodeId) === previous) this.byNode.delete(previous.nodeId);
     this.generation += 1;
-    const connection: ControlConnection<Socket> = { nodeId, socket, protocolVersion, generation: this.generation, synced: false, deliveredRunIds: new Set() };
+    const connection: ControlConnection<Socket> = { nodeId, socket, protocolVersion, generation: this.generation, synced: false, instanceDeliveryOpen: false, deliveredRunIds: new Set() };
     this.byNode.set(nodeId, connection);
     this.bySocket.set(socket, connection);
     return connection;
@@ -79,6 +85,18 @@ export class ControlConnectionRegistry<Socket extends ControlSocket> {
   markSynced(connection: ControlConnection<Socket>) {
     if (!this.isCurrent(connection)) return false;
     connection.synced = true;
+    return true;
+  }
+
+  /**
+   * Opens instance command delivery for one connection. The sync handler calls this only after the
+   * connection's reported resident set has been applied (or its sync carried no authoritative
+   * instance evidence), so a persisted provision is never delivered against a pre-provision
+   * snapshot that would then judge it lost.
+   */
+  openInstanceDelivery(connection: ControlConnection<Socket>) {
+    if (!this.isCurrent(connection)) return false;
+    connection.instanceDeliveryOpen = true;
     return true;
   }
 
@@ -126,6 +144,22 @@ export class ControlConnectionRegistry<Socket extends ControlSocket> {
     }
     const connection = this.current(nodeId);
     if (!connection || !canSendToControlAgent(message, connection.protocolVersion)) return false;
+    try {
+      connection.socket.send(JSON.stringify(message));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Sends a version-5 instance command to the node's current connection once it has passed its
+   * reconnect barrier and its reported resident set has been applied. A stale or pre-v5 connection
+   * records no delivery, so the persisted command replays after the node's next authoritative sync.
+   */
+  sendInstanceCommand(nodeId: string, message: InstanceHubMessage) {
+    const connection = this.current(nodeId);
+    if (!connection || !this.barrierPassed(connection) || !connection.instanceDeliveryOpen || !canSendToControlAgent(message, connection.protocolVersion)) return false;
     try {
       connection.socket.send(JSON.stringify(message));
       return true;

@@ -26,6 +26,14 @@ import {
   type TimelineEvent
 } from "@coffee-shop/protocol";
 import type { HarnessEventStream, StoredHarnessEvent } from "./harnessEvents.js";
+import {
+  assertPersistedInstanceState,
+  type InstanceDeliveryRecord,
+  type InstanceLifecycleReceipt,
+  type InstanceReleaseIntent,
+  type NodeInstanceResidency,
+  type RemoteReleaseRequest
+} from "./instances.js";
 import { assertPersistedSessionState } from "./persistedSessionState.js";
 import { recordTaskEvents, type TaskEventEntry, type TaskEventStream } from "./taskEvents.js";
 
@@ -40,6 +48,12 @@ export interface TaskSubmission {
   /** The agent the submitting run executes as; absent for an external orchestrator. */
   creatorAgentId?: string;
   idempotencyKey: string;
+  /**
+   * The key space the idempotency key belongs to. Absent for a caller-supplied batch; a batch the
+   * hub derives on a caller's behalf names its own origin so the two spaces cannot collide even on
+   * an identical key string.
+   */
+  origin?: "instance-lifecycle";
   /** SHA-256 of the normalized batch; see `taskBatchDigest`. */
   digest: string;
   tasks: Array<{ key: string; taskId: string }>;
@@ -75,6 +89,16 @@ interface HubOnlyState {
   taskEventStreams?: TaskEventStream[];
   harnessEventStreams?: HarnessEventStream[];
   harnessEvents?: StoredHarnessEvent[];
+  /** Version-5 instance lifecycle idempotency receipts, release intents, and delivery decisions. */
+  instanceLifecycleReceipts?: InstanceLifecycleReceipt[];
+  instanceReleaseIntents?: InstanceReleaseIntent[];
+  instanceDeliveries?: InstanceDeliveryRecord[];
+  remoteReleaseRequests?: RemoteReleaseRequest[];
+  /**
+   * The resident set of each node, replaced wholesale by its latest report of resident identities —
+   * every heartbeat as well as its reconnect barrier. It is the hub's single record of residency.
+   */
+  nodeInstanceResidency?: NodeInstanceResidency[];
   /** Prevents a deliberately emptied catalog from re-importing the legacy profiles file. */
   projectProfilesImported?: boolean;
 }
@@ -93,6 +117,14 @@ const emptyState = (): State => withOrchestrationDefaults({
   threads: [],
   delegations: [],
   artifacts: [],
+  instances: [],
+  allocations: [],
+  templates: [],
+  instanceLifecycleReceipts: [],
+  instanceReleaseIntents: [],
+  instanceDeliveries: [],
+  remoteReleaseRequests: [],
+  nodeInstanceResidency: [],
   taskSubmissions: [],
   taskUpdates: [],
   taskEventJournal: [],
@@ -123,6 +155,25 @@ export function addOrchestrationDefaults(state: State) {
   state.orchestratorClients ??= [];
   state.orchestratorAttachments ??= [];
   return changed;
+}
+
+/**
+ * Initializes the version-5 instance collections of a snapshot persisted before they existed. Empty
+ * defaults are deterministic: no legacy record is migrated into an instance or allocation, and an
+ * absent collection is not a migration, so a legacy file the hub loads is not rewritten for this —
+ * the defaults reach disk with the next real transaction. Only a missing field is a legacy
+ * snapshot: an explicitly present but malformed value (null, wrong type) is left for validation to
+ * reject, never silently replaced with a default.
+ */
+export function addInstanceDefaults(state: State) {
+  if (state.instances === undefined) state.instances = [];
+  if (state.allocations === undefined) state.allocations = [];
+  if (state.templates === undefined) state.templates = [];
+  if (state.instanceLifecycleReceipts === undefined) state.instanceLifecycleReceipts = [];
+  if (state.instanceReleaseIntents === undefined) state.instanceReleaseIntents = [];
+  if (state.instanceDeliveries === undefined) state.instanceDeliveries = [];
+  if (state.remoteReleaseRequests === undefined) state.remoteReleaseRequests = [];
+  if (state.nodeInstanceResidency === undefined) state.nodeInstanceResidency = [];
 }
 
 /** Rejects malformed or duplicate persisted profiles before they can affect scheduling. */
@@ -279,7 +330,8 @@ export function assertPersistedTaskState(state: State) {
   for (const [index, submission] of (state.taskSubmissions ?? []).entries()) {
     if (!isRecord(submission) || !isNonEmptyString(submission.id) || !isNonEmptyString(submission.threadId) || !isNonEmptyString(submission.idempotencyKey)
       || !isNonEmptyString(submission.digest) || !Array.isArray(submission.tasks)
-      || !submission.tasks.every((entry) => isRecord(entry) && isNonEmptyString(entry.key) && isNonEmptyString(entry.taskId))) {
+      || !submission.tasks.every((entry) => isRecord(entry) && isNonEmptyString(entry.key) && isNonEmptyString(entry.taskId))
+      || (submission.origin !== undefined && submission.origin !== "instance-lifecycle")) {
       throw new Error(`Persisted task submission ${index} is malformed`);
     }
   }
@@ -539,6 +591,7 @@ export class Store {
     const addedThreadOrchestrators = addThreadOrchestratorDefaults(loaded);
     const addedThreads = addThreadDefaults(loaded);
     const addedOrchestration = addOrchestrationDefaults(loaded);
+    addInstanceDefaults(loaded);
     if (this.sqlite) loaded.projectProfiles ??= [];
     const addedApprovalResolvers = addApprovalResolverDefaults(loaded);
     assertPersistedTaskState(loaded);
@@ -547,6 +600,7 @@ export class Store {
     assertPersistedSessionState(loaded);
     assertPersistedOrchestratorClientState(loaded);
     assertPersistedProjectProfiles(loaded);
+    assertPersistedInstanceState(loaded);
     if (this.sqlite || removedDemoRecords || addedAgentAvatars || addedCoordination || addedThreads || addedOrchestration
       || addedThreadOrchestrators || addedApprovalResolvers) await this.save(loaded);
     this.state = loaded;
@@ -566,6 +620,9 @@ export class Store {
     const {
       taskSubmissions: _taskSubmissions, taskUpdates: _taskUpdates, taskEventJournal: _taskEventJournal, taskEventStreams: _taskEventStreams,
       harnessEventStreams: _harnessEventStreams, harnessEvents: _harnessEvents,
+      instanceLifecycleReceipts: _instanceLifecycleReceipts, instanceReleaseIntents: _instanceReleaseIntents,
+      instanceDeliveries: _instanceDeliveries, remoteReleaseRequests: _remoteReleaseRequests,
+      nodeInstanceResidency: _nodeInstanceResidency,
       projectProfilesImported: _projectProfilesImported, orchestratorClients, ...published
     } = this.state;
     return structuredClone({
@@ -583,6 +640,8 @@ export class Store {
   getAgent(id: string) { return this.state.agents.find((agent) => agent.id === id); }
   getRun(id: string) { return this.state.runs.find((run) => run.id === id); }
   getThread(id: string) { return this.state.threads?.find((thread) => thread.id === id); }
+  getInstance(id: string) { return this.state.instances?.find((instance) => instance.id === id); }
+  getInstanceAllocation(id: string) { return this.state.allocations?.find((allocation) => allocation.id === id); }
 
   async writeArtifactContent(id: string, content: Buffer) {
     const directory = resolve(dirname(this.path), "artifacts");
