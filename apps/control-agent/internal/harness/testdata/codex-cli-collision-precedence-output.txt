@@ -1,0 +1,2 @@
+- shared-skill-name: The Barista projected skill offered from inside the managed subtree. (file: /home/coder/probe-collide/home/.codex/skills/coffee-shop-barista/projected/SKILL.md)
+- shared-skill-name: The operator own skill offered from outside the managed subtree. (file: /home/coder/probe-collide/home/.codex/skills/operator-own/SKILL.md)

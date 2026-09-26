@@ -180,13 +180,64 @@ func run(args []string) int {
 		}
 	}
 	log.Printf("node capability report ready: %d of %d evidence entries succeeded", succeeded, len(report.Evidence))
-	runner := newRunner(nativeProfiles, profiles, driver, cfg).WithManagedHarnesses(harness.ManagedHarnesses(resolutions))
+	// A crash can leave run-scoped projections on disk. They are reconciled here, at daemon start,
+	// and nowhere else: only entries directly beneath the one Barista-owned run-scoped prefix are
+	// removed, and a symlink is never followed while cleaning.
+	if removed, err := harness.ReconcileStaleProjections(cfg.DataRoot); err != nil {
+		log.Printf("capability pack: stale run-scoped projections were retained and will be reconciled at the next start: %v", err)
+	} else if len(removed) > 0 {
+		log.Printf("capability pack: reconciled %d run-scoped projection(s) left behind by an earlier Barista", len(removed))
+	}
+	// A managed projection has one unavoidable replacement window: a crash between moving the outgoing
+	// subtree aside and renaming the incoming one in leaves the managed path absent and both complete
+	// subtrees inside the temporary sibling. It is repaired here, at daemon start, and nowhere else.
+	if repaired, err := harness.ReconcileManagedProjections(os.Environ()); err != nil {
+		log.Printf("capability pack: a managed projection could not be reconciled and was left as it is: %v", err)
+	} else if len(repaired) > 0 {
+		log.Printf("capability pack: restored %d managed projection(s) from an interrupted replacement", len(repaired))
+	}
+	activePack, packUnavailable := activeCapabilityPack(componentManifest, ownership, activation, cfg.DataRoot, version)
+	if activePack == nil {
+		log.Printf("capability pack: %s; runs on this node are %s", packUnavailable, cfg.CapabilityPackRequirement)
+	} else {
+		log.Printf("capability pack %s@%s (%s) is active; runs on this node are %s",
+			activePack.ID, activePack.Version, activePack.ArchiveDigest, cfg.CapabilityPackRequirement)
+		for _, harnessID := range packReadyHarnessIDs() {
+			log.Printf("capability pack: %s", harnessID)
+		}
+	}
+	runner := newRunner(nativeProfiles, profiles, driver, cfg).WithManagedHarnesses(harness.ManagedHarnesses(resolutions)).
+		WithCapabilityPack(activePack, packUnavailable, cfg.CapabilityPackRequirement, cfg.DataRoot).
+		WithCapabilityPackReport(func(line string) { log.Print(line) })
 	client := controlplane.NewClient(cfg, node, runner, buildCapabilityReport)
 	if err := client.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		log.Printf("Barista stopped: %v", err)
 		return 1
 	}
 	return 0
+}
+
+// packReadyHarnessIDs describes, per harness and transport, whether this build ships a capability
+// pack activation adapter. A combination with no adapter is named as such rather than left silent,
+// because silence about an unverified surface is exactly what would make a run look pack-ready.
+func packReadyHarnessIDs() []string {
+	ready := map[string]bool{}
+	for _, combination := range harness.PackReadyCombinations() {
+		ready[combination[0]+" over "+combination[1]] = true
+	}
+	lines := make([]string, 0, len(ready)+2)
+	for _, harnessID := range []string{"claude-cli", "codex-cli"} {
+		for _, transport := range []string{harness.TransportNative, harness.TransportACP} {
+			combination := harnessID + " over " + transport
+			if ready[combination] {
+				lines = append(lines, combination+" has a verified activation adapter")
+				continue
+			}
+			lines = append(lines, combination+" has no verified skill-discovery surface at its pinned version, so it ships no activation adapter and refuses a pack-required run before the prompt")
+		}
+	}
+	slices.Sort(lines)
+	return lines
 }
 
 // fallbackDescription names what a harness falls back to when its managed selection is not usable,

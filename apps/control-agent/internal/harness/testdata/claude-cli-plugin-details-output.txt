@@ -1,0 +1,22 @@
+coffee-shop-barista 1.0.0
+  Coffee Shop capability pack projection.
+  Source: coffee-shop-barista@inline
+
+Component inventory
+  Skills (3)  coffeeshop-artifacts, coffeeshop-coordination, coffeeshop-task-reporting
+  Agents (0)
+  Hooks (0)
+  MCP servers (0)
+  LSP servers (0)
+
+Projected token cost
+  Always-on:   ~255 tok   added to every session
+
+Per-component (rounded)
+  component                  always-on  on-invoke
+  coffeeshop-artifacts             ~80       ~720
+  coffeeshop-coordination          ~90      ~1.1k
+  coffeeshop-task-reporting        ~80       ~720
+
+  On-invoke cost is paid each time a skill or agent fires.
+  Token counts are estimates and may differ from actual usage.

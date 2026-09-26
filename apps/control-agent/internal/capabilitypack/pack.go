@@ -279,6 +279,11 @@ func validatePackPath(path string) error {
 	return nil
 }
 
+// ValidatePackPath is the packaged-path grammar exported for the harness activation adapters, which
+// interpolate values into a projection path and must be held to exactly this grammar rather than
+// defining a second containment check. It is validatePackPath and nothing else.
+func ValidatePackPath(path string) error { return validatePackPath(path) }
+
 func hasDuplicate(values []string) bool {
 	seen := make(map[string]bool, len(values))
 	for _, value := range values {

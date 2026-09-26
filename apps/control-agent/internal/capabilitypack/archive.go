@@ -278,6 +278,19 @@ func ReadTree(root string) (Tree, error) {
 	return tree, nil
 }
 
+// WriteTree writes every file of tree beneath root through WriteFileInTree, so a harness projection
+// is held to exactly the packaged-path grammar the archive reader enforces and there is no second
+// containment check. Only regular files are ever written: a Tree carries nothing else, because both
+// ArchiveTree and ReadTree refuse a non-regular entry before one can reach a Tree.
+func WriteTree(root string, tree Tree) error {
+	for _, path := range tree.Paths() {
+		if err := WriteFileInTree(root, path, tree[path]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // WriteFileInTree writes one pack file back into the source directory, used only by sealing. It
 // refuses a path outside the packaged-path grammar, so sealing can never write outside the pack root.
 func WriteFileInTree(root string, path string, content []byte) error {

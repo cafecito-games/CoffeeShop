@@ -1,0 +1,1 @@
+Error loading config.toml: unknown configuration field `skills.roots` in -c/--config override

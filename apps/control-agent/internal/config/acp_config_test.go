@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/harness"
 	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/setup"
 	"github.com/stretchr/testify/require"
 )
@@ -232,4 +233,30 @@ func TestParseRejectsAnUnknownClaudeACPAuthMode(t *testing.T) {
 
 	_, err := Parse(append(acpBaseArguments, "--claude-acp-auth-mode", "trust-me"))
 	require.EqualError(t, err, `claude acp auth mode must be "local-subscription" or "api"`)
+}
+
+// TestParseResolvesTheCapabilityPackPolicy proves the node's Coffee Shop capability pack policy is
+// explicit: both values in the vocabulary parse, the default is the optional reading, and an unknown
+// or empty value stops startup rather than being defaulted to either policy.
+func TestParseResolvesTheCapabilityPackPolicy(t *testing.T) {
+	t.Setenv("WORKSPACE_ROOTS", absoluteExistingRoot(t))
+	baseline := acpBaseArguments
+	parsed, err := Parse(baseline)
+	require.NoError(t, err)
+	require.Equal(t, harness.PackOptional, parsed.CapabilityPackRequirement)
+
+	for _, requirement := range harness.PackRequirements {
+		parsed, err := Parse(append(append([]string{}, baseline...), "--capability-pack", string(requirement)))
+		require.NoError(t, err)
+		require.Equal(t, requirement, parsed.CapabilityPackRequirement)
+	}
+	for _, rejected := range []string{"", "yes", "REQUIRED", "none"} {
+		_, err := Parse(append(append([]string{}, baseline...), "--capability-pack", rejected))
+		require.Error(t, err, "%q must stop startup rather than be defaulted", rejected)
+	}
+
+	t.Setenv("BARISTA_CAPABILITY_PACK", string(harness.PackRequired))
+	parsed, err = Parse(baseline)
+	require.NoError(t, err)
+	require.Equal(t, harness.PackRequired, parsed.CapabilityPackRequirement)
 }

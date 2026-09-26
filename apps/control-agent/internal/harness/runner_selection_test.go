@@ -348,7 +348,7 @@ func TestCodexNativeCommandWiresRunScopedMCPWithoutLeakingTheToken(t *testing.T)
 	configuration := mcpserver.Config{URL: "http://127.0.0.1:1234/mcp", Token: "do-not-leak"}
 	run := protocol.Run{HarnessID: "codex-cli", Model: "gpt-5.4", Prompt: "fix it"}
 
-	arguments, err := harnessArguments(run, protocol.Agent{}, configuration, protocol.ApprovalPolicyManual)
+	arguments, err := harnessArguments(run, protocol.Agent{}, configuration, protocol.ApprovalPolicyManual, nil)
 	require.NoError(t, err)
 	require.Equal(t, []string{"exec", "--json", "--sandbox", "workspace-write"}, arguments[:4])
 	for _, override := range []string{
@@ -368,7 +368,7 @@ func TestCodexNativeCommandWiresRunScopedMCPWithoutLeakingTheToken(t *testing.T)
 	}
 
 	for _, model := range []string{"", "default"} {
-		arguments, err := harnessArguments(protocol.Run{HarnessID: "codex-cli", Model: model, Prompt: "fix it"}, protocol.Agent{}, configuration, protocol.ApprovalPolicyManual)
+		arguments, err := harnessArguments(protocol.Run{HarnessID: "codex-cli", Model: model, Prompt: "fix it"}, protocol.Agent{}, configuration, protocol.ApprovalPolicyManual, nil)
 		require.NoError(t, err)
 		require.NotContains(t, arguments, "--model")
 	}

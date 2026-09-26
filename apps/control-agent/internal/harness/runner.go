@@ -41,10 +41,6 @@ func (driver nativeDriver) Execute(ctx context.Context, invocation Invocation) (
 	if err := driver.runner.verifyManagedHarness(run.HarnessID); err != nil {
 		return "", err
 	}
-	args, err := harnessArguments(run, invocation.Agent, mcpConfig, invocation.approvalPolicy)
-	if err != nil {
-		return "", err
-	}
 	// The executable is always the one the resolved profile names — a managed activated version's
 	// absolute install path, or the external binary PATH discovery resolved. There is no second
 	// resolution path and no hardcoded binary name.
@@ -54,6 +50,20 @@ func (driver nativeDriver) Execute(ctx context.Context, invocation Invocation) (
 	}
 	releaseExecutable := driver.runner.holdExecutable(binary)
 	defer releaseExecutable()
+	// The capability pack is projected, or its absence is resolved against the node's requirement,
+	// before the prompt is composed and before the transport is announced as started. The environment
+	// the adapter reads the vendor's own configuration root from is the one the child will launch
+	// with, minus the run's credentials: a projection never carries the run's MCP URL or token.
+	invocation.packEnvironment = adapterEnvironment(os.Environ(), nil)
+	projection, err := driver.runner.activatePack(ctx, invocation, TransportNative, binary)
+	if err != nil {
+		return "", err
+	}
+	defer projection.Cleanup()
+	args, err := harnessArguments(run, invocation.Agent, mcpConfig, invocation.approvalPolicy, projection.launchArguments())
+	if err != nil {
+		return "", err
+	}
 	command := exec.CommandContext(ctx, binary, args...)
 	configureProcessCancellation(command)
 	command.Dir = invocation.Workspace
@@ -61,6 +71,7 @@ func (driver nativeDriver) Execute(ctx context.Context, invocation Invocation) (
 	if mcpConfig.URL != "" {
 		command.Env = append(command.Env, "COFFEE_SHOP_MCP_TOKEN="+mcpConfig.Token)
 	}
+	command.Env = append(command.Env, projection.launchEnvironment()...)
 	stdout, err := command.StdoutPipe()
 	if err != nil {
 		return "", err
@@ -144,11 +155,14 @@ func nativeCodexSandboxArguments(approvalPolicy string) []string {
 // harnessArguments builds the argument list for one native harness invocation. It deliberately
 // returns no executable: the executable comes from the resolved harness profile, which is the one
 // place a managed activated version and an external PATH installation are ever chosen between.
-func harnessArguments(run protocol.Run, agent protocol.Agent, mcpConfig mcpserver.Config, approvalPolicy string) ([]string, error) {
+// packArguments are the capability-pack activation adapter's own arguments. They are inserted before
+// a harness's positional prompt, never shell-interpreted, and empty when the run has no projection.
+func harnessArguments(run protocol.Run, agent protocol.Agent, mcpConfig mcpserver.Config, approvalPolicy string, packArguments []string) ([]string, error) {
 	prompt := composePrompt(run, agent)
 	switch run.HarnessID {
 	case "claude-cli":
 		args := []string{"-p", prompt, "--output-format", "stream-json", "--verbose", "--permission-mode", nativeClaudePermissionMode(approvalPolicy), "--permission-prompts", "none", "--model", run.Model}
+		args = append(args, packArguments...)
 		if mcpConfig.URL != "" {
 			configuration, err := json.Marshal(map[string]any{"mcpServers": map[string]any{"coffee_shop_hub": map[string]any{
 				"type": "http", "url": mcpConfig.URL, "headers": map[string]string{"Authorization": "Bearer ${COFFEE_SHOP_MCP_TOKEN}"},
@@ -165,6 +179,7 @@ func harnessArguments(run protocol.Run, agent protocol.Agent, mcpConfig mcpserve
 		return args, nil
 	case "codex-cli":
 		args := append([]string{"exec", "--json"}, nativeCodexSandboxArguments(approvalPolicy)...)
+		args = append(args, packArguments...)
 		if run.Model != "" && run.Model != "default" {
 			args = append(args, "--model", run.Model)
 		}
