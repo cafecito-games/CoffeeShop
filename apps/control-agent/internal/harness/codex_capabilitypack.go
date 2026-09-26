@@ -100,21 +100,34 @@ func environmentValue(environment []string, name string) string {
 }
 
 func projectCodexManagedSkills(projectionContext packProjectionContext) (*PackProjection, error) {
-	pack := projectionContext.Pack
 	parent, err := codexSkillsRoot(projectionContext.Environment)
 	if err != nil {
+		// Nothing is resolvable, so nothing is installed: the child resolves its skills root the same
+		// way from the same environment and reads none either.
 		return nil, packUnavailablef("%s", err.Error())
 	}
 	root := filepath.Join(parent, ManagedProjectionDirectory)
-
 	established, release := projectionContext.established.begin("codex-cli")
-	projection, err := establishManagedProjection(parent, root, pack, established, projectionContext.hooks)
+	projection, err := projectCodexManagedSkillsUnder(parent, root, established, projectionContext)
 	if err != nil {
 		release("")
+		// The one chokepoint. Every failure the managed shape can raise passes through here and is
+		// classified by what is actually installed at root, so no site inside can reach the run's
+		// reported outcome unclassified — including a site added later.
+		return nil, withInstalledProjection(err, root, established != "")
+	}
+	release(projectionContext.Pack.Identity())
+	return projection, nil
+}
+
+// projectCodexManagedSkillsUnder does the managed projection's work. It is deliberately separate from
+// its caller so that every error it can return leaves through one classification point.
+func projectCodexManagedSkillsUnder(parent, root, established string, projectionContext packProjectionContext) (*PackProjection, error) {
+	pack := projectionContext.Pack
+	projection, err := establishManagedProjection(parent, root, pack, established, projectionContext.hooks)
+	if err != nil {
 		return nil, err
 	}
-	release(pack.Identity())
-
 	names, err := pack.SkillNamesByDirectory()
 	if err != nil {
 		return nil, fmt.Errorf("%w: %s", ErrPackActivation, err.Error())
@@ -130,9 +143,7 @@ func projectCodexManagedSkills(projectionContext packProjectionContext) (*PackPr
 
 	collisions, err := codexSkillCollisions(parent, root, declared)
 	if err != nil {
-		// The projection is installed by now, so a pack-optional run that proceeds past an enumeration
-		// failure still discovers it. Reporting it as "no pack" would be false.
-		return nil, withInstalledProjection(err, root)
+		return nil, err
 	}
 	projection.Collisions = collisions
 	// The managed projection is shared by every run of this daemon lifetime, so a run never removes

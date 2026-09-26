@@ -369,19 +369,32 @@ func isPackUnavailable(err error) bool {
 
 // withInstalledProjection re-tags an unavailable failure that was raised while a Barista-owned managed
 // projection was installed at root, so a pack-optional run that proceeds past it is never described as
-// unskilled. It is the one place a failure raised after or around establishment is classified, and it
-// answers the question from the filesystem rather than from where in the code the failure came: mere
-// existence at root is not enough, because a foreign occupant is not a projection the run discovers as
-// Coffee Shop's. A failure of any other kind is returned unchanged.
-func withInstalledProjection(err error, root string) error {
+// unskilled. Every managed projection failure passes through it — it is a chokepoint on the projection
+// function's own error return, not a convention applied per site — so a failure raised anywhere after
+// establishment cannot reach the report unclassified.
+//
+// It answers from the filesystem rather than from where in the code the failure came, on two pieces of
+// evidence. The ownership marker is the first: mere existence at root is not enough, because a foreign
+// occupant is not a projection the run discovers as Coffee Shop's. The daemon's own record that it
+// established a projection at root during this lifetime is the second, and it is ground truth a
+// tampered marker cannot contradict — deleting or corrupting a marker does not un-install the content
+// the run's vendor CLI is about to read. Only the subtree actually being gone makes the run unskilled.
+//
+// A failure of any other kind is returned unchanged.
+func withInstalledProjection(err error, root string, established bool) error {
 	var failure unavailablePack
 	if !errors.As(err, &failure) || failure.installed {
 		return err
 	}
-	if _, err := readProjectionMarker(root); err != nil {
+	if _, markerErr := readProjectionMarker(root); markerErr == nil {
+		failure.installed = true
 		return failure
 	}
-	failure.installed = true
+	if established {
+		if _, statErr := os.Lstat(root); statErr == nil {
+			failure.installed = true
+		}
+	}
 	return failure
 }
 
@@ -811,9 +824,9 @@ func replaceManagedProjection(parent, root string, pack ActivePack, metadata map
 	// adopted: it is by definition an incomplete or superseded subtree. Content at that reserved name
 	// that is not Barista's is neither adopted nor clobbered, exactly as at the managed path itself.
 	if err := removeBaristaTemporarySibling(temporary); err != nil {
-		// A refusal here leaves whatever is already installed at the managed path in place, and a
-		// pack-optional run will still discover it, so the reason is classified accordingly.
-		return nil, withInstalledProjection(err, root)
+		// A refusal here leaves whatever is already installed at the managed path in place. The caller's
+		// chokepoint classifies that, so there is no per-site classification to get wrong.
+		return nil, err
 	}
 	projection, err := writeProjection(incoming, pack, ProjectionManaged, metadata)
 	if err != nil {

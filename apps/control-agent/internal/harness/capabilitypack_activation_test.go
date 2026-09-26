@@ -1844,6 +1844,31 @@ func TestManagedOutcomeIsClassifiedByWhatIsActuallyInstalled(t *testing.T) {
 			reason:    "is gone, and Barista does not re-project it under live runs",
 		},
 		{
+			name: "the marker is deleted from an intact projection under a live daemon",
+			arrange: func(t *testing.T, skillsRoot, dataRoot, binary string, established *Runner) (*Runner, *[]string) {
+				// Operator tampering that leaves the skills themselves intact: the launched Codex CLI still
+				// discovers the whole Coffee Shop subtree, so the run is not unskilled.
+				require.NoError(t, os.Remove(filepath.Join(root(skillsRoot), ProjectionMarkerName)))
+				return established, nil
+			},
+			installed: true,
+			reason:    "is not Barista-owned",
+		},
+		{
+			name: "the projection root is replaced by a symlink under a live daemon",
+			arrange: func(t *testing.T, skillsRoot, dataRoot, binary string, established *Runner) (*Runner, *[]string) {
+				if runtime.GOOS == "windows" {
+					t.Skip("symlinks are not exercised on this platform")
+				}
+				moved := filepath.Join(t.TempDir(), ManagedProjectionDirectory)
+				require.NoError(t, os.Rename(root(skillsRoot), moved))
+				require.NoError(t, os.Symlink(moved, root(skillsRoot)))
+				return established, nil
+			},
+			installed: true,
+			reason:    "is a symlink",
+		},
+		{
 			name: "the projection is replaced by another pack under a live daemon",
 			arrange: func(t *testing.T, skillsRoot, dataRoot, binary string, established *Runner) (*Runner, *[]string) {
 				other := pack
@@ -1942,28 +1967,40 @@ func TestInstalledClassificationIsAnsweredFromTheFilesystem(t *testing.T) {
 	directory := t.TempDir()
 
 	absent := filepath.Join(directory, "absent")
-	require.False(t, projectionRemainsInstalled(withInstalledProjection(packUnavailablef("a reason"), absent)))
+	require.False(t, projectionRemainsInstalled(withInstalledProjection(packUnavailablef("a reason"), absent, false)))
 
 	foreign := filepath.Join(directory, "foreign")
 	require.NoError(t, os.MkdirAll(foreign, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(foreign, ProjectionMarkerName), []byte(`{"owner":"someone-else"}`), 0o644))
-	require.False(t, projectionRemainsInstalled(withInstalledProjection(packUnavailablef("a reason"), foreign)),
+	require.False(t, projectionRemainsInstalled(withInstalledProjection(packUnavailablef("a reason"), foreign, false)),
 		"a foreign occupant is not a projection the run discovers as Coffee Shop's")
 
 	owned := filepath.Join(directory, "owned")
 	projection, err := writeProjection(owned, pack, ProjectionManaged, nil)
 	require.NoError(t, err)
 	require.Equal(t, owned, projection.Root)
-	tagged := withInstalledProjection(packUnavailablef("a reason"), owned)
+	tagged := withInstalledProjection(packUnavailablef("a reason"), owned, false)
 	require.True(t, projectionRemainsInstalled(tagged))
 	require.Equal(t, "a reason", tagged.Error(), "re-tagging never rewrites the reason")
 
 	// A failure that is not an unavailable one is never re-tagged into one.
 	hard := fmt.Errorf("%w: a hard refusal", ErrPackActivation)
-	require.Same(t, hard, withInstalledProjection(hard, owned))
-	require.False(t, isPackUnavailable(withInstalledProjection(hard, owned)))
+	require.Same(t, hard, withInstalledProjection(hard, owned, true))
+	require.False(t, isPackUnavailable(withInstalledProjection(hard, owned, true)))
 	// And an already-installed failure is idempotent under re-tagging.
-	require.True(t, projectionRemainsInstalled(withInstalledProjection(packUnconfirmedf("a reason"), absent)))
+	require.True(t, projectionRemainsInstalled(withInstalledProjection(packUnconfirmedf("a reason"), absent, false)))
+
+	// The daemon's own establishment record is ground truth a tampered marker cannot contradict:
+	// removing the marker does not un-install the content the run's vendor CLI is about to read.
+	tampered := filepath.Join(directory, "tampered")
+	_, err = writeProjection(tampered, pack, ProjectionManaged, nil)
+	require.NoError(t, err)
+	require.NoError(t, os.Remove(filepath.Join(tampered, ProjectionMarkerName)))
+	require.False(t, projectionRemainsInstalled(withInstalledProjection(packUnavailablef("a reason"), tampered, false)))
+	require.True(t, projectionRemainsInstalled(withInstalledProjection(packUnavailablef("a reason"), tampered, true)))
+	// But a subtree that is actually gone makes the run unskilled whatever the daemon recorded.
+	require.NoError(t, os.RemoveAll(tampered))
+	require.False(t, projectionRemainsInstalled(withInstalledProjection(packUnavailablef("a reason"), tampered, true)))
 }
 
 // TestSurfaceRecordingsCarryNoTestDependencyOnAMachinePath keeps the recordings honest and portable at
