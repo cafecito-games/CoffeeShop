@@ -726,9 +726,12 @@ test("the placement diagnostic vocabulary is closed and every kind reaches its o
     assert.ok((placementRequirementKinds as readonly string[]).includes(kind), kind);
   }
   /*
-   * The only consumer outside the hub decodes the kind against this same exported list
-   * (apps/web/src/hubConnection.ts:209), so every value is handled there by construction. Nothing in
-   * the repository switches exhaustively on the kind; it is rendered, never branched on.
+   * Two consumers exist outside the hub and both are closed over this same exported list: the
+   * snapshot decoder accepts a kind only if it appears here (apps/web/src/hubConnection.ts:209), and
+   * the operator label table is an exhaustive `Record<PlacementRequirementKind, string>`
+   * (apps/web/src/orchestration/orchestrationLabels.ts:17) that the compiler refuses to leave
+   * incomplete — adding a kind without labelling it fails `task typecheck`, which is how these four
+   * were caught. Nothing branches on the kind; it is only decoded and rendered.
    */
   for (const kind of placementRequirementKinds) {
     assert.equal(typeof kind, "string");
