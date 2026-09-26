@@ -1685,9 +1685,35 @@ func TestReservedTemporarySiblingNeitherAdoptedNorClobbered(t *testing.T) {
 	require.DirExists(t, filepath.Join(skillsRoot, ManagedProjectionDirectory))
 }
 
+// surfaceEvidence is the complete set of real vendor recordings this issue's surface claims rest on,
+// per harness. It is enumerated in one place so a pinned-version bump has a checklist of exactly what
+// must be re-captured, and so a recording added without being classified fails the test below.
+var surfaceEvidence = map[string][]string{
+	"claude-cli": {
+		"claude-cli-version-output.txt",
+		"claude-cli-plugin-dir-help.txt",
+		"claude-cli-plugin-details-output.txt",
+		"claude-cli-plugin-manifest-requirement.txt",
+	},
+	"codex-cli": {
+		"codex-cli-version-output.txt",
+		"codex-cli-skills-config-rejection.txt",
+		"codex-cli-prompt-input-output.json",
+		"codex-cli-collision-precedence-output.txt",
+	},
+}
+
+// surfaceVersionRecording is the one recording per harness that names the vendor version, and is
+// therefore what a pinned-version bump breaks.
+var surfaceVersionRecording = map[string]string{
+	"claude-cli": "claude-cli-version-output.txt",
+	"codex-cli":  "codex-cli-version-output.txt",
+}
+
 // TestAdapterSurfacesNameThePinnedVendorVersions ties every "verified at the pinned version" claim to
 // the component manifest. A pin bump without re-verifying the surface fails here rather than leaving a
-// stale claim in a doc comment and a stale recording in testdata.
+// stale claim in a doc comment and stale recordings in testdata, and the failure names the whole
+// evidence set that has to be re-captured.
 func TestAdapterSurfacesNameThePinnedVendorVersions(t *testing.T) {
 	manifest, err := setup.LoadDefaultManifest()
 	require.NoError(t, err)
@@ -1697,21 +1723,36 @@ func TestAdapterSurfacesNameThePinnedVendorVersions(t *testing.T) {
 	}
 	require.Len(t, pinned, 2)
 
-	recordings := map[string][]string{
-		"claude-cli": {"claude-cli-version-output.txt"},
-		"codex-cli":  {"codex-cli-version-output.txt"},
-	}
-	for key, adapter := range packActivationAdapters {
-		version, managed := pinned[key.HarnessID]
-		require.True(t, managed, "%s has no pinned harness version to verify a surface against", key.HarnessID)
-		require.Contains(t, adapter.Surface, version,
-			"the %s adapter's surface claims a version the component manifest does not pin", key.HarnessID)
-		for _, recording := range recordings[key.HarnessID] {
+	classified := map[string]bool{}
+	for harnessID, recordings := range surfaceEvidence {
+		version, managed := pinned[harnessID]
+		require.True(t, managed, "%s has no pinned harness version to verify a surface against", harnessID)
+		for _, recording := range recordings {
 			content, err := os.ReadFile(filepath.Join("testdata", recording))
 			require.NoError(t, err)
-			require.Contains(t, string(content), version,
-				"%s records a different version than the component manifest pins", recording)
+			require.NotEmpty(t, content, "%s is an empty recording, which proves nothing", recording)
+			classified[recording] = true
 		}
+		naming, present := surfaceVersionRecording[harnessID]
+		require.True(t, present, "%s has no recording that names the vendor version", harnessID)
+		content, err := os.ReadFile(filepath.Join("testdata", naming))
+		require.NoError(t, err)
+		require.Contains(t, string(content), version,
+			"%s records a different version than the component manifest pins, so every recording in surfaceEvidence[%q] must be re-captured",
+			naming, harnessID)
+	}
+	for key, adapter := range packActivationAdapters {
+		require.Contains(t, adapter.Surface, pinned[key.HarnessID],
+			"the %s adapter's surface claims a version the component manifest does not pin", key.HarnessID)
+	}
+
+	// Every recording in testdata is classified, so a new one cannot be added without being tied to a
+	// harness and therefore to that harness's pin.
+	entries, err := os.ReadDir("testdata")
+	require.NoError(t, err)
+	for _, entry := range entries {
+		require.True(t, classified[entry.Name()],
+			"testdata/%s is not listed in surfaceEvidence, so a pin bump would not invalidate it", entry.Name())
 	}
 }
 
@@ -1748,4 +1789,202 @@ func TestClaudePluginManifestRecordingShowsItIsRequired(t *testing.T) {
 	require.Contains(t, string(recorded), claudePluginManifestPath)
 	require.Contains(t, string(recorded), "Validation failed")
 	require.Contains(t, projectionMetadataPaths, claudePluginManifestPath)
+}
+
+// TestManagedOutcomeIsClassifiedByWhatIsActuallyInstalled is the class-level test for the honesty
+// property: a pack-optional run is reported as unskilled exactly when nothing of Barista's is
+// installed, and as unconfirmed exactly when a managed projection is installed and the run will
+// therefore discover it. Every unavailable managed path is driven, in both directions.
+func TestManagedOutcomeIsClassifiedByWhatIsActuallyInstalled(t *testing.T) {
+	pack, _ := packFixture(t)
+	root := func(skillsRoot string) string { return filepath.Join(skillsRoot, ManagedProjectionDirectory) }
+
+	for _, situation := range []struct {
+		name string
+		// arrange runs after the daemon has served one successful run, and returns the runner to use.
+		arrange   func(t *testing.T, skillsRoot, dataRoot, binary string, established *Runner) (*Runner, *[]string)
+		installed bool
+		reason    string
+	}{
+		{
+			name: "collision enumeration fails while the projection is installed",
+			arrange: func(t *testing.T, skillsRoot, dataRoot, binary string, established *Runner) (*Runner, *[]string) {
+				// Ordinary operator state the enumeration cannot read a name from: a document with no
+				// metadata block at all. The projection is already installed at this point.
+				require.NoError(t, os.MkdirAll(filepath.Join(skillsRoot, "unreadable"), 0o755))
+				require.NoError(t, os.WriteFile(filepath.Join(skillsRoot, "unreadable", "SKILL.md"), []byte("no metadata\n"), 0o644))
+				return established, nil
+			},
+			installed: true,
+			reason:    "could not be enumerated for skill name collisions",
+		},
+		{
+			name: "the replacement is blocked while a previous projection is installed",
+			arrange: func(t *testing.T, skillsRoot, dataRoot, binary string, established *Runner) (*Runner, *[]string) {
+				// A foreign occupant at the reserved temporary name blocks the next daemon's replacement,
+				// leaving the previous daemon's complete projection installed and serving runs.
+				require.NoError(t, os.MkdirAll(filepath.Join(managedTemporarySibling(skillsRoot), "theirs"), 0o755))
+				upgraded := pack
+				upgraded.ArchiveDigest = strings.Repeat("c", 64)
+				upgraded.Reread = func() (capabilitypack.Tree, capabilitypack.PackManifest, string, error) {
+					return pack.Tree, pack.Manifest, upgraded.ArchiveDigest, nil
+				}
+				return packTestRunner(t, "codex-cli", binary, dataRoot, &upgraded, "", PackOptional, skillsRoot)
+			},
+			installed: true,
+			reason:    "reserved for Barista's atomic replacement",
+		},
+		{
+			name: "the projection is deleted under a live daemon",
+			arrange: func(t *testing.T, skillsRoot, dataRoot, binary string, established *Runner) (*Runner, *[]string) {
+				require.NoError(t, os.RemoveAll(root(skillsRoot)))
+				return established, nil
+			},
+			installed: false,
+			reason:    "is gone, and Barista does not re-project it under live runs",
+		},
+		{
+			name: "the projection is replaced by another pack under a live daemon",
+			arrange: func(t *testing.T, skillsRoot, dataRoot, binary string, established *Runner) (*Runner, *[]string) {
+				other := pack
+				other.ArchiveDigest = strings.Repeat("d", 64)
+				require.NoError(t, os.WriteFile(filepath.Join(root(skillsRoot), ProjectionMarkerName),
+					mustMarshalMarker(t, markerFor(other, ProjectionManaged)), 0o644))
+				return established, nil
+			},
+			installed: true,
+			reason:    "no longer records the pack this Barista established",
+		},
+	} {
+		t.Run(situation.name, func(t *testing.T) {
+			_, _, skillsRoot := fakeVendorHome(t)
+			dataRoot := t.TempDir()
+			binary, record := fakeHarnessBinary(t, "codex-cli")
+			established, lines := packTestRunner(t, "codex-cli", binary, dataRoot, &pack, "", PackOptional, skillsRoot)
+			_, err := established.Execute(context.Background(), Invocation{Run: packRun("codex-cli"), Workspace: dataRoot})
+			require.NoError(t, err)
+			require.FileExists(t, record+".args")
+			*lines = nil
+
+			runner, replacement := situation.arrange(t, skillsRoot, dataRoot, binary, established)
+			if replacement != nil {
+				lines = replacement
+			}
+			run := packRun("codex-cli")
+			run.ID = "run-pack-2"
+			result, err := runner.Execute(context.Background(), Invocation{Run: run, Workspace: dataRoot})
+			require.NoError(t, err, "a pack-optional run proceeds")
+			require.Equal(t, "done", result)
+
+			reported := strings.Join(*lines, "\n")
+			require.Contains(t, reported, situation.reason)
+			// The report says what is actually true of the filesystem the run just read.
+			_, statErr := os.Lstat(root(skillsRoot))
+			require.Equal(t, situation.installed, statErr == nil, "the test's own premise about what is installed")
+			if situation.installed {
+				require.Contains(t, reported, "activation "+string(PackUnconfirmed))
+				require.Contains(t, reported, "still installed and its guarantee unconfirmed")
+				require.NotContains(t, reported, "proceeds with no Coffee Shop capability pack")
+				return
+			}
+			require.Contains(t, reported, "activation "+string(PackUnskilled))
+			require.Contains(t, reported, "proceeds with no Coffee Shop capability pack")
+			require.NotContains(t, reported, "still installed")
+		})
+	}
+}
+
+func mustMarshalMarker(t *testing.T, marker ProjectionMarker) []byte {
+	t.Helper()
+	data, err := marshalMarker(marker)
+	require.NoError(t, err)
+	return data
+}
+
+// TestIncompleteFirstEstablishmentIsNotRestored proves reconciliation repairs only the one window in
+// which the incoming subtree is known to be complete. A crash during the very first write leaves a
+// marker-carrying but incomplete subtree and no outgoing slot; it is removed, not installed, because a
+// partial skill set is worse than none.
+func TestIncompleteFirstEstablishmentIsNotRestored(t *testing.T) {
+	pack, _ := packFixture(t)
+	_, codexHome, skillsRoot := fakeVendorHome(t)
+	root := filepath.Join(skillsRoot, ManagedProjectionDirectory)
+	temporary := managedTemporarySibling(skillsRoot)
+
+	partial, err := writeProjection(filepath.Join(temporary, "incoming"), pack, ProjectionManaged, nil)
+	require.NoError(t, err)
+	require.NoError(t, os.RemoveAll(filepath.Join(partial.Root, "skills")))
+	require.NoDirExists(t, root)
+
+	repaired, err := ReconcileManagedProjections([]string{"CODEX_HOME=" + codexHome})
+	require.NoError(t, err)
+	require.Empty(t, repaired, "an incomplete subtree is never installed as the managed projection")
+	require.NoDirExists(t, root)
+	require.NoDirExists(t, temporary)
+
+	// The next run establishes it in full.
+	dataRoot := t.TempDir()
+	binary, _ := fakeHarnessBinary(t, "codex-cli")
+	runner, _ := packTestRunner(t, "codex-cli", binary, dataRoot, &pack, "", PackRequired, skillsRoot)
+	_, err = runner.Execute(context.Background(), Invocation{Run: packRun("codex-cli"), Workspace: dataRoot})
+	require.NoError(t, err)
+	for _, skill := range pack.Manifest.Skills {
+		require.FileExists(t, filepath.Join(root, filepath.FromSlash(skill.Path)))
+	}
+}
+
+// TestInstalledClassificationIsAnsweredFromTheFilesystem is the class-level guard for the one place a
+// failure raised after or around establishment is classified. It must answer from what is actually at
+// the managed path, not from where in the code the failure came, and a foreign occupant is not a
+// projection the run discovers as Coffee Shop's.
+func TestInstalledClassificationIsAnsweredFromTheFilesystem(t *testing.T) {
+	pack, _ := packFixture(t)
+	directory := t.TempDir()
+
+	absent := filepath.Join(directory, "absent")
+	require.False(t, projectionRemainsInstalled(withInstalledProjection(packUnavailablef("a reason"), absent)))
+
+	foreign := filepath.Join(directory, "foreign")
+	require.NoError(t, os.MkdirAll(foreign, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(foreign, ProjectionMarkerName), []byte(`{"owner":"someone-else"}`), 0o644))
+	require.False(t, projectionRemainsInstalled(withInstalledProjection(packUnavailablef("a reason"), foreign)),
+		"a foreign occupant is not a projection the run discovers as Coffee Shop's")
+
+	owned := filepath.Join(directory, "owned")
+	projection, err := writeProjection(owned, pack, ProjectionManaged, nil)
+	require.NoError(t, err)
+	require.Equal(t, owned, projection.Root)
+	tagged := withInstalledProjection(packUnavailablef("a reason"), owned)
+	require.True(t, projectionRemainsInstalled(tagged))
+	require.Equal(t, "a reason", tagged.Error(), "re-tagging never rewrites the reason")
+
+	// A failure that is not an unavailable one is never re-tagged into one.
+	hard := fmt.Errorf("%w: a hard refusal", ErrPackActivation)
+	require.Same(t, hard, withInstalledProjection(hard, owned))
+	require.False(t, isPackUnavailable(withInstalledProjection(hard, owned)))
+	// And an already-installed failure is idempotent under re-tagging.
+	require.True(t, projectionRemainsInstalled(withInstalledProjection(packUnconfirmedf("a reason"), absent)))
+}
+
+// TestSurfaceRecordingsCarryNoTestDependencyOnAMachinePath keeps the recordings honest and portable at
+// once: they are real producer bytes, so they legitimately contain the absolute paths the probe ran
+// under, but no test may depend on those paths, or the suite would only pass on one machine.
+func TestSurfaceRecordingsCarryNoTestDependencyOnAMachinePath(t *testing.T) {
+	sources, err := filepath.Glob(filepath.Join("*.go"))
+	require.NoError(t, err)
+	require.NotEmpty(t, sources)
+	for _, source := range sources {
+		content, err := os.ReadFile(source)
+		require.NoError(t, err)
+		// The fragments are assembled at run time so this guard's own literals cannot trip it.
+		for _, fragments := range [][]string{{"/home", "/coder"}, {"probe", "-real"}, {"probe", "-collide"}, {"probe", "-claude"}, {"probe", "-codex"}} {
+			require.NotContains(t, string(content), strings.Join(fragments, ""),
+				"%s depends on a path from the machine the recordings were captured on", source)
+		}
+	}
+	// The one place a recorded absolute path is used, it is derived from the recording's own bytes.
+	recorded, err := os.ReadFile(filepath.Join("testdata", "codex-cli-prompt-input-output.json"))
+	require.NoError(t, err)
+	require.Contains(t, string(recorded), "/"+ManagedProjectionDirectory+"/",
+		"the recording is real producer output and names the projection it was captured against")
 }

@@ -367,6 +367,24 @@ func isPackUnavailable(err error) bool {
 	return errors.As(err, &failure)
 }
 
+// withInstalledProjection re-tags an unavailable failure that was raised while a Barista-owned managed
+// projection was installed at root, so a pack-optional run that proceeds past it is never described as
+// unskilled. It is the one place a failure raised after or around establishment is classified, and it
+// answers the question from the filesystem rather than from where in the code the failure came: mere
+// existence at root is not enough, because a foreign occupant is not a projection the run discovers as
+// Coffee Shop's. A failure of any other kind is returned unchanged.
+func withInstalledProjection(err error, root string) error {
+	var failure unavailablePack
+	if !errors.As(err, &failure) || failure.installed {
+		return err
+	}
+	if _, err := readProjectionMarker(root); err != nil {
+		return failure
+	}
+	failure.installed = true
+	return failure
+}
+
 // projectionRemainsInstalled reports whether a pack-optional run that proceeds past err will still
 // discover a projection Barista installed.
 func projectionRemainsInstalled(err error) bool {
@@ -793,7 +811,9 @@ func replaceManagedProjection(parent, root string, pack ActivePack, metadata map
 	// adopted: it is by definition an incomplete or superseded subtree. Content at that reserved name
 	// that is not Barista's is neither adopted nor clobbered, exactly as at the managed path itself.
 	if err := removeBaristaTemporarySibling(temporary); err != nil {
-		return nil, err
+		// A refusal here leaves whatever is already installed at the managed path in place, and a
+		// pack-optional run will still discover it, so the reason is classified accordingly.
+		return nil, withInstalledProjection(err, root)
 	}
 	projection, err := writeProjection(incoming, pack, ProjectionManaged, metadata)
 	if err != nil {
@@ -1001,11 +1021,20 @@ func ReconcileManagedProjections(environment []string) ([]string, error) {
 		if _, err := os.Lstat(temporary); errors.Is(err, fs.ErrNotExist) {
 			continue
 		}
-		if _, err := os.Lstat(root); errors.Is(err, fs.ErrNotExist) {
-			// The replacement was interrupted inside the window. The incoming subtree is the newer one;
-			// fall back to the outgoing subtree, which is the previous complete projection.
+		incoming := filepath.Join(temporary, "incoming")
+		outgoing := filepath.Join(temporary, "outgoing")
+		_, rootErr := os.Lstat(root)
+		// Only the two-rename window is repaired, and its signature is exact: the managed path is
+		// absent and *both* slots are present. That is the only state in which the incoming subtree is
+		// known to be complete, because a replacement writes it in full and confirms it before it moves
+		// the outgoing subtree aside. A crash during the very first write leaves a marker-carrying but
+		// incomplete incoming subtree and no outgoing one, and it is removed rather than installed: a
+		// partial skill set is worse than none, and the next run establishes the projection in full.
+		_, incomingErr := os.Lstat(incoming)
+		_, outgoingErr := os.Lstat(outgoing)
+		if errors.Is(rootErr, fs.ErrNotExist) && incomingErr == nil && outgoingErr == nil {
 			restored := false
-			for _, candidate := range []string{filepath.Join(temporary, "incoming"), filepath.Join(temporary, "outgoing")} {
+			for _, candidate := range []string{incoming, outgoing} {
 				if owned, _ := carriesOwnershipMarker(candidate); !owned {
 					continue
 				}

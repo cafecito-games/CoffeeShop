@@ -130,7 +130,9 @@ func projectCodexManagedSkills(projectionContext packProjectionContext) (*PackPr
 
 	collisions, err := codexSkillCollisions(parent, root, declared)
 	if err != nil {
-		return nil, err
+		// The projection is installed by now, so a pack-optional run that proceeds past an enumeration
+		// failure still discovers it. Reporting it as "no pack" would be false.
+		return nil, withInstalledProjection(err, root)
 	}
 	projection.Collisions = collisions
 	// The managed projection is shared by every run of this daemon lifetime, so a run never removes
@@ -152,7 +154,11 @@ func establishManagedProjection(parent, root string, pack ActivePack, establishe
 	if established != "" {
 		// This daemon already wrote its projection. A marker that no longer records that identity
 		// means something else changed the subtree while runs were live.
-		if !present || marker.Identity() != established {
+		if !present {
+			// Nothing is installed any more, so a pack-optional run genuinely proceeds unskilled.
+			return nil, packUnavailablef("the managed capability pack projection at %s is gone, and Barista does not re-project it under live runs", root)
+		}
+		if marker.Identity() != established {
 			return nil, packUnconfirmedf("the managed capability pack projection at %s no longer records the pack this Barista established, so it was not re-projected under live runs", root)
 		}
 		if !marker.Current() {
