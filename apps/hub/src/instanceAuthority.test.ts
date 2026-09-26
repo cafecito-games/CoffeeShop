@@ -41,7 +41,7 @@ import { cancelRunInState } from "./lifecycle.js";
 import { resolveCaller } from "./mailbox.js";
 import { runContinuationPass } from "./orchestratorInbox.js";
 import { placeTask, type NodeConnection, type PlacementEnvironment, type SchedulingContext } from "./scheduler.js";
-import { bindingMatchesRun, isResumableFor } from "./sessionBindings.js";
+import { acceptSessionBinding, bindingActorMatches, bindingMatchesRun, isResumableFor, sessionDispatchFor } from "./sessionBindings.js";
 import { Store, type State } from "./store.js";
 import { nodeResidencyInState, residentInstanceUsage } from "./instances.js";
 
@@ -766,6 +766,181 @@ test("a record naming a genuinely different agent and instance is refused rather
   state.runs[0].agentId = "worker-a";
   await writeFile(path, JSON.stringify(state));
   await assert.rejects(new Store(path).load(), /Persisted run 0 names both a configured agent and an instance actor/);
+});
+
+/*
+ * The same upgrade, for the shape that carries *only* the borrowed agent key.
+ *
+ * `state-with-acp-instance-session-before-78.json` was written byte for byte by the hub at the base of
+ * this branch (`cafecito-games/CoffeeShop@8a6f910`) against an ACP-only harness — which is what base
+ * `transportPreference` (`apps/hub/src/scheduler.ts:210`) prefers whenever a node advertises it, so this
+ * is the ordinary case rather than an exotic one. Driving that revision's own `runSchedulingPass`,
+ * `receiveSessionBinding` (`apps/hub/src/sessionBindings.ts:170`, which wrote `agentId: run.agentId` —
+ * the instance id — with no instance half at all), `applyRunLifecycle`, and `createArtifact`
+ * (`apps/hub/src/coordination.ts:366,373`, which wrote the artifact and its event the same way) and
+ * persisting through that revision's own `Store` produced these bytes. They are asserted as they are:
+ * nothing is normalized before comparison.
+ */
+const acpSessionFixturePath = new URL("../test-fixtures/state-with-acp-instance-session-before-78.json", import.meta.url);
+
+const readAcpSessionFixture = async () => {
+  const bytes = await readFile(acpSessionFixturePath);
+  return { bytes, state: JSON.parse(bytes.toString()) as State };
+};
+
+/**
+ * The dispatch decision for the fixture's own run, given the two live facts that are not part of this
+ * defect: the node still advertises the adapter the run negotiated, and the binding carries the
+ * capabilities that run reported — exactly the copy `settleSessionBindingsForTerminalRun` makes from
+ * `run.transportSelection.acp`. Both are applied identically to the migrated and unmigrated states, so
+ * the only difference between the two answers is the actor identity.
+ */
+function dispatchProbe(state: State) {
+  const run = state.runs[0];
+  const binding = state.sessionBindings![0];
+  const capabilities = run.transportSelection!.acp!;
+  state.nodes[0].harnesses[0] = { ...state.nodes[0].harnesses[0], acp: capabilities };
+  binding.capabilities = structuredClone(capabilities);
+  return sessionDispatchFor(run, { nodes: state.nodes, sessionBindings: state.sessionBindings, orchestratorInboxes: state.orchestratorInboxes });
+}
+
+/** The resume report Barista sends for a run whose dispatch named an existing session. */
+const resumeReport = (binding: HarnessSessionBinding) => ({
+  bindingId: binding.id, providerSessionId: binding.providerSessionId,
+  harnessId: binding.harnessId, transport: "acp-v1" as const, status: "active" as const
+});
+
+test("a base-written ACP session binding is migrated onto its instance and resumes instead of cold-starting", async () => {
+  const { bytes, state: persisted } = await readAcpSessionFixture();
+  const before = persisted.sessionBindings![0];
+  assert.equal(before.agentId, persisted.runs[0].instanceId, "the fixture's binding really borrowed the agent key");
+  assert.deepEqual([before.instanceId, before.allocationId], [undefined, undefined], "and carries no instance half to compare it with");
+
+  // Unmigrated, the binding is a different actor from its own run: the dispatch cold-starts the
+  // provider session, and Barista's resume report for it is refused.
+  assert.equal(bindingActorMatches(before, persisted.runs[0]), false);
+  assert.equal(dispatchProbe(JSON.parse(bytes.toString()) as State).sessionBinding, undefined, "the base shape cold-starts");
+  const stale = JSON.parse(bytes.toString()) as State;
+  assert.deepEqual(
+    acceptSessionBinding(stale, "node-acp", stale.runs[0].id, resumeReport(stale.sessionBindings![0]), later(60)),
+    { kind: "rejected", reason: `session.binding for run ${stale.runs[0].id} resumed a session its dispatch did not name` }
+  );
+
+  const directory = await mkdtemp(join(tmpdir(), "coffee-shop-acp-upgrade-"));
+  const path = join(directory, "state.json");
+  await writeFile(path, bytes);
+  const store = new Store(path);
+  await store.load();
+
+  store.read((state) => {
+    const [run, binding] = [state.runs[0], state.sessionBindings![0]];
+    assert.deepEqual([binding.agentId, binding.instanceId, binding.allocationId],
+      [undefined, run.instanceId, run.allocationId], "the binding now names the instance and the exact allocation its run ran under");
+    assert.equal(bindingActorMatches(binding, run), true);
+    assert.equal(bindingMatchesRun(binding, run), true, "the whole execution context matches again");
+    assert.equal(isResumableFor({ ...binding, capabilities: run.transportSelection!.acp! }, run), true);
+    // The artifact and the event of the same run are the display-only members of this class.
+    assert.deepEqual(describeHistoricalActor(state, state.artifacts![0]).id, run.instanceId);
+    assert.equal(describeHistoricalActor(state, state.artifacts![0]).kind, "instance");
+    const registered = state.events.find((event) => event.title === "Artifact registered")!;
+    assert.equal(describeHistoricalActor(state, registered).kind, "instance");
+    // The both-keys shape of the same snapshot is still migrated, and no actor was invented anywhere.
+    assert.equal(run.agentId, undefined);
+    assert.equal(state.tasks![0].assignment!.agentId, undefined);
+    assert.equal(state.tasks![0].assignment!.instanceId, run.instanceId);
+  });
+
+  const migrated = store.read((state) => structuredClone(state));
+  assert.equal(dispatchProbe(structuredClone(migrated)).sessionBinding?.id, migrated.sessionBindings![0].id,
+    "the dispatch now carries the session it already created");
+  const replay = structuredClone(migrated);
+  assert.deepEqual(acceptSessionBinding(replay, "node-acp", replay.runs[0].id, resumeReport(replay.sessionBindings![0]), later(60)),
+    { kind: "duplicate" }, "Barista's report for that session is accepted rather than refused");
+
+  const written = await readFile(path);
+  assert.notDeepEqual(written, bytes, "the one-shot migration ran");
+  const restarted = new Store(path);
+  await restarted.load();
+  assert.deepEqual(await readFile(path), written, "a restart migrates nothing a second time");
+});
+
+test("an agent-only actor key is migrated only when it resolves to an instance and nothing else", async () => {
+  const { bytes } = await readAcpSessionFixture();
+  const borrowed = (JSON.parse(bytes.toString()) as State).sessionBindings![0].agentId!;
+
+  const load = async (mutate: (state: State) => void) => {
+    const directory = await mkdtemp(join(tmpdir(), "coffee-shop-agent-only-"));
+    const path = join(directory, "state.json");
+    const state = JSON.parse(bytes.toString()) as State;
+    mutate(state);
+    await writeFile(path, JSON.stringify(state));
+    const store = new Store(path);
+    await store.load();
+    return store;
+  };
+
+  // A configured agent of that id has a valid legacy reading, so the record keeps it: a migration
+  // never overwrites an attribution an operator can still follow.
+  const configured = await load((state) => {
+    state.agents = [fixtureAgent(borrowed, false, { name: "Borrowed name" })];
+  });
+  configured.read((state) => {
+    assert.equal(state.sessionBindings![0].agentId, borrowed, "a record naming a real agent is left alone");
+    assert.equal(describeHistoricalActor(state, state.sessionBindings![0]).name, "Borrowed name");
+  });
+
+  // An agent key that names neither a configured agent nor an instance is a legacy record whose agent
+  // was deleted. It is not guessed at, and it keeps rendering as the identity it carries.
+  const orphan = await load((state) => {
+    state.instances = [];
+    state.allocations = [];
+    state.instanceDeliveries = [];
+    state.nodeInstanceResidency = [];
+    state.runs = [];
+    state.tasks = [];
+    state.taskMessages = [];
+    state.artifacts = [];
+  });
+  orphan.read((state) => {
+    assert.equal(state.sessionBindings![0].agentId, borrowed);
+    assert.deepEqual(describeHistoricalActor(state, state.sessionBindings![0]), { kind: "agent", id: borrowed, name: borrowed });
+  });
+
+  // Half an instance identity beside the agent key is malformed, never "absent": the load must fail
+  // with the missing field named rather than the migration reading it as an agent-only record.
+  const directory = await mkdtemp(join(tmpdir(), "coffee-shop-agent-only-malformed-"));
+  const malformedPath = join(directory, "state.json");
+  const malformed = JSON.parse(bytes.toString()) as State;
+  malformed.sessionBindings![0].allocationId = malformed.runs[0].allocationId;
+  await writeFile(malformedPath, JSON.stringify(malformed));
+  await assert.rejects(new Store(malformedPath).load(),
+    /Persisted session binding 0 names both a configured agent and an instance actor/);
+});
+
+test("a session binding whose allocation cannot be recovered is closed and unlinked rather than guessed", async () => {
+  const { bytes } = await readAcpSessionFixture();
+  const directory = await mkdtemp(join(tmpdir(), "coffee-shop-acp-unrecoverable-"));
+  const path = join(directory, "state.json");
+  const state = JSON.parse(bytes.toString()) as State;
+  /*
+   * The run that created the session is no longer in the snapshot, so nothing records which allocation
+   * the session was created under. The resident's *current* allocation is not an answer: the session
+   * lives in a process a replacement allocation does not own, and adopting it would make a stale session
+   * resumable by the wrong principal.
+   */
+  state.sessionBindings![0].createdByRunId = "run_pruned";
+  state.sessionBindings![0].lastRunId = "run_pruned";
+  await writeFile(path, JSON.stringify(state));
+  const store = new Store(path);
+  await store.load();
+
+  store.read((current) => {
+    const binding = current.sessionBindings![0];
+    assert.equal(binding.status, "closed", "the session is retired instead of being adopted by a guessed allocation");
+    assert.equal(binding.instanceId, undefined, "no instance identity was invented");
+    assert.equal(current.runs[0].sessionBindingId, undefined, "the run cold-starts deliberately");
+    assert.equal(bindingActorMatches(binding, current.runs[0]), false);
+  });
 });
 
 test("a temporarily unplaceable owner agent keeps its thread instead of being promoted away from it", async () => {

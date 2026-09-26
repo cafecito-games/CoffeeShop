@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import {
   agentAvatarColors,
   agentAvatarShapes,
+  canTransitionSessionBinding,
   harnessEventStreamStatuses,
   isApprovalDeliveryStatus,
   isApprovalStatus,
@@ -26,7 +27,7 @@ import {
   type Thread,
   type TimelineEvent
 } from "@coffee-shop/protocol";
-import { assertPersistedActor } from "./actors.js";
+import { assertPersistedActor, type ActorKeyed } from "./actors.js";
 import { assertPersistedTemplateState, importLegacyAgentTemplates, type LegacyTemplateImport } from "./agentTemplates.js";
 import type { HarnessEventStream, StoredHarnessEvent } from "./harnessEvents.js";
 import {
@@ -300,37 +301,142 @@ export function assertPersistedOrchestratorClientState(state: State) {
 }
 
 /**
- * Drops the borrowed agent key a version-5 instance record was persisted with before this migration.
+ * Migrates the borrowed agent key a version-5 instance record was persisted with before this change.
  *
- * Until #78 an instance run had nowhere else to put its identity, so the writer filled the required
- * agent key with the instance id as well: `apps/hub/src/scheduler.ts` wrote
- * `agentId: instance.id, instanceId: instance.id` for every instance-keyed attempt, and
- * `assignTaskAttempt` copied both onto `task.assignment`. Those records now name two actors at once,
- * which `assertPersistedActorState` refuses — so without this the hub would fail to boot on the state
- * its own immediately preceding revision wrote, on the flagship offering-placement path.
+ * Until #78 an instance record had nowhere to put its identity but the required agent key, and the
+ * previous revision filled it with the instance id in two distinguishable shapes:
  *
- * The borrowed form is self-identifying: the agent key holds the *same* string as `instanceId`, and no
- * configured agent id can equal an instance id (`newId("instance")` produces `instance_<base36>_…`,
- * which the agent id slug generator cannot emit). Only that exact shape is stripped. A record naming a
- * genuinely different agent and instance is ambiguous and is left for the assertion to refuse, because
- * guessing which of two actors produced it is exactly what must never happen.
+ *  - *Both keys.* `apps/hub/src/scheduler.ts:1335` wrote `agentId: instance.id` beside
+ *    `instanceId`/`allocationId` for every instance-keyed attempt, and `assignTaskAttempt`
+ *    (`apps/hub/src/tasks.ts:663`) copied both onto `task.assignment`. Such a record names two actors
+ *    at once, which `assertPersistedActorState` refuses.
+ *  - *Agent only.* `apps/hub/src/sessionBindings.ts:170` wrote `agentId: run.agentId` — the instance id
+ *    — with no instance half at all, and `apps/hub/src/coordination.ts:366,373` did the same for an
+ *    instance run's artifact and its timeline event. Such a record loads, because it is a well-formed
+ *    legacy agent record; it is simply attributed to an agent that does not exist. For a session
+ *    binding that is not cosmetic: `bindingActorMatches` compares an agent actor to the run's instance
+ *    actor, never matches, and the dispatch cold-starts the provider session while a later
+ *    `session.binding` report naming the binding is rejected. Base `transportPreference` prefers
+ *    `acp-v1`, so every base-revision ACP instance run wrote one.
+ *
+ * Both shapes are recognised without ever guessing between two actors:
+ *
+ *  - The both-keys shape is self-identifying: the agent key holds the *same* string as `instanceId`,
+ *    and no configured agent id can equal an instance id (`newId("instance")` produces
+ *    `instance_<base36>_…`, which the agent id slug generator cannot emit). Only that exact shape is
+ *    stripped; a record naming a genuinely different agent and instance stays ambiguous and is left for
+ *    the assertion to refuse.
+ *  - The agent-only shape has no second key to compare against, so it is resolved against state: the
+ *    agent key is borrowed exactly when it names no configured agent *and* does name a record in
+ *    `state.instances`. An id that names a configured agent is a legacy record and is left alone even
+ *    if an instance shares the id, because a valid legacy reading is never overwritten. An id that
+ *    names neither is a legacy record whose agent was deleted — it keeps naming that agent and renders
+ *    as the raw id, exactly as it did before this migration.
+ *
+ * A malformed identity is never read as an absent one: a record carrying an agent key beside a *half*
+ * instance identity is left untouched in both shapes, so `assertPersistedActorState` still fails the
+ * load with the missing field named.
+ *
+ * Setting the right actor needs the allocation the work ran under, and that is taken from the record's
+ * own run rather than from the instance's current allocation: a session created under a lost allocation
+ * lives in a process the replacement does not own, so inventing one would make a stale session
+ * resumable by the wrong principal. When the run cannot supply it, an optional- or display-only record
+ * is left as it was — the attribution degrades exactly as it already did — and a session binding is
+ * closed and unlinked from its run, so the next dispatch cold-starts deliberately and the next report
+ * creates a replacement instead of resuming a session nobody can address.
  */
 export function dropBorrowedInstanceAgentKeys(state: State) {
   let changed = false;
-  const strip = (record: { agentId?: string; instanceId?: string; allocationId?: string } | undefined) => {
+  const agentIds = new Set(state.agents.map((item) => item.id));
+  const instanceIds = new Set((state.instances ?? []).map((item) => item.id));
+  const runsById = new Map(state.runs.map((run) => [run.id, run]));
+
+  /** The both-keys shape: the agent key repeats `instanceId` and carries no information of its own. */
+  const strip = (record: ActorKeyed | undefined) => {
     if (!record || record.agentId === undefined || record.instanceId === undefined) return;
     if (record.agentId !== record.instanceId) return;
     delete record.agentId;
     changed = true;
   };
+
+  /** The instance the record's agent key borrowed, or `undefined` for every other shape. */
+  const borrowedInstanceId = (record: ActorKeyed) => {
+    const { agentId, instanceId, allocationId } = record;
+    if (agentId === undefined || instanceId !== undefined || allocationId !== undefined) return undefined;
+    if (agentIds.has(agentId)) return undefined;
+    return instanceIds.has(agentId) ? agentId : undefined;
+  };
+
+  /** The allocation `instanceId` held when it produced the record, read from the record's own run. */
+  const allocationOf = (instanceId: string, runIds: readonly (string | undefined)[]) => {
+    for (const runId of runIds) {
+      const run = runId === undefined ? undefined : runsById.get(runId);
+      if (run?.instanceId === instanceId && run.allocationId !== undefined) return run.allocationId;
+    }
+    return undefined;
+  };
+
+  /**
+   * Replaces a borrowed agent key with the instance identity its run recorded. Returns `"borrowed"`
+   * when the shape was recognised but no allocation could be recovered, so the caller decides what a
+   * record of its own kind does about it.
+   */
+  const adopt = (record: ActorKeyed | undefined, ...runIds: readonly (string | undefined)[]) => {
+    if (!record) return "untouched" as const;
+    const instanceId = borrowedInstanceId(record);
+    if (instanceId === undefined) return "untouched" as const;
+    const allocationId = allocationOf(instanceId, runIds);
+    if (allocationId === undefined) return "borrowed" as const;
+    delete record.agentId;
+    record.instanceId = instanceId;
+    record.allocationId = allocationId;
+    changed = true;
+    return "migrated" as const;
+  };
+
   for (const run of state.runs) strip(run);
-  for (const event of state.events) strip(event);
-  for (const message of state.messages) strip(message);
-  for (const artifact of state.artifacts ?? []) strip(artifact);
-  for (const update of state.taskUpdates ?? []) strip(update);
-  for (const binding of state.sessionBindings ?? []) strip(binding);
-  for (const approval of state.approvals ?? []) strip(approval);
-  for (const task of state.tasks ?? []) strip(task.assignment);
+  for (const event of state.events) {
+    strip(event);
+    adopt(event, event.runId);
+  }
+  for (const message of state.messages) {
+    strip(message);
+    adopt(message, message.runId);
+  }
+  for (const artifact of state.artifacts ?? []) {
+    strip(artifact);
+    adopt(artifact, artifact.runId);
+  }
+  for (const update of state.taskUpdates ?? []) {
+    strip(update);
+    adopt(update, update.sourceRunId);
+  }
+  for (const approval of state.approvals ?? []) {
+    strip(approval);
+    adopt(approval, approval.runId);
+  }
+  for (const task of state.tasks ?? []) {
+    strip(task.assignment);
+    adopt(task.assignment, task.assignment?.runId);
+  }
+  for (const binding of state.sessionBindings ?? []) {
+    strip(binding);
+    if (adopt(binding, binding.createdByRunId, binding.lastRunId) !== "borrowed") continue;
+    /*
+     * The session's own allocation is unrecoverable, so the binding can never be matched to a run
+     * again. It keeps the agent key it was written with — an actor-less binding would fail the load —
+     * and is closed and unlinked, which is the honest outcome: the run cold-starts.
+     */
+    if (canTransitionSessionBinding(binding.status, "closed")) {
+      binding.status = "closed";
+      changed = true;
+    }
+    for (const run of state.runs) {
+      if (run.sessionBindingId !== binding.id) continue;
+      delete run.sessionBindingId;
+      changed = true;
+    }
+  }
   return changed;
 }
 
@@ -683,8 +789,16 @@ export class Store {
     assertPersistedProjectProfiles(loaded);
     assertPersistedInstanceState(loaded);
     assertPersistedTemplateState(loaded);
-    // Runs before the actor assertion: a record the previous revision wrote with the borrowed agent
-    // key is migrated, and only a genuinely ambiguous one is refused.
+    /*
+     * Runs before the actor assertion: a record the previous revision wrote with the borrowed agent
+     * key is migrated, and only a genuinely ambiguous one is refused. It deliberately stays *after*
+     * the session and instance assertions rather than ahead of them. Neither borrowed shape is refused
+     * by an earlier assertion — the both-keys shape reaches only `assertPersistedActorState`, and the
+     * agent-only shape is a well-formed legacy agent record until this migration reinterprets it — so
+     * running earlier would buy nothing, while this migration resolves an agent key against
+     * `state.instances`, `state.agents` and `state.runs` and so must run on an inventory
+     * `assertPersistedInstanceState` has already validated.
+     */
     const droppedBorrowedKeys = dropBorrowedInstanceAgentKeys(loaded);
     assertPersistedActorState(loaded);
     /*
