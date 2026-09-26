@@ -36,6 +36,7 @@ import {
   residentInstanceUsage
 } from "./instances.js";
 import { Store, type State } from "./store.js";
+import { receiveSessionBinding } from "./sessionBindings.js";
 import { cancelTaskInState, normalizeRequirements, taskBatchLimits } from "./tasks.js";
 
 /*
@@ -977,4 +978,78 @@ test("cancelling a task that is waiting on a resident releases the slot promptly
   const instance = instances(current).find((item) => item.id === instanceId)!;
   assert.ok(["draining", "released"].includes(instance.status), `expected a drained instance, got ${instance.status}`);
   assert.equal((current.state.instanceReleaseIntents ?? []).some((intent) => intent.instanceId === instanceId), true);
+});
+
+test("a running instance attempt is failed when its allocation is lost, not left mid-flight", async () => {
+  const current = fixture([node("node-alpha", { instanceCapacity: 2 })], [task("one")]);
+  runSchedulingPass(current.state, context(current), at);
+  const instanceId = instances(current)[0].id;
+  markReady(current, instanceId);
+  runSchedulingPass(current.state, context(current), later(20));
+  const runId = current.state.runs[0].id;
+  // The attempt actually started, so the loss must settle a `running` run, not only a queued one.
+  assert.equal(applyRunLifecycle(current.state, { type: "run.started", runId, at: later(21) } as never), true);
+  assert.equal(taskById(current, "one").status, "running");
+  const store = await outboxStore(current);
+
+  await store.transact((state) => reconcileNodeInstancesInState(state, "node-alpha", [], later(40)));
+  const after = store.read((state) => ({
+    run: state.runs.find((item) => item.id === runId)!,
+    task: state.tasks!.find((item) => item.id === "one")!,
+    instance: (state.instances ?? []).find((item) => item.id === instanceId)!
+  }));
+  assert.equal(after.run.status, "failed");
+  assert.equal(after.run.error?.includes("allocation was lost"), true);
+  assert.equal(after.task.status, "ready", "a running attempt is retried under the same policy as a queued one");
+  assert.equal(after.instance.status, "requested", "the instance keeps its identity for a replacement");
+});
+
+test("an agent-only fleet reports no offering-exclusion entry for an ineligible agent pin", () => {
+  // No node publishes an offering and the thread holds no resident, so the pin closed nothing and
+  // the diagnostic must not claim it did.
+  const pinnedAgent = {
+    id: "worker-b", name: "worker-b", title: "worker-b", summary: "", glyph: "W",
+    avatarShape: "cup" as const, avatarColor: "amber" as const, state: "idle" as const, currentAction: "Available",
+    harnessId: "codex-cli" as const, model: "default", computeNodeId: "node-plain", workspace: "/workspace/worker-b",
+    systemPrompt: "Work carefully", unread: 0, updatedAt: at, skills: []
+  };
+  const plain = node("node-plain", { instanceCapacity: undefined, status: "offline" });
+  const current = fixture([plain], [
+    task("one", {}, { placementOverride: { agentId: "worker-b", authorizedBy: "operator" } })
+  ], { agents: [pinnedAgent] });
+  current.connections.set("node-plain", { protocolVersion: "4", synced: true });
+
+  runSchedulingPass(current.state, context(current), at);
+  assert.equal(current.state.runs.length, 0);
+  assert.equal(instances(current).length, 0);
+  const entries = taskById(current, "one").placement!.unsatisfied;
+  assert.equal(entries.some((entry) => entry.detail.includes("pinned to a configured agent")), false);
+  assert.ok(entries.length > 0, "the pinned agent's own failure is still reported");
+  assert.ok(entries.every((entry) => entry.kind !== "offering"));
+});
+
+test("an instance run's session replacement event carries no agent attribution", async () => {
+  const acp = node("node-acp", { harnesses: [
+    { id: "claude-cli", label: "Claude", description: "", available: true, authMode: "local-subscription", models: ["fable"], transports: ["acp-v1"] }
+  ] });
+  const current = fixture([acp], [task("one")]);
+  runSchedulingPass(current.state, context(current), at);
+  const instanceId = instances(current)[0].id;
+  markReady(current, instanceId);
+  runSchedulingPass(current.state, context(current), later(20));
+  const run = current.state.runs[0];
+  assert.equal(run.transport, "acp-v1");
+  const store = await outboxStore(current);
+  await flushPendingInstanceDeliveries(store, () => true);
+
+  const binding = (providerSessionId: string) => ({
+    transport: "acp-v1" as const, harnessId: "claude-cli" as const, providerSessionId, status: "active" as const
+  });
+  assert.equal((await receiveSessionBinding(store, "node-acp", run.id, binding("session-one"), later(30))).kind, "created");
+  // A second binding with a different provider session replaces the first and writes the event.
+  const replaced = await receiveSessionBinding(store, "node-acp", run.id, binding("session-two"), later(31));
+  assert.equal(replaced.kind, "created");
+  const event = store.read((state) => state.events.find((item) => item.title === "Session replaced"));
+  assert.ok(event, "the replacement event was written");
+  assert.equal(Object.hasOwn(event!, "agentId"), false, "an instance run names no configured agent");
 });
