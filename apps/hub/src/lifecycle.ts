@@ -13,6 +13,7 @@ import {
   type RunTransportSelection,
   type Snapshot
 } from "@coffee-shop/protocol";
+import { describeHistoricalActor } from "./actors.js";
 import { isContinuationRun } from "./continuationRuns.js";
 import { settleHarnessStateForTerminalRun } from "./harnessEvents.js";
 import { hasAttribution, newEvent, newMessage, runAttribution, type State, type Store } from "./store.js";
@@ -160,7 +161,8 @@ function runActor(state: State, run: Run): RunActor | undefined {
     const instance = (state.instances ?? []).find((item) => item.id === run.instanceId);
     if (!instance || run.allocationId === undefined) return undefined;
     return {
-      name: instance.purpose?.name ?? instance.id,
+      // One definition of an operator-facing actor name, shared with every historical projection.
+      name: describeHistoricalActor(state, run).name,
       attribution: { instanceId: instance.id, allocationId: run.allocationId },
       present: () => {},
       touch: (at) => { instance.updatedAt = at; }
@@ -169,7 +171,7 @@ function runActor(state: State, run: Run): RunActor | undefined {
   const agent = state.agents.find((item) => item.id === run.agentId);
   if (!agent) return undefined;
   return {
-    name: agent.name,
+    name: describeHistoricalActor(state, run).name,
     attribution: { agentId: agent.id },
     present: (next) => { agent.state = next.state; agent.currentAction = next.action; },
     touch: (at) => { agent.updatedAt = at; }

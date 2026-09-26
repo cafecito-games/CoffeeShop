@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   threadOrchestrator,
+  threadOrchestratorKinds,
   type AcpAgentCapabilities,
   type AgentInstance,
   type ComputeNode,
@@ -32,6 +33,7 @@ import {
   templateFromLegacyAgent
 } from "./agentTemplates.js";
 import { CoordinationError } from "./coordinationError.js";
+import { postOperatorMessageInState } from "./externalOrchestrators.js";
 import { fixtureAgent, fixtureHandler, fixtureNode, fixtureTime } from "./hubToolsTestSupport.js";
 import { closeLegacySessionBindings, promoteThreadToInstanceInState } from "./legacyPromotion.js";
 import { cancelRunInState } from "./lifecycle.js";
@@ -646,4 +648,66 @@ test("closing legacy sessions leaves an instance session and a settled legacy se
       ["s-instance", "idle"], ["s-legacy-idle", "closed"], ["s-legacy-failed", "failed"], ["s-other-thread", "idle"]
     ]);
   });
+});
+
+/*
+ * Vocabulary closure. `threadOrchestratorKinds` has exactly one definition, in the protocol, and
+ * every hub consumer of it must either handle a kind or refuse it explicitly. A kind a consumer
+ * silently ignored would leave a thread with no authorized principal and no diagnostic, which is the
+ * failure this table exists to prevent.
+ */
+test("every thread orchestrator kind is handled or explicitly refused by every hub consumer", async () => {
+  assert.deepEqual([...threadOrchestratorKinds], ["agent", "external", "instance"], "one definition of the vocabulary");
+  const { store, context } = await promotableWorld();
+  const thread = () => store.read((state) => state.threads!.find((item) => item.id === "thread-one")!);
+
+  const asKind = async (kind: "agent" | "external" | "instance") => {
+    await store.transact((state) => {
+      const current = state.threads!.find((item) => item.id === "thread-one")!;
+      if (kind === "agent") {
+        current.orchestrator = { kind: "agent", agentId: "orchestrator" };
+        current.ownerAgentId = "orchestrator";
+        return true;
+      }
+      current.orchestrator = kind === "external" ? { kind: "external", clientId: "client-one" } : { kind: "instance", instanceId: "instance-one" };
+      delete current.ownerAgentId;
+      return true;
+    });
+  };
+
+  const promotion = new Map<string, string>();
+  const operatorMessage = new Map<string, string>();
+  const continuations = new Map<string, boolean>();
+  for (const kind of threadOrchestratorKinds) {
+    await asKind(kind);
+    await store.transact((state) => {
+      const result = promoteThreadToInstanceInState(state, "thread-one", context, later(10));
+      promotion.set(kind, result.kind);
+      // Only the agent kind may commit a promotion; roll every probe back so the next kind starts clean.
+      return false;
+    });
+    try {
+      await store.transact((state) => {
+        postOperatorMessageInState(state, { threadId: "thread-one", body: "hello", idempotencyKey: `op-${kind}` }, later(11));
+        operatorMessage.set(kind, "accepted");
+        return false;
+      });
+    } catch (error) {
+      operatorMessage.set(kind, error instanceof CoordinationError ? error.code : "unexpected");
+    }
+    await store.transact((state) => {
+      // With no pending inbox events no kind is ever planned a continuation, and none may throw.
+      continuations.set(kind, runContinuationPass(state, context, later(12)).continuations.length > 0);
+      return false;
+    });
+  }
+
+  assert.deepEqual(Object.fromEntries(promotion), {
+    agent: "promoted", external: "not-eligible", instance: "not-eligible"
+  }, "only an agent-orchestrated thread is promotable; the other kinds are refused by name");
+  assert.deepEqual(Object.fromEntries(operatorMessage), {
+    agent: "not_found", external: "accepted", instance: "accepted"
+  }, "an agent thread takes operator messages through its own entry point, never the orchestrator mailbox");
+  assert.deepEqual(Object.fromEntries(continuations), { agent: false, external: false, instance: false });
+  assert.equal(threadOrchestrator(thread())?.kind, "instance", "every probe rolled back to the kind it was set to");
 });
