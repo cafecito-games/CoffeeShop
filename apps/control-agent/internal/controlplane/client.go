@@ -710,7 +710,8 @@ func httpEndpoint(controlEndpoint, path string) (string, error) {
 func (client *Client) heartbeatMessage() protocol.Outbound {
 	activeInstances := client.activeInstanceCount()
 	activeInstanceIDs := client.activeInstanceIDs()
-	return protocol.Outbound{Type: "heartbeat", NodeID: client.node.ID, ActiveRuns: client.activeRuns(), ActiveInstances: &activeInstances, ActiveInstanceIDs: &activeInstanceIDs, At: now()}
+	activeRuns := client.activeRuns()
+	return protocol.Outbound{Type: "heartbeat", NodeID: client.node.ID, ActiveRuns: &activeRuns, ActiveInstances: &activeInstances, ActiveInstanceIDs: &activeInstanceIDs, At: now()}
 }
 
 func (client *Client) activeRuns() int {

@@ -92,7 +92,11 @@ type Outbound struct {
 	ProtocolVersion string       `json:"protocolVersion,omitempty"`
 	Node            *ComputeNode `json:"node,omitempty"`
 	NodeID          string       `json:"nodeId,omitempty"`
-	ActiveRuns      int          `json:"activeRuns"`
+	// ActiveRuns is a pointer so only the message types whose contract carries it encode the field.
+	// A non-pointer int encoded "activeRuns":0 onto every Outbound message, including `register`,
+	// whose v5 contract admits exactly type, protocolVersion and node — so a v5 hub refused every
+	// registration. Heartbeat sets it explicitly because its contract requires the field.
+	ActiveRuns *int `json:"activeRuns,omitempty"`
 	// ActiveRunIDs is a pointer so sync.complete can encode an explicitly empty array
 	// ("activeRunIds":[]) when no runs survived the reconnect, while every other message type
 	// omits the field entirely by leaving the pointer nil.
