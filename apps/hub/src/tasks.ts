@@ -7,6 +7,7 @@ import {
   isTaskDependencyPolicy,
   isTerminalTaskStatus,
   recordSourceKey,
+  validateInstanceRequirements,
   type DependencyOutcome,
   type ExecutionPreferences,
   type ExecutionRequirements,
@@ -177,6 +178,17 @@ export function normalizeRequirements(value: unknown): ExecutionRequirements {
   }
   const preferences = normalizePreferences(value.preferences);
   if (preferences) requirements.preferences = preferences;
+  /*
+   * The batch bounds above count characters; the protocol contract these requirements travel under
+   * counts UTF-8 bytes and constrains identity shapes. A value inside one bound and outside the other
+   * would be accepted here and then fail to encode where it is actually used — on the instance record
+   * a version-5 placement creates — which is a refusal in the wrong place: inside a scheduling
+   * transaction, where it aborts placements for unrelated tasks. It is refused at the boundary
+   * instead, against the single validator that owns those bounds, so nothing unencodable is ever
+   * persisted.
+   */
+  const wireValid = validateInstanceRequirements(requirements);
+  if (!wireValid.ok) throw invalid(`requirements cannot be carried by the execution contract: ${wireValid.reason}`);
   return requirements;
 }
 
@@ -661,6 +673,17 @@ export function assignTaskAttempt(state: State, taskId: string, run: Run, at: st
   transitionTask(task, "assigned", at);
   return run;
 }
+
+/**
+ * A task is failed rather than retried once this many attempts have been lost. The budget lives with
+ * the task, beside `attemptRunIds`, so every authority that can lose an attempt — the version-4
+ * reconnect sweep and the version-5 instance lifecycle alike — reads one definition of it.
+ */
+export const maximumTaskAttempts = 3;
+
+/** Whether a task may receive another attempt after losing the current one. */
+export const attemptIsRetryable = (task: Task | undefined) =>
+  (task?.attemptRunIds.length ?? maximumTaskAttempts) < maximumTaskAttempts;
 
 export interface AttemptOutcomeOptions {
   /** A failure the hub may retry with a new attempt, such as lost compute. */

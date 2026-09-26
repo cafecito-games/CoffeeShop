@@ -15,8 +15,11 @@ import {
 } from "@coffee-shop/protocol";
 import { isContinuationRun } from "./continuationRuns.js";
 import { settleHarnessStateForTerminalRun } from "./harnessEvents.js";
-import { newEvent, newMessage, type State, type Store } from "./store.js";
-import { applyAttemptOutcome, cancelTaskInState, type TaskCancellationResult } from "./tasks.js";
+import { newEvent, newMessage, runAttribution, type State, type Store } from "./store.js";
+import { applyAttemptOutcome, attemptIsRetryable, cancelTaskInState, maximumTaskAttempts, type TaskCancellationResult } from "./tasks.js";
+
+/** Re-exported for the version-4 callers that have always read the attempt budget from here. */
+export { maximumTaskAttempts };
 
 type RunLifecycleMessage = Extract<ControlAgentToHub, { type: `run.${string}` }>;
 const runLifecycleMessageTypes = new Set<string>([
@@ -98,8 +101,6 @@ export function queuedRunsForNode(snapshot: Snapshot, nodeId: string, activeRunI
   return snapshot.runs.filter((run) => run.nodeId === nodeId && run.status === "queued" && !active.has(run.id) && currentAttempt(run));
 }
 
-/** A task is failed rather than retried once this many attempts have been lost. */
-export const maximumTaskAttempts = 3;
 export const lostComputeError = "Compute lost: Barista no longer reports this attempt as active";
 
 /**
@@ -126,7 +127,7 @@ export function failLostTaskAttempts(state: State, nodeId: string, activeRunIds:
     state.events.unshift(newEvent({ type: "status", title: "Compute lost", detail: `Run ${run.id} was no longer active on ${nodeId}`, threadId: run.threadId, ...attribution, runId: run.id }));
     updateAgentAfterRunEnded(state, run, at);
     settleHarnessStateForTerminalRun(state, run.id, at);
-    applyAttemptOutcome(state, run.id, at, { retryable: (task?.attemptRunIds.length ?? maximumTaskAttempts) < maximumTaskAttempts });
+    applyAttemptOutcome(state, run.id, at, { retryable: attemptIsRetryable(task) });
     lost.push(run);
   }
   return lost;
@@ -173,13 +174,6 @@ function runActor(state: State, run: Run): RunActor | undefined {
     touch: (at) => { instance.updatedAt = at; }
   };
 }
-
-/**
- * Event and message attribution for a run. An instance run names no agent, so the field is omitted
- * rather than filled with an instance id that no agent lookup could ever resolve.
- */
-const runAttribution = (state: Readonly<State>, run: Run): { agentId?: string } =>
-  state.agents.some((item) => item.id === run.agentId) ? { agentId: run.agentId } : {};
 
 function activeRunForAgent(state: State, agentId: string, excludedRunId: string) {
   return state.runs

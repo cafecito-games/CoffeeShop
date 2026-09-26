@@ -10,7 +10,7 @@ import type {
 import { applyHarnessResolution, cancelPendingApprovals, openApproval, settleApprovalsForTerminalRun } from "./approvals.js";
 import type { Redactor } from "./redaction.js";
 import { settleSessionBindingsForTerminalRun } from "./sessionBindings.js";
-import { newEvent, type State } from "./store.js";
+import { newEvent, runAttribution, type State } from "./store.js";
 
 /*
  * Structured harness events.
@@ -296,7 +296,7 @@ function failStream(state: State, run: Run, stream: HarnessEventStream, activity
   activity.streamStatus = "failed";
   activity.streamFailure = reason;
   activity.updatedAt = at;
-  state.events.unshift(newEvent({ type: "status", title: "Harness event stream stopped", detail: reason, threadId: run.threadId, agentId: run.agentId, runId: run.id }));
+  state.events.unshift(newEvent({ type: "status", title: "Harness event stream stopped", detail: reason, threadId: run.threadId, ...runAttribution(state, run), runId: run.id }));
   return { kind: "stream-failed", reason, deliveries: cancelPendingApprovals(state, run.id, at) };
 }
 

@@ -31,11 +31,12 @@ import {
   flushPendingInstanceDeliveries,
   nodeResidencyInState,
   pruneInstanceAuditRecords,
+  receiveInstanceLifecycleReport,
   reconcileNodeInstancesInState,
   residentInstanceUsage
 } from "./instances.js";
 import { Store, type State } from "./store.js";
-import { normalizeRequirements } from "./tasks.js";
+import { cancelTaskInState, normalizeRequirements, taskBatchLimits } from "./tasks.js";
 
 /*
  * Offering-first placement (#77).
@@ -842,4 +843,138 @@ test("a node named by a placement override restricts instance reuse and pins as 
   assert.equal(pinned.state.runs.length, 0);
   assert.equal(instances(pinned).length, 1, "a failed pin never substitutes an offering");
   assert.deepEqual(kinds(pinned, "one"), ["instance"]);
+});
+
+/*
+ * Executor loss after the attempt exists. These are the paths that stranded a `queued` instance run
+ * for ever: nothing resends a dispatch whose allocation is gone, the version-4 reconnect sweep only
+ * touches `running` runs, and a task that is no longer `ready` is never placed again.
+ */
+
+test("losing the allocation of a queued attempt fails it and returns the task to placement", async () => {
+  const current = fixture([node("node-alpha", { instanceCapacity: 2 })], [task("one")]);
+  runSchedulingPass(current.state, context(current), at);
+  const instanceId = instances(current)[0].id;
+  markReady(current, instanceId);
+  runSchedulingPass(current.state, context(current), later(20));
+  const runId = current.state.runs[0].id;
+  assert.equal(taskById(current, "one").status, "assigned");
+  const store = await outboxStore(current);
+  await flushPendingInstanceDeliveries(store, () => true);
+
+  // The node comes back without the resident: the allocation is lost and its dispatch goes with it.
+  await store.transact((state) => reconcileNodeInstancesInState(state, "node-alpha", [], later(40)));
+  const after = store.read((state) => ({
+    run: state.runs.find((item) => item.id === runId)!,
+    task: state.tasks!.find((item) => item.id === "one")!,
+    dispatches: (state.instanceDeliveries ?? []).filter((record) => record.kind === "dispatch").length
+  }));
+  assert.equal(after.dispatches, 0, "the dispatch was removed with its allocation");
+  assert.equal(after.run.status, "failed", "the attempt is not left queued for ever");
+  assert.equal(after.task.status, "ready", "the task returns to placement under its retry policy");
+  assert.equal(after.task.assignment, undefined);
+
+  // And it is genuinely placeable again, on a fresh instance identity.
+  const replaced = store.read((state) => structuredClone(state));
+  const revived: Fixture = { ...current, state: replaced as State };
+  revived.connections = current.connections;
+  runSchedulingPass(revived.state, context(revived), later(50));
+  assert.equal((revived.state.instances ?? []).length, 2, "the retry received a new instance identity");
+  assert.equal((revived.state.allocations ?? []).some((item) => item.status === "reserved"), true);
+});
+
+test("an instance that fails while carrying a queued attempt settles that attempt", async () => {
+  const current = fixture([node("node-alpha", { instanceCapacity: 2 })], [task("one")]);
+  runSchedulingPass(current.state, context(current), at);
+  const instanceId = instances(current)[0].id;
+  markReady(current, instanceId);
+  runSchedulingPass(current.state, context(current), later(20));
+  const runId = current.state.runs[0].id;
+  const allocationId = allocations(current)[0].id;
+  const store = await outboxStore(current);
+
+  const outcome = await receiveInstanceLifecycleReport(store, "node-alpha", {
+    type: "instance.failed", nodeId: "node-alpha", at: later(40), instanceId, allocationId, error: "harness could not start"
+  }, later(40));
+  assert.equal(outcome.kind, "accepted");
+  const after = store.read((state) => ({
+    run: state.runs.find((item) => item.id === runId)!,
+    task: state.tasks!.find((item) => item.id === "one")!,
+    instance: (state.instances ?? []).find((item) => item.id === instanceId)!
+  }));
+  assert.equal(after.instance.status, "failed");
+  assert.equal(after.run.status, "failed", "a failed resident never leaves its attempt queued");
+  assert.equal(after.task.status, "ready", "the task returns to placement");
+});
+
+test("a task pinned to a configured agent is never substituted onto an offering or a resident", () => {
+  const reusable: AgentInstance = {
+    id: "instance-spare", threadId: "thread-one", creator: { kind: "operator", operatorId: "operator" },
+    delegation: { canDelegate: false }, requirements: {}, lease: { idleTimeoutSeconds: 1800, expiresAt: later(1800) },
+    status: "ready", createdAt: at, updatedAt: at
+  };
+  const allocation: InstanceAllocation = {
+    id: "allocation-spare", instanceId: "instance-spare", nodeId: "node-alpha", harnessId: "claude-cli",
+    model: "fable", transport: "native-cli", workspace: "/workspace", lease: { ...reusable.lease },
+    status: "active", createdAt: at, updatedAt: at
+  };
+  // The pinned agent is ineligible: its own node is absent from the fleet entirely.
+  const pinnedAgent = {
+    id: "worker-b", name: "worker-b", title: "worker-b", summary: "", glyph: "W",
+    avatarShape: "cup" as const, avatarColor: "amber" as const, state: "idle" as const, currentAction: "Available",
+    harnessId: "codex-cli" as const, model: "default", computeNodeId: "node-gone", workspace: "/workspace/worker-b",
+    systemPrompt: "Work carefully", unread: 0, updatedAt: at, skills: []
+  };
+  const current = fixture([node("node-alpha")], [
+    task("one", {}, { placementOverride: { agentId: "worker-b", authorizedBy: "operator" } })
+  ], { agents: [pinnedAgent], instances: [reusable], allocations: [allocation] });
+
+  runSchedulingPass(current.state, context(current), at);
+  assert.equal(current.state.runs.length, 0, "the pinned task waits for its agent");
+  assert.equal(instances(current).length, 1, "no resident is requested for a pinned task");
+  assert.equal(allocations(current).length, 1, "the spare resident is not reused either");
+  const reported = kinds(current, "one");
+  assert.ok(reported.includes("node-offline"), "the pinned agent's own failure is reported");
+  assert.ok(reported.includes("agent"), "and so is the reason no offering may stand in");
+  assert.equal(
+    taskById(current, "one").placement!.unsatisfied.some((entry) => entry.detail.includes("pinned to a configured agent")),
+    true
+  );
+});
+
+test("a requirement the execution contract cannot carry is refused at submission, not inside the pass", () => {
+  // 90 characters — inside the batch's character bound — but 270 UTF-8 bytes, outside the wire bound.
+  const overlong = "ラベル".repeat(30);
+  assert.equal(overlong.length <= taskBatchLimits.requirementValueLength, true);
+  assert.equal(Buffer.byteLength(overlong, "utf8") > 256, true);
+  assert.throws(() => normalizeRequirements({ preferences: { labels: [overlong] } }), /execution contract/);
+  assert.throws(() => normalizeRequirements({ labels: [overlong] }), /execution contract/);
+
+  // Defence in depth: a record that reached persistence anyway becomes this task's diagnostic and
+  // never an exception that rolls back the placements of unrelated tasks in the same pass.
+  const current = fixture([node("node-alpha", { instanceCapacity: 2 })], [
+    task("one", { preferences: { labels: [overlong] } }),
+    task("two")
+  ]);
+  const result = runSchedulingPass(current.state, context(current), at);
+  assert.equal(result.changed, true);
+  assert.equal(taskById(current, "two").placementInstanceId !== undefined, true, "the healthy task was still placed");
+  assert.equal(taskById(current, "one").placementInstanceId, undefined);
+  assert.deepEqual(kinds(current, "one"), ["instance"]);
+  assert.equal(taskById(current, "one").placement!.unsatisfied[0].detail.includes("wire-valid"), true);
+  assert.equal(instances(current).length, 1, "the refused task left no instance behind");
+});
+
+test("cancelling a task that is waiting on a resident releases the slot promptly", () => {
+  const current = fixture([node("node-alpha", { instanceCapacity: 1 })], [task("one")]);
+  runSchedulingPass(current.state, context(current), at);
+  const instanceId = instances(current)[0].id;
+  assert.equal(taskById(current, "one").placementInstanceId, instanceId);
+
+  cancelTaskInState(current.state, "one", later(5));
+  runSchedulingPass(current.state, context(current), later(6));
+  assert.equal(taskById(current, "one").placementInstanceId, undefined);
+  const instance = instances(current).find((item) => item.id === instanceId)!;
+  assert.ok(["draining", "released"].includes(instance.status), `expected a drained instance, got ${instance.status}`);
+  assert.equal((current.state.instanceReleaseIntents ?? []).some((intent) => intent.instanceId === instanceId), true);
 });

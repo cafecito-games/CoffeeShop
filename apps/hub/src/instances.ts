@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import {
   canTransitionAllocation,
   canTransitionInstance,
+  canTransitionRun,
   defaultInstanceIdleTimeoutSeconds,
   instanceLifecycleOperations,
   instanceLimits,
@@ -36,7 +37,7 @@ import {
 } from "@coffee-shop/protocol";
 import { CoordinationError } from "./coordinationError.js";
 import { newEvent, newId, type State, type Store } from "./store.js";
-import { appendInitialTaskInState, initialTaskOrigin } from "./tasks.js";
+import { appendInitialTaskInState, applyAttemptOutcome, attemptIsRetryable, initialTaskOrigin } from "./tasks.js";
 
 /*
  * Ephemeral instance lifecycle authority.
@@ -583,6 +584,34 @@ export async function applyInstanceLifecycle(
   return result;
 }
 
+/**
+ * Drains a resident the scheduler asked for and no longer needs, inside the caller's transaction.
+ * Without it a resident requested for a task that was then cancelled — or served by the compatibility
+ * agent path instead — would hold its node's resident slot until its idle lease expired, and its
+ * `requested` record would linger with no intent pointing at it. It refuses to touch a resident that
+ * is still carrying work or that any task still names, so it can never drain a live one, and it is a
+ * no-op for an already terminal or draining record.
+ */
+export function releaseUnneededInstanceInState(state: State, instanceId: string, at: string): boolean {
+  const instance = (state.instances ?? []).find((item) => item.id === instanceId);
+  if (!instance || terminalInstanceStatuses.includes(instance.status) || instance.status === "draining") return false;
+  if (activeRunsForInstance(state, instance.id).length > 0) return false;
+  if ((state.tasks ?? []).some((task) => task.placementInstanceId === instance.id)) return false;
+  recordReleaseIntent(state, instance, "drain", at);
+  if (canTransitionInstance(instance.status, "draining")) {
+    instance.status = "draining";
+    instance.updatedAt = at;
+  }
+  state.events.unshift(newEvent({
+    type: "status",
+    title: "Instance release requested (drain)",
+    detail: `${instanceEventDetail(instance)} is no longer needed by any task`,
+    threadId: instance.threadId
+  }));
+  settleDrainingInstances(state, at);
+  return true;
+}
+
 /** Records the release intent, escalating monotonically: once cancel, always cancel. */
 function recordReleaseIntent(state: State, instance: AgentInstance, mode: InstanceReleaseMode, at: string): InstanceReleaseIntent {
   state.instanceReleaseIntents ??= [];
@@ -656,7 +685,13 @@ export interface AllocationCandidate {
 export type ReservationResult =
   | { kind: "reserved"; allocation: InstanceAllocation }
   | { kind: "not-found" }
-  | { kind: "capacity"; reason: string };
+  | { kind: "capacity"; reason: string }
+  /**
+   * The reservation would produce a command this hub cannot encode. It is reported rather than
+   * thrown, because the scheduler decides many tasks inside one transaction and an exception there
+   * would roll back placements that have nothing to do with the offending record.
+   */
+  | { kind: "invalid"; reason: string };
 
 const isUnderWorkspaceRoot = (workspace: string, root: string) =>
   workspace === root || workspace.startsWith(root.endsWith("/") ? root : `${root}/`);
@@ -700,7 +735,9 @@ export function reserveInstanceAllocationInState(
   const refusal = allocationRefusal(state, instance, candidate);
   if (refusal !== undefined) return { kind: "capacity", reason: refusal };
   const node = state.nodes.find((item) => item.id === candidate.nodeId)!;
-  return { kind: "reserved", allocation: structuredClone(writeAllocationInState(state, instance, node, candidate, at)) };
+  const written = writeAllocationInState(state, instance, node, candidate, at);
+  if (!written.ok) return { kind: "invalid", reason: written.reason };
+  return { kind: "reserved", allocation: structuredClone(written.allocation) };
 }
 
 /**
@@ -733,8 +770,19 @@ function allocationRefusal(state: Readonly<State>, instance: AgentInstance, cand
   return undefined;
 }
 
-/** Writes the allocation, moves the instance to `provisioning`, and persists its provision command. */
-function writeAllocationInState(state: State, instance: AgentInstance, node: ComputeNode, candidate: AllocationCandidate, at: string): InstanceAllocation {
+/**
+ * Writes the allocation, moves the instance to `provisioning`, and persists its provision command —
+ * or reports that the command cannot be encoded, having written nothing. The command is built and
+ * validated against a prospective copy of the records before any of them is mutated, so a refusal
+ * leaves no allocation, no status change, and no outbox entry behind.
+ */
+function writeAllocationInState(
+  state: State,
+  instance: AgentInstance,
+  node: ComputeNode,
+  candidate: AllocationCandidate,
+  at: string
+): { ok: true; allocation: InstanceAllocation } | { ok: false; reason: string } {
   const allocation: InstanceAllocation = {
     id: newId("allocation"),
     instanceId: instance.id,
@@ -748,15 +796,17 @@ function writeAllocationInState(state: State, instance: AgentInstance, node: Com
     createdAt: at,
     updatedAt: at
   };
+  const message: InstanceHubMessage = {
+    type: "instance.provision",
+    instance: { ...structuredClone(instance), status: "provisioning", updatedAt: at },
+    allocation: structuredClone(allocation)
+  };
+  const wireValid = validateInstanceHubMessage(message, "5");
+  if (!wireValid.ok) return { ok: false, reason: `the provision command is not wire-valid: ${wireValid.reason}` };
   instance.status = "provisioning";
   instance.updatedAt = at;
   state.allocations ??= [];
   state.allocations.unshift(allocation);
-  const message: InstanceHubMessage = { type: "instance.provision", instance: structuredClone(instance), allocation: structuredClone(allocation) };
-  const wireValid = validateInstanceHubMessage(message, "5");
-  if (!wireValid.ok) {
-    throw new CoordinationError("invalid_arguments", `The provision command is not wire-valid: ${wireValid.reason}`);
-  }
   state.instanceDeliveries ??= [];
   state.instanceDeliveries.push({ allocationId: allocation.id, kind: "provision", nodeId: node.id, message, createdAt: at, sequence: nextDeliverySequence(state, allocation.id) });
   state.events.unshift(newEvent({
@@ -765,7 +815,7 @@ function writeAllocationInState(state: State, instance: AgentInstance, node: Com
     detail: `${instanceEventDetail(instance)} on ${node.id}`,
     threadId: instance.threadId
   }));
-  return allocation;
+  return { ok: true, allocation };
 }
 
 /** The seed for a scheduler-requested instance; no lifecycle idempotency receipt is involved. */
@@ -778,7 +828,7 @@ export interface InstanceRequestSeed {
 }
 
 /** Builds and wire-validates a `requested` instance record without writing it. */
-function buildRequestedInstance(threadId: string, seed: InstanceRequestSeed, at: string): AgentInstance {
+function buildRequestedInstance(threadId: string, seed: InstanceRequestSeed, at: string): { ok: true; instance: AgentInstance } | { ok: false; reason: string } {
   const idleTimeoutSeconds = seed.idleTimeoutSeconds ?? defaultInstanceIdleTimeoutSeconds;
   const instance: AgentInstance = {
     id: newId("instance"),
@@ -793,8 +843,8 @@ function buildRequestedInstance(threadId: string, seed: InstanceRequestSeed, at:
     updatedAt: at
   };
   const validated = validateAgentInstance(instance);
-  if (!validated.ok) throw new CoordinationError("invalid_arguments", `The instance request is not wire-valid: ${validated.reason}`);
-  return instance;
+  if (!validated.ok) return { ok: false, reason: `the instance record is not wire-valid: ${validated.reason}` };
+  return { ok: true, instance };
 }
 
 /**
@@ -807,7 +857,9 @@ export function requestInstanceInState(state: State, seed: InstanceRequestSeed, 
   const thread = (state.threads ?? []).find((item) => item.id === seed.threadId);
   if (!thread) throw new CoordinationError("not_found", "Thread not found");
   if (thread.status !== "active") throw new CoordinationError("thread_inactive", "Instance creation requires an active thread");
-  const instance = buildRequestedInstance(thread.id, seed, at);
+  const built = buildRequestedInstance(thread.id, seed, at);
+  if (!built.ok) throw new CoordinationError("invalid_arguments", `The instance request is not valid: ${built.reason}`);
+  const instance = built.instance;
   state.instances ??= [];
   state.instances.unshift(instance);
   state.events.unshift(newEvent({
@@ -821,7 +873,9 @@ export function requestInstanceInState(state: State, seed: InstanceRequestSeed, 
 
 export type InstancePlacementResult =
   | { kind: "placed"; instance: AgentInstance; allocation: InstanceAllocation }
-  | { kind: "capacity"; reason: string };
+  | { kind: "capacity"; reason: string }
+  /** The record or its command cannot be encoded; nothing was written. See `ReservationResult`. */
+  | { kind: "invalid"; reason: string };
 
 /**
  * Requests one instance and reserves its allocation as a single mutation, inside the caller's
@@ -834,9 +888,27 @@ export function placeInstanceInState(state: State, seed: InstanceRequestSeed, ca
   const thread = (state.threads ?? []).find((item) => item.id === seed.threadId);
   if (!thread) throw new CoordinationError("not_found", "Thread not found");
   if (thread.status !== "active") throw new CoordinationError("thread_inactive", "Instance creation requires an active thread");
-  const instance = buildRequestedInstance(thread.id, seed, at);
+  const built = buildRequestedInstance(thread.id, seed, at);
+  if (!built.ok) return { kind: "invalid", reason: built.reason };
+  const instance = built.instance;
   const refusal = allocationRefusal(state, instance, candidate);
   if (refusal !== undefined) return { kind: "capacity", reason: refusal };
+  const node = state.nodes.find((item) => item.id === candidate.nodeId)!;
+  /*
+   * The command is built and validated against prospective copies first, so this refusal — like the
+   * capacity one above — happens before the instance record itself is written.
+   */
+  const probe: InstanceHubMessage = {
+    type: "instance.provision",
+    instance: { ...structuredClone(instance), status: "provisioning", updatedAt: at },
+    allocation: {
+      id: "probe", instanceId: instance.id, nodeId: node.id, harnessId: candidate.harnessId, model: candidate.model,
+      transport: candidate.transport, workspace: candidate.workspace, lease: { ...instance.lease },
+      status: "reserved", createdAt: at, updatedAt: at
+    }
+  };
+  const encodable = validateInstanceHubMessage(probe, "5");
+  if (!encodable.ok) return { kind: "invalid", reason: `the provision command is not wire-valid: ${encodable.reason}` };
   state.instances ??= [];
   state.instances.unshift(instance);
   state.events.unshift(newEvent({
@@ -845,8 +917,9 @@ export function placeInstanceInState(state: State, seed: InstanceRequestSeed, ca
     detail: instanceEventDetail(instance),
     threadId: thread.id
   }));
-  const node = state.nodes.find((item) => item.id === candidate.nodeId)!;
-  return { kind: "placed", instance, allocation: writeAllocationInState(state, instance, node, candidate, at) };
+  const written = writeAllocationInState(state, instance, node, candidate, at);
+  if (!written.ok) return { kind: "invalid", reason: written.reason };
+  return { kind: "placed", instance, allocation: written.allocation };
 }
 
 /**
@@ -879,11 +952,11 @@ export function acceptInstanceWorkInState(state: State, instanceId: string, at: 
  * wire-validated here, so an attempt whose resolved placement disagrees with its allocation is
  * refused before it can be committed rather than silently dropped at send time.
  */
-export function appendInstanceDispatchInState(state: State, run: InstanceRun, at: string) {
+export function appendInstanceDispatchInState(state: State, run: InstanceRun, at: string): { ok: true } | { ok: false; reason: string } {
   const instance = (state.instances ?? []).find((item) => item.id === run.instanceId);
-  if (!instance) throw new CoordinationError("not_found", "Instance not found");
+  if (!instance) return { ok: false, reason: "the dispatch names no known instance" };
   const allocation = (state.allocations ?? []).find((item) => item.id === run.allocationId);
-  if (!allocation || allocation.instanceId !== instance.id) throw new CoordinationError("not_found", "Instance allocation not found");
+  if (!allocation || allocation.instanceId !== instance.id) return { ok: false, reason: "the dispatch names no allocation of that instance" };
   const message: InstanceHubMessage = {
     type: "dispatch",
     instance: structuredClone(instance),
@@ -891,7 +964,7 @@ export function appendInstanceDispatchInState(state: State, run: InstanceRun, at
     run: structuredClone(run)
   };
   const wireValid = validateInstanceHubMessage(message, "5");
-  if (!wireValid.ok) throw new CoordinationError("invalid_arguments", `The dispatch command is not wire-valid: ${wireValid.reason}`);
+  if (!wireValid.ok) return { ok: false, reason: `the dispatch command is not wire-valid: ${wireValid.reason}` };
   state.instanceDeliveries ??= [];
   state.instanceDeliveries.push({
     allocationId: allocation.id,
@@ -901,6 +974,7 @@ export function appendInstanceDispatchInState(state: State, run: InstanceRun, at
     createdAt: at,
     sequence: nextDeliverySequence(state, allocation.id)
   });
+  return { ok: true };
 }
 
 /** Test seams for the delivery pass; production callers pass none. */
@@ -1013,7 +1087,43 @@ export async function receiveInstanceLifecycleReport(
   return outcome;
 }
 
-/** Settles every remaining nonterminal allocation of a terminal instance to the same terminal status. */
+/**
+ * Fails every active run of an instance that can no longer execute it and projects the failure onto
+ * its task under the task's own retry budget.
+ *
+ * Without this an attempt dispatched to a resident is stranded the moment its executor disappears.
+ * The run is created `queued` and only leaves that status when Barista reports `run.started`, so:
+ * losing the allocation deletes the dispatch command with it, `failLostTaskAttempts` sweeps only
+ * `running` runs, `dispatchQueuedRuns` resolves a configured agent and therefore skips instance runs,
+ * and the task is no longer `ready`, so no scheduling pass ever places it again. The run would hold
+ * its thread open and block its instance from draining until an operator cancelled it by hand.
+ */
+function failInstanceAttemptsInState(state: State, instance: AgentInstance, reason: string, at: string): boolean {
+  let changed = false;
+  for (const run of activeRunsForInstance(state, instance.id)) {
+    if (!canTransitionRun(run.status, "failed")) continue;
+    run.status = "failed";
+    run.error = reason;
+    run.finishedAt = at;
+    const task = run.taskId === undefined ? undefined : state.tasks?.find((item) => item.id === run.taskId);
+    applyAttemptOutcome(state, run.id, at, { retryable: attemptIsRetryable(task) });
+    state.events.unshift(newEvent({
+      type: "status",
+      title: "Instance attempt lost",
+      detail: `Run ${run.id} could no longer be executed: ${reason}`,
+      threadId: run.threadId,
+      runId: run.id
+    }));
+    changed = true;
+  }
+  return changed;
+}
+
+/**
+ * Settles every remaining nonterminal allocation of a terminal instance to the same terminal status,
+ * and fails the attempts that instance was still carrying: a released or failed resident cannot
+ * finish them, and nothing else would ever settle them.
+ */
 function settleTerminalInstance(state: State, instance: AgentInstance, at: string) {
   const target = instance.status === "released" ? "released" : "failed";
   for (const allocation of state.allocations ?? []) {
@@ -1021,6 +1131,7 @@ function settleTerminalInstance(state: State, instance: AgentInstance, at: strin
     allocation.status = target;
     allocation.updatedAt = at;
   }
+  failInstanceAttemptsInState(state, instance, `the executing instance is ${instance.status}`, at);
 }
 
 /**
@@ -1049,6 +1160,12 @@ export function reconcileNodeInstancesInState(state: State, nodeId: string, acti
     if (!canTransitionAllocation(allocation.status, "lost")) continue;
     allocation.status = "lost";
     allocation.updatedAt = at;
+    /*
+     * Every command addressed to this allocation goes with it, the dispatch included, so an attempt it
+     * was carrying must be failed here: nothing would resend that dispatch and nothing else sweeps a
+     * `queued` run. The task then returns to `ready` under its own retry budget and is placed afresh.
+     */
+    failInstanceAttemptsInState(state, instance, "the executing instance's allocation was lost", at);
     state.instanceDeliveries = (state.instanceDeliveries ?? []).filter((record) => record.allocationId !== allocation.id);
     if (!terminalInstanceStatuses.includes(instance.status) && instance.status !== "draining") {
       /*

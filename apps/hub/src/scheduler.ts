@@ -1,9 +1,11 @@
 import {
   isActiveRunStatus,
   isHarnessTransport,
+  isTerminalTaskStatus,
   resolveNodeCapability,
   satisfiesMinimumQuantity,
   supportsControlCapability,
+  validateInstanceHubMessage,
   workspaceLeaseGrant,
   type Agent,
   type AgentInstance,
@@ -39,6 +41,7 @@ import {
   nonTerminalInstanceStatuses,
   occupyingAllocationStatuses,
   placeInstanceInState,
+  releaseUnneededInstanceInState,
   reserveInstanceAllocationInState,
   residentInstanceUsage,
   terminalInstanceStatuses,
@@ -893,6 +896,13 @@ export function placeTask(task: Task, environment: PlacementEnvironment): Placem
 
   // A node the override names restricts every candidate set — instances, agents, and offerings alike.
   const requiredNodeId = override && authorizedOverride ? override.nodeId : undefined;
+  /*
+   * An agent pin names one configured agent, chosen for its identity, skills, and instructions. No
+   * offering and no resident instance is that agent, so an agent pin closes both of those candidate
+   * sets outright: the pinned task waits for its agent rather than being silently substituted onto an
+   * anonymous resident with a different harness, model, node, or no system prompt at all.
+   */
+  const pinnedAgentId = override && authorizedOverride ? override.agentId : undefined;
 
   // An explicit pin is exact: no offering, reuse, or agent may stand in for the instance it names.
   const pinned = override && authorizedOverride ? override.instanceId : undefined;
@@ -939,7 +949,9 @@ export function placeTask(task: Task, environment: PlacementEnvironment): Placem
     && !(environment.allocations ?? []).some((item) => item.instanceId === owned.id && occupyingAllocation(item.status))
     ? owned
     : undefined;
-  const reusable = replacing !== undefined ? [] : reusableInstances(effective, environment, profile, requiredNodeId);
+  const reusable = replacing !== undefined || pinnedAgentId !== undefined
+    ? []
+    : reusableInstances(effective, environment, profile, requiredNodeId);
   if (reusable.length) {
     return {
       kind: "instance",
@@ -952,9 +964,11 @@ export function placeTask(task: Task, environment: PlacementEnvironment): Placem
    * why reuse failed. A resident another task is still provisioning is not a candidate and must not
    * appear in this task's diagnostics.
    */
-  for (const instance of environment.instances ?? []) {
-    if (instance.threadId !== task.threadId || (instance.status !== "ready" && instance.status !== "idle")) continue;
-    unsatisfied.push(...instanceUnsatisfied(effective, instance, environment, profile, requiredNodeId));
+  if (pinnedAgentId === undefined) {
+    for (const instance of environment.instances ?? []) {
+      if (instance.threadId !== task.threadId || (instance.status !== "ready" && instance.status !== "idle")) continue;
+      unsatisfied.push(...instanceUnsatisfied(effective, instance, environment, profile, requiredNodeId));
+    }
   }
 
   /*
@@ -965,8 +979,8 @@ export function placeTask(task: Task, environment: PlacementEnvironment): Placem
    * from live offerings below.
    */
   const agents = [...environment.agents]
-    .filter((agent) => !override || !authorizedOverride
-      || ((override.agentId === undefined || agent.id === override.agentId) && (override.nodeId === undefined || agent.computeNodeId === override.nodeId)))
+    .filter((agent) => (pinnedAgentId === undefined || agent.id === pinnedAgentId)
+      && (requiredNodeId === undefined || agent.computeNodeId === requiredNodeId))
     .sort((left, right) => compareText(left.id, right.id));
   const agentEvaluations = agents.map((agent) => evaluateCandidate(effective, agent, profile, environment));
   const eligibleAgents = agentEvaluations.filter((evaluation) => evaluation.candidate !== undefined).sort(compareEligible);
@@ -978,12 +992,13 @@ export function placeTask(task: Task, environment: PlacementEnvironment): Placem
     };
   }
   unsatisfied.push(...agentEvaluations.flatMap((evaluation) => evaluation.unsatisfied));
-  if (agents.length === 0 && override && authorizedOverride && override.agentId !== undefined) {
+  if (agents.length === 0 && pinnedAgentId !== undefined) {
     unsatisfied.push({ kind: "agent", requirement: "placement override", detail: "no configured agent is a candidate" });
   }
 
-  // Live offerings. A pin naming an agent or a node restricts them the same way it restricts agents.
-  const offeringNodes = [...environment.nodes]
+  // Live offerings. A node the override names restricts them exactly as it restricts agents; an agent
+  // pin excludes them entirely, because no offering is the agent the operator named.
+  const offeringNodes = pinnedAgentId !== undefined ? [] : [...environment.nodes]
     .filter((node) => offersInstances(node))
     .filter((node) => requiredNodeId === undefined || node.id === requiredNodeId)
     .sort((left, right) => compareText(left.id, right.id));
@@ -1029,16 +1044,49 @@ export function placeTask(task: Task, environment: PlacementEnvironment): Placem
   } else {
     unsatisfied.push(...silentNodes, ...offeringEvaluations.flatMap((evaluation) => evaluation.unsatisfied));
   }
+  /*
+   * Say so whenever the pin actually closed a candidate set that could otherwise have been tried, so
+   * an operator reading the diagnostic is never left wondering why a healthy offering or an idle
+   * resident went unused. A fleet that publishes neither needs no such explanation.
+   */
+  const pinClosedCandidates = pinnedAgentId !== undefined
+    && (environment.nodes.some(offersInstances)
+      || (environment.instances ?? []).some((item) => item.threadId === task.threadId && (item.status === "ready" || item.status === "idle")));
+  if (pinClosedCandidates) {
+    unsatisfied.push({
+      kind: "agent",
+      requirement: pinnedAgentId!,
+      detail: "the task is pinned to a configured agent, so no live offering or resident instance may serve it"
+    });
+  }
   if (offeringNodes.length === 0 && agents.length === 0) {
     unsatisfied.push({
       kind: "agent",
-      requirement: override && authorizedOverride && override.agentId !== undefined ? "placement override" : "configured agent",
+      requirement: pinnedAgentId !== undefined ? "placement override" : "configured agent",
       detail: "no configured agent is a candidate"
     });
   } else if (offeringNodes.length === 0 && unsatisfied.length === 0) {
     unsatisfied.push({ kind: "offering", requirement: "live harness offering", detail: "no compute node publishes a resident instance offering" });
   }
   return { kind: "unsatisfied", diagnostic: diagnostic([], unsatisfied) };
+}
+
+/**
+ * Whether the dispatch this attempt would produce can be encoded for the wire, decided before the
+ * attempt is committed. `instanceRunFor` throws only for a run that is not instance-keyed, which this
+ * path has already established, so the check reports rather than raises.
+ */
+function instanceDispatchIsEncodable(state: Readonly<State>, run: Run): { ok: true } | { ok: false; reason: string } {
+  const instance = (state.instances ?? []).find((item) => item.id === run.instanceId);
+  const allocation = (state.allocations ?? []).find((item) => item.id === run.allocationId);
+  if (!instance || !allocation) return { ok: false, reason: "the attempt names no known instance allocation" };
+  const wireValid = validateInstanceHubMessage({
+    type: "dispatch",
+    instance: structuredClone(instance),
+    allocation: structuredClone(allocation),
+    run: instanceRunFor(run)
+  }, "5");
+  return wireValid.ok ? { ok: true } : { ok: false, reason: `the dispatch command is not wire-valid: ${wireValid.reason}` };
 }
 
 /**
@@ -1049,7 +1097,7 @@ export function placeTask(task: Task, environment: PlacementEnvironment): Placem
 function reservationAsPlacement(state: State, instanceId: string, candidate: AllocationCandidate, at: string): InstancePlacementResult {
   const reservation = reserveInstanceAllocationInState(state, instanceId, candidate, at);
   if (reservation.kind === "not-found") return { kind: "capacity", reason: `Instance ${instanceId} no longer exists` };
-  if (reservation.kind === "capacity") return reservation;
+  if (reservation.kind !== "reserved") return reservation;
   const instance = (state.instances ?? []).find((item) => item.id === instanceId)!;
   return { kind: "placed", instance, allocation: reservation.allocation };
 }
@@ -1172,15 +1220,23 @@ export function runSchedulingPass(state: State, context: SchedulingContext, at: 
   for (const task of state.tasks ?? []) {
     if (task.placementInstanceId === undefined) continue;
     const instance = (state.instances ?? []).find((item) => item.id === task.placementInstanceId);
-    if (instance && nonTerminalInstanceStatuses.includes(instance.status)) continue;
+    const unusable = !instance || !nonTerminalInstanceStatuses.includes(instance.status);
+    // A task that will never be placed again — cancelled, failed, completed — releases its resident
+    // promptly rather than leaving it to hold a node slot until its idle lease expires.
+    const unwanted = isTerminalTaskStatus(task.status);
+    if (!unusable && !unwanted) continue;
     state.events.unshift(newEvent({
       type: "status",
       title: "Task placement released",
-      detail: `Instance ${task.placementInstanceId} can no longer carry ${task.title.slice(0, 80)}`,
+      detail: unusable
+        ? `Instance ${task.placementInstanceId} can no longer carry ${task.title.slice(0, 80)}`
+        : `${task.title.slice(0, 80)} is ${task.status} and no longer needs instance ${task.placementInstanceId}`,
       threadId: task.threadId
     }));
+    const released = task.placementInstanceId;
     delete task.placementInstanceId;
     task.updatedAt = at;
+    if (!unusable) releaseUnneededInstanceInState(state, released, at);
     changed = true;
   }
   const environmentFor = (): PlacementEnvironment => ({
@@ -1229,10 +1285,20 @@ export function runSchedulingPass(state: State, context: SchedulingContext, at: 
         }, candidate, at)
         : reservationAsPlacement(state, decision.instanceId, candidate, at);
       if (placement.kind !== "placed") {
+        /*
+         * A refusal never throws out of the pass: one transaction decides every ready task, so an
+         * exception here would roll back placements that have nothing to do with this task, and every
+         * later pass would hit the same wall. It is recorded as this task's own diagnostic instead.
+         */
         changed = recordPlacement(task, {
           evaluatedAt: at,
           eligibleNodeIds: [],
-          unsatisfied: [{ kind: "resident-capacity", requirement: offering.nodeId, nodeId: offering.nodeId, detail: placement.reason }]
+          unsatisfied: [{
+            kind: placement.kind === "invalid" ? "instance" : "resident-capacity",
+            requirement: offering.nodeId,
+            nodeId: offering.nodeId,
+            detail: placement.reason
+          }]
         }) || changed;
         continue;
       }
@@ -1281,6 +1347,23 @@ export function runSchedulingPass(state: State, context: SchedulingContext, at: 
         createdAt: at,
         transport: allocation.transport
       };
+      /*
+       * The attempt's own identity is decided before the command is validated, because the wire
+       * record carries it, and the command is validated before the attempt is committed, so a record
+       * this hub cannot encode becomes this task's diagnostic rather than an exception that aborts the
+       * whole pass.
+       */
+      run.taskId = task.id;
+      run.attempt = task.attemptRunIds.length + 1;
+      const command = instanceDispatchIsEncodable(state, run);
+      if (!command.ok) {
+        changed = recordPlacement(task, {
+          evaluatedAt: at,
+          eligibleNodeIds: [],
+          unsatisfied: [{ kind: "instance", requirement: instance.id, nodeId: allocation.nodeId, instanceId: instance.id, detail: command.reason }]
+        }) || changed;
+        continue;
+      }
       assignTaskAttempt(state, task.id, run, at);
       delete task.placementInstanceId;
       task.placement = decision.diagnostic;
@@ -1338,8 +1421,11 @@ export function runSchedulingPass(state: State, context: SchedulingContext, at: 
     }
     assignTaskAttempt(state, task.id, run, at);
     // The compatibility path fulfils the task itself, so any instance intent it still held is
-    // released here rather than left pointing at a resident nothing will ever dispatch to.
+    // released here, and the resident it named is drained rather than left holding a node slot that
+    // nothing will ever dispatch to.
+    const abandoned = task.placementInstanceId;
     delete task.placementInstanceId;
+    if (abandoned !== undefined) releaseUnneededInstanceInState(state, abandoned, at);
     task.placement = decision.diagnostic;
     const delivered = context.canDeliver(run.nodeId, dispatchMessageFor(run, agent, state.agents, state.workspaceLeases, state));
     if (delivered) run.dispatchedAt = at;
