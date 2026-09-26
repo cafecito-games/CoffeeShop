@@ -120,6 +120,12 @@ const runInstanceMaintenance = coalesceAsync(async () => {
   const changed = await maintainInstanceLifecycle(store);
   const delivered = await flushPendingInstanceDeliveries(store, sendInstanceCommand);
   if (changed || delivered) broadcast();
+  /*
+   * A lifecycle change can release a task's placement — an expired lease drains the instance it was
+   * waiting on — so the scheduler is re-entered to place that task afresh. Only the lifecycle half
+   * triggers it: a delivery is a send, and re-entering on every send would alternate the two passes.
+   */
+  if (changed) requestScheduling();
 }, (error) => console.error("instance lifecycle maintenance failed", error));
 
 type DispatchMessage = Extract<HubToControlAgent, { type: "dispatch" }>;
@@ -187,6 +193,13 @@ const scheduleReadyTasks = coalesceAsync(async () => {
     const connection = approved.get(attempt.runId);
     if (attempt.delivered && connection) await deliverRun(attempt.runId, connection);
   }
+  /*
+   * An instance-keyed attempt and a reserved allocation are both persisted commands in the instance
+   * outbox, never direct sends, so the pass ends by flushing that outbox instead of writing a socket
+   * itself. Doing it whenever the pass changed state also covers the provision commands a fresh
+   * reservation wrote, so a newly placed task starts provisioning without waiting for the next beat.
+   */
+  if (result.changed) await runInstanceMaintenance();
   if (result.changed || continuations.changed) broadcast();
 }, (error) => console.error("task scheduling failed", error));
 const requestScheduling = () => { void scheduleReadyTasks(); };

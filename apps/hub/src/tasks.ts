@@ -141,7 +141,7 @@ export function normalizeRequirements(value: unknown): ExecutionRequirements {
   if (!isRecord(value)) throw invalid("requirements must be an object");
   onlyKeys(value, [
     "skills", "harnessIds", "models", "transports", "operatingSystems", "architectures", "labels",
-    "minimumConcurrency", "minimumMemoryMegabytes", "projectProfileId", "workspace", "preferences"
+    "minimumConcurrency", "minimumMemoryMegabytes", "projectProfileId", "templateId", "workspace", "preferences"
   ], "requirements");
   const requirements: ExecutionRequirements = {};
   const sets = {
@@ -165,6 +165,7 @@ export function normalizeRequirements(value: unknown): ExecutionRequirements {
   if (minimumConcurrency !== undefined) requirements.minimumConcurrency = minimumConcurrency;
   if (minimumMemoryMegabytes !== undefined) requirements.minimumMemoryMegabytes = minimumMemoryMegabytes;
   if (value.projectProfileId !== undefined) requirements.projectProfileId = boundedString(value.projectProfileId, "requirements.projectProfileId", taskBatchLimits.requirementValueLength);
+  if (value.templateId !== undefined) requirements.templateId = boundedString(value.templateId, "requirements.templateId", taskBatchLimits.requirementValueLength);
   if (value.workspace !== undefined) {
     const workspace = value.workspace;
     if (!isRecord(workspace)) throw invalid("requirements.workspace must be an object");
@@ -648,6 +649,8 @@ export function assignTaskAttempt(state: State, taskId: string, run: Run, at: st
   task.assignment = {
     runId: run.id,
     agentId: run.agentId,
+    ...(run.instanceId === undefined ? {} : { instanceId: run.instanceId }),
+    ...(run.allocationId === undefined ? {} : { allocationId: run.allocationId }),
     nodeId: run.nodeId,
     harnessId: run.harnessId,
     transport: run.transport ?? "native-cli",
@@ -728,6 +731,8 @@ export interface TaskAttemptProjection {
   attempt?: number;
   status: Run["status"];
   agentId: string;
+  /** Version-5: the resident instance that executed the attempt, when it was instance-keyed. */
+  instanceId?: string;
   nodeId: string;
   createdAt: string;
   startedAt?: string;
@@ -790,7 +795,8 @@ function projectTask(state: Readonly<State>, task: Task): TaskProjection {
     attempts: task.attemptRunIds.flatMap((runId) => {
       const run = runs.get(runId);
       return run ? [{
-        runId: run.id, attempt: run.attempt, status: run.status, agentId: run.agentId, nodeId: run.nodeId,
+        runId: run.id, attempt: run.attempt, status: run.status, agentId: run.agentId,
+        ...(run.instanceId === undefined ? {} : { instanceId: run.instanceId }), nodeId: run.nodeId,
         createdAt: run.createdAt, startedAt: run.startedAt, finishedAt: run.finishedAt, error: run.error,
         transport: run.transport ?? "native-cli",
         ...(run.transportSelection ? { transportSelection: structuredClone(run.transportSelection) } : {})
