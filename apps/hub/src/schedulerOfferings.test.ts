@@ -738,3 +738,24 @@ test("the placement diagnostic vocabulary is closed and every kind reaches its o
     assert.notEqual(kind.length, 0);
   }
 });
+
+test("a resident returns to idle when its attempt settles and carries the thread's next task", () => {
+  const current = fixture([node("node-alpha", { instanceCapacity: 1 })], [task("one"), task("two")]);
+  runSchedulingPass(current.state, context(current), at);
+  const instanceId = instances(current)[0].id;
+  markReady(current, instanceId);
+  runSchedulingPass(current.state, context(current), later(20));
+  assert.equal(instances(current).find((item) => item.id === instanceId)!.status, "busy");
+  assert.equal(current.state.runs.length, 1, "the busy resident carries only one attempt at a time");
+
+  // Barista reported the first attempt complete; the resident is available again.
+  const first = current.state.runs[0];
+  first.status = "completed";
+  first.finishedAt = later(40);
+  taskById(current, "one").status = "completed";
+  const next = runSchedulingPass(current.state, context(current), later(50));
+  assert.equal(next.attempts.length, 1);
+  assert.equal(instances(current).length, 1, "the thread's next task reuses the resident rather than overbooking");
+  assert.equal(current.state.runs.find((run) => run.taskId === "two")!.instanceId, instanceId);
+  assert.equal(instances(current)[0].status, "busy");
+});

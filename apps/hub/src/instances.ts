@@ -1191,16 +1191,36 @@ function rearmUnacknowledgedReleases(state: State, nodeId: string, reported: Rea
   return changed;
 }
 
-/** Expires idle leases, converges draining instances, and prunes terminal audit records. */
+/** Expires idle leases, converges instance activity and drains, and prunes terminal audit records. */
 export async function maintainInstanceLifecycle(store: Store, at = new Date().toISOString()): Promise<boolean> {
   let changed = false;
   await store.transact((state) => {
+    const converged = convergeInstanceActivityInState(state, at);
     const expired = expireIdleInstances(state, at);
     const settled = settleDrainingInstances(state, at);
     const pruned = pruneInstanceAuditRecords(state);
-    changed = expired || settled || pruned;
+    changed = converged || expired || settled || pruned;
     return changed;
   });
+  return changed;
+}
+
+/**
+ * Returns a resident whose work has finished to `idle`, inside the caller's transaction. Accepting a
+ * task attempt makes an instance `busy`, and nothing else would ever move it back, so without this a
+ * resident would be unreusable for the thread's next task and would only ever leave `busy` through
+ * idle-lease expiry. Its lease is not touched: expiry measures idleness from the last accepted work,
+ * which is exactly when the lease was last refreshed.
+ */
+export function convergeInstanceActivityInState(state: State, at: string): boolean {
+  let changed = false;
+  for (const instance of state.instances ?? []) {
+    if (instance.status !== "busy" || activeRunsForInstance(state, instance.id).length > 0) continue;
+    if (!canTransitionInstance(instance.status, "idle")) continue;
+    instance.status = "idle";
+    instance.updatedAt = at;
+    changed = true;
+  }
   return changed;
 }
 

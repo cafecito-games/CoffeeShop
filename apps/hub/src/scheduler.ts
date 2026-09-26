@@ -34,6 +34,7 @@ import { isWorkspaceWithinRoot } from "./agentConfiguration.js";
 import {
   acceptInstanceWorkInState,
   appendInstanceDispatchInState,
+  convergeInstanceActivityInState,
   nodeResidencyInState,
   nonTerminalInstanceStatuses,
   occupyingAllocationStatuses,
@@ -1144,6 +1145,9 @@ export function runSchedulingPass(state: State, context: SchedulingContext, at: 
       unsatisfied: [{ kind: "assignment", requirement: "consistent persisted assignment", detail: `${problem}; operator attention is required` }]
     }) || changed;
   }
+  // A resident whose attempt has settled is available again; the scheduler must see that before it
+  // decides whether to reuse it or request another.
+  if (convergeInstanceActivityInState(state, at)) changed = true;
   /*
    * A placement intent survives only as long as the instance it names can still carry the task. A
    * released, failed, draining, or vanished instance is immutable history: the intent is dropped so
