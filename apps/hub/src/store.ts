@@ -300,6 +300,41 @@ export function assertPersistedOrchestratorClientState(state: State) {
 }
 
 /**
+ * Drops the borrowed agent key a version-5 instance record was persisted with before this migration.
+ *
+ * Until #78 an instance run had nowhere else to put its identity, so the writer filled the required
+ * agent key with the instance id as well: `apps/hub/src/scheduler.ts` wrote
+ * `agentId: instance.id, instanceId: instance.id` for every instance-keyed attempt, and
+ * `assignTaskAttempt` copied both onto `task.assignment`. Those records now name two actors at once,
+ * which `assertPersistedActorState` refuses — so without this the hub would fail to boot on the state
+ * its own immediately preceding revision wrote, on the flagship offering-placement path.
+ *
+ * The borrowed form is self-identifying: the agent key holds the *same* string as `instanceId`, and no
+ * configured agent id can equal an instance id (`newId("instance")` produces `instance_<base36>_…`,
+ * which the agent id slug generator cannot emit). Only that exact shape is stripped. A record naming a
+ * genuinely different agent and instance is ambiguous and is left for the assertion to refuse, because
+ * guessing which of two actors produced it is exactly what must never happen.
+ */
+export function dropBorrowedInstanceAgentKeys(state: State) {
+  let changed = false;
+  const strip = (record: { agentId?: string; instanceId?: string; allocationId?: string } | undefined) => {
+    if (!record || record.agentId === undefined || record.instanceId === undefined) return;
+    if (record.agentId !== record.instanceId) return;
+    delete record.agentId;
+    changed = true;
+  };
+  for (const run of state.runs) strip(run);
+  for (const event of state.events) strip(event);
+  for (const message of state.messages) strip(message);
+  for (const artifact of state.artifacts ?? []) strip(artifact);
+  for (const update of state.taskUpdates ?? []) strip(update);
+  for (const binding of state.sessionBindings ?? []) strip(binding);
+  for (const approval of state.approvals ?? []) strip(approval);
+  for (const task of state.tasks ?? []) strip(task.assignment);
+  return changed;
+}
+
+/**
  * Rejects persisted runtime records whose actor identity the hub cannot interpret. Every record that
  * names who produced it must name exactly one actor: a configured agent, or an instance together with
  * the exact allocation it ran under. A record naming both, or half an instance identity, fails the
@@ -648,6 +683,9 @@ export class Store {
     assertPersistedProjectProfiles(loaded);
     assertPersistedInstanceState(loaded);
     assertPersistedTemplateState(loaded);
+    // Runs before the actor assertion: a record the previous revision wrote with the borrowed agent
+    // key is migrated, and only a genuinely ambiguous one is refused.
+    const droppedBorrowedKeys = dropBorrowedInstanceAgentKeys(loaded);
     assertPersistedActorState(loaded);
     /*
      * The legacy import runs after every assertion, so it never writes on top of state the hub could
@@ -656,7 +694,7 @@ export class Store {
      */
     const importedTemplates = importLegacyAgentTemplates(loaded, new Date().toISOString());
     if (this.sqlite || removedDemoRecords || addedAgentAvatars || addedCoordination || addedThreads || addedOrchestration
-      || addedThreadOrchestrators || addedApprovalResolvers || importedTemplates) await this.save(loaded);
+      || addedThreadOrchestrators || addedApprovalResolvers || droppedBorrowedKeys || importedTemplates) await this.save(loaded);
     this.state = loaded;
   }
 

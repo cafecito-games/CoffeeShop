@@ -31,6 +31,7 @@ import { createConfiguredAgent, markDisconnectedNodesOffline, updateConfiguredAg
 import { ControlConnectionRegistry, type ControlConnection } from "./controlConnections.js";
 import { applyRunLifecycle, cancelPersistedRun, coalesceAsync, failLostTaskAttempts, isReportedByOwningNode, queuedRunsForNode, retryAsync, serializeAsync } from "./lifecycle.js";
 import { CoordinationError } from "./coordination.js";
+import { reconsiderLegacyAgentImport } from "./agentTemplates.js";
 import { detachEveryAttachmentInState, postOperatorMessageInState, type OperatorMessage } from "./externalOrchestrators.js";
 import { createHubToolHandler, hubToolError } from "./hubTools.js";
 import {
@@ -390,6 +391,14 @@ app.patch("/api/agents/:id", async (req, res) => {
   await store.transact((state) => {
     result = updateConfiguredAgent(state, req.params.id, req.body, new Date().toISOString(), liveControlAgents);
     if (!result.ok || !result.changed) return false;
+    /*
+     * A refusal to import this agent described the configuration it had before this change, so it is
+     * forgotten and the next import pass decides afresh; a now-representable agent must not stay barred
+     * for ever. A recorded success is left alone, which is what keeps the import single-shot. The
+     * import itself stays at load time: it changes how skill-requiring work is placed, so it is not
+     * something an agent edit should re-route mid-flight.
+     */
+    reconsiderLegacyAgentImport(state, result.agent.id);
   });
   if (!result?.ok) return res.status(result?.kind === "not-found" ? 404 : 400).json({ error: result?.error ?? "Invalid agent configuration" });
   if (result.changed) {

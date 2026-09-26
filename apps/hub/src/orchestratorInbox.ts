@@ -471,20 +471,27 @@ export function runContinuationPass(state: State, context: SchedulingContext, at
       continue;
     }
     /*
-     * A thread that still names a configured agent continues on it while that agent can serve the
-     * wake, so an in-flight legacy thread finishes exactly as it always did. When the agent can no
-     * longer be placed at all — it was deleted, or nothing it is configured for is left in the fleet —
-     * the thread promotes to an instance created from the template that agent was imported to, rather
-     * than stalling for ever on an owner that will never come back. Promotion writes nothing when the
-     * template is missing, so an ambiguous migration leaves the thread and its history untouched.
+     * A thread that still names a configured agent continues on it, exactly as it always did.
+     *
+     * Promotion is reached only when that agent is no longer configured at all — the one condition
+     * that is permanent and cannot heal on its own. A *placement* failure must never promote: an
+     * offline node, an unfinished reconnect barrier, stale capability evidence, or a harness not yet
+     * re-reported all make the owner temporarily unplaceable, and promoting on any of them would
+     * irreversibly take the thread away from a healthy agent seconds before it came back, closing its
+     * live ACP sessions on the way. Such a thread simply waits for the next pass, which is what the
+     * hub did before instances existed.
      */
     const owner = state.agents.find((agent) => agent.id === orchestrator.agentId);
-    const continuation = owner && planAgentContinuation(state, thread, owner, window, context, at);
-    if (continuation) {
-      continuations.push(continuation);
-      changed = true;
+    if (owner) {
+      const continuation = planAgentContinuation(state, thread, owner, window, context, at);
+      if (continuation) {
+        continuations.push(continuation);
+        changed = true;
+      }
       continue;
     }
+    // Promotion writes nothing when the template is missing, so an ambiguous migration leaves the
+    // thread and its history untouched and surfaces through the import refusal instead.
     const promotion = promoteThreadToInstanceInState(state, thread.id, context, at);
     if (promotion.kind === "promoted") changed = true;
   }

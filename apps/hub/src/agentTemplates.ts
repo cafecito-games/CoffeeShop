@@ -18,10 +18,16 @@ import { newEvent, type State } from "./store.js";
  *
  * The import creates no capacity. A template is inert: no instance, no allocation, no node slot.
  *
- * It runs once per agent, ever. The marker is the deterministic `legacyAgentId` on the template plus
- * a persisted import record, never a timestamp, so a restart finds the previous decision — including
- * a refusal — and writes nothing. A refusal is recorded with its reason and surfaced as an event
- * rather than silently coercing an agent whose configuration cannot be represented.
+ * A successful import runs once per agent, ever. The marker is the deterministic `legacyAgentId` on
+ * the template plus a persisted import record, never a timestamp, so a restart finds the previous
+ * decision and writes nothing. A refusal is recorded with its reason and surfaced as an event rather
+ * than silently coercing an agent whose configuration cannot be represented.
+ *
+ * A refusal is not permanent, though: it describes one configuration, not the agent for ever. An
+ * operator who fixes the configuration would otherwise find the agent barred from ever importing, so
+ * `reconsiderLegacyAgentImport` drops the refusal when the configuration changes, and the next import
+ * pass decides afresh. A recorded *success* is never reconsidered — that is what keeps the import
+ * single-shot.
  */
 
 /** The deterministic identity of the template imported from one legacy agent. */
@@ -139,6 +145,20 @@ export function importLegacyAgentTemplates(state: State, at: string): boolean {
     changed = true;
   }
   return changed;
+}
+
+/**
+ * Forgets a recorded *refusal* for one agent, so its next import pass re-decides. Called when an
+ * operator changes the agent's configuration: the refusal described the configuration that existed
+ * then, and keeping it would bar a now-representable agent for ever. A recorded success is left
+ * untouched, so this can never cause a second import.
+ */
+export function reconsiderLegacyAgentImport(state: State, agentId: string) {
+  const records = state.legacyTemplateImports ?? [];
+  const refused = records.filter((record) => record.agentId === agentId && record.templateId === undefined);
+  if (refused.length === 0) return false;
+  state.legacyTemplateImports = records.filter((record) => !refused.includes(record));
+  return true;
 }
 
 /** Rejects persisted templates and import records the hub cannot interpret. */

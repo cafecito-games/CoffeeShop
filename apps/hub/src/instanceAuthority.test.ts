@@ -29,6 +29,7 @@ import {
 import {
   importLegacyAgentTemplates,
   legacyTemplateId,
+  reconsiderLegacyAgentImport,
   templateForLegacyAgent,
   templateFromLegacyAgent
 } from "./agentTemplates.js";
@@ -710,4 +711,131 @@ test("every thread orchestrator kind is handled or explicitly refused by every h
   }, "an agent thread takes operator messages through its own entry point, never the orchestrator mailbox");
   assert.deepEqual(Object.fromEntries(continuations), { agent: false, external: false, instance: false });
   assert.equal(threadOrchestrator(thread())?.kind, "instance", "every probe rolled back to the kind it was set to");
+});
+
+/*
+ * Upgrade compatibility with the immediately preceding revision.
+ *
+ * `state-with-instance-attempt-before-78.json` was written byte for byte by the hub at the base of
+ * this branch (`cafecito-games/CoffeeShop@8a6f910`) by driving its own `runSchedulingPass`
+ * (`apps/hub/src/scheduler.ts:1330-1337`, which wrote `agentId: instance.id` beside `instanceId`) and
+ * `assignTaskAttempt` (`apps/hub/src/tasks.ts:661-664`, which copied both onto `task.assignment`),
+ * then persisting through that revision's own `Store`. It is the state on an operator's disk after a
+ * single task was placed on a live offering, which is #77's flagship path — so it is exactly the
+ * snapshot an upgrade has to survive.
+ */
+const beforeSeventyEightFixturePath = new URL("../test-fixtures/state-with-instance-attempt-before-78.json", import.meta.url);
+
+test("a snapshot the previous revision wrote loads, drops the borrowed agent key, and then never changes", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "coffee-shop-upgrade-"));
+  const path = join(directory, "state.json");
+  const bytes = await readFile(beforeSeventyEightFixturePath);
+  await writeFile(path, bytes);
+  const persisted = JSON.parse(bytes.toString()) as {
+    runs: Array<{ agentId?: string; instanceId?: string }>;
+    tasks: Array<{ assignment?: { agentId?: string; instanceId?: string } }>;
+  };
+  assert.equal(persisted.runs[0].agentId, persisted.runs[0].instanceId, "the fixture really carries the borrowed key");
+  assert.equal(persisted.tasks[0].assignment!.agentId, persisted.tasks[0].assignment!.instanceId);
+
+  const store = new Store(path);
+  await store.load();
+
+  store.read((state) => {
+    const run = state.runs[0];
+    assert.deepEqual([run.agentId, run.instanceId, run.allocationId],
+      [undefined, persisted.runs[0].instanceId, state.allocations![0].id], "the run now names one actor");
+    assert.equal(state.tasks![0].assignment!.agentId, undefined);
+    assert.equal(state.tasks![0].assignment!.instanceId, persisted.runs[0].instanceId);
+    // The record is interpretable again, and still not a principal: its instance is ready, not busy on
+    // a live run, but the migration must not have invented authority either way.
+    assert.deepEqual(describeHistoricalActor(state, run).kind, "instance");
+  });
+
+  const migrated = await readFile(path);
+  assert.notDeepEqual(migrated, bytes, "the one-shot migration ran");
+  const restarted = new Store(path);
+  await restarted.load();
+  assert.deepEqual(await readFile(path), migrated, "a restart migrates nothing a second time");
+});
+
+test("a record naming a genuinely different agent and instance is refused rather than guessed", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "coffee-shop-ambiguous-"));
+  const path = join(directory, "state.json");
+  const state = JSON.parse((await readFile(beforeSeventyEightFixturePath)).toString()) as { runs: Array<{ agentId?: string }> };
+  state.runs[0].agentId = "worker-a";
+  await writeFile(path, JSON.stringify(state));
+  await assert.rejects(new Store(path).load(), /Persisted run 0 names both a configured agent and an instance actor/);
+});
+
+test("a temporarily unplaceable owner agent keeps its thread instead of being promoted away from it", async () => {
+  const { store, context } = await promotableWorld();
+  await store.transact((state) => {
+    // One relevant inbox event, so the continuation window is genuinely open.
+    state.taskEventJournal = [{
+      threadId: "thread-one", sequence: 1, taskId: "task-one", kind: "message", recipientKey: "orchestrator",
+      status: "ready", changes: [], at
+    } as never];
+    state.taskEventStreams = [{ threadId: "thread-one", head: 1, floor: 0 } as never];
+  });
+
+  /*
+   * The owner agent is still configured; only its node is unreachable — a reconnect barrier, a restart,
+   * a stale report. Promoting here would delete `ownerAgentId` and close the thread's live ACP session
+   * for a fleet that heals itself seconds later, and nothing would ever hand the thread back.
+   */
+  await store.transact((state) => {
+    const result = runContinuationPass(state, context, later(10));
+    assert.deepEqual([result.changed, result.continuations.length], [false, 0]);
+    assert.equal(threadOrchestrator(state.threads![0])?.kind, "agent", "the thread is not taken away from a healthy agent");
+    assert.equal(state.threads![0].ownerAgentId, "orchestrator");
+    assert.deepEqual([state.instances ?? [], state.allocations ?? []], [[], []], "no resident is requested");
+    assert.equal(state.sessionBindings![0].status, "idle", "the in-flight session is not cold-started");
+  });
+
+  // The permanent condition — the agent is gone from the roster — is the only one that promotes.
+  await store.transact((state) => {
+    state.agents = [];
+    assert.equal(runContinuationPass(state, context, later(20)).changed, true);
+    assert.equal(threadOrchestrator(state.threads![0])?.kind, "instance");
+  });
+});
+
+test("a refused import is reconsidered once the configuration changes, and a success never is", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "coffee-shop-reconsider-"));
+  const store = new Store(join(directory, "state.json"));
+  await store.load();
+  await store.transact((state) => {
+    state.agents = [fixtureAgent("broken", false, { workspace: "relative/path" })];
+    importLegacyAgentTemplates(state, at);
+  });
+  store.read((state) => {
+    assert.deepEqual(state.templates, []);
+    assert.equal(state.legacyTemplateImports![0].reason !== undefined, true);
+  });
+
+  // Another pass with the same configuration changes nothing, so the refusal is not re-evaluated
+  // on every load and its event is written once.
+  await store.transact((state) => {
+    assert.equal(importLegacyAgentTemplates(state, later(10)), false);
+  });
+
+  // An operator fixes the workspace. The refusal described the old configuration, so it is forgotten
+  // and the agent imports; a barred-for-ever agent would be a permanent consequence of a transient fact.
+  await store.transact((state) => {
+    state.agents[0].workspace = "/workspace/broken";
+    assert.equal(reconsiderLegacyAgentImport(state, "broken"), true);
+    assert.equal(importLegacyAgentTemplates(state, later(20)), true);
+  });
+  store.read((state) => {
+    assert.equal(templateForLegacyAgent(state, "broken")?.id, legacyTemplateId("broken"));
+    assert.deepEqual(state.legacyTemplateImports!.map((record) => [record.agentId, record.templateId]), [["broken", "legacy-broken"]]);
+  });
+
+  // A recorded success is never reconsidered, so no second template can ever be written.
+  await store.transact((state) => {
+    assert.equal(reconsiderLegacyAgentImport(state, "broken"), false);
+    assert.equal(importLegacyAgentTemplates(state, later(30)), false);
+    assert.equal(state.templates!.length, 1);
+  });
 });

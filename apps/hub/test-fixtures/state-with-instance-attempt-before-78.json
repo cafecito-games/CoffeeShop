@@ -1,0 +1,339 @@
+{
+  "agents": [],
+  "nodes": [
+    {
+      "id": "node-alpha",
+      "name": "node-alpha",
+      "kind": "local",
+      "platform": "darwin · arm64",
+      "status": "online",
+      "lastSeen": "2026-09-25T12:00:00.000Z",
+      "activeRuns": 0,
+      "concurrency": 2,
+      "instanceCapacity": 2,
+      "activeInstances": 0,
+      "workspaceRoots": [
+        "/workspace"
+      ],
+      "version": "test",
+      "harnesses": [
+        {
+          "id": "claude-cli",
+          "label": "Claude",
+          "description": "",
+          "available": true,
+          "authMode": "local-subscription",
+          "models": [
+            "fable"
+          ]
+        }
+      ]
+    }
+  ],
+  "runs": [
+    {
+      "id": "run_muiwtlrt_yi190k",
+      "threadId": "thread-one",
+      "agentId": "instance_muiwtlrp_ds7sa9",
+      "instanceId": "instance_muiwtlrp_ds7sa9",
+      "allocationId": "allocation_muiwtlrp_6lptfg",
+      "nodeId": "node-alpha",
+      "harnessId": "claude-cli",
+      "model": "fable",
+      "workspace": "/workspace",
+      "prompt": "Task one\n\nDo it",
+      "status": "queued",
+      "output": "",
+      "depth": 0,
+      "createdAt": "2026-09-25T12:00:20.000Z",
+      "transport": "native-cli",
+      "taskId": "task-one",
+      "attempt": 1
+    }
+  ],
+  "events": [
+    {
+      "type": "run",
+      "title": "instance_muiwtlrp_ds7sa9 was assigned a task",
+      "detail": "Task one",
+      "threadId": "thread-one",
+      "runId": "run_muiwtlrt_yi190k",
+      "id": "evt_muiwtlrt_5oiz25",
+      "createdAt": "2026-09-26T21:36:40.313Z"
+    },
+    {
+      "type": "status",
+      "title": "Instance allocation reserved",
+      "detail": "provisioning on node-alpha",
+      "threadId": "thread-one",
+      "id": "evt_muiwtlrp_ndt1p4",
+      "createdAt": "2026-09-26T21:36:40.309Z"
+    },
+    {
+      "type": "status",
+      "title": "Instance requested",
+      "detail": "requested",
+      "threadId": "thread-one",
+      "id": "evt_muiwtlrp_k1qh8e",
+      "createdAt": "2026-09-26T21:36:40.309Z"
+    }
+  ],
+  "messages": [],
+  "threads": [
+    {
+      "id": "thread-one",
+      "title": "thread-one",
+      "objective": "thread-one",
+      "summary": "",
+      "status": "active",
+      "ownerAgentId": "orchestrator",
+      "orchestrator": {
+        "kind": "agent",
+        "agentId": "orchestrator"
+      },
+      "createdBy": "user",
+      "createdAt": "2026-09-25T12:00:00.000Z",
+      "updatedAt": "2026-09-25T12:00:20.000Z"
+    }
+  ],
+  "delegations": [],
+  "artifacts": [],
+  "instances": [
+    {
+      "id": "instance_muiwtlrp_ds7sa9",
+      "threadId": "thread-one",
+      "creator": {
+        "kind": "operator",
+        "operatorId": "operator"
+      },
+      "delegation": {
+        "canDelegate": false
+      },
+      "requirements": {},
+      "lease": {
+        "idleTimeoutSeconds": 1800,
+        "expiresAt": "2026-09-25T12:30:20.000Z"
+      },
+      "status": "busy",
+      "createdAt": "2026-09-25T12:00:00.000Z",
+      "updatedAt": "2026-09-25T12:00:20.000Z"
+    }
+  ],
+  "allocations": [
+    {
+      "id": "allocation_muiwtlrp_6lptfg",
+      "instanceId": "instance_muiwtlrp_ds7sa9",
+      "nodeId": "node-alpha",
+      "harnessId": "claude-cli",
+      "model": "fable",
+      "transport": "native-cli",
+      "workspace": "/workspace",
+      "lease": {
+        "idleTimeoutSeconds": 1800,
+        "expiresAt": "2026-09-25T12:30:20.000Z"
+      },
+      "status": "active",
+      "createdAt": "2026-09-25T12:00:00.000Z",
+      "updatedAt": "2026-09-25T12:00:20.000Z"
+    }
+  ],
+  "templates": [],
+  "instanceLifecycleReceipts": [],
+  "instanceReleaseIntents": [],
+  "instanceDeliveries": [
+    {
+      "allocationId": "allocation_muiwtlrp_6lptfg",
+      "kind": "provision",
+      "nodeId": "node-alpha",
+      "message": {
+        "type": "instance.provision",
+        "instance": {
+          "id": "instance_muiwtlrp_ds7sa9",
+          "threadId": "thread-one",
+          "creator": {
+            "kind": "operator",
+            "operatorId": "operator"
+          },
+          "delegation": {
+            "canDelegate": false
+          },
+          "requirements": {},
+          "lease": {
+            "idleTimeoutSeconds": 1800,
+            "expiresAt": "2026-09-25T12:30:00.000Z"
+          },
+          "status": "provisioning",
+          "createdAt": "2026-09-25T12:00:00.000Z",
+          "updatedAt": "2026-09-25T12:00:00.000Z"
+        },
+        "allocation": {
+          "id": "allocation_muiwtlrp_6lptfg",
+          "instanceId": "instance_muiwtlrp_ds7sa9",
+          "nodeId": "node-alpha",
+          "harnessId": "claude-cli",
+          "model": "fable",
+          "transport": "native-cli",
+          "workspace": "/workspace",
+          "lease": {
+            "idleTimeoutSeconds": 1800,
+            "expiresAt": "2026-09-25T12:30:00.000Z"
+          },
+          "status": "reserved",
+          "createdAt": "2026-09-25T12:00:00.000Z",
+          "updatedAt": "2026-09-25T12:00:00.000Z"
+        }
+      },
+      "createdAt": "2026-09-25T12:00:00.000Z",
+      "sequence": 1
+    },
+    {
+      "allocationId": "allocation_muiwtlrp_6lptfg",
+      "kind": "dispatch",
+      "nodeId": "node-alpha",
+      "message": {
+        "type": "dispatch",
+        "instance": {
+          "id": "instance_muiwtlrp_ds7sa9",
+          "threadId": "thread-one",
+          "creator": {
+            "kind": "operator",
+            "operatorId": "operator"
+          },
+          "delegation": {
+            "canDelegate": false
+          },
+          "requirements": {},
+          "lease": {
+            "idleTimeoutSeconds": 1800,
+            "expiresAt": "2026-09-25T12:30:20.000Z"
+          },
+          "status": "busy",
+          "createdAt": "2026-09-25T12:00:00.000Z",
+          "updatedAt": "2026-09-25T12:00:20.000Z"
+        },
+        "allocation": {
+          "id": "allocation_muiwtlrp_6lptfg",
+          "instanceId": "instance_muiwtlrp_ds7sa9",
+          "nodeId": "node-alpha",
+          "harnessId": "claude-cli",
+          "model": "fable",
+          "transport": "native-cli",
+          "workspace": "/workspace",
+          "lease": {
+            "idleTimeoutSeconds": 1800,
+            "expiresAt": "2026-09-25T12:30:20.000Z"
+          },
+          "status": "active",
+          "createdAt": "2026-09-25T12:00:00.000Z",
+          "updatedAt": "2026-09-25T12:00:20.000Z"
+        },
+        "run": {
+          "id": "run_muiwtlrt_yi190k",
+          "threadId": "thread-one",
+          "instanceId": "instance_muiwtlrp_ds7sa9",
+          "allocationId": "allocation_muiwtlrp_6lptfg",
+          "nodeId": "node-alpha",
+          "harnessId": "claude-cli",
+          "model": "fable",
+          "workspace": "/workspace",
+          "prompt": "Task one\n\nDo it",
+          "status": "queued",
+          "output": "",
+          "depth": 0,
+          "createdAt": "2026-09-25T12:00:20.000Z",
+          "transport": "native-cli",
+          "taskId": "task-one",
+          "attempt": 1
+        }
+      },
+      "createdAt": "2026-09-25T12:00:20.000Z",
+      "sequence": 2
+    }
+  ],
+  "remoteReleaseRequests": [],
+  "nodeInstanceResidency": [],
+  "taskSubmissions": [],
+  "taskUpdates": [],
+  "taskEventJournal": [
+    {
+      "threadId": "thread-one",
+      "kind": "task",
+      "taskId": "task-one",
+      "status": "ready",
+      "changes": [
+        "status"
+      ],
+      "sequence": 1,
+      "at": "2026-09-26T21:36:40.306Z"
+    },
+    {
+      "threadId": "thread-one",
+      "kind": "task",
+      "taskId": "task-one",
+      "status": "assigned",
+      "previousStatus": "ready",
+      "changes": [
+        "status",
+        "attempt"
+      ],
+      "attemptRunId": "run_muiwtlrt_yi190k",
+      "attempt": 1,
+      "sequence": 2,
+      "at": "2026-09-26T21:36:40.313Z"
+    }
+  ],
+  "taskEventStreams": [
+    {
+      "threadId": "thread-one",
+      "head": 2,
+      "floor": 0
+    }
+  ],
+  "runActivity": [],
+  "harnessEventStreams": [],
+  "harnessEvents": [],
+  "orchestratorInboxes": [],
+  "orchestratorClients": [],
+  "orchestratorAttachments": [],
+  "projectProfiles": [],
+  "tasks": [
+    {
+      "id": "task-one",
+      "threadId": "thread-one",
+      "title": "Task one",
+      "instructions": "Do it",
+      "status": "assigned",
+      "requirements": {},
+      "dependencies": [],
+      "idempotencyKey": "batch",
+      "attemptRunIds": [
+        "run_muiwtlrt_yi190k"
+      ],
+      "createdAt": "2026-09-25T12:00:00.000Z",
+      "updatedAt": "2026-09-25T12:00:20.000Z",
+      "placement": {
+        "evaluatedAt": "2026-09-25T12:00:20.000Z",
+        "eligibleNodeIds": [
+          "node-alpha"
+        ],
+        "unsatisfied": []
+      },
+      "assignment": {
+        "runId": "run_muiwtlrt_yi190k",
+        "agentId": "instance_muiwtlrp_ds7sa9",
+        "instanceId": "instance_muiwtlrp_ds7sa9",
+        "allocationId": "allocation_muiwtlrp_6lptfg",
+        "nodeId": "node-alpha",
+        "harnessId": "claude-cli",
+        "transport": "native-cli",
+        "model": "fable",
+        "assignedAt": "2026-09-25T12:00:20.000Z"
+      }
+    }
+  ],
+  "taskMessages": [],
+  "taskMessageAcknowledgements": [],
+  "sessionBindings": [],
+  "approvals": [],
+  "workspaceLeases": []
+}
