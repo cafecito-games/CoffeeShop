@@ -36,14 +36,21 @@ interface TaskContextResult {
 interface InventoryResult {
   generatedAt: string;
   agents: Array<{ id: string; self: boolean }>;
+  offerings: Array<{ nodeId: string; harnessId: string; model: string; transport: string; fallbackTransport?: string }>;
+  instances: Array<{ id: string; threadId: string; status: string; nodeId?: string; model?: string; allocationStatus?: string }>;
   nodes: Array<{
     id: string;
     connected: boolean;
     acceptsTasks: boolean;
+    concurrency: number;
+    slotsInUse: number;
+    instanceCapacity: number;
+    residentSlotsInUse: number;
+    offersInstances: boolean;
     capabilities: Array<{ capabilityId: string; state: string; value?: string }>;
     capabilitiesReportedAt?: string;
   }>;
-  truncated: { agents: boolean; nodes: boolean };
+  truncated: { agents: boolean; nodes: boolean; instances: boolean; offerings: boolean };
 }
 
 interface UpdateResult {
@@ -539,4 +546,61 @@ test("a delegated task's attempt completes through the run lifecycle", async () 
   assert.equal(storedTask(store, delegated.taskId).status, "completed");
   const context = await hub.call("get_task_context", rootRunId, {}) as TaskContextResult;
   assert.ok(context.taskGraph.some((task) => task.id === delegated.taskId));
+});
+
+test("execution inventory reports live offerings, this thread's residents, and both capacity dimensions", async () => {
+  const store = await orchestrationStore();
+  await store.transact((state) => {
+    const node = state.nodes.find((item) => item.id === "node-worker-a")!;
+    node.instanceCapacity = 3;
+    node.activeInstances = 0;
+    node.harnesses = [{
+      id: "claude-cli", label: "Claude", description: "", available: true,
+      authMode: "local-subscription", models: ["fable"], transports: ["native-cli", "acp-v1"]
+    }];
+    state.instances = [
+      {
+        id: "instance-mine", threadId: "thread-one", creator: { kind: "operator", operatorId: "operator" },
+        purpose: { name: "Reviewer", instructions: "PRIVATE-INSTRUCTIONS" }, delegation: { canDelegate: false },
+        requirements: {}, lease: { idleTimeoutSeconds: 1800, expiresAt: fixtureTime }, status: "ready",
+        createdAt: fixtureTime, updatedAt: fixtureTime
+      },
+      {
+        id: "instance-foreign", threadId: "thread-two", creator: { kind: "operator", operatorId: "operator" },
+        delegation: { canDelegate: false }, requirements: {},
+        lease: { idleTimeoutSeconds: 1800, expiresAt: fixtureTime }, status: "ready",
+        createdAt: fixtureTime, updatedAt: fixtureTime
+      }
+    ];
+    state.allocations = [{
+      id: "allocation-mine", instanceId: "instance-mine", nodeId: "node-worker-a", harnessId: "claude-cli",
+      model: "fable", transport: "native-cli", workspace: "/workspace/worker-a",
+      lease: { idleTimeoutSeconds: 1800, expiresAt: fixtureTime }, status: "active",
+      createdAt: fixtureTime, updatedAt: fixtureTime
+    }];
+    return true;
+  });
+  const hub = fixtureHandler(store, { connections: { "node-worker-a": { protocolVersion: "5", synced: true } } });
+  const inventory = await hub.call("get_execution_inventory", rootRunId, {}) as InventoryResult;
+  assert.deepEqual(outputViolations("get_execution_inventory", inventory), []);
+
+  // Offerings are the candidate set: one per available harness, advertised model, and transport.
+  assert.deepEqual(inventory.offerings, [
+    { nodeId: "node-worker-a", harnessId: "claude-cli", model: "fable", transport: "acp-v1", fallbackTransport: "native-cli" },
+    { nodeId: "node-worker-a", harnessId: "claude-cli", model: "fable", transport: "native-cli" }
+  ]);
+
+  // Instances are thread-scoped, and their private instructions never travel.
+  assert.deepEqual(inventory.instances.map((instance) => instance.id), ["instance-mine"]);
+  assert.deepEqual(
+    [inventory.instances[0].nodeId, inventory.instances[0].model, inventory.instances[0].allocationStatus],
+    ["node-worker-a", "fable", "active"]
+  );
+  assert.equal(JSON.stringify(inventory).includes("PRIVATE-INSTRUCTIONS"), false);
+
+  const capable = inventory.nodes.find((node) => node.id === "node-worker-a")!;
+  assert.deepEqual([capable.concurrency, capable.slotsInUse, capable.instanceCapacity, capable.residentSlotsInUse, capable.offersInstances], [2, 0, 3, 1, true]);
+  const incapable = inventory.nodes.find((node) => node.id === "node-worker-b")!;
+  assert.deepEqual([incapable.instanceCapacity, incapable.residentSlotsInUse, incapable.offersInstances], [0, 0, false]);
+  assert.deepEqual(inventory.truncated, { agents: false, nodes: false, instances: false, offerings: false });
 });

@@ -36,9 +36,13 @@ import {
   appendInstanceDispatchInState,
   nodeResidencyInState,
   nonTerminalInstanceStatuses,
+  occupyingAllocationStatuses,
   placeInstanceInState,
+  reserveInstanceAllocationInState,
   residentInstanceUsage,
   terminalInstanceStatuses,
+  type AllocationCandidate,
+  type InstancePlacementResult,
   type ResidentInstanceUsage
 } from "./instances.js";
 import { computeNodeProjectReadiness, defaultEvidenceTTLMilliseconds } from "./projectReadiness.js";
@@ -204,8 +208,12 @@ export const transportPreference: readonly HarnessTransport[] = ["acp-v1", "nati
 export type PlacementDecision =
   /** Dispatch now on the named resident instance: a reuse, a pin, or an allocation that became ready. */
   | { kind: "instance"; instanceId: string; diagnostic: PlacementDiagnostic }
-  /** Request an instance and reserve this offering; no run exists until the allocation is ready. */
-  | { kind: "offering"; offering: ExecutionOffering; diagnostic: PlacementDiagnostic }
+  /**
+   * Reserve this offering. `instanceId` names an instance that already exists and lost its
+   * allocation, whose identity, requirements, and lease survive the loss (#73); otherwise a new
+   * instance is requested with the reservation. Either way no run exists until the allocation is ready.
+   */
+  | { kind: "offering"; offering: ExecutionOffering; instanceId?: string; diagnostic: PlacementDiagnostic }
   /** An instance this task already owns is still provisioning; the task waits and is not re-offered. */
   | { kind: "waiting"; instanceId: string; diagnostic: PlacementDiagnostic }
   /** Compatibility-only: a configured agent, for a task no offering can serve. */
@@ -480,6 +488,9 @@ interface OfferingEvaluation {
   usage?: NodeUsage;
   resident?: ResidentInstanceUsage;
 }
+
+/** Whether an allocation status still holds its instance's resident slot. */
+const occupyingAllocation = (status: InstanceAllocation["status"]) => occupyingAllocationStatuses.includes(status);
 
 const residentUsageFor = (environment: PlacementEnvironment, node: ComputeNode): ResidentInstanceUsage =>
   environment.residentUsage?.(node) ?? residentInstanceUsage(node, environment.allocations ?? []);
@@ -901,11 +912,21 @@ export function placeTask(task: Task, environment: PlacementEnvironment): Placem
       const allocation = (environment.allocations ?? []).find((item) => item.instanceId === owned.id && item.status === "active")!;
       return { kind: "instance", instanceId: owned.id, diagnostic: diagnostic([allocation.nodeId], []) };
     }
-    return { kind: "waiting", instanceId: owned.id, diagnostic: diagnostic([], failures) };
+    const awaitingReplacement = owned.status === "requested"
+      && !(environment.allocations ?? []).some((item) => item.instanceId === owned.id && occupyingAllocation(item.status));
+    if (!awaitingReplacement) return { kind: "waiting", instanceId: owned.id, diagnostic: diagnostic([], failures) };
   }
 
   const unsatisfied: UnsatisfiedRequirement[] = [];
-  const reusable = reusableInstances(effective, environment, profile);
+  /*
+   * An instance whose allocation was lost returns to `requested` and keeps its identity, so its
+   * replacement allocates afresh against the same record rather than becoming a second resident.
+   */
+  const replacing = owned !== undefined && owned.status === "requested"
+    && !(environment.allocations ?? []).some((item) => item.instanceId === owned.id && occupyingAllocation(item.status))
+    ? owned
+    : undefined;
+  const reusable = replacing !== undefined ? [] : reusableInstances(effective, environment, profile);
   if (reusable.length) {
     return {
       kind: "instance",
@@ -913,8 +934,13 @@ export function placeTask(task: Task, environment: PlacementEnvironment): Placem
       diagnostic: diagnostic(reusable.map((candidate) => candidate.allocation.nodeId), [])
     };
   }
+  /*
+   * Only a ready or idle resident of this thread was ever a reuse candidate, so only those explain
+   * why reuse failed. A resident another task is still provisioning is not a candidate and must not
+   * appear in this task's diagnostics.
+   */
   for (const instance of environment.instances ?? []) {
-    if (instance.threadId !== task.threadId || terminalInstanceStatuses.includes(instance.status)) continue;
+    if (instance.threadId !== task.threadId || (instance.status !== "ready" && instance.status !== "idle")) continue;
     unsatisfied.push(...instanceUnsatisfied(effective, instance, environment, profile));
   }
 
@@ -948,22 +974,44 @@ export function placeTask(task: Task, environment: PlacementEnvironment): Placem
     .filter((node) => offersInstances(node))
     .filter((node) => !override || !authorizedOverride || override.nodeId === undefined || node.id === override.nodeId)
     .sort((left, right) => compareText(left.id, right.id));
-  // A legacy skill requirement with no covering template closes the offering path entirely: an
-  // offering carries no skill evidence of its own, so there is no candidate to evaluate.
-  const offeringEvaluations = templateGap !== undefined ? [] : offeringNodes.flatMap((node) =>
-    nodeOfferings(node, requirements.workspace?.path).map((offering) => evaluateOffering(effective, offering, node, profile, environment)));
+  /*
+   * A legacy skill requirement with no covering template closes the offering path entirely: an
+   * offering carries no skill evidence of its own, so there is no candidate to evaluate. A node that
+   * publishes nothing for this workload still says why, because an unplaceable task must never end up
+   * with an empty diagnostic.
+   */
+  const requestedPath = requirements.workspace?.path;
+  const silentNodes: UnsatisfiedRequirement[] = [];
+  const offeringEvaluations = templateGap !== undefined ? [] : offeringNodes.flatMap((node) => {
+    const published = nodeOfferings(node, requestedPath);
+    if (published.length === 0) {
+      if (offeredWorkspace(node, requestedPath) === undefined) {
+        silentNodes.push(requestedPath === undefined
+          ? { kind: "workspace", requirement: "workspace beneath an advertised root", nodeId: node.id, detail: "the compute node advertises no workspace root" }
+          : { kind: "workspace", requirement: requestedPath, nodeId: node.id, detail: "requested path is not beneath a root the compute node advertises" });
+      } else {
+        silentNodes.push({ kind: "offering", requirement: "available harness", nodeId: node.id, detail: "the compute node publishes no available harness offering" });
+      }
+    }
+    return published.map((offering) => evaluateOffering(effective, offering, node, profile, environment));
+  });
   const eligibleOfferings = offeringEvaluations.filter((evaluation) => evaluation.offering !== undefined).sort(compareOfferings);
   if (eligibleOfferings.length) {
     return {
       kind: "offering",
       offering: eligibleOfferings[0].offering!,
+      ...(replacing === undefined ? {} : { instanceId: replacing.id }),
       diagnostic: diagnostic(eligibleOfferings.map((evaluation) => evaluation.offering!.nodeId), [])
     };
+  }
+  if (replacing !== undefined) {
+    unsatisfied.push(...offeringEvaluations.flatMap((evaluation) => evaluation.unsatisfied));
+    return { kind: "waiting", instanceId: replacing.id, diagnostic: diagnostic([], unsatisfied) };
   }
   if (templateGap !== undefined) {
     if (offeringNodes.length) unsatisfied.push(templateGap);
   } else {
-    unsatisfied.push(...offeringEvaluations.flatMap((evaluation) => evaluation.unsatisfied));
+    unsatisfied.push(...silentNodes, ...offeringEvaluations.flatMap((evaluation) => evaluation.unsatisfied));
   }
   if (offeringNodes.length === 0 && agents.length === 0) {
     unsatisfied.push({
@@ -975,6 +1023,19 @@ export function placeTask(task: Task, environment: PlacementEnvironment): Placem
     unsatisfied.push({ kind: "offering", requirement: "live harness offering", detail: "no compute node publishes a resident instance offering" });
   }
   return { kind: "unsatisfied", diagnostic: diagnostic([], unsatisfied) };
+}
+
+/**
+ * Reserves a replacement allocation for an instance that already exists, reported in the same shape
+ * as a create-and-reserve so the scheduler has one code path for both. A missing instance is a
+ * capacity refusal rather than a throw: the pass records a diagnostic and leaves the task placeable.
+ */
+function reservationAsPlacement(state: State, instanceId: string, candidate: AllocationCandidate, at: string): InstancePlacementResult {
+  const reservation = reserveInstanceAllocationInState(state, instanceId, candidate, at);
+  if (reservation.kind === "not-found") return { kind: "capacity", reason: `Instance ${instanceId} no longer exists` };
+  if (reservation.kind === "capacity") return reservation;
+  const instance = (state.instances ?? []).find((item) => item.id === instanceId)!;
+  return { kind: "placed", instance, allocation: reservation.allocation };
 }
 
 /**
@@ -1134,17 +1195,20 @@ export function runSchedulingPass(state: State, context: SchedulingContext, at: 
         templateResolution.kind === "template" ? templateResolution.template : undefined
       );
       const template = templateResolution.kind === "template" ? templateResolution.template : undefined;
-      const placement = placeInstanceInState(state, {
-        threadId: task.threadId,
-        requirements,
-        ...(template?.purpose ? { purpose: template.purpose } : {})
-      }, {
+      const candidate = {
         nodeId: offering.nodeId,
         harnessId: offering.harnessId,
         model: offering.model,
         transport: offering.transport,
         workspace: offering.workspace
-      }, at);
+      };
+      const placement: InstancePlacementResult = decision.instanceId === undefined
+        ? placeInstanceInState(state, {
+          threadId: task.threadId,
+          requirements,
+          ...(template?.purpose ? { purpose: template.purpose } : {})
+        }, candidate, at)
+        : reservationAsPlacement(state, decision.instanceId, candidate, at);
       if (placement.kind !== "placed") {
         changed = recordPlacement(task, {
           evaluatedAt: at,
@@ -1158,17 +1222,11 @@ export function runSchedulingPass(state: State, context: SchedulingContext, at: 
       task.placementInstanceId = placement.instance.id;
       task.updatedAt = at;
       thread.updatedAt = at;
-      recordPlacement(task, {
-        evaluatedAt: at,
-        eligibleNodeIds: [offering.nodeId],
-        unsatisfied: [{
-          kind: "instance",
-          requirement: placement.instance.id,
-          nodeId: offering.nodeId,
-          instanceId: placement.instance.id,
-          detail: `waiting for the instance to become ready on ${offering.nodeId}`
-        }]
-      });
+      /*
+       * The provisioning wait is rendered by re-deciding against the now-committed state, so it is
+       * byte-identical to what the next pass derives and repeated passes rewrite nothing.
+       */
+      recordPlacement(task, placeTask(task, environmentFor()).diagnostic);
       changed = true;
       continue;
     }
