@@ -85,6 +85,12 @@ type Config struct {
 	// ApprovalPolicies is the administrator's effective approval policy for each harness that has a
 	// non-manual one; a harness without an entry is manual. Only this configuration sets it.
 	ApprovalPolicies harness.ApprovalPolicies
+	// CapabilityPackRequirement is the administrator's Coffee Shop capability pack policy:
+	// harness.PackRequired refuses a run before the prompt whenever the pack guarantee cannot be
+	// established, and harness.PackOptional lets it proceed unskilled with the reason reported.
+	// Nothing in the control protocol carries this, so an unconfigured node keeps the optional
+	// reading; an unknown value stops startup rather than being defaulted to either policy.
+	CapabilityPackRequirement harness.PackRequirement
 }
 
 type stringList []string
@@ -160,6 +166,7 @@ func Parse(args []string) (Config, error) {
 	adapterManifest := set.String("adapter-manifest", env("BARISTA_ADAPTER_MANIFEST", ""), "adapter manifest JSON file used by setup (default: the manifest embedded in this binary)")
 	set.Var(&acpAdapters, "acp-adapter", "ACP adapter override as <harness-id>=sha256:<64 lowercase hex>:<absolute path>; repeat the flag for multiple harnesses")
 	set.Var(&nativeFallback, "acp-native-fallback", "harness ID whose acp-v1 runs may fall back to the native CLI before the prompt when the dispatch permits it; repeat the flag for multiple harnesses")
+	capabilityPack := set.String("capability-pack", env("BARISTA_CAPABILITY_PACK", string(harness.PackOptional)), "Coffee Shop capability pack policy: required refuses a run before the prompt when the pack cannot be projected, optional lets it proceed unskilled")
 	claudeACPAuthMode := set.String("claude-acp-auth-mode", env("BARISTA_CLAUDE_ACP_AUTH_MODE", ""), "administrator auth-mode policy required before Claude ACP is loaded: local-subscription or api (unset keeps Claude ACP unavailable)")
 	ApprovalPolicyFlag(set, &approvalPolicies)
 	if err := set.Parse(args); err != nil {
@@ -249,6 +256,12 @@ func Parse(args []string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	// An empty or unknown capability pack policy stops startup rather than defaulting to either
+	// reading, so a typo can never silently weaken the node's fail-closed behavior.
+	packRequirement, err := harness.ParsePackRequirement(strings.TrimSpace(*capabilityPack))
+	if err != nil {
+		return Config{}, err
+	}
 
 	return Config{
 		ControlEndpoint:  wsEndpoint,
@@ -273,6 +286,8 @@ func Parse(args []string) (Config, error) {
 		ACPNativeFallback:   validatedFallback,
 		ClaudeACPAuthMode:   trimmedClaudeACPAuthMode,
 		ApprovalPolicies:    validatedApprovalPolicies,
+
+		CapabilityPackRequirement: packRequirement,
 	}, nil
 }
 

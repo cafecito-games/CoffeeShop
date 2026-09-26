@@ -67,6 +67,77 @@ func managedHarnesses(
 	return resolved, unresolved
 }
 
+// activeCapabilityPack is the capability-pack sibling of managedHarnesses: it resolves the one
+// verified active capability pack this daemon will project for its whole lifetime, or the fixed
+// reason none is available. Like managedHarnesses it consults only internal/setup's verified results
+// and internal/capabilitypack's one validator, and it distinguishes every outcome the fail-closed
+// contract distinguishes — a rejected activation ledger, nothing selected, and a selection that
+// stopped verifying are three separate reasons and none is ever reported as another.
+//
+// The second return value is empty exactly when the first is non-nil.
+func activeCapabilityPack(
+	manifest setup.Manifest,
+	ledger setup.OwnershipLedger,
+	activation setup.ActivationState,
+	dataRoot string,
+	build string,
+) (*harness.ActivePack, string) {
+	entries := manifest.ComponentsOfKind(setup.ComponentKindCapabilityPack)
+	if len(entries) == 0 {
+		return nil, "this Barista's component manifest declares no capability pack"
+	}
+	if activation.Rejection != nil {
+		// A rejected ledger is never read as "no pack selected": no pack is resolved at all, and the
+		// reason names the ledger rather than the selection.
+		return nil, "the activation ledger could not be accepted, so no capability pack was resolved"
+	}
+	if len(entries) > 1 {
+		// Duplicate or conflicting pack identities resolve as ambiguous, never newest-wins.
+		return nil, "this Barista's component manifest declares more than one capability pack, which is ambiguous"
+	}
+	entry := entries[0]
+	installed, err := setup.ActiveInstalledComponent(dataRoot, manifest, setup.CurrentPlatform(), ledger, activation, entry.Ref().Identity())
+	switch {
+	case errors.Is(err, setup.ErrComponentNotActivated):
+		return nil, "no capability pack version is activated on this node"
+	case err != nil:
+		return nil, "the activated capability pack version could not be verified"
+	}
+	// The selection's bytes are read and validated here, through the same validator that packaged
+	// them, and read again immediately before every projection through the returned Reread.
+	reread := func() (capabilitypack.Tree, capabilitypack.PackManifest, string, error) {
+		if err := installed.Verify(); err != nil {
+			return nil, capabilitypack.PackManifest{}, "", err
+		}
+		packManifest, err := capabilitypack.ProbeInstalledArtifact(installed.Path, installed.Entry.ID, installed.Ref().Version)
+		if err != nil {
+			return nil, capabilitypack.PackManifest{}, "", err
+		}
+		data, err := os.ReadFile(installed.Path)
+		if err != nil {
+			return nil, capabilitypack.PackManifest{}, "", err
+		}
+		tree, err := capabilitypack.ArchiveTree(data)
+		if err != nil {
+			return nil, capabilitypack.PackManifest{}, "", err
+		}
+		return tree, packManifest, capabilitypack.ArchiveDigest(data), nil
+	}
+	tree, packManifest, digest, err := reread()
+	if err != nil {
+		return nil, "the activated capability pack is not a valid Coffee Shop capability pack"
+	}
+	return &harness.ActivePack{
+		ID:            packManifest.ID,
+		Version:       packManifest.Version,
+		ArchiveDigest: digest,
+		Manifest:      packManifest,
+		Tree:          tree,
+		Build:         build,
+		Reread:        reread,
+	}, ""
+}
+
 // componentProbe is the compiled-in candidate probe activation and rollback run before a selection
 // becomes durable: a managed harness answers its compiled-in --version contract, an ACP adapter
 // completes the existing ACP startup handshake, and a capability pack is re-validated through the

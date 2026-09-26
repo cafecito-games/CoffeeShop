@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -56,6 +57,10 @@ type Invocation struct {
 
 	// begin is installed by Runner.Execute; drivers call it when the prompt is about to be sent.
 	begin func(transportDetails)
+	// packEnvironment is the credential-free child environment a capability pack activation adapter
+	// reads the vendor's own configuration root from. It is installed by the driver that is about to
+	// launch, so a caller building an Invocation from a dispatch cannot supply one.
+	packEnvironment []string
 	// approvalPolicy is set by Runner.Execute from the node's configuration. It is deliberately
 	// unexported: a caller building an Invocation from a dispatch cannot set it, and a driver
 	// reached without the Runner sees "" and applies the manual policy.
@@ -113,6 +118,27 @@ type Runner struct {
 	managedHarnesses map[string]ManagedHarness
 	// usageMutex guards executableUsage.
 	usageMutex sync.Mutex
+	// pack is the one verified active capability pack this daemon adopted at startup, or nil when
+	// none could be resolved. packUnavailable is then the fixed reason, which is reported rather than
+	// collapsed into "nothing selected": a rejected activation ledger and an unselected pack are
+	// distinct outcomes and neither is ever reported as the other.
+	pack            *ActivePack
+	packUnavailable string
+	// packRequirement is the node administrator's capability-pack policy. Nothing in the control
+	// protocol carries it, so a node that has not opted in keeps the optional reading.
+	packRequirement PackRequirement
+	// packProjections records which harnesses this daemon already established a managed projection
+	// for, which is what makes "never mutate an in-flight projection" structural.
+	packProjections *establishedProjections
+	// packDataRoot is the Barista-owned data root every run-scoped projection lives beneath.
+	packDataRoot string
+	// packInventory replaces the vendor inventory subprocess in a test; production leaves it nil.
+	packInventory func(context.Context, string, []string) (string, error)
+	// packHooks are replacement-interruption injection points a test uses; production leaves them zero.
+	packHooks projectionHooks
+	// packReport receives one line per run recording how activation resolved. Without one the lines
+	// are dropped rather than printed from a library package.
+	packReport func(string)
 	// executableUsage counts the invocations currently supervising each absolute executable path.
 	// It is the in-memory active-run usage a local activation, rollback, or prune must find empty
 	// before it touches that executable. It is deliberately per-process: another process cannot see
@@ -127,6 +153,8 @@ func NewRunner(profiles []protocol.HarnessProfile) *Runner {
 		now:              time.Now,
 		managedHarnesses: map[string]ManagedHarness{},
 		executableUsage:  map[string]int{},
+		packRequirement:  PackOptional,
+		packProjections:  newEstablishedProjections(),
 	}
 	runner.native = nativeDriver{runner: runner}
 	return runner
@@ -140,6 +168,30 @@ func (r *Runner) WithManagedHarnesses(managed map[string]ManagedHarness) *Runner
 		r.managedHarnesses[harnessID] = entry
 	}
 	return r
+}
+
+// WithCapabilityPack records the one verified active capability pack this daemon resolved, the fixed
+// reason none is available when pack is nil, the node's requirement policy, and the Barista-owned
+// data root every projection lives beneath. internal/setup resolves the pack; the harness package
+// receives the resolved value and never interprets a ledger itself.
+func (r *Runner) WithCapabilityPack(pack *ActivePack, unavailable string, requirement PackRequirement, dataRoot string) *Runner {
+	r.pack = pack
+	r.packUnavailable = unavailable
+	if requirement == "" {
+		requirement = PackOptional
+	}
+	r.packRequirement = requirement
+	r.packDataRoot = dataRoot
+	r.packProjections = newEstablishedProjections()
+	return r
+}
+
+// CapabilityPackRequirement returns the node's effective capability-pack policy.
+func (r *Runner) CapabilityPackRequirement() PackRequirement {
+	if r.packRequirement == "" {
+		return PackOptional
+	}
+	return r.packRequirement
 }
 
 // verifyManagedHarness re-verifies the harness's managed executable, if it has one. A harness with
@@ -332,6 +384,18 @@ func (r *Runner) executeACP(ctx context.Context, invocation Invocation) (string,
 		}
 		return "", err
 	}
+	// The transport is settled: this run will be driven over ACP, so its capability pack fate is
+	// resolved here, before the adapter process starts and therefore before any prompt could be sent.
+	// No activation adapter ships for acp-v1 on either harness — neither ACP adapter is installed at
+	// the pinned versions, so no skill-discovery surface has been verified for one — which makes this
+	// the missing-adapter case: a pack-required run is refused with a named reason and a pack-optional
+	// run proceeds unskilled, having written nothing anywhere.
+	invocation.packEnvironment = adapterEnvironment(os.Environ(), nil)
+	projection, packErr := r.activatePack(ctx, invocation, TransportACP, r.acp.AdapterBinary(harnessID))
+	if packErr != nil {
+		return "", packErr
+	}
+	defer projection.Cleanup()
 	var started atomic.Bool
 	selection := protocol.RunTransportSelection{RequestedTransport: TransportACP, SelectedTransport: TransportACP, Adapter: r.acp.provenance(harnessID)}
 	// The adapter executable is in use for the whole ACP execution, so a local activation, rollback,
