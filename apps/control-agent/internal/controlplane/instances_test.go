@@ -961,7 +961,8 @@ func TestHeartbeatAndRegistrationReportIndependentResidentCounts(t *testing.T) {
 
 	heartbeat := client.heartbeatMessage()
 	require.Equal(t, 0, *heartbeat.ActiveInstances)
-	require.Equal(t, 0, heartbeat.ActiveRuns)
+	require.NotNil(t, heartbeat.ActiveRuns)
+	require.Equal(t, 0, *heartbeat.ActiveRuns)
 	require.NotNil(t, heartbeat.ActiveInstanceIDs, "every heartbeat carries identity evidence")
 	require.Empty(t, *heartbeat.ActiveInstanceIDs, "zero residents are an explicit empty array, not an absent field")
 

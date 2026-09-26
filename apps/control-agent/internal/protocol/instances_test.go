@@ -47,7 +47,12 @@ func instanceFixtureProducer() map[string]any {
 		"sync":            InstanceControlMessage{Type: "sync.complete", NodeID: a.NodeID, ActiveRunIDs: instancePointer([]string{}), ActiveInstanceIDs: instancePointer([]string{i.ID}), At: instanceAt},
 		"sync-empty":      InstanceControlMessage{Type: "sync.complete", NodeID: a.NodeID, ActiveInstanceIDs: instancePointer([]string{}), At: instanceAt},
 		"sync-absent":     InstanceControlMessage{Type: "sync.complete", NodeID: a.NodeID, At: instanceAt},
-		"register": InstanceControlMessage{Type: "register", ProtocolVersion: LatestVersion, Node: &ComputeNode{
+		// register is produced from Outbound, the struct controlplane.Client.attach actually writes.
+		// Producing it from InstanceControlMessage instead hid a real defect: that struct's
+		// ActiveRuns is a pointer, so the fixture carried three top-level keys and passed the v5
+		// validator, while Outbound's non-pointer ActiveRuns put a fourth key on every real frame
+		// and a v5 hub refused it. A fixture must come from the producer it claims to represent.
+		"register": Outbound{Type: "register", ProtocolVersion: LatestVersion, Node: &ComputeNode{
 			ID: a.NodeID, Name: "Build Mac", Kind: "local", Platform: "darwin/arm64", Status: "online", LastSeen: instanceAt,
 			ActiveRuns: 0, Concurrency: 2, InstanceCapacity: instancePointer(4), ActiveInstances: instancePointer(1),
 			WorkspaceRoots: []string{"/workspace"}, Harnesses: []HarnessProfile{{ID: "claude-cli", Label: "Claude", Description: "Local account", Available: true, AuthMode: "local-subscription", Models: []string{"fable"}}}, Version: "0.1.0",
