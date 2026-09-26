@@ -1,0 +1,6 @@
+
+✘ Found 1 error:
+
+  ❯ directory: No manifest found in directory. Expected .claude-plugin/marketplace.json or .claude-plugin/plugin.json
+
+✘ Validation failed

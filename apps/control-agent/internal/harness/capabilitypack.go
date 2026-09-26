@@ -108,6 +108,14 @@ func ParsePackRequirement(value string) (PackRequirement, error) {
 	return requirement, nil
 }
 
+// Validate refuses a requirement outside the vocabulary rather than letting it default to either one.
+func (requirement PackRequirement) Validate() error {
+	if !slices.Contains(PackRequirements, requirement) {
+		return errors.New("unknown capability pack requirement")
+	}
+	return nil
+}
+
 func packRequirementNames() []string {
 	names := make([]string, 0, len(PackRequirements))
 	for _, requirement := range PackRequirements {
@@ -127,12 +135,16 @@ const (
 	// PackUnskilled means a pack-optional run proceeded with no projection and no claim of pack
 	// activation, for a named reason.
 	PackUnskilled PackActivationOutcome = "unskilled"
+	// PackUnconfirmed means a pack-optional run proceeded while a managed projection remained
+	// installed in the vendor's own configuration and its guarantee could not be confirmed. It is
+	// deliberately distinct from PackUnskilled: such a run does discover the projected skills.
+	PackUnconfirmed PackActivationOutcome = "unconfirmed"
 	// PackRefused means the run terminated before the prompt with a named reason.
 	PackRefused PackActivationOutcome = "refused"
 )
 
 // PackActivationOutcomes is the whole vocabulary, which every consumer must handle or reject.
-var PackActivationOutcomes = []PackActivationOutcome{PackProjected, PackUnskilled, PackRefused}
+var PackActivationOutcomes = []PackActivationOutcome{PackProjected, PackUnskilled, PackUnconfirmed, PackRefused}
 
 // ErrPackActivation is what every refusal of a pack-required run wraps, so a caller can tell a
 // capability-pack refusal from a transport failure without matching on message text.
@@ -323,10 +335,20 @@ func (projection *PackProjection) Cleanup() error {
 	return cleanup()
 }
 
-// unavailablePack marks a pack activation failure a pack-optional run may proceed past, unskilled.
-// Every other failure refuses the run whatever the requirement, because it means Barista could not
-// establish the integrity of what it was about to project.
-type unavailablePack struct{ reason string }
+// unavailablePack marks a pack activation failure a pack-optional run may proceed past. Every other
+// failure refuses the run whatever the requirement, because it means Barista could not establish the
+// integrity of what it was about to project.
+//
+// installed distinguishes the two ways a pack-optional run may proceed, which must never be reported
+// as each other. When nothing of Barista's is in place — no adapter, a foreign occupant at the
+// managed path, a run-scoped projection that was written and then removed — the run genuinely
+// proceeds unskilled. When a managed projection is already installed in the vendor's own
+// configuration, the run will still discover it, so calling that run "unskilled" would be false: it
+// proceeds with the projection installed and the guarantee unconfirmed, and it is reported that way.
+type unavailablePack struct {
+	reason    string
+	installed bool
+}
 
 func (failure unavailablePack) Error() string { return failure.reason }
 
@@ -334,9 +356,22 @@ func packUnavailablef(format string, arguments ...any) error {
 	return unavailablePack{reason: fmt.Sprintf(format, arguments...)}
 }
 
+// packUnconfirmedf is packUnavailablef for a managed projection that is already installed and that
+// this run will therefore discover whatever Barista decides.
+func packUnconfirmedf(format string, arguments ...any) error {
+	return unavailablePack{reason: fmt.Sprintf(format, arguments...), installed: true}
+}
+
 func isPackUnavailable(err error) bool {
 	var failure unavailablePack
 	return errors.As(err, &failure)
+}
+
+// projectionRemainsInstalled reports whether a pack-optional run that proceeds past err will still
+// discover a projection Barista installed.
+func projectionRemainsInstalled(err error) bool {
+	var failure unavailablePack
+	return errors.As(err, &failure) && failure.installed
 }
 
 // packAdapterKey identifies one harness and transport combination. An adapter exists for a
@@ -479,11 +514,11 @@ func (r *Runner) activatePack(ctx context.Context, invocation Invocation, transp
 		if reason == "" {
 			reason = "no capability pack is selected on this node"
 		}
-		return nil, r.unskilled(invocation, requirement, reason)
+		return nil, r.unskilled(invocation, requirement, packUnavailablef("%s", reason))
 	}
 	adapter, registered := packAdapterFor(harnessID, transport)
 	if !registered {
-		return nil, r.unskilled(invocation, requirement, fmt.Sprintf(
+		return nil, r.unskilled(invocation, requirement, packUnavailablef(
 			"no capability pack activation adapter ships for harness %s over transport %s, because no skill-discovery surface has been verified for it at the pinned version",
 			harnessID, transport))
 	}
@@ -517,24 +552,26 @@ func (r *Runner) activatePack(ctx context.Context, invocation Invocation, transp
 	projection, err := adapter.Project(projectionContext)
 	if err != nil {
 		if isPackUnavailable(err) {
-			return nil, r.unskilled(invocation, requirement, err.Error())
+			return nil, r.unskilled(invocation, requirement, err)
 		}
 		return nil, err
 	}
 	for _, collision := range projection.Collisions {
 		if collision.Winner == "" {
+			shape := projection.Shape
 			projection.Cleanup()
-			return nil, r.unskilled(invocation, requirement, fmt.Sprintf(
+			return nil, r.unskilled(invocation, requirement, packUnconfirmedForShape(shape, fmt.Sprintf(
 				"the projected capability pack skill %s collides with a skill %s already offers, and the effective precedence winner cannot be confirmed for %s at its pinned version",
-				collision.Name, collision.Offered, harnessID))
+				collision.Name, collision.Offered, harnessID)))
 		}
 		r.reportPack("capability pack %s: projected skill %s collides with %s; the effective winner is %s", pack.Ref(), collision.Name, collision.Offered, collision.Winner)
 	}
 	if adapter.Confirm != nil {
 		if err := adapter.Confirm(ctx, projectionContext, projection); err != nil {
+			shape := projection.Shape
 			projection.Cleanup()
 			if isPackUnavailable(err) {
-				return nil, r.unskilled(invocation, requirement, err.Error())
+				return nil, r.unskilled(invocation, requirement, packUnconfirmedForShape(shape, err.Error()))
 			}
 			return nil, err
 		}
@@ -551,10 +588,24 @@ func (r *Runner) activatePack(ctx context.Context, invocation Invocation, transp
 	return projection, nil
 }
 
+// packUnconfirmedForShape classifies a pack-optional run's remaining exposure. A managed projection
+// is already installed in the vendor's own configuration by the time a collision or a discovery
+// confirmation can fail, and Barista does not tear a shared managed projection down for one run, so
+// such a run is never described as unskilled. A run-scoped projection is removed, so it is.
+func packUnconfirmedForShape(shape ProjectionShape, reason string) error {
+	if shape == ProjectionManaged {
+		return packUnconfirmedf("%s", reason)
+	}
+	return packUnavailablef("%s", reason)
+}
+
 // unskilled resolves a named reason the pack could not be projected against the node's requirement:
 // a pack-required run is refused before the prompt with one warning event, and a pack-optional run
-// proceeds with no projection, no claim of pack activation, and the reason reported.
-func (r *Runner) unskilled(invocation Invocation, requirement PackRequirement, reason string) error {
+// proceeds with the reason reported. The two ways a pack-optional run may proceed are reported as the
+// distinct things they are — with no projection at all, or with a managed projection still installed
+// and its guarantee unconfirmed — because claiming the second is the first would be false.
+func (r *Runner) unskilled(invocation Invocation, requirement PackRequirement, cause error) error {
+	reason := cause.Error()
 	if requirement == PackRequired {
 		if invocation.Events != nil {
 			invocation.Events(protocol.HarnessEvent{
@@ -565,6 +616,11 @@ func (r *Runner) unskilled(invocation Invocation, requirement PackRequirement, r
 		}
 		r.reportPack("capability pack activation %s: run %s was refused before the prompt (%s)", PackRefused, invocation.Run.ID, reason)
 		return fmt.Errorf("%w: %s", ErrPackActivation, reason)
+	}
+	if projectionRemainsInstalled(cause) {
+		r.reportPack("capability pack activation %s: run %s proceeds with the managed Coffee Shop capability pack projection still installed and its guarantee unconfirmed (%s)",
+			PackUnconfirmed, invocation.Run.ID, reason)
+		return nil
 	}
 	r.reportPack("capability pack activation %s: run %s proceeds with no Coffee Shop capability pack (%s)", PackUnskilled, invocation.Run.ID, reason)
 	return nil
@@ -624,9 +680,9 @@ func writeProjection(root string, pack ActivePack, shape ProjectionShape, metada
 	if err := os.Mkdir(root, 0o755); err != nil {
 		return nil, fmt.Errorf("create the capability pack projection directory: %w", err)
 	}
-	if err := capabilitypack.WriteTree(root, pack.Tree); err != nil {
-		return nil, fmt.Errorf("write the capability pack projection: %w", err)
-	}
+	// The ownership marker is written first, before any content. A directory Barista created is then
+	// identifiable as Barista's from the moment it exists, so an interrupted write leaves a leftover
+	// that later cleanup can recognize rather than one it must refuse to touch.
 	marker, err := marshalMarker(markerFor(pack, shape))
 	if err != nil {
 		return nil, err
@@ -643,6 +699,9 @@ func writeProjection(root string, pack ActivePack, shape ProjectionShape, metada
 		names = append(names, path)
 	}
 	slices.Sort(names)
+	if err := capabilitypack.WriteTree(root, pack.Tree); err != nil {
+		return nil, fmt.Errorf("write the capability pack projection: %w", err)
+	}
 	return &PackProjection{Shape: shape, Root: root, Files: pack.Tree.Paths(), Metadata: names}, nil
 }
 
@@ -731,9 +790,10 @@ func replaceManagedProjection(parent, root string, pack ActivePack, metadata map
 	incoming := filepath.Join(temporary, "incoming")
 	outgoing := filepath.Join(temporary, "outgoing")
 	// A leftover from an interrupted replacement is removed before the new one is written, never
-	// adopted: it is by definition an incomplete subtree.
-	if err := removeIfOwned(temporary); err != nil {
-		return nil, fmt.Errorf("%w: %s", ErrPackActivation, err.Error())
+	// adopted: it is by definition an incomplete or superseded subtree. Content at that reserved name
+	// that is not Barista's is neither adopted nor clobbered, exactly as at the managed path itself.
+	if err := removeBaristaTemporarySibling(temporary); err != nil {
+		return nil, err
 	}
 	projection, err := writeProjection(incoming, pack, ProjectionManaged, metadata)
 	if err != nil {
@@ -866,7 +926,9 @@ func foreignSkillNames(root string, exclude []string, name func(directory string
 // written by an operator, not by Barista, so it is read for one key and nothing else, and a document
 // that declares none yields "" rather than an error the caller could mistake for absence.
 func frontMatterName(content []byte) string {
-	text := string(content)
+	// Operator documents may be CRLF-authored. Carriage returns are removed before the block is read,
+	// so a well-formed Windows-authored skill still yields its name instead of failing enumeration.
+	text := strings.ReplaceAll(string(content), "\r\n", "\n")
 	if !strings.HasPrefix(text, "---\n") {
 		return ""
 	}
@@ -883,6 +945,122 @@ func frontMatterName(content []byte) string {
 		return strings.Trim(strings.TrimSpace(value), `"'`)
 	}
 	return ""
+}
+
+// removeBaristaTemporarySibling removes the one reserved temporary path inside a vendor's skills
+// root, but only when it is Barista's. Because writeProjection writes the ownership marker before any
+// content, every directory Barista ever creates there is identifiable as Barista's from the moment it
+// exists, so an interrupted replacement is still recognized. Content at that reserved name that is
+// not Barista's is neither adopted nor clobbered, exactly as at the managed path itself.
+func removeBaristaTemporarySibling(temporary string) error {
+	information, err := os.Lstat(temporary)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return packUnavailablef("the Barista temporary path %s could not be inspected", temporary)
+	}
+	if information.Mode()&os.ModeSymlink != 0 || !information.IsDir() {
+		return packUnavailablef("the path %s reserved for Barista's atomic replacement is a symlink or not a directory, so Barista neither adopted nor replaced it", temporary)
+	}
+	entries, err := os.ReadDir(temporary)
+	if err != nil {
+		return packUnavailablef("the Barista temporary path %s could not be read", temporary)
+	}
+	for _, entry := range entries {
+		if owned, _ := carriesOwnershipMarker(filepath.Join(temporary, entry.Name())); !owned {
+			return packUnavailablef("the path %s reserved for Barista's atomic replacement holds content Barista did not write, so Barista neither adopted nor replaced it", temporary)
+		}
+	}
+	if err := removeIfOwned(temporary); err != nil {
+		return fmt.Errorf("%w: %s", ErrPackActivation, err.Error())
+	}
+	return nil
+}
+
+// ReconcileManagedProjections repairs a managed projection an interrupted atomic replacement left
+// behind, and is called once at daemon start and nowhere else. There is one unavoidable window in a
+// POSIX directory replacement — between moving the outgoing subtree aside and renaming the incoming
+// one into place — and a crash inside it leaves the managed path absent with both complete subtrees
+// inside the one temporary sibling. Without this, a vendor that discovers skills recursively would
+// keep offering both copies indefinitely.
+//
+// It restores the more recent of the two complete subtrees and removes the temporary sibling, and it
+// touches nothing that does not carry Barista's ownership marker.
+func ReconcileManagedProjections(environment []string) ([]string, error) {
+	var repaired []string
+	var failures []string
+	for _, key := range managedProjectionRoots(environment) {
+		parent, err := key.root(environment)
+		if err != nil {
+			// A vendor configuration root Barista cannot resolve has nothing for Barista to reconcile.
+			continue
+		}
+		root := filepath.Join(parent, ManagedProjectionDirectory)
+		temporary := managedTemporarySibling(parent)
+		if _, err := os.Lstat(temporary); errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if _, err := os.Lstat(root); errors.Is(err, fs.ErrNotExist) {
+			// The replacement was interrupted inside the window. The incoming subtree is the newer one;
+			// fall back to the outgoing subtree, which is the previous complete projection.
+			restored := false
+			for _, candidate := range []string{filepath.Join(temporary, "incoming"), filepath.Join(temporary, "outgoing")} {
+				if owned, _ := carriesOwnershipMarker(candidate); !owned {
+					continue
+				}
+				if renameErr := os.Rename(candidate, root); renameErr == nil {
+					repaired = append(repaired, root)
+					restored = true
+					break
+				}
+			}
+			if !restored {
+				failures = append(failures, "the managed capability pack projection at "+root+" is absent and no complete Barista-owned subtree could be restored")
+			}
+		}
+		if err := removeBaristaTemporarySibling(temporary); err != nil {
+			failures = append(failures, err.Error())
+		}
+	}
+	slices.Sort(repaired)
+	if len(failures) > 0 {
+		return repaired, errors.New(strings.Join(failures, "; "))
+	}
+	return repaired, nil
+}
+
+// managedProjectionRoots lists the vendor skills roots this build's managed adapters project into, in
+// a stable order, so reconciliation covers exactly the adapters that ship and no path they do not use.
+func managedProjectionRoots(environment []string) []managedRootResolver {
+	resolvers := make([]managedRootResolver, 0, len(packActivationAdapters))
+	seen := map[string]bool{}
+	for key, adapter := range packActivationAdapters {
+		if adapter.Shape != ProjectionManaged || seen[key.HarnessID] {
+			continue
+		}
+		resolver, known := managedRootResolvers[key.HarnessID]
+		if !known {
+			continue
+		}
+		seen[key.HarnessID] = true
+		resolvers = append(resolvers, resolver)
+	}
+	slices.SortFunc(resolvers, func(a, b managedRootResolver) int { return strings.Compare(a.harnessID, b.harnessID) })
+	return resolvers
+}
+
+// managedRootResolver names how one harness's own skills root is resolved from a launch environment.
+type managedRootResolver struct {
+	harnessID string
+	root      func([]string) (string, error)
+}
+
+// managedRootResolvers is the one mapping from a managed adapter to its vendor skills root. A managed
+// adapter added without an entry here is simply not reconciled, never reconciled against a guessed
+// path.
+var managedRootResolvers = map[string]managedRootResolver{
+	"codex-cli": {harnessID: "codex-cli", root: codexSkillsRoot},
 }
 
 // carriesOwnershipMarker reports whether path is a real directory whose subtree carries a Barista

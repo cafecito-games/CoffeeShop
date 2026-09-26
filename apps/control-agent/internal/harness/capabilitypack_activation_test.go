@@ -20,6 +20,7 @@ import (
 	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/capabilitypack"
 	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/mcpserver"
 	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/protocol"
+	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/setup"
 )
 
 // packFixtureRoot is the repository's own capability pack tree. Every projection test below is driven
@@ -444,9 +445,21 @@ func TestUnconfirmedDiscoveryFailsBeforePrompt(t *testing.T) {
 				result, err := optional.Execute(context.Background(), Invocation{Run: packRun(harnessID), Workspace: dataRoot})
 				require.NoError(t, err)
 				require.Equal(t, "done", result)
-				require.Contains(t, strings.Join(*optionalLines, "\n"), "proceeds with no Coffee Shop capability pack")
+				// A pack-optional run is reported as the thing it actually is. For the run-scoped shape the
+				// projection is gone, so the run is unskilled. For the managed shape the projection stays
+				// installed in the vendor's own configuration and the run still discovers it, so calling it
+				// unskilled would be false and it is reported as unconfirmed instead.
+				reported := strings.Join(*optionalLines, "\n")
+				if adapter, _ := packAdapterFor(harnessID, TransportNative); adapter.Shape == ProjectionManaged {
+					require.Contains(t, reported, "activation "+string(PackUnconfirmed))
+					require.Contains(t, reported, "still installed and its guarantee unconfirmed")
+					require.NotContains(t, reported, "proceeds with no Coffee Shop capability pack")
+					require.DirExists(t, filepath.Join(skillsRoot, ManagedProjectionDirectory))
+				} else {
+					require.Contains(t, reported, "activation "+string(PackUnskilled))
+					require.Contains(t, reported, "proceeds with no Coffee Shop capability pack")
+				}
 				require.NoDirExists(t, filepath.Join(dataRoot, RunScopedProjectionDirectory, "run-pack-1"))
-				_ = skillsRoot
 			})
 		}
 	}
@@ -613,10 +626,10 @@ func TestProjectionCarriesNoEndpointOrToken(t *testing.T) {
 				require.NotContains(t, string(content), token, "%s carries the run's MCP token", path)
 				return nil
 			}))
-			// The credential-free environment the adapter was given carries neither.
-			for _, entry := range os.Environ() {
-				require.NotContains(t, entry, token)
-			}
+			// The credential-free environment an adapter is handed is os.Environ() with Barista's own
+			// credentials stripped, so a token that happened to be exported would not reach it either.
+			require.NotContains(t, adapterEnvironment([]string{"COFFEE_SHOP_MCP_TOKEN=" + token, "PATH=/usr/bin"}, nil),
+				"COFFEE_SHOP_MCP_TOKEN="+token)
 			require.NoError(t, projection.Cleanup())
 
 			result, err := runner.Execute(context.Background(), Invocation{
@@ -1085,7 +1098,11 @@ func TestPrecedenceCollisionRecordedAndUnconfirmableRefused(t *testing.T) {
 		optional, lines := packTestRunner(t, "codex-cli", binary, dataRoot, &pack, "", PackOptional, skillsRoot)
 		_, err = optional.Execute(context.Background(), Invocation{Run: packRun("codex-cli"), Workspace: dataRoot})
 		require.NoError(t, err)
-		require.Contains(t, strings.Join(*lines, "\n"), names[colliding])
+		reported := strings.Join(*lines, "\n")
+		require.Contains(t, reported, names[colliding])
+		// The managed projection is installed, so the run is never reported as unskilled.
+		require.Contains(t, reported, "activation "+string(PackUnconfirmed))
+		require.NotContains(t, reported, "proceeds with no Coffee Shop capability pack")
 	})
 
 	t.Run("a confirmed winner is recorded and the run proceeds", func(t *testing.T) {
@@ -1157,7 +1174,7 @@ func TestCapabilityPackVocabulariesAreClosed(t *testing.T) {
 		require.Equal(t, requirement, parsed)
 		runner := NewRunner(nil).WithCapabilityPack(&pack, "", requirement, t.TempDir())
 		require.Equal(t, requirement, runner.CapabilityPackRequirement())
-		err = runner.unskilled(Invocation{Run: packRun("codex-cli")}, requirement, "a named reason")
+		err = runner.unskilled(Invocation{Run: packRun("codex-cli")}, requirement, packUnavailablef("a named reason"))
 		if requirement == PackRequired {
 			require.ErrorIs(t, err, ErrPackActivation)
 		} else {
@@ -1167,12 +1184,20 @@ func TestCapabilityPackVocabulariesAreClosed(t *testing.T) {
 	for _, outside := range []string{"", "yes", "REQUIRED", "optional "} {
 		_, err := ParsePackRequirement(outside)
 		require.Error(t, err, "%q must be rejected, never defaulted", outside)
+		if outside == "" {
+			continue
+		}
+		require.Error(t, PackRequirement(outside).Validate())
+		// A caller that bypassed configuration parsing collapses to the strictest policy, never the
+		// permissive one, so an invalid value can never silently weaken the node.
+		require.Equal(t, PackRequired,
+			NewRunner(nil).WithCapabilityPack(&pack, "", PackRequirement(outside), t.TempDir()).CapabilityPackRequirement())
 	}
 	// An unwired Runner keeps the optional reading rather than an empty requirement.
 	require.Equal(t, PackOptional, NewRunner(nil).CapabilityPackRequirement())
 
 	// Activation outcomes: the whole vocabulary is enumerated in one place.
-	require.Equal(t, []PackActivationOutcome{PackProjected, PackUnskilled, PackRefused}, PackActivationOutcomes)
+	require.Equal(t, []PackActivationOutcome{PackProjected, PackUnskilled, PackUnconfirmed, PackRefused}, PackActivationOutcomes)
 	for _, outcome := range PackActivationOutcomes {
 		require.NotEmpty(t, string(outcome))
 	}
@@ -1544,4 +1569,183 @@ func TestReconcileStaleProjectionsRefusesARelativeDataRoot(t *testing.T) {
 	removed, err := ReconcileStaleProjections(t.TempDir())
 	require.NoError(t, err)
 	require.Empty(t, removed, "a data root with no projection prefix is not a failure")
+}
+
+// TestInterruptedReplacementIsReconciledAtStartup covers the one unavoidable window in a POSIX
+// directory replacement: a crash between moving the outgoing subtree aside and renaming the incoming
+// one into place leaves the managed path absent and both complete subtrees inside the temporary
+// sibling. Reconciliation at daemon start restores the incoming subtree and removes the sibling; a
+// vendor that discovers skills recursively must not keep offering both copies.
+func TestInterruptedReplacementIsReconciledAtStartup(t *testing.T) {
+	pack, _ := packFixture(t)
+	_, codexHome, skillsRoot := fakeVendorHome(t)
+	dataRoot := t.TempDir()
+	binary, _ := fakeHarnessBinary(t, "codex-cli")
+	root := filepath.Join(skillsRoot, ManagedProjectionDirectory)
+	temporary := managedTemporarySibling(skillsRoot)
+
+	runner, _ := packTestRunner(t, "codex-cli", binary, dataRoot, &pack, "", PackRequired, skillsRoot)
+	_, err := runner.Execute(context.Background(), Invocation{Run: packRun("codex-cli"), Workspace: dataRoot})
+	require.NoError(t, err)
+	complete := snapshotTree(t, root)
+
+	// Reproduce the crash state by hand: a complete incoming subtree and the previous one moved aside,
+	// with the managed path absent.
+	require.NoError(t, os.MkdirAll(temporary, 0o755))
+	require.NoError(t, os.Rename(root, filepath.Join(temporary, "outgoing")))
+	incoming, err := writeProjection(filepath.Join(temporary, "incoming"), pack, ProjectionManaged, nil)
+	require.NoError(t, err)
+	require.DirExists(t, incoming.Root)
+	require.NoDirExists(t, root)
+
+	repaired, err := ReconcileManagedProjections([]string{"CODEX_HOME=" + codexHome})
+	require.NoError(t, err)
+	require.Equal(t, []string{root}, repaired)
+	require.NoDirExists(t, temporary, "the temporary sibling must be gone")
+	marker, err := readProjectionMarker(root)
+	require.NoError(t, err)
+	require.Equal(t, pack.Identity(), marker.Identity())
+	require.Equal(t, complete, snapshotTree(t, root))
+
+	// Idempotent: a second start finds nothing to repair.
+	repaired, err = ReconcileManagedProjections([]string{"CODEX_HOME=" + codexHome})
+	require.NoError(t, err)
+	require.Empty(t, repaired)
+
+	// With no complete subtree to restore, the failure is reported rather than papered over, and
+	// nothing Barista did not write is removed.
+	require.NoError(t, os.RemoveAll(root))
+	require.NoError(t, os.MkdirAll(filepath.Join(temporary, "incoming"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(temporary, "incoming", "no-marker.txt"), []byte("x"), 0o644))
+	_, err = ReconcileManagedProjections([]string{"CODEX_HOME=" + codexHome})
+	require.Error(t, err)
+	require.FileExists(t, filepath.Join(temporary, "incoming", "no-marker.txt"))
+
+	// An environment with no resolvable Codex home has nothing to reconcile and is not an error.
+	repaired, err = ReconcileManagedProjections(nil)
+	require.NoError(t, err)
+	require.Empty(t, repaired)
+}
+
+// TestReservedTemporarySiblingNeitherAdoptedNorClobbered proves the second path Barista creates in a
+// vendor's skills root is protected exactly like the first: content there that Barista did not write
+// is never deleted, and a pack-required run refuses rather than clobbering it.
+func TestReservedTemporarySiblingNeitherAdoptedNorClobbered(t *testing.T) {
+	pack, _ := packFixture(t)
+	for _, occupant := range []struct {
+		name    string
+		install func(t *testing.T, temporary string)
+	}{
+		{"a foreign directory", func(t *testing.T, temporary string) {
+			require.NoError(t, os.MkdirAll(filepath.Join(temporary, "theirs"), 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(temporary, "theirs", "notes.txt"), []byte("theirs"), 0o644))
+		}},
+		{"a plain file", func(t *testing.T, temporary string) {
+			require.NoError(t, os.WriteFile(temporary, []byte("theirs"), 0o644))
+		}},
+		{"a symlink", func(t *testing.T, temporary string) {
+			if runtime.GOOS == "windows" {
+				t.Skip("symlinks are not exercised on this platform")
+			}
+			target := t.TempDir()
+			require.NoError(t, os.WriteFile(filepath.Join(target, "kept.txt"), []byte("kept"), 0o644))
+			require.NoError(t, os.Symlink(target, temporary))
+		}},
+	} {
+		t.Run(occupant.name, func(t *testing.T) {
+			_, _, skillsRoot := fakeVendorHome(t)
+			dataRoot := t.TempDir()
+			binary, record := fakeHarnessBinary(t, "codex-cli")
+			temporary := managedTemporarySibling(skillsRoot)
+			occupant.install(t, temporary)
+			before := snapshotTree(t, skillsRoot)
+
+			runner, _ := packTestRunner(t, "codex-cli", binary, dataRoot, &pack, "", PackRequired, skillsRoot)
+			_, err := runner.Execute(context.Background(), Invocation{Run: packRun("codex-cli"), Workspace: dataRoot})
+			require.ErrorIs(t, err, ErrPackActivation)
+			require.Contains(t, err.Error(), temporary)
+			require.NoFileExists(t, record+".args")
+			require.Equal(t, before, snapshotTree(t, skillsRoot), "content Barista did not write must be untouched")
+		})
+	}
+
+	// An interrupted write Barista *did* make is recognized and removed, because the ownership marker
+	// is written before any content.
+	_, _, skillsRoot := fakeVendorHome(t)
+	dataRoot := t.TempDir()
+	binary, _ := fakeHarnessBinary(t, "codex-cli")
+	temporary := managedTemporarySibling(skillsRoot)
+	partial, err := writeProjection(filepath.Join(temporary, "incoming"), pack, ProjectionManaged, nil)
+	require.NoError(t, err)
+	require.NoError(t, os.RemoveAll(filepath.Join(partial.Root, "skills")))
+	runner, _ := packTestRunner(t, "codex-cli", binary, dataRoot, &pack, "", PackRequired, skillsRoot)
+	_, err = runner.Execute(context.Background(), Invocation{Run: packRun("codex-cli"), Workspace: dataRoot})
+	require.NoError(t, err)
+	require.NoDirExists(t, temporary)
+	require.DirExists(t, filepath.Join(skillsRoot, ManagedProjectionDirectory))
+}
+
+// TestAdapterSurfacesNameThePinnedVendorVersions ties every "verified at the pinned version" claim to
+// the component manifest. A pin bump without re-verifying the surface fails here rather than leaving a
+// stale claim in a doc comment and a stale recording in testdata.
+func TestAdapterSurfacesNameThePinnedVendorVersions(t *testing.T) {
+	manifest, err := setup.LoadDefaultManifest()
+	require.NoError(t, err)
+	pinned := map[string]string{}
+	for _, entry := range manifest.ComponentsOfKind(setup.ComponentKindHarness) {
+		pinned[entry.HarnessID] = entry.Version
+	}
+	require.Len(t, pinned, 2)
+
+	recordings := map[string][]string{
+		"claude-cli": {"claude-cli-version-output.txt"},
+		"codex-cli":  {"codex-cli-version-output.txt"},
+	}
+	for key, adapter := range packActivationAdapters {
+		version, managed := pinned[key.HarnessID]
+		require.True(t, managed, "%s has no pinned harness version to verify a surface against", key.HarnessID)
+		require.Contains(t, adapter.Surface, version,
+			"the %s adapter's surface claims a version the component manifest does not pin", key.HarnessID)
+		for _, recording := range recordings[key.HarnessID] {
+			content, err := os.ReadFile(filepath.Join("testdata", recording))
+			require.NoError(t, err)
+			require.Contains(t, string(content), version,
+				"%s records a different version than the component manifest pins", recording)
+		}
+	}
+}
+
+// TestCodexCollisionRecordingShowsNoConfirmablePrecedence is the recording the refuse-on-collision
+// behavior rests on: with the same skill name offered from inside and from outside the managed
+// subtree, codex-cli 0.147.0 lists both entries, so no winner can be confirmed.
+func TestCodexCollisionRecordingShowsNoConfirmablePrecedence(t *testing.T) {
+	recorded, err := os.ReadFile(filepath.Join("testdata", "codex-cli-collision-precedence-output.txt"))
+	require.NoError(t, err)
+	lines := strings.Split(strings.TrimRight(string(recorded), "\n"), "\n")
+	require.Len(t, lines, 2, "the CLI listed both colliding entries, so neither is the confirmable winner")
+	inside, outside := 0, 0
+	for _, line := range lines {
+		require.Contains(t, line, "shared-skill-name")
+		if strings.Contains(line, "/"+ManagedProjectionDirectory+"/") {
+			inside++
+			continue
+		}
+		outside++
+	}
+	require.Equal(t, 1, inside)
+	require.Equal(t, 1, outside)
+	// Which is why the Codex adapter records a collision with no winner, and the gate refuses.
+	require.Empty(t, SkillCollision{Name: "shared-skill-name"}.Winner)
+}
+
+// TestClaudePluginManifestRecordingShowsItIsRequired is the recording behind the run-scoped shape: a
+// directory without .claude-plugin/plugin.json is rejected outright by the CLI, so the projection must
+// carry that one Barista-owned metadata file.
+func TestClaudePluginManifestRecordingShowsItIsRequired(t *testing.T) {
+	recorded, err := os.ReadFile(filepath.Join("testdata", "claude-cli-plugin-manifest-requirement.txt"))
+	require.NoError(t, err)
+	require.Contains(t, string(recorded), "No manifest found in directory")
+	require.Contains(t, string(recorded), claudePluginManifestPath)
+	require.Contains(t, string(recorded), "Validation failed")
+	require.Contains(t, projectionMetadataPaths, claudePluginManifestPath)
 }

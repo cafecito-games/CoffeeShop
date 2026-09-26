@@ -180,6 +180,11 @@ func (r *Runner) WithCapabilityPack(pack *ActivePack, unavailable string, requir
 	if requirement == "" {
 		requirement = PackOptional
 	}
+	if err := requirement.Validate(); err != nil {
+		// A value outside the vocabulary is never read as the permissive one: it collapses to the
+		// strictest policy, so a caller that bypassed config.Parse cannot weaken the node silently.
+		requirement = PackRequired
+	}
 	r.packRequirement = requirement
 	r.packDataRoot = dataRoot
 	r.packProjections = newEstablishedProjections()

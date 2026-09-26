@@ -136,9 +136,7 @@ func projectCodexManagedSkills(projectionContext packProjectionContext) (*PackPr
 	// The managed projection is shared by every run of this daemon lifetime, so a run never removes
 	// it. The only path a run's cleanup may remove is the Barista-created temporary sibling, which a
 	// successful replacement already consumed and a failed one already removed.
-	projection.cleanup = func() error {
-		return removeIfOwned(filepath.Join(parent, ManagedProjectionDirectory+managedProjectionTemporarySuffix))
-	}
+	projection.cleanup = func() error { return removeBaristaTemporarySibling(managedTemporarySibling(parent)) }
 	return projection, nil
 }
 
@@ -155,10 +153,10 @@ func establishManagedProjection(parent, root string, pack ActivePack, establishe
 		// This daemon already wrote its projection. A marker that no longer records that identity
 		// means something else changed the subtree while runs were live.
 		if !present || marker.Identity() != established {
-			return nil, packUnavailablef("the managed capability pack projection at %s no longer records the pack this Barista established, so it was not re-projected under live runs", root)
+			return nil, packUnconfirmedf("the managed capability pack projection at %s no longer records the pack this Barista established, so it was not re-projected under live runs", root)
 		}
 		if !marker.Current() {
-			return nil, packUnavailablef("the managed capability pack projection at %s records projection generation %s, which this Barista does not recognise", root, marker.ProjectionSchemaVersion)
+			return nil, packUnconfirmedf("the managed capability pack projection at %s records projection generation %s, which this Barista does not recognise", root, marker.ProjectionSchemaVersion)
 		}
 		return &PackProjection{Shape: ProjectionManaged, Root: root, Files: pack.Tree.Paths(), Metadata: []string{ProjectionMarkerName}}, nil
 	}
@@ -177,8 +175,7 @@ func establishManagedProjection(parent, root string, pack ActivePack, establishe
 // de-duplication and no visible precedence — so the winner is left empty and the caller treats the
 // run as unconfirmed discovery. Precedence is never assumed from ordering.
 func codexSkillCollisions(parent, root string, projected []string) ([]SkillCollision, error) {
-	temporary := filepath.Join(parent, ManagedProjectionDirectory+managedProjectionTemporarySuffix)
-	offered, err := foreignSkillNames(parent, []string{root, temporary}, func(_ string, content []byte) string {
+	offered, err := foreignSkillNames(parent, []string{root, managedTemporarySibling(parent)}, func(_ string, content []byte) string {
 		return frontMatterName(content)
 	})
 	if err != nil {

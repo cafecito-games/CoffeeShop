@@ -188,6 +188,14 @@ func run(args []string) int {
 	} else if len(removed) > 0 {
 		log.Printf("capability pack: reconciled %d run-scoped projection(s) left behind by an earlier Barista", len(removed))
 	}
+	// A managed projection has one unavoidable replacement window: a crash between moving the outgoing
+	// subtree aside and renaming the incoming one in leaves the managed path absent and both complete
+	// subtrees inside the temporary sibling. It is repaired here, at daemon start, and nowhere else.
+	if repaired, err := harness.ReconcileManagedProjections(os.Environ()); err != nil {
+		log.Printf("capability pack: a managed projection could not be reconciled and was left as it is: %v", err)
+	} else if len(repaired) > 0 {
+		log.Printf("capability pack: restored %d managed projection(s) from an interrupted replacement", len(repaired))
+	}
 	activePack, packUnavailable := activeCapabilityPack(componentManifest, ownership, activation, cfg.DataRoot, version)
 	if activePack == nil {
 		log.Printf("capability pack: %s; runs on this node are %s", packUnavailable, cfg.CapabilityPackRequirement)
