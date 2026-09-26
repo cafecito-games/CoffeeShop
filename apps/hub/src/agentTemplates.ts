@@ -56,7 +56,13 @@ export function templateFromLegacyAgent(agent: Agent): { ok: true; template: Age
   const requirements: ExecutionRequirements = {
     harnessIds: [agent.harnessId],
     models: [agent.model],
-    workspace: { path: agent.workspace, writable: true },
+    /*
+     * The path is a hard requirement; writability is not. A configured agent's workspace was never
+     * checked for writability, and `writable: true` is a capability requirement that needs
+     * worker-reported evidence — asserting it would make every imported template unplaceable on a
+     * fleet that reports none, which is not the behaviour the agent had.
+     */
+    workspace: { path: agent.workspace, writable: false },
     ...(normalizedSkills(agent.skills) ? { skills: normalizedSkills(agent.skills) } : {})
   };
   const template: AgentTemplate = {
