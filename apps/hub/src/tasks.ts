@@ -21,7 +21,7 @@ import {
   type TaskStatus
 } from "@coffee-shop/protocol";
 import { CoordinationError } from "./coordinationError.js";
-import { callerAgent, callerCanDelegate, callerRun, resolveCallerFor, runSource, type CallerSource } from "./mailbox.js";
+import { callerAttribution, callerCanDelegate, callerRun, resolveCallerFor, runSource, type CallerSource } from "./mailbox.js";
 import { newEvent, newId, runActorKeys, type State, type Store, type TaskSubmission } from "./store.js";
 
 export const taskBatchLimits = {
@@ -317,7 +317,8 @@ interface SubmissionSource {
   /** The submitting run, or `undefined` when an external orchestrator submitted the batch. */
   run?: Run;
   threadId: string;
-  agentId?: string;
+  /** The submitting actor: a configured agent, or a resident instance and its exact allocation. */
+  attribution: { agentId?: string; instanceId?: string; allocationId?: string };
   /** The lineage and idempotency identity of the submitter. */
   sourceKey: string;
   /**
@@ -335,7 +336,7 @@ function authorizeSource(state: Readonly<State>, source: CallerSource): Submissi
   return {
     run,
     threadId: caller.thread.id,
-    agentId: callerAgent(caller)?.id,
+    attribution: callerAttribution(caller),
     sourceKey: caller.sourceKey,
     digestIdentity: run ? run.id : caller.sourceKey
   };
@@ -480,7 +481,11 @@ export async function submitTaskBatchForSource(
       id: newId("tasksub"),
       threadId: plan.source.threadId,
       ...(plan.source.run ? { sourceRunId: plan.source.run.id } : { sourceKey: plan.source.sourceKey }),
-      ...(plan.source.agentId === undefined ? {} : { creatorAgentId: plan.source.agentId }),
+      ...(plan.source.attribution.agentId === undefined ? {} : { creatorAgentId: plan.source.attribution.agentId }),
+      ...(plan.source.attribution.instanceId === undefined ? {} : {
+        creatorInstanceId: plan.source.attribution.instanceId,
+        creatorAllocationId: plan.source.attribution.allocationId
+      }),
       idempotencyKey: batch.idempotencyKey,
       digest: plan.digest,
       tasks: batch.tasks.map((task) => ({ key: task.key, taskId: idsByKey.get(task.key)! })),
@@ -495,7 +500,7 @@ export async function submitTaskBatchForSource(
       title: `${created.length} task${created.length === 1 ? "" : "s"} submitted`,
       detail: created.map((task) => task.title).join(", ").slice(0, 240),
       threadId: plan.source.threadId,
-      ...(plan.source.agentId === undefined ? {} : { agentId: plan.source.agentId }),
+      ...plan.source.attribution,
       ...(plan.source.run === undefined ? {} : { runId: plan.source.run.id })
     }));
     result = {

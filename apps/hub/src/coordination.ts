@@ -93,7 +93,11 @@ function taskSummary(state: Readonly<State>, task: Task) {
     status: task.status,
     ...(source?.taskId !== undefined ? { parentTaskId: source.taskId } : {}),
     dependencies: task.dependencies.map((dependency) => ({ ...dependency })),
-    ...(task.assignment ? { assignedAgentId: task.assignment.agentId, assignedNodeId: task.assignment.nodeId } : {}),
+    ...(task.assignment ? {
+      ...(task.assignment.agentId === undefined ? {} : { assignedAgentId: task.assignment.agentId }),
+      ...(task.assignment.instanceId === undefined ? {} : { assignedInstanceId: task.assignment.instanceId }),
+      assignedNodeId: task.assignment.nodeId
+    } : {}),
     attempts: task.attemptRunIds.length,
     ...(task.progress?.summary !== undefined ? { progress: task.progress.summary } : {}),
     ...(task.progress?.blockedReason !== undefined ? { blockedReason: task.progress.blockedReason } : {}),
@@ -159,7 +163,9 @@ export function taskContext(state: Readonly<State>, sourceRunId: string, argumen
     task: focusRun ? {
       id: focusRun.id,
       status: focusRun.status,
-      agentId: focusRun.agentId,
+      // Mixed history stays interpretable: whichever identity the run carries is the one reported.
+      ...(focusRun.agentId === undefined ? {} : { agentId: focusRun.agentId }),
+      ...(focusRun.instanceId === undefined ? {} : { instanceId: focusRun.instanceId }),
       objective: focusRun.prompt,
       depth: focusRun.depth,
       parentTaskId: focusRun.parentRunId,
@@ -182,7 +188,8 @@ export function taskContext(state: Readonly<State>, sourceRunId: string, argumen
     delegations: children.map((child) => ({
       taskId: child.id,
       delegationId: delegationByChild.get(child.id)?.id,
-      agentId: child.agentId,
+      ...(child.agentId === undefined ? {} : { agentId: child.agentId }),
+      ...(child.instanceId === undefined ? {} : { instanceId: child.instanceId }),
       status: child.status,
       summary: child.status === "completed" ? child.output.slice(0, 2_000) : child.error
     })),

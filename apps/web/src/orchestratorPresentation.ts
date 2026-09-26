@@ -122,3 +122,23 @@ export function approvalResolverLabel(resolvedBy: ApprovalResolvedBy | undefined
 export function isOrchestratorResolution(resolvedBy: ApprovalResolvedBy | undefined): boolean {
   return resolvedBy?.kind === "orchestrator";
 }
+
+/**
+ * Names the actor behind a record for display. A snapshot from a version-5 hub attributes a record to
+ * a resident instance rather than to a configured agent, so a view that only ever looked up an agent
+ * would render nothing at all for it. Presentation only: it never decides what a caller may do.
+ */
+export function actorLabel(
+  record: { agentId?: string; instanceId?: string },
+  agents: Agent[],
+  instances: AgentInstance[] = []
+): string {
+  if (record.instanceId !== undefined) {
+    const instance = instances.find((candidate) => candidate.id === record.instanceId);
+    return instance?.purpose?.name ?? record.instanceId;
+  }
+  if (record.agentId !== undefined) {
+    return agents.find((candidate) => candidate.id === record.agentId)?.name ?? record.agentId;
+  }
+  return "Unattributed";
+}

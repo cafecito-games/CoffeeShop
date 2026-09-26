@@ -1,4 +1,5 @@
 import { isHarnessTransport, isOrchestratorWakeStatus, isSessionBindingStatus } from "@coffee-shop/protocol";
+import { assertPersistedActor } from "./actors.js";
 import type { State } from "./store.js";
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
@@ -14,11 +15,18 @@ export function assertPersistedSessionState(state: State) {
   const bindingIds = new Set<string>();
   for (const [index, binding] of (state.sessionBindings ?? []).entries()) {
     const context = `Persisted session binding ${index}`;
-    if (!isRecord(binding) || !isNonEmptyString(binding.id) || !isNonEmptyString(binding.threadId) || !isNonEmptyString(binding.agentId)
+    if (!isRecord(binding) || !isNonEmptyString(binding.id) || !isNonEmptyString(binding.threadId)
       || !isNonEmptyString(binding.nodeId) || !isNonEmptyString(binding.providerSessionId) || !isNonEmptyString(binding.workspace)
       || !isNonEmptyString(binding.createdByRunId) || !isNonEmptyString(binding.lastRunId)) {
       throw new Error(`${context} is missing its identity`);
     }
+    /*
+     * A binding must name exactly one actor: the configured agent it was created for, or the instance
+     * and the exact allocation it was created under. A half-written instance identity is refused with
+     * the missing field named rather than being read as a legacy agent binding, which would otherwise
+     * make a truncated record resumable by the wrong principal.
+     */
+    assertPersistedActor(binding, context, true);
     if (bindingIds.has(binding.id)) throw new Error(`${context} repeats its binding id`);
     bindingIds.add(binding.id);
     if (!isSessionBindingStatus(binding.status)) throw new Error(`${context} has an unknown status`);

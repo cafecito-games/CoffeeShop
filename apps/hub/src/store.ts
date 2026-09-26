@@ -26,6 +26,7 @@ import {
   type Thread,
   type TimelineEvent
 } from "@coffee-shop/protocol";
+import { assertPersistedActor } from "./actors.js";
 import { assertPersistedTemplateState, importLegacyAgentTemplates, type LegacyTemplateImport } from "./agentTemplates.js";
 import type { HarnessEventStream, StoredHarnessEvent } from "./harnessEvents.js";
 import {
@@ -49,6 +50,9 @@ export interface TaskSubmission {
   sourceKey?: string;
   /** The agent the submitting run executes as; absent for an external orchestrator. */
   creatorAgentId?: string;
+  /** Version-5 attribution: the resident instance and allocation that submitted the batch. */
+  creatorInstanceId?: string;
+  creatorAllocationId?: string;
   idempotencyKey: string;
   /**
    * The key space the idempotency key belongs to. Absent for a caller-supplied batch; a batch the
@@ -292,6 +296,33 @@ export function assertPersistedOrchestratorClientState(state: State) {
     const context = `Persisted orchestrator attachment ${index}`;
     if (!clientIds.has(attachment.clientId)) throw new Error(`${context} names unknown orchestrator client ${attachment.clientId}`);
     if (!threadIds.has(attachment.threadId)) throw new Error(`${context} names unknown thread ${attachment.threadId}`);
+  }
+}
+
+/**
+ * Rejects persisted runtime records whose actor identity the hub cannot interpret. Every record that
+ * names who produced it must name exactly one actor: a configured agent, or an instance together with
+ * the exact allocation it ran under. A record naming both, or half an instance identity, fails the
+ * load with the offending field named — it is never coerced to the legacy agent path, defaulted, or
+ * dropped, because either would silently hand a record to the wrong principal.
+ *
+ * A record that names no actor at all is accepted only where the hub legitimately writes one: an
+ * event or a chat message it authored itself, or a task update from a principal with no agent. A run,
+ * a task assignment, and an artifact must always say whose work they are.
+ */
+export function assertPersistedActorState(state: State) {
+  for (const [index, run] of state.runs.entries()) assertPersistedActor(run, `Persisted run ${index}`, true);
+  for (const [index, event] of state.events.entries()) assertPersistedActor(event, `Persisted event ${index}`, false);
+  for (const [index, message] of state.messages.entries()) assertPersistedActor(message, `Persisted message ${index}`, false);
+  for (const [index, artifact] of (state.artifacts ?? []).entries()) assertPersistedActor(artifact, `Persisted artifact ${index}`, true);
+  for (const [index, update] of (state.taskUpdates ?? []).entries()) assertPersistedActor(update, `Persisted task update ${index}`, false);
+  for (const [index, task] of (state.tasks ?? []).entries()) {
+    if (task.assignment !== undefined) assertPersistedActor(task.assignment, `Persisted task ${index} assignment`, true);
+  }
+  for (const [index, approval] of (state.approvals ?? []).entries()) {
+    // An approval never carries an agent key; it is identified by its run. Only the instance half can
+    // be half-written, and that must fail the load like any other truncated actor identity.
+    assertPersistedActor(approval, `Persisted approval ${index}`, false);
   }
 }
 
@@ -617,6 +648,7 @@ export class Store {
     assertPersistedProjectProfiles(loaded);
     assertPersistedInstanceState(loaded);
     assertPersistedTemplateState(loaded);
+    assertPersistedActorState(loaded);
     /*
      * The legacy import runs after every assertion, so it never writes on top of state the hub could
      * not interpret, and it is decided from its own persisted records rather than from a timestamp:

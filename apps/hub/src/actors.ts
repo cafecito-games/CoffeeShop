@@ -45,6 +45,9 @@ const malformed = (context: string, field: string) =>
 export function recordActor(record: ActorKeyed, context: string): RuntimeActor | undefined {
   const { agentId, instanceId, allocationId } = record;
   if (instanceId !== undefined || allocationId !== undefined) {
+    if (agentId !== undefined) {
+      throw new CoordinationError("invalid_arguments", `${context} names both a configured agent and an instance actor`);
+    }
     if (instanceId === undefined) throw malformed(context, "an allocation");
     if (allocationId === undefined) throw malformed(context, "an instance");
     const validated = validateRuntimeActor({ kind: "instance", instanceId, allocationId });
@@ -52,9 +55,30 @@ export function recordActor(record: ActorKeyed, context: string): RuntimeActor |
     return validated.value;
   }
   if (agentId === undefined) return undefined;
-  const validated = validateRuntimeActor({ kind: "agent", agentId });
-  if (!validated.ok) throw new CoordinationError("invalid_arguments", `${context} has an invalid agent actor: ${validated.reason}`);
-  return validated.value;
+  /*
+   * A legacy agent identity is only required to be a non-empty string. Configured agent ids predate
+   * the version-5 identifier grammar, so validating them against it would fail the load of a snapshot
+   * this hub itself wrote. A version-5 instance actor above is held to the grammar exactly.
+   */
+  if (agentId.length === 0) throw new CoordinationError("invalid_arguments", `${context} has an empty agent actor`);
+  return { kind: "agent", agentId };
+}
+
+/**
+ * The load-time form of `recordActor`: it throws a plain `Error` naming the offending field, because a
+ * persisted record the hub cannot interpret must fail the load rather than be coerced, defaulted, or
+ * dropped. `required` is set for records that can never legitimately lack an actor, such as a run or a
+ * session binding; an event or a chat message the hub itself authored carries none.
+ */
+export function assertPersistedActor(record: unknown, context: string, required: boolean) {
+  if (typeof record !== "object" || record === null || Array.isArray(record)) throw new Error(`${context} is not an object`);
+  const entry = record as ActorKeyed;
+  try {
+    const actor = recordActor(entry, context);
+    if (actor === undefined && required) throw new Error(`${context} is missing its actor identity`);
+  } catch (error) {
+    throw error instanceof CoordinationError ? new Error(error.message) : error;
+  }
 }
 
 /** Whether a record is instance-keyed at all, without resolving it. */

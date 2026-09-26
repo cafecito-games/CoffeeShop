@@ -138,7 +138,7 @@ export function TaskGraph({ tasks, threadId, agents, nodes, taskMessages, taskMe
             )}
             {task.assignment ? (
               <dl className="task-assignment">
-                <div><dt>Assignee</dt><dd>{agent?.name ?? `${task.assignment.agentId} (unavailable)`}</dd></div>
+                <div><dt>Assignee</dt><dd>{agent?.name ?? (task.assignment.instanceId !== undefined ? task.assignment.instanceId : `${task.assignment.agentId ?? "Unattributed"} (unavailable)`)}</dd></div>
                 <div><dt>Compute</dt><dd>{nodeNames.get(task.assignment.nodeId) ?? `${task.assignment.nodeId} (unavailable)`}</dd></div>
                 <div><dt>Harness / transport</dt><dd>{task.assignment.harnessId} · {task.assignment.transport}</dd></div>
                 <div><dt>Attempts</dt><dd>{task.attemptRunIds.length}</dd></div>

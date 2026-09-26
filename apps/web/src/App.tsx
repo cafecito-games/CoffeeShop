@@ -15,7 +15,7 @@ import { AgentConfigurationForm, CreateAgentDialog, type AgentConfigurationPaylo
 import { CoffeeAvatar } from "./CoffeeAvatar.js";
 import { ComputeView } from "./compute/ComputeView.js";
 import { ExternalThreadDialog } from "./ExternalThreadDialog.js";
-import { describeThreadOrchestrator } from "./orchestratorPresentation.js";
+import { actorLabel, describeThreadOrchestrator } from "./orchestratorPresentation.js";
 import { useHubConnection, type ConnectionStatus } from "./hubConnection.js";
 import { AgentTimelineItem, buildAgentTimeline, type AgentTimelineEntry } from "./orchestration/AgentWorkTimeline.js";
 import { ApprovalDialog } from "./orchestration/ApprovalsView.js";
@@ -311,7 +311,7 @@ function RunInspector({ selectedRunId, run, runs, threads, artifacts, agents, no
         <>
           <div className="run-summary"><span className={`run-status run-status-${run.status}`}>{runStatusLabels[run.status]}</span><code>{run.id}</code></div>
           <dl className="run-details">
-            <div><dt>Agent</dt><dd>{agent ? `${agent.name} · ${agent.id}` : `${run.agentId} · unavailable`}</dd></div>
+            <div><dt>Actor</dt><dd>{agent ? `${agent.name} · ${agent.id}` : run.instanceId ? `${actorLabel(run, agents)} · ${run.instanceId}` : `${run.agentId ?? "Unattributed"} · unavailable`}</dd></div>
             <div><dt>Compute</dt><dd>{node ? `${node.name} · ${node.id}` : `${run.nodeId} · unavailable`}</dd></div>
             <div><dt>Harness / model</dt><dd>{run.harnessId} · {run.model || "Model unavailable"}</dd></div>
             <div><dt>Workspace</dt><dd><code>{run.workspace || "Workspace unavailable"}</code></dd></div>
@@ -328,7 +328,7 @@ function RunInspector({ selectedRunId, run, runs, threads, artifacts, agents, no
           <section className="run-text"><h3>Error</h3><pre>{run.error ?? "No error reported."}</pre></section>
           <RunActivityPanel activity={activity} transportSelection={run.transportSelection} sessionBinding={sessionBinding} approvals={runApprovals} />
           {providerSession && <section className="run-text"><h3>Provider session</h3><ProviderSessionCard reference={providerSession} nodeName={node?.name ?? run.nodeId} /></section>}
-          {children.length > 0 && <section className="run-related"><h3>Delegated tasks</h3>{children.map((child) => <button key={child.id} onClick={() => onInspectRun(child.id)}><span>{agents.find((item) => item.id === child.agentId)?.name ?? child.agentId}</span><small>{runStatusLabels[child.status]}</small></button>)}</section>}
+          {children.length > 0 && <section className="run-related"><h3>Delegated tasks</h3>{children.map((child) => <button key={child.id} onClick={() => onInspectRun(child.id)}><span>{actorLabel(child, agents)}</span><small>{runStatusLabels[child.status]}</small></button>)}</section>}
           {runArtifacts.length > 0 && <section className="run-related"><h3>Artifacts</h3>{runArtifacts.map((artifact) => <button key={artifact.id} onClick={() => void downloadArtifact(artifact)}><span>{artifact.title}</span><small>{artifact.kind} · {artifact.size} bytes</small></button>)}</section>}
           {notice && <p className="run-notice" role="alert">{notice}</p>}
           {isActiveRunStatus(run.status) && (
