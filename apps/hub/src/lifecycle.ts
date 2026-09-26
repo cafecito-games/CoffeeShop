@@ -5,6 +5,7 @@ import {
   isTerminalTaskStatus,
   supportsControlCapability,
   validateRunTransportSelection,
+  type AgentState,
   type ControlAgentToHub,
   type ControlProtocolVersion,
   type HubToControlAgent,
@@ -118,8 +119,11 @@ export function failLostTaskAttempts(state: State, nodeId: string, activeRunIds:
     run.error = lostComputeError;
     run.finishedAt = at;
     const task = state.tasks?.find((item) => item.id === run.taskId);
-    state.messages.push(newMessage({ agentId: run.agentId, author: "system", body: `Run failed: ${lostComputeError}`, kind: "status", threadId: run.threadId, runId: run.id }));
-    state.events.unshift(newEvent({ type: "status", title: "Compute lost", detail: `Run ${run.id} was no longer active on ${nodeId}`, threadId: run.threadId, agentId: run.agentId, runId: run.id }));
+    const attribution = runAttribution(state, run);
+    if (attribution.agentId !== undefined) {
+      state.messages.push(newMessage({ agentId: attribution.agentId, author: "system", body: `Run failed: ${lostComputeError}`, kind: "status", threadId: run.threadId, runId: run.id }));
+    }
+    state.events.unshift(newEvent({ type: "status", title: "Compute lost", detail: `Run ${run.id} was no longer active on ${nodeId}`, threadId: run.threadId, ...attribution, runId: run.id }));
     updateAgentAfterRunEnded(state, run, at);
     settleHarnessStateForTerminalRun(state, run.id, at);
     applyAttemptOutcome(state, run.id, at, { retryable: (task?.attemptRunIds.length ?? maximumTaskAttempts) < maximumTaskAttempts });
@@ -127,6 +131,55 @@ export function failLostTaskAttempts(state: State, nodeId: string, activeRunIds:
   }
   return lost;
 }
+
+/**
+ * The presentation a run's lifecycle writes back to. A legacy agent run has its configured agent,
+ * whose live state and current action the report updates. An instance run (#77) is executed by a
+ * resident instance, which carries no live presentation state at all — its identity is the actor and
+ * there is nothing to mark thinking, working, or idle — so the writer works against this shape
+ * instead of requiring an agent record and dropping the report when it finds none. That dropped
+ * report is exactly what made an instance-keyed attempt stay `queued` for ever.
+ *
+ * `agentId` is absent for an instance run: nothing fabricates an agent identity the fleet does not
+ * have, so an event carries no attribution and a chat message — whose `agentId` is required — is not
+ * written at all until #79/#81 give instances their own presentation.
+ */
+interface RunActor {
+  /** Operator-facing name for events. */
+  name: string;
+  /** Attribution for events and chat messages; absent for an instance run. */
+  agentId?: string;
+  /** Applies live presentation state; an instance only records that it was touched. */
+  present(next: { state: AgentState; action: string }): void;
+  touch(at: string): void;
+}
+
+function runActor(state: State, run: Run): RunActor | undefined {
+  const agent = state.agents.find((item) => item.id === run.agentId);
+  if (agent) {
+    return {
+      name: agent.name,
+      agentId: agent.id,
+      present: (next) => { agent.state = next.state; agent.currentAction = next.action; },
+      touch: (at) => { agent.updatedAt = at; }
+    };
+  }
+  if (run.instanceId === undefined) return undefined;
+  const instance = (state.instances ?? []).find((item) => item.id === run.instanceId);
+  if (!instance) return undefined;
+  return {
+    name: instance.purpose?.name ?? instance.id,
+    present: () => {},
+    touch: (at) => { instance.updatedAt = at; }
+  };
+}
+
+/**
+ * Event and message attribution for a run. An instance run names no agent, so the field is omitted
+ * rather than filled with an instance id that no agent lookup could ever resolve.
+ */
+const runAttribution = (state: Readonly<State>, run: Run): { agentId?: string } =>
+  state.agents.some((item) => item.id === run.agentId) ? { agentId: run.agentId } : {};
 
 function activeRunForAgent(state: State, agentId: string, excludedRunId: string) {
   return state.runs
@@ -168,7 +221,7 @@ export function cancelRunInState(state: State, runId: string, at: string): Cance
     title: "Run cancelled",
     detail: `Run ${run.id} was cancelled`,
     threadId: run.threadId,
-    agentId: run.agentId,
+    ...runAttribution(state, run),
     runId: run.id
   }));
   const thread = run.threadId ? state.threads?.find((item) => item.id === run.threadId) : undefined;
@@ -287,32 +340,32 @@ export function applyRunLifecycle(state: State, message: RunLifecycleMessage) {
   if (message.type === "run.failed" && typeof message.error !== "string") return false;
   if (message.type === "run.cancelled") return false;
   if (run.status === "cancelled") return false;
-  const agent = state.agents.find((item) => item.id === run.agentId);
-  if (!agent) return false;
+  const actor = runActor(state, run);
+  if (!actor) return false;
+  const attribution = actor.agentId === undefined ? {} : { agentId: actor.agentId };
   const thread = run.threadId ? state.threads?.find((item) => item.id === run.threadId) : undefined;
 
   if (message.type === "run.started") {
     if (!canTransitionRun(run.status, "running")) return false;
     run.status = "running";
     run.startedAt = message.at;
-    agent.state = "working";
-    agent.currentAction = "Working";
+    actor.present({ state: "working", action: "Working" });
     if (message.transport !== undefined) {
       const selection = acceptedTransportSelection(run, message.transport);
       if (selection) {
         run.transportSelection = selection;
         if (selection.fallbackReason) {
           state.events.unshift(newEvent({
-            type: "status", title: `${agent.name} fell back to the native CLI`,
+            type: "status", title: `${actor.name} fell back to the native CLI`,
             detail: `Requested ${selection.requestedTransport}; ${selection.fallbackReason} before the prompt was sent.`,
-            threadId: run.threadId, agentId: agent.id, runId: run.id
+            threadId: run.threadId, ...attribution, runId: run.id
           }));
         }
       } else {
         state.events.unshift(newEvent({
-          type: "status", title: `${agent.name}'s compute reported an unexpected transport`,
+          type: "status", title: `${actor.name}'s compute reported an unexpected transport`,
           detail: "The transport selection was malformed or not permitted by the dispatch and was not recorded.",
-          threadId: run.threadId, agentId: agent.id, runId: run.id
+          threadId: run.threadId, ...attribution, runId: run.id
         }));
       }
     }
@@ -320,7 +373,7 @@ export function applyRunLifecycle(state: State, message: RunLifecycleMessage) {
     if (run.status !== "running") return false;
     const chunk = message.chunk ?? "";
     run.output += chunk;
-    if (chunk.trim()) agent.currentAction = chunk.trim().slice(-90);
+    if (chunk.trim()) actor.present({ state: "working", action: chunk.trim().slice(-90) });
     const selectedTransport = run.transportSelection?.selectedTransport ?? run.transport ?? "native-cli";
     if (selectedTransport === "native-cli" && run.providerSessionId === undefined && isProviderSessionId(message.providerSessionId)) {
       run.providerSessionId = message.providerSessionId;
@@ -330,20 +383,22 @@ export function applyRunLifecycle(state: State, message: RunLifecycleMessage) {
     run.status = "completed";
     run.output = message.output;
     run.finishedAt = message.at;
-    agent.state = "done";
-    agent.currentAction = "Completed just now";
-    state.messages.push(newMessage({ agentId: agent.id, author: "agent", body: message.output || "Completed.", kind: "message", threadId: run.threadId, runId: run.id }));
-    state.events.unshift(newEvent({ type: "status", title: `${agent.name} finished`, detail: run.prompt.slice(0, 120), threadId: run.threadId, agentId: agent.id, runId: run.id }));
+    actor.present({ state: "done", action: "Completed just now" });
+    if (actor.agentId !== undefined) {
+      state.messages.push(newMessage({ agentId: actor.agentId, author: "agent", body: message.output || "Completed.", kind: "message", threadId: run.threadId, runId: run.id }));
+    }
+    state.events.unshift(newEvent({ type: "status", title: `${actor.name} finished`, detail: run.prompt.slice(0, 120), threadId: run.threadId, ...attribution, runId: run.id }));
   } else {
     if (!canTransitionRun(run.status, "failed")) return false;
     run.status = "failed";
     run.error = message.error;
     run.finishedAt = message.at;
-    agent.state = "blocked";
-    agent.currentAction = message.error.slice(0, 90);
-    state.messages.push(newMessage({ agentId: agent.id, author: "system", body: `Run failed: ${message.error}`, kind: "status", threadId: run.threadId, runId: run.id }));
+    actor.present({ state: "blocked", action: message.error.slice(0, 90) });
+    if (actor.agentId !== undefined) {
+      state.messages.push(newMessage({ agentId: actor.agentId, author: "system", body: `Run failed: ${message.error}`, kind: "status", threadId: run.threadId, runId: run.id }));
+    }
   }
-  agent.updatedAt = message.at;
+  actor.touch(message.at);
   if (thread) thread.updatedAt = message.at;
   if (message.type === "run.completed" || message.type === "run.failed") settleHarnessStateForTerminalRun(state, run.id, message.at);
   if (message.type !== "run.output") applyAttemptOutcome(state, run.id, message.at);

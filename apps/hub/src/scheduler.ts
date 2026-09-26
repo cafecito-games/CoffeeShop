@@ -727,7 +727,8 @@ export function instanceUnsatisfied(
   task: Task,
   instance: AgentInstance,
   environment: PlacementEnvironment,
-  profile: ProjectProfile | undefined
+  profile: ProjectProfile | undefined,
+  requiredNodeId?: string
 ): UnsatisfiedRequirement[] {
   const requirements = task.requirements;
   const unsatisfied: UnsatisfiedRequirement[] = [];
@@ -748,6 +749,9 @@ export function instanceUnsatisfied(
   }
   if (environment.runs.some((run) => run.instanceId === instance.id && isActiveRunStatus(run.status))) {
     add("instance", instance.id, "the instance already has an active run");
+  }
+  if (requiredNodeId !== undefined && allocation.nodeId !== requiredNodeId) {
+    add("instance", requiredNodeId, "the instance is allocated to a node the placement override does not permit", allocation.nodeId);
   }
   const node = environment.nodes.find((item) => item.id === allocation.nodeId);
   if (!node) {
@@ -802,12 +806,17 @@ export function instanceUnsatisfied(
 }
 
 /** The same-thread instances a task may reuse, in a stable order. */
-function reusableInstances(task: Task, environment: PlacementEnvironment, profile: ProjectProfile | undefined): InstanceCandidate[] {
+function reusableInstances(
+  task: Task,
+  environment: PlacementEnvironment,
+  profile: ProjectProfile | undefined,
+  requiredNodeId?: string
+): InstanceCandidate[] {
   const candidates: InstanceCandidate[] = [];
   for (const instance of [...(environment.instances ?? [])].sort((left, right) => compareText(left.id, right.id))) {
     if (instance.threadId !== task.threadId) continue;
     if (instance.status !== "ready" && instance.status !== "idle") continue;
-    if (instanceUnsatisfied(task, instance, environment, profile).length) continue;
+    if (instanceUnsatisfied(task, instance, environment, profile, requiredNodeId).length) continue;
     const allocation = (environment.allocations ?? []).find((item) => item.instanceId === instance.id && item.status === "active")!;
     candidates.push({ instance, allocation });
   }
@@ -882,6 +891,9 @@ export function placeTask(task: Task, environment: PlacementEnvironment): Placem
   }
   if (global.length) return { kind: "unsatisfied", diagnostic: diagnostic([], global) };
 
+  // A node the override names restricts every candidate set — instances, agents, and offerings alike.
+  const requiredNodeId = override && authorizedOverride ? override.nodeId : undefined;
+
   // An explicit pin is exact: no offering, reuse, or agent may stand in for the instance it names.
   const pinned = override && authorizedOverride ? override.instanceId : undefined;
   if (pinned !== undefined) {
@@ -889,7 +901,7 @@ export function placeTask(task: Task, environment: PlacementEnvironment): Placem
     if (!instance) {
       return { kind: "unsatisfied", diagnostic: diagnostic([], [{ kind: "instance", requirement: pinned, detail: "no instance with this identity exists" }]) };
     }
-    const failures = instanceUnsatisfied(effective, instance, environment, profile);
+    const failures = instanceUnsatisfied(effective, instance, environment, profile, requiredNodeId);
     if (failures.length === 0) {
       const allocation = (environment.allocations ?? []).find((item) => item.instanceId === instance.id && item.status === "active")!;
       return { kind: "instance", instanceId: instance.id, diagnostic: diagnostic([allocation.nodeId], []) };
@@ -908,7 +920,7 @@ export function placeTask(task: Task, environment: PlacementEnvironment): Placem
     ? undefined
     : (environment.instances ?? []).find((item) => item.id === task.placementInstanceId);
   if (owned !== undefined && nonTerminalInstanceStatuses.includes(owned.status)) {
-    const failures = instanceUnsatisfied(effective, owned, environment, profile);
+    const failures = instanceUnsatisfied(effective, owned, environment, profile, requiredNodeId);
     if (failures.length === 0) {
       const allocation = (environment.allocations ?? []).find((item) => item.instanceId === owned.id && item.status === "active")!;
       return { kind: "instance", instanceId: owned.id, diagnostic: diagnostic([allocation.nodeId], []) };
@@ -927,7 +939,7 @@ export function placeTask(task: Task, environment: PlacementEnvironment): Placem
     && !(environment.allocations ?? []).some((item) => item.instanceId === owned.id && occupyingAllocation(item.status))
     ? owned
     : undefined;
-  const reusable = replacing !== undefined ? [] : reusableInstances(effective, environment, profile);
+  const reusable = replacing !== undefined ? [] : reusableInstances(effective, environment, profile, requiredNodeId);
   if (reusable.length) {
     return {
       kind: "instance",
@@ -942,7 +954,7 @@ export function placeTask(task: Task, environment: PlacementEnvironment): Placem
    */
   for (const instance of environment.instances ?? []) {
     if (instance.threadId !== task.threadId || (instance.status !== "ready" && instance.status !== "idle")) continue;
-    unsatisfied.push(...instanceUnsatisfied(effective, instance, environment, profile));
+    unsatisfied.push(...instanceUnsatisfied(effective, instance, environment, profile, requiredNodeId));
   }
 
   /*
@@ -973,7 +985,7 @@ export function placeTask(task: Task, environment: PlacementEnvironment): Placem
   // Live offerings. A pin naming an agent or a node restricts them the same way it restricts agents.
   const offeringNodes = [...environment.nodes]
     .filter((node) => offersInstances(node))
-    .filter((node) => !override || !authorizedOverride || override.nodeId === undefined || node.id === override.nodeId)
+    .filter((node) => requiredNodeId === undefined || node.id === requiredNodeId)
     .sort((left, right) => compareText(left.id, right.id));
   /*
    * A legacy skill requirement with no covering template closes the offering path entirely: an
@@ -1006,7 +1018,10 @@ export function placeTask(task: Task, environment: PlacementEnvironment): Placem
     };
   }
   if (replacing !== undefined) {
-    unsatisfied.push(...offeringEvaluations.flatMap((evaluation) => evaluation.unsatisfied));
+    unsatisfied.push(...silentNodes, ...offeringEvaluations.flatMap((evaluation) => evaluation.unsatisfied));
+    if (unsatisfied.length === 0) {
+      unsatisfied.push({ kind: "offering", requirement: "live harness offering", instanceId: replacing.id, detail: "no compute node publishes an offering the lost allocation can be replaced on" });
+    }
     return { kind: "waiting", instanceId: replacing.id, diagnostic: diagnostic([], unsatisfied) };
   }
   if (templateGap !== undefined) {
@@ -1322,6 +1337,9 @@ export function runSchedulingPass(state: State, context: SchedulingContext, at: 
       run.workspace = plan.lease.worktreePath;
     }
     assignTaskAttempt(state, task.id, run, at);
+    // The compatibility path fulfils the task itself, so any instance intent it still held is
+    // released here rather than left pointing at a resident nothing will ever dispatch to.
+    delete task.placementInstanceId;
     task.placement = decision.diagnostic;
     const delivered = context.canDeliver(run.nodeId, dispatchMessageFor(run, agent, state.agents, state.workspaceLeases, state));
     if (delivered) run.dispatchedAt = at;

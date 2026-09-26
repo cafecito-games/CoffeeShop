@@ -24,6 +24,7 @@ import {
   type Task,
   type Thread
 } from "@coffee-shop/protocol";
+import { applyRunLifecycle, failLostTaskAttempts } from "./lifecycle.js";
 import { nodeOfferings, offeredWorkspace, placeTask, requirementsThroughTemplate, resolveTaskTemplate, runSchedulingPass, type NodeConnection, type PlacementEnvironment, type SchedulingContext } from "./scheduler.js";
 import {
   assertPersistedInstanceState,
@@ -758,4 +759,87 @@ test("a resident returns to idle when its attempt settles and carries the thread
   assert.equal(instances(current).length, 1, "the thread's next task reuses the resident rather than overbooking");
   assert.equal(current.state.runs.find((run) => run.taskId === "two")!.instanceId, instanceId);
   assert.equal(instances(current)[0].status, "busy");
+});
+
+test("an instance run reports its whole lifecycle and settles its task", () => {
+  const current = fixture([node("node-alpha")], [task("one")]);
+  runSchedulingPass(current.state, context(current), at);
+  const instanceId = instances(current)[0].id;
+  markReady(current, instanceId);
+  runSchedulingPass(current.state, context(current), later(20));
+  const runId = current.state.runs[0].id;
+
+  // Barista's reports name a run whose only actor is a resident instance; none may be dropped.
+  assert.equal(applyRunLifecycle(current.state, { type: "run.started", runId, at: later(21) } as never), true);
+  assert.equal(current.state.runs[0].status, "running");
+  assert.equal(taskById(current, "one").status, "running");
+  assert.equal(applyRunLifecycle(current.state, { type: "run.output", runId, chunk: "working", at: later(22) } as never), true);
+  assert.equal(applyRunLifecycle(current.state, { type: "run.completed", runId, output: "done", at: later(23) } as never), true);
+  assert.equal(current.state.runs[0].status, "completed");
+  assert.equal(taskById(current, "one").status, "completed");
+  assert.equal(taskById(current, "one").result, "done");
+
+  // Nothing is attributed to an agent identity the fleet does not have.
+  assert.deepEqual(current.state.messages, []);
+  for (const event of current.state.events) assert.notEqual(event.agentId, instanceId);
+  assert.ok(current.state.events.some((event) => event.title.includes("finished")));
+
+  // The settled attempt returns the resident to idle for the thread's next task.
+  assert.equal(runSchedulingPass(current.state, context(current), later(30)).changed, true);
+  assert.equal(instances(current)[0].status, "idle");
+});
+
+test("a failed instance run fails its task and a lost one is retried without an agent identity", () => {
+  const current = fixture([node("node-alpha")], [task("one")]);
+  runSchedulingPass(current.state, context(current), at);
+  markReady(current, instances(current)[0].id);
+  runSchedulingPass(current.state, context(current), later(20));
+  const runId = current.state.runs[0].id;
+  assert.equal(applyRunLifecycle(current.state, { type: "run.started", runId, at: later(21) } as never), true);
+  assert.equal(applyRunLifecycle(current.state, { type: "run.failed", runId, error: "harness exited", at: later(22) } as never), true);
+  assert.equal(taskById(current, "one").status, "failed");
+  assert.deepEqual(current.state.messages, []);
+
+  const lost = fixture([node("node-beta")], [task("two")]);
+  runSchedulingPass(lost.state, context(lost), at);
+  markReady(lost, instances(lost)[0].id);
+  runSchedulingPass(lost.state, context(lost), later(20));
+  const lostRunId = lost.state.runs[0].id;
+  applyRunLifecycle(lost.state, { type: "run.started", runId: lostRunId, at: later(21) } as never);
+  const failed = failLostTaskAttempts(lost.state, "node-beta", [], later(30));
+  assert.deepEqual(failed.map((run) => run.id), [lostRunId]);
+  assert.equal(taskById(lost, "two").status, "ready", "the attempt is retried under the existing policy");
+  assert.deepEqual(lost.state.messages, [], "no chat message is attributed to a nonexistent agent");
+  for (const event of lost.state.events) assert.notEqual(event.agentId, instances(lost)[0].id);
+});
+
+test("a node named by a placement override restricts instance reuse and pins as well as offerings", () => {
+  const ready: AgentInstance = {
+    id: "instance-elsewhere", threadId: "thread-one", creator: { kind: "operator", operatorId: "operator" },
+    delegation: { canDelegate: false }, requirements: {}, lease: { idleTimeoutSeconds: 1800, expiresAt: later(1800) },
+    status: "ready", createdAt: at, updatedAt: at
+  };
+  const allocation: InstanceAllocation = {
+    id: "allocation-elsewhere", instanceId: "instance-elsewhere", nodeId: "node-alpha", harnessId: "claude-cli",
+    model: "fable", transport: "native-cli", workspace: "/workspace", lease: { ...ready.lease },
+    status: "active", createdAt: at, updatedAt: at
+  };
+
+  // Reuse may not cross to a node the override excludes; the permitted node is used instead.
+  const reuse = fixture([node("node-alpha"), node("node-beta")], [
+    task("one", {}, { placementOverride: { nodeId: "node-beta", authorizedBy: "operator" } })
+  ], { instances: [ready], allocations: [allocation] });
+  runSchedulingPass(reuse.state, context(reuse), at);
+  assert.equal(reuse.state.runs.length, 0, "the excluded resident is not reused");
+  assert.equal(allocations(reuse).length, 2);
+  assert.equal(allocations(reuse).find((item) => item.status === "reserved")!.nodeId, "node-beta");
+
+  // A pin naming both an instance and a node it is not allocated to fails rather than being honored.
+  const pinned = fixture([node("node-alpha"), node("node-beta")], [
+    task("one", {}, { placementOverride: { instanceId: "instance-elsewhere", nodeId: "node-beta", authorizedBy: "operator" } })
+  ], { instances: [ready], allocations: [allocation] });
+  runSchedulingPass(pinned.state, context(pinned), at);
+  assert.equal(pinned.state.runs.length, 0);
+  assert.equal(instances(pinned).length, 1, "a failed pin never substitutes an offering");
+  assert.deepEqual(kinds(pinned, "one"), ["instance"]);
 });

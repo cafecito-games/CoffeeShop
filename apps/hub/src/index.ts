@@ -959,8 +959,10 @@ wss.on("connection", (socket, request) => {
       if (message.type === "run.completed" && current.depth < 3) {
         const directive = message.output.match(/<handoff\s+to=["']([^"']+)["']>([\s\S]*?)<\/handoff>/i);
         const recipient = directive && store.getAgent(directive[1]);
-        if (directive && recipient) {
-          const sender = store.getAgent(current.agentId)!;
+        // A handoff directive is agent-to-agent; an instance run names no configured sender, so the
+        // directive is ignored rather than dereferenced through an agent lookup that returns nothing.
+        const sender = store.getAgent(current.agentId);
+        if (directive && recipient && sender) {
           const task = directive[2].trim();
           await store.transact((state) => {
             state.events.unshift(newEvent({ type: "handoff", title: `${sender.name} → ${recipient.name}`, detail: task, threadId: current.threadId, fromAgentId: sender.id, toAgentId: recipient.id, runId: current.id }));
