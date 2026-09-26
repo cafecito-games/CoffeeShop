@@ -1,5 +1,5 @@
 import {
-  threadOrchestrator, type Agent, type ApprovalResolvedBy, type OrchestratorAttachment,
+  threadOrchestrator, type Agent, type AgentInstance, type ApprovalResolvedBy, type OrchestratorAttachment,
   type OrchestratorClient, type OrchestratorClientScope, type Thread
 } from "@coffee-shop/protocol";
 
@@ -30,11 +30,11 @@ export function sinceLabel(timestamp: string, now: number = Date.now()): string 
   return `${Math.floor(hours / 24)}d ago`;
 }
 
-export type ThreadOrchestratorDescriptionKind = "agent" | "external" | "unknown";
+export type ThreadOrchestratorDescriptionKind = "agent" | "instance" | "external" | "unknown";
 
 export interface ThreadOrchestratorDescription {
   kind: ThreadOrchestratorDescriptionKind;
-  /** Who orchestrates: an agent name, a client name, or a fallback identity. */
+  /** Who orchestrates: an instance name, an agent name, a client name, or a fallback identity. */
   name: string;
   /** The live state of an external orchestrator; empty for an agent thread. */
   detail: string;
@@ -46,6 +46,8 @@ export interface OrchestratorContext {
   agents: Agent[];
   clients: OrchestratorClient[];
   attachments: OrchestratorAttachment[];
+  /** Absent in a snapshot from a hub that predates instance-orchestrated threads. */
+  instances?: AgentInstance[];
   now?: number;
 }
 
@@ -56,13 +58,22 @@ export interface OrchestratorContext {
  */
 export function describeThreadOrchestrator(
   thread: Pick<Thread, "id" | "orchestrator" | "ownerAgentId">,
-  { agents, clients, attachments, now }: OrchestratorContext
+  { agents, clients, attachments, instances, now }: OrchestratorContext
 ): ThreadOrchestratorDescription {
   const orchestrator = threadOrchestrator(thread);
   if (orchestrator === undefined) return { kind: "unknown", name: "Unassigned", detail: "", attached: false };
   if (orchestrator.kind === "agent") {
     const agent = agents.find((candidate) => candidate.id === orchestrator.agentId);
     return { kind: "agent", name: agent?.name ?? orchestrator.agentId, detail: "", attached: false };
+  }
+  if (orchestrator.kind === "instance") {
+    const instance = (instances ?? []).find((candidate) => candidate.id === orchestrator.instanceId);
+    return {
+      kind: "instance",
+      name: instance?.purpose?.name ?? orchestrator.instanceId,
+      detail: instance === undefined ? "" : instance.status,
+      attached: false
+    };
   }
   const client = clients.find((candidate) => candidate.id === orchestrator.clientId);
   const threadAttachments = attachments.filter((attachment) => attachment.threadId === thread.id);

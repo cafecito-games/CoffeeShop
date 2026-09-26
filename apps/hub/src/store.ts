@@ -393,7 +393,7 @@ function removeLegacyDemoRecords(state: State) {
     .filter((agent) => legacyDemoAgents.get(agent.id) === agent.name)
     .map((agent) => agent.id));
   const runIds = new Set(state.runs
-    .filter((run) => legacyDemoRunIds.has(run.id) || agentIds.has(run.agentId))
+    .filter((run) => legacyDemoRunIds.has(run.id) || agentIds.has(run.agentId ?? ""))
     .map((run) => run.id));
   const before = [state.agents.length, state.nodes.length, state.runs.length, state.events.length, state.messages.length];
 
@@ -405,7 +405,7 @@ function removeLegacyDemoRecords(state: State) {
     && !agentIds.has(event.toAgentId ?? "")
     && !runIds.has(event.runId ?? ""));
   state.messages = state.messages.filter((message) =>
-    !agentIds.has(message.agentId)
+    !agentIds.has(message.agentId ?? "")
     && !runIds.has(message.runId ?? ""));
 
   const referencedNodeIds = new Set([
@@ -480,7 +480,9 @@ function addThreadDefaults(state: State) {
       const createdAt = typeof root.createdAt === "string" ? root.createdAt : new Date().toISOString();
       const thread: Thread = {
         id: newId("thread"), title: firstLine.length <= 120 ? firstLine : `${firstLine.slice(0, 119).trimEnd()}…`,
-        objective, summary: "", status: "completed", ownerAgentId: root.agentId, orchestrator: { kind: "agent", agentId: root.agentId }, createdBy: "user",
+        objective, summary: "", status: "completed",
+        ...(root.agentId === undefined ? {} : { ownerAgentId: root.agentId, orchestrator: { kind: "agent" as const, agentId: root.agentId } }),
+        createdBy: "user",
         createdAt, updatedAt: root.finishedAt ?? createdAt, completedAt: root.finishedAt ?? createdAt
       };
       state.threads.push(thread);
@@ -706,11 +708,24 @@ export const newMessage = (message: Omit<ChatMessage, "id" | "createdAt">): Chat
 export const newEvent = (event: Omit<TimelineEvent, "id" | "createdAt">): TimelineEvent => ({ ...event, id: newId("evt"), createdAt: new Date().toISOString() });
 
 /**
- * How an event or chat message names the actor behind a run. A legacy agent run names its configured
- * agent; a version-5 instance run carries the instance identity in `agentId` for the required field's
- * sake, and that identity resolves to no agent, so the field is omitted rather than written as an
- * attribution no reader could follow. Every writer that attributes a record to a run uses this, so
- * the two run shapes can never drift apart one call site at a time.
+ * How an event or chat message names the actor behind a run. A version-5 instance run names both
+ * halves of its identity — the instance and the exact allocation — and never an `agentId`, which is
+ * typed as a configured-agent key. A legacy run names its configured agent, and only while that
+ * agent is still configured, so no reader is pointed at a record that is not there. Every writer
+ * that attributes a record to a run uses this, so the two run shapes can never drift apart one call
+ * site at a time.
  */
-export const runAttribution = (state: Readonly<State>, run: Pick<Run, "agentId"> | undefined): { agentId?: string } =>
-  run !== undefined && state.agents.some((item) => item.id === run.agentId) ? { agentId: run.agentId } : {};
+export const runAttribution = (
+  state: Readonly<State>,
+  run: Pick<Run, "agentId" | "instanceId" | "allocationId"> | undefined
+): { agentId?: string; instanceId?: string; allocationId?: string } => {
+  if (run === undefined) return {};
+  if (run.instanceId !== undefined && run.allocationId !== undefined) {
+    return { instanceId: run.instanceId, allocationId: run.allocationId };
+  }
+  return run.agentId !== undefined && state.agents.some((item) => item.id === run.agentId) ? { agentId: run.agentId } : {};
+};
+
+/** Whether an attribution names an actor at all; an unattributable run writes no chat message. */
+export const hasAttribution = (attribution: { agentId?: string; instanceId?: string }) =>
+  attribution.agentId !== undefined || attribution.instanceId !== undefined;

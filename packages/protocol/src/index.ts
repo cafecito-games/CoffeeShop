@@ -106,7 +106,11 @@ export interface Artifact {
   id: string;
   threadId?: string;
   runId: string;
-  agentId: string;
+  /** Compatibility attribution: the configured agent that produced it. Absent on an instance run. */
+  agentId?: string;
+  /** Version-5: the resident instance that produced it, and the allocation it ran under. */
+  instanceId?: string;
+  allocationId?: string;
   relativePath: string;
   title: string;
   kind: ArtifactKind;
@@ -124,7 +128,12 @@ export interface Artifact {
 export interface Run {
   id: string;
   threadId?: string;
-  agentId: string;
+  /**
+   * Compatibility attribution: the configured agent this run executes as. Absent on a version-5
+   * instance run, which names `instanceId`/`allocationId` instead. An instance identity is never
+   * written here: the field is typed as an agent id and every agent-keyed lookup reads it.
+   */
+  agentId?: string;
   nodeId: string;
   harnessId: HarnessId;
   model: string;
@@ -175,6 +184,9 @@ export interface TimelineEvent {
   title: string;
   detail: string;
   agentId?: string;
+  /** Version-5 attribution: the resident instance and allocation behind the event. */
+  instanceId?: string;
+  allocationId?: string;
   runId?: string;
   fromAgentId?: string;
   toAgentId?: string;
@@ -184,7 +196,11 @@ export interface TimelineEvent {
 export interface ChatMessage {
   id: string;
   threadId?: string;
-  agentId: string;
+  /** Compatibility attribution; absent on a message an instance run authored. */
+  agentId?: string;
+  /** Version-5 attribution: the resident instance and allocation behind the message. */
+  instanceId?: string;
+  allocationId?: string;
   author: "you" | "agent" | "system";
   body: string;
   kind: "message" | "handoff" | "status";
@@ -211,7 +227,7 @@ export type ThreadOrchestrator =
 
 /** Existing consumers remain explicitly legacy until their instance migration. */
 export type LegacyThreadOrchestrator = Exclude<ThreadOrchestrator, { kind: "instance" }>;
-export interface Thread<Orchestrator extends ThreadOrchestrator = LegacyThreadOrchestrator> {
+export interface Thread<Orchestrator extends ThreadOrchestrator = ThreadOrchestrator> {
   id: string;
   title: string;
   objective: string;
@@ -629,7 +645,8 @@ export interface PlacementOverride {
 
 export interface TaskAssignment {
   runId: string;
-  agentId: string;
+  /** Compatibility attribution; absent when the attempt is instance-keyed. */
+  agentId?: string;
   /** Version-5: the resident instance executing this attempt, when the attempt is instance-keyed. */
   instanceId?: string;
   /** Version-5: the exact allocation the attempt was dispatched against. */
@@ -853,7 +870,14 @@ export const canTransitionSessionBinding = (from: SessionBindingStatus, to: Sess
 export interface HarnessSessionBinding {
   id: string;
   threadId: string;
-  agentId: string;
+  /** Compatibility context: the configured agent the session was created for. */
+  agentId?: string;
+  /**
+   * Version-5 context: the resident instance and the exact allocation the session was created
+   * under. A binding is resumable only in exactly the context it records, allocation included.
+   */
+  instanceId?: string;
+  allocationId?: string;
   nodeId: string;
   harnessId: HarnessId;
   transport: HarnessTransport;
@@ -1092,6 +1116,9 @@ export interface ApprovalRequest {
   taskId?: string;
   runId: string;
   nodeId: string;
+  /** Version-5 attribution: the resident instance and allocation of the run that raised it. */
+  instanceId?: string;
+  allocationId?: string;
   sessionBindingId?: string;
   toolCallId?: string;
   title: string;
@@ -2684,6 +2711,14 @@ export interface AgentTemplate {
   tags?: string[];
   requirements?: ExecutionRequirements;
   preferences?: ExecutionPreferences;
+  /** Hub-granted delegation default for instances created from this template. */
+  delegation?: InstanceDelegationPolicy;
+  /**
+   * The configured agent this template was imported from. It is the deterministic marker that makes
+   * the one-shot legacy import idempotent: a restart finds the template by this field rather than by
+   * a timestamp, so no second template is ever written.
+   */
+  legacyAgentId?: string;
 }
 /** New actor attribution always names both logical identity and the exact allocation. */
 export interface InstanceActor { instanceId: string; allocationId: string }
@@ -2809,11 +2844,13 @@ export function validateInstanceAllocation(value: unknown): Validation<InstanceA
   return accept(value as unknown as InstanceAllocation);
 }
 export function validateAgentTemplate(value: unknown): Validation<AgentTemplate> {
-  if (!isRecord(value) || !hasOnlyKeys(value, ["id", "name", "purpose", "glyph", "avatarShape", "avatarColor", "instructions", "skills", "tags", "requirements", "preferences"])
+  if (!isRecord(value) || !hasOnlyKeys(value, ["id", "name", "purpose", "glyph", "avatarShape", "avatarColor", "instructions", "skills", "tags", "requirements", "preferences", "delegation", "legacyAgentId"])
     || !instanceID(value.id) || !isIdentifier(value.name) || !isOptional(value.purpose, instancePurpose) || !isOptional(value.glyph, isIdentifier)
     || !isOptional(value.avatarShape, isOneOf(agentAvatarShapes)) || !isOptional(value.avatarColor, isOneOf(agentAvatarColors))
     || !isOptional(value.instructions, instanceText) || !isOptional(value.skills, instanceStrings) || !isOptional(value.tags, instanceStrings)
-    || !isOptional(value.requirements, (item) => validateInstanceRequirements(item).ok) || !isOptional(value.preferences, executionPreferences)) return reject("invalid agent template");
+    || !isOptional(value.requirements, (item) => validateInstanceRequirements(item).ok) || !isOptional(value.preferences, executionPreferences)
+    || !isOptional(value.delegation, (item) => isRecord(item) && hasOnlyKeys(item, ["canDelegate"]) && typeof item.canDelegate === "boolean")
+    || !isOptional(value.legacyAgentId, instanceID)) return reject("invalid agent template");
   // Preferences may rank concrete nodes; a template never fixes a node binding.
   return accept(value as unknown as AgentTemplate);
 }

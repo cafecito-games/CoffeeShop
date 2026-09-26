@@ -961,7 +961,7 @@ wss.on("connection", (socket, request) => {
         const recipient = directive && store.getAgent(directive[1]);
         // A handoff directive is agent-to-agent; an instance run names no configured sender, so the
         // directive is ignored rather than dereferenced through an agent lookup that returns nothing.
-        const sender = store.getAgent(current.agentId);
+        const sender = current.agentId === undefined ? undefined : store.getAgent(current.agentId);
         if (directive && recipient && sender) {
           const task = directive[2].trim();
           await store.transact((state) => {

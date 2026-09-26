@@ -660,7 +660,9 @@ export function assignTaskAttempt(state: State, taskId: string, run: Run, at: st
   task.attemptRunIds.push(run.id);
   task.assignment = {
     runId: run.id,
-    agentId: run.agentId,
+    // Record identity, not attribution: an instance attempt names its instance and allocation, and
+    // never writes an instance id into the agent-typed key.
+    ...(run.agentId === undefined ? {} : { agentId: run.agentId }),
     ...(run.instanceId === undefined ? {} : { instanceId: run.instanceId }),
     ...(run.allocationId === undefined ? {} : { allocationId: run.allocationId }),
     nodeId: run.nodeId,
@@ -753,9 +755,12 @@ export interface TaskAttemptProjection {
   runId: string;
   attempt?: number;
   status: Run["status"];
-  agentId: string;
+  /** Compatibility attribution; absent when the attempt was instance-keyed. */
+  agentId?: string;
   /** Version-5: the resident instance that executed the attempt, when it was instance-keyed. */
   instanceId?: string;
+  /** Version-5: the exact allocation the attempt was dispatched against. */
+  allocationId?: string;
   nodeId: string;
   createdAt: string;
   startedAt?: string;
@@ -818,8 +823,10 @@ function projectTask(state: Readonly<State>, task: Task): TaskProjection {
     attempts: task.attemptRunIds.flatMap((runId) => {
       const run = runs.get(runId);
       return run ? [{
-        runId: run.id, attempt: run.attempt, status: run.status, agentId: run.agentId,
-        ...(run.instanceId === undefined ? {} : { instanceId: run.instanceId }), nodeId: run.nodeId,
+        runId: run.id, attempt: run.attempt, status: run.status,
+        ...(run.agentId === undefined ? {} : { agentId: run.agentId }),
+        ...(run.instanceId === undefined ? {} : { instanceId: run.instanceId }),
+        ...(run.allocationId === undefined ? {} : { allocationId: run.allocationId }), nodeId: run.nodeId,
         createdAt: run.createdAt, startedAt: run.startedAt, finishedAt: run.finishedAt, error: run.error,
         transport: run.transport ?? "native-cli",
         ...(run.transportSelection ? { transportSelection: structuredClone(run.transportSelection) } : {})
