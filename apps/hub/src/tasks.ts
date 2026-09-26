@@ -7,6 +7,7 @@ import {
   isTaskDependencyPolicy,
   isTerminalTaskStatus,
   recordSourceKey,
+  validateInstanceRequirements,
   type DependencyOutcome,
   type ExecutionPreferences,
   type ExecutionRequirements,
@@ -141,7 +142,7 @@ export function normalizeRequirements(value: unknown): ExecutionRequirements {
   if (!isRecord(value)) throw invalid("requirements must be an object");
   onlyKeys(value, [
     "skills", "harnessIds", "models", "transports", "operatingSystems", "architectures", "labels",
-    "minimumConcurrency", "minimumMemoryMegabytes", "projectProfileId", "workspace", "preferences"
+    "minimumConcurrency", "minimumMemoryMegabytes", "projectProfileId", "templateId", "workspace", "preferences"
   ], "requirements");
   const requirements: ExecutionRequirements = {};
   const sets = {
@@ -165,6 +166,7 @@ export function normalizeRequirements(value: unknown): ExecutionRequirements {
   if (minimumConcurrency !== undefined) requirements.minimumConcurrency = minimumConcurrency;
   if (minimumMemoryMegabytes !== undefined) requirements.minimumMemoryMegabytes = minimumMemoryMegabytes;
   if (value.projectProfileId !== undefined) requirements.projectProfileId = boundedString(value.projectProfileId, "requirements.projectProfileId", taskBatchLimits.requirementValueLength);
+  if (value.templateId !== undefined) requirements.templateId = boundedString(value.templateId, "requirements.templateId", taskBatchLimits.requirementValueLength);
   if (value.workspace !== undefined) {
     const workspace = value.workspace;
     if (!isRecord(workspace)) throw invalid("requirements.workspace must be an object");
@@ -176,6 +178,17 @@ export function normalizeRequirements(value: unknown): ExecutionRequirements {
   }
   const preferences = normalizePreferences(value.preferences);
   if (preferences) requirements.preferences = preferences;
+  /*
+   * The batch bounds above count characters; the protocol contract these requirements travel under
+   * counts UTF-8 bytes and constrains identity shapes. A value inside one bound and outside the other
+   * would be accepted here and then fail to encode where it is actually used — on the instance record
+   * a version-5 placement creates — which is a refusal in the wrong place: inside a scheduling
+   * transaction, where it aborts placements for unrelated tasks. It is refused at the boundary
+   * instead, against the single validator that owns those bounds, so nothing unencodable is ever
+   * persisted.
+   */
+  const wireValid = validateInstanceRequirements(requirements);
+  if (!wireValid.ok) throw invalid(`requirements cannot be carried by the execution contract: ${wireValid.reason}`);
   return requirements;
 }
 
@@ -648,6 +661,8 @@ export function assignTaskAttempt(state: State, taskId: string, run: Run, at: st
   task.assignment = {
     runId: run.id,
     agentId: run.agentId,
+    ...(run.instanceId === undefined ? {} : { instanceId: run.instanceId }),
+    ...(run.allocationId === undefined ? {} : { allocationId: run.allocationId }),
     nodeId: run.nodeId,
     harnessId: run.harnessId,
     transport: run.transport ?? "native-cli",
@@ -658,6 +673,17 @@ export function assignTaskAttempt(state: State, taskId: string, run: Run, at: st
   transitionTask(task, "assigned", at);
   return run;
 }
+
+/**
+ * A task is failed rather than retried once this many attempts have been lost. The budget lives with
+ * the task, beside `attemptRunIds`, so every authority that can lose an attempt — the version-4
+ * reconnect sweep and the version-5 instance lifecycle alike — reads one definition of it.
+ */
+export const maximumTaskAttempts = 3;
+
+/** Whether a task may receive another attempt after losing the current one. */
+export const attemptIsRetryable = (task: Task | undefined) =>
+  (task?.attemptRunIds.length ?? maximumTaskAttempts) < maximumTaskAttempts;
 
 export interface AttemptOutcomeOptions {
   /** A failure the hub may retry with a new attempt, such as lost compute. */
@@ -728,6 +754,8 @@ export interface TaskAttemptProjection {
   attempt?: number;
   status: Run["status"];
   agentId: string;
+  /** Version-5: the resident instance that executed the attempt, when it was instance-keyed. */
+  instanceId?: string;
   nodeId: string;
   createdAt: string;
   startedAt?: string;
@@ -790,7 +818,8 @@ function projectTask(state: Readonly<State>, task: Task): TaskProjection {
     attempts: task.attemptRunIds.flatMap((runId) => {
       const run = runs.get(runId);
       return run ? [{
-        runId: run.id, attempt: run.attempt, status: run.status, agentId: run.agentId, nodeId: run.nodeId,
+        runId: run.id, attempt: run.attempt, status: run.status, agentId: run.agentId,
+        ...(run.instanceId === undefined ? {} : { instanceId: run.instanceId }), nodeId: run.nodeId,
         createdAt: run.createdAt, startedAt: run.startedAt, finishedAt: run.finishedAt, error: run.error,
         transport: run.transport ?? "native-cli",
         ...(run.transportSelection ? { transportSelection: structuredClone(run.transportSelection) } : {})

@@ -139,6 +139,10 @@ export interface Run {
   startedAt?: string;
   finishedAt?: string;
   createdAt: string;
+  /** Version-5: the resident instance this run executes as; absent on a legacy agent run. */
+  instanceId?: string;
+  /** Version-5: the exact allocation this run was dispatched against. */
+  allocationId?: string;
   /** Version-4: the task this run is an execution attempt for. */
   taskId?: string;
   /** Version-4: one-based attempt number within the owning task. */
@@ -591,6 +595,13 @@ export interface ExecutionRequirements {
   minimumConcurrency?: number;
   minimumMemoryMegabytes?: number;
   projectProfileId?: string;
+  /**
+   * Version-5: the `AgentTemplate` whose role defaults this workload requires. It is discovery
+   * metadata and a hard admission gate at once: a task naming a template may be placed only through
+   * that template, and a task naming none needs no configured template at all. It never relaxes a
+   * hard requirement — the template's own requirements are added to the task's.
+   */
+  templateId?: string;
   workspace?: { repository?: string; path?: string; writable: boolean };
   preferences?: ExecutionPreferences;
 }
@@ -604,6 +615,13 @@ export interface ExecutionPreferences {
 
 /** A separately authorized placement override; ordinary delegation is declarative. */
 export interface PlacementOverride {
+  /**
+   * Version-5: the exact resident instance this task must run on. A pinned task is never placed on
+   * another instance and never falls back to an offering; an unauthorized, foreign-thread,
+   * draining, or incompatible pin fails with its own diagnostic.
+   */
+  instanceId?: string;
+  /** Compatibility-only agent pin. New overrides name an `instanceId` instead; #78 removes this. */
   agentId?: string;
   nodeId?: string;
   authorizedBy: "operator" | "policy";
@@ -612,6 +630,10 @@ export interface PlacementOverride {
 export interface TaskAssignment {
   runId: string;
   agentId: string;
+  /** Version-5: the resident instance executing this attempt, when the attempt is instance-keyed. */
+  instanceId?: string;
+  /** Version-5: the exact allocation the attempt was dispatched against. */
+  allocationId?: string;
   nodeId: string;
   harnessId: HarnessId;
   transport: HarnessTransport;
@@ -637,7 +659,15 @@ export const placementRequirementKinds = [
   "agent",
   "capacity",
   "protocol-version",
-  "assignment"
+  "assignment",
+  /** Version-5: no live harness offering satisfied the workload. */
+  "offering",
+  /** Version-5: the named or required `AgentTemplate` cannot serve the workload. */
+  "template",
+  /** Version-5: a pinned or reusable instance cannot serve the workload. */
+  "instance",
+  /** Version-5: the node's resident-instance capacity, which is independent of run concurrency. */
+  "resident-capacity"
 ] as const;
 export type PlacementRequirementKind = typeof placementRequirementKinds[number];
 
@@ -649,6 +679,8 @@ export interface UnsatisfiedRequirement {
   nodeId?: string;
   /** Present when the explanation applies to one candidate agent. */
   agentId?: string;
+  /** Present when the explanation applies to one resident instance. */
+  instanceId?: string;
   detail: string;
 }
 
@@ -692,6 +724,13 @@ export interface Task {
   /** The submitting principal; written only when it is not the run named by `sourceRunId`. */
   sourceKey?: string;
   idempotencyKey: string;
+  /**
+   * Version-5: the instance this task is waiting on. It is written in the same transaction that
+   * requests the instance and reserves its allocation, which is what stops a second scheduling pass
+   * from creating a duplicate instance, and it is cleared when the instance settles terminally so
+   * the retry policy can place the task afresh.
+   */
+  placementInstanceId?: string;
   assignment?: TaskAssignment;
   placement?: PlacementDiagnostic;
   attemptRunIds: string[];
@@ -2742,12 +2781,13 @@ const executionPreferences = (value: unknown): value is ExecutionPreferences => 
 const absoluteInstancePath = (value: unknown): value is string => isBoundedString(value, instanceLimits.workspaceBytes)
   && !/[\u0000-\u001f]/.test(value) && (/^\//.test(value) || /^[A-Za-z]:[\\/]/.test(value));
 export function validateInstanceRequirements(value: unknown): Validation<ExecutionRequirements> {
-  if (!isRecord(value) || !hasOnlyKeys(value, ["skills", "harnessIds", "models", "transports", "operatingSystems", "architectures", "labels", "minimumConcurrency", "minimumMemoryMegabytes", "projectProfileId", "workspace", "preferences"])
+  if (!isRecord(value) || !hasOnlyKeys(value, ["skills", "harnessIds", "models", "transports", "operatingSystems", "architectures", "labels", "minimumConcurrency", "minimumMemoryMegabytes", "projectProfileId", "templateId", "workspace", "preferences"])
     || !["skills", "models", "operatingSystems", "architectures", "labels"].every((key) => isOptional(value[key], instanceStrings))
     || !isOptional(value.harnessIds, (items) => instanceStrings(items, isHarnessId))
     || !isOptional(value.transports, (items) => instanceStrings(items, isHarnessTransport))
     || !isOptional(value.minimumConcurrency, instanceCount) || !isOptional(value.minimumMemoryMegabytes, (megabytes) => isNonNegativeInteger(megabytes) && megabytes <= 2 ** 32 - 1)
-    || !isOptional(value.projectProfileId, instanceID) || !isOptional(value.preferences, executionPreferences)) return reject("invalid instance requirements");
+    || !isOptional(value.projectProfileId, instanceID) || !isOptional(value.templateId, instanceID)
+    || !isOptional(value.preferences, executionPreferences)) return reject("invalid instance requirements");
   if (value.workspace !== undefined && (!isRecord(value.workspace) || !hasOnlyKeys(value.workspace, ["repository", "path", "writable"])
     || typeof value.workspace.writable !== "boolean" || !isOptional(value.workspace.path, absoluteInstancePath)
     || !isOptional(value.workspace.repository, (item) => isBoundedString(item, instanceLimits.workspaceBytes)))) return reject("invalid instance workspace requirements");

@@ -11,7 +11,7 @@ import {
   type Run
 } from "@coffee-shop/protocol";
 import { wakeForRun } from "./continuationRuns.js";
-import { newEvent, newId, type State, type Store } from "./store.js";
+import { newEvent, newId, runAttribution, type State, type Store } from "./store.js";
 
 /*
  * Harness session bindings.
@@ -204,7 +204,7 @@ export async function receiveSessionBinding(store: Store, nodeId: string, runId:
       state.events.unshift(newEvent({
         type: "status", title: "Session replaced",
         detail: "The previous harness session could not be resumed; a new session received the bounded durable context.",
-        threadId: run.threadId, agentId: run.agentId, runId: run.id
+        threadId: run.threadId, ...runAttribution(state, run), runId: run.id
       }));
     }
     return outcome.kind === "created" || outcome.kind === "resumed";

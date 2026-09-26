@@ -21,6 +21,7 @@ import {
   type ChatMessage,
   type OrchestratorClient,
   type ProjectProfile,
+  type Run,
   type Snapshot,
   type Thread,
   type TimelineEvent
@@ -703,3 +704,13 @@ export class Store {
 export const newId = (prefix: string) => `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 export const newMessage = (message: Omit<ChatMessage, "id" | "createdAt">): ChatMessage => ({ ...message, id: newId("msg"), createdAt: new Date().toISOString() });
 export const newEvent = (event: Omit<TimelineEvent, "id" | "createdAt">): TimelineEvent => ({ ...event, id: newId("evt"), createdAt: new Date().toISOString() });
+
+/**
+ * How an event or chat message names the actor behind a run. A legacy agent run names its configured
+ * agent; a version-5 instance run carries the instance identity in `agentId` for the required field's
+ * sake, and that identity resolves to no agent, so the field is omitted rather than written as an
+ * attribution no reader could follow. Every writer that attributes a record to a run uses this, so
+ * the two run shapes can never drift apart one call site at a time.
+ */
+export const runAttribution = (state: Readonly<State>, run: Pick<Run, "agentId"> | undefined): { agentId?: string } =>
+  run !== undefined && state.agents.some((item) => item.id === run.agentId) ? { agentId: run.agentId } : {};

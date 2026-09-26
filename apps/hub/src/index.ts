@@ -120,6 +120,12 @@ const runInstanceMaintenance = coalesceAsync(async () => {
   const changed = await maintainInstanceLifecycle(store);
   const delivered = await flushPendingInstanceDeliveries(store, sendInstanceCommand);
   if (changed || delivered) broadcast();
+  /*
+   * A lifecycle change can release a task's placement — an expired lease drains the instance it was
+   * waiting on — so the scheduler is re-entered to place that task afresh. Only the lifecycle half
+   * triggers it: a delivery is a send, and re-entering on every send would alternate the two passes.
+   */
+  if (changed) requestScheduling();
 }, (error) => console.error("instance lifecycle maintenance failed", error));
 
 type DispatchMessage = Extract<HubToControlAgent, { type: "dispatch" }>;
@@ -187,6 +193,13 @@ const scheduleReadyTasks = coalesceAsync(async () => {
     const connection = approved.get(attempt.runId);
     if (attempt.delivered && connection) await deliverRun(attempt.runId, connection);
   }
+  /*
+   * An instance-keyed attempt and a reserved allocation are both persisted commands in the instance
+   * outbox, never direct sends, so the pass ends by flushing that outbox instead of writing a socket
+   * itself. Doing it whenever the pass changed state also covers the provision commands a fresh
+   * reservation wrote, so a newly placed task starts provisioning without waiting for the next beat.
+   */
+  if (result.changed) await runInstanceMaintenance();
   if (result.changed || continuations.changed) broadcast();
 }, (error) => console.error("task scheduling failed", error));
 const requestScheduling = () => { void scheduleReadyTasks(); };
@@ -946,8 +959,10 @@ wss.on("connection", (socket, request) => {
       if (message.type === "run.completed" && current.depth < 3) {
         const directive = message.output.match(/<handoff\s+to=["']([^"']+)["']>([\s\S]*?)<\/handoff>/i);
         const recipient = directive && store.getAgent(directive[1]);
-        if (directive && recipient) {
-          const sender = store.getAgent(current.agentId)!;
+        // A handoff directive is agent-to-agent; an instance run names no configured sender, so the
+        // directive is ignored rather than dereferenced through an agent lookup that returns nothing.
+        const sender = store.getAgent(current.agentId);
+        if (directive && recipient && sender) {
           const task = directive[2].trim();
           await store.transact((state) => {
             state.events.unshift(newEvent({ type: "handoff", title: `${sender.name} → ${recipient.name}`, detail: task, threadId: current.threadId, fromAgentId: sender.id, toAgentId: recipient.id, runId: current.id }));

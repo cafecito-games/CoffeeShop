@@ -31,7 +31,11 @@ export const placementRequirementLabels: Record<PlacementRequirementKind, string
   agent: "Agent",
   capacity: "Capacity",
   "protocol-version": "Protocol version",
-  assignment: "Assignment"
+  assignment: "Assignment",
+  offering: "Offering",
+  template: "Template",
+  instance: "Instance",
+  "resident-capacity": "Resident capacity"
 };
 
 export const approvalStatusLabels: Record<ApprovalStatus, string> = {

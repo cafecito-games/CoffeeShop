@@ -11,7 +11,7 @@ import {
   type Run,
   type Validation
 } from "@coffee-shop/protocol";
-import { newEvent, newId, type State } from "./store.js";
+import { newEvent, newId, runAttribution, type State } from "./store.js";
 
 /*
  * Approval lifecycle.
@@ -62,7 +62,7 @@ function findHarnessApproval(state: State, runId: string, harnessApprovalId: str
 
 function recordApprovalEvent(state: State, approval: ApprovalRequest, title: string) {
   const run = state.runs.find((item) => item.id === approval.runId);
-  state.events.unshift(newEvent({ type: "status", title, detail: approval.title, threadId: approval.threadId || undefined, agentId: run?.agentId, runId: approval.runId }));
+  state.events.unshift(newEvent({ type: "status", title, detail: approval.title, threadId: approval.threadId || undefined, ...runAttribution(state, run), runId: approval.runId }));
 }
 
 function resolve(approval: ApprovalRequest, status: Exclude<ApprovalStatus, "pending">, resolvedBy: ApprovalResolvedBy, at: string, needsDelivery: boolean) {
