@@ -1,6 +1,6 @@
-import { isActiveRunStatus, threadStatuses, type Thread, type ThreadStatus } from "@coffee-shop/protocol";
+import { isActiveRunStatus, threadOwnerAgentId, threadStatuses, type Thread, type ThreadStatus } from "@coffee-shop/protocol";
 import { CoordinationError } from "./coordinationError.js";
-import { resolveExternalCaller } from "./mailbox.js";
+import { callerAttribution, resolveCaller, resolveExternalCaller } from "./mailbox.js";
 import { newEvent, newId, type State, type Store } from "./store.js";
 
 /** Bounds shared by every thread producer, including the external-orchestrator `create_thread`. */
@@ -109,8 +109,20 @@ interface ThreadChanges {
   status?: ThreadStatus;
 }
 
-/** Applies validated changes inside a transaction the caller already owns. */
-function applyThreadChanges(state: State, threadId: string, changes: ThreadChanges, at: string, currentRunId?: string) {
+/**
+ * Applies validated changes inside a transaction the caller already owns. `attribution` names the
+ * actor whose call this is, when there is one; otherwise the event falls back to the thread's own
+ * legacy owner agent, which is what every operator and external path has always recorded. A thread
+ * orchestrated by an instance records no agent identity it does not have.
+ */
+function applyThreadChanges(
+  state: State,
+  threadId: string,
+  changes: ThreadChanges,
+  at: string,
+  currentRunId?: string,
+  attribution?: { agentId?: string; instanceId?: string; allocationId?: string }
+) {
   const thread = state.threads?.find((item) => item.id === threadId);
   if (!thread) throw new CoordinationError("not_found", "Thread not found");
   if (thread.status === "archived" && changes.status !== "active") throw new CoordinationError("thread_archived", "Archived threads are read-only until reopened");
@@ -129,7 +141,7 @@ function applyThreadChanges(state: State, threadId: string, changes: ThreadChang
     type: "status",
     title: changes.status === "archived" ? "Thread archived" : changes.status === "completed" ? "Thread completed" : "Thread updated",
     detail: thread.title,
-    agentId: thread.ownerAgentId,
+    ...(attribution ?? (threadOwnerAgentId(thread) === undefined ? {} : { agentId: threadOwnerAgentId(thread) })),
     threadId: thread.id
   }));
   return thread;
@@ -167,13 +179,24 @@ export async function updateThreadForExternalOrchestrator(
   return updated;
 }
 
+/**
+ * `update_thread` for a hub-hosted run. Authority is the thread's own orchestrator, resolved against
+ * the calling run's runtime actor inside the transaction that writes the change: a live instance that
+ * the thread names, or the legacy agent it names. A worker resident of the same thread, a replacement
+ * instance the thread has not been handed to, and a released resident are all refused alike.
+ */
 export async function updateThreadForRun(store: Store, sourceRunId: string, argumentsValue: unknown, at = new Date().toISOString()) {
-  const source = store.getRun(sourceRunId);
-  if (!source?.threadId) throw new CoordinationError("not_found", "The current run is not attached to a thread");
-  const thread = store.getThread(source.threadId);
-  if (!thread) throw new CoordinationError("not_found", "Thread not found");
-  if (thread.ownerAgentId !== source.agentId) throw new CoordinationError("forbidden", "Only the thread owner agent can update the thread");
-  return changeThread(store, source.threadId, argumentsValue, false, at, sourceRunId);
+  const changes = requestedChanges(argumentsValue, false);
+  let updated: Thread | undefined;
+  await store.transact((state) => {
+    const caller = resolveCaller(state, sourceRunId);
+    if (caller.participant?.type !== "orchestrator") {
+      throw new CoordinationError("forbidden", "Only the thread owner agent can update the thread");
+    }
+    updated = applyThreadChanges(state, caller.thread.id, changes, at, sourceRunId, callerAttribution(caller));
+  });
+  if (!updated) throw new CoordinationError("persistence_failed", "The thread was not updated", true);
+  return updated;
 }
 
 export async function updateThreadByOperator(store: Store, threadId: string, argumentsValue: unknown, at = new Date().toISOString()) {

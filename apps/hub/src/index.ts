@@ -14,6 +14,7 @@ import {
   orchestratorClientHeartbeatSeconds,
   supportsControlCapability,
   threadOrchestrator,
+  threadOwnerAgentId,
   validateProjectProfile,
   validateNodeCapabilityReport,
   validateInstanceControlMessage,
@@ -140,8 +141,10 @@ const deliveryConnection = (nodeId: string, message: DispatchMessage) => control
  */
 const deliverRun = async (runId: string, connection: ControlConnection<WebSocket>) => {
   const message = store.read((state) => {
-    const run = state.runs.find((item) => item.id === runId && item.status === "queued" && item.dispatchedAt !== undefined);
-    const agent = run && state.agents.find((item) => item.id === run.agentId);
+    // Only a legacy agent run is delivered this way; an instance run's dispatch is a persisted
+    // command in the instance outbox, which `runInstanceMaintenance` flushes instead.
+    const run = state.runs.find((item) => item.id === runId && item.status === "queued" && item.dispatchedAt !== undefined && item.instanceId === undefined);
+    const agent = run && run.agentId !== undefined && state.agents.find((item) => item.id === run.agentId);
     return run && agent ? structuredClone(dispatchMessageFor(run, agent, state.agents, state.workspaceLeases, state)) : undefined;
   });
   if (!message || controlAgents.deliver(connection, message)) return;
@@ -199,7 +202,14 @@ const scheduleReadyTasks = coalesceAsync(async () => {
    * itself. Doing it whenever the pass changed state also covers the provision commands a fresh
    * reservation wrote, so a newly placed task starts provisioning without waiting for the next beat.
    */
-  if (result.changed) await runInstanceMaintenance();
+  /*
+   * An instance-keyed attempt or continuation and a reserved allocation are all persisted commands in
+   * the instance outbox, never direct sends, so the pass ends by flushing that outbox. Doing it
+   * whenever either pass changed state also covers the provision commands a fresh reservation wrote —
+   * including the one a thread promotion reserved — so newly placed work starts provisioning without
+   * waiting for the next beat.
+   */
+  if (result.changed || continuations.changed) await runInstanceMaintenance();
   if (result.changed || continuations.changed) broadcast();
 }, (error) => console.error("task scheduling failed", error));
 const requestScheduling = () => { void scheduleReadyTasks(); };
@@ -266,13 +276,27 @@ app.post("/api/agents/:id/messages", async (req, res) => {
   if (!body) return res.status(400).json({ error: "Message is required" });
   try {
     let threadId = "";
+    let posted: OperatorMessage | undefined;
     await store.transact((state) => {
       let thread = requestedThreadId ? state.threads?.find((item) => item.id === requestedThreadId) : undefined;
       if (requestedThreadId && !thread) throw new CoordinationError("not_found", "Thread not found");
       if (thread && threadOrchestrator(thread)?.kind === "external") {
         throw new CoordinationError("forbidden", "An externally orchestrated thread takes messages at /api/threads/:id/messages");
       }
-      if (thread && thread.ownerAgentId !== agent.id) throw new CoordinationError("forbidden", "Continue this thread with its owner agent");
+      /*
+       * A thread this route may continue as an agent run is one the named agent still orchestrates. A
+       * thread that has been promoted to an instance orchestrator is continued through its mailbox
+       * instead — the operator's message becomes an inbox event the continuation pass wakes the
+       * resident for — so the legacy entry point keeps working across the promotion boundary without
+       * ever queueing a run for an agent that no longer orchestrates the thread.
+       */
+      if (thread && threadOrchestrator(thread)?.kind === "instance") {
+        if (thread.status === "archived") throw new CoordinationError("thread_archived", "Archived threads are read-only");
+        posted = postOperatorMessageInState(state, { threadId: thread.id, body }, new Date().toISOString());
+        threadId = thread.id;
+        return posted.created;
+      }
+      if (thread && threadOwnerAgentId(thread) !== agent.id) throw new CoordinationError("forbidden", "Continue this thread with its owner agent");
       if (thread?.status === "archived") throw new CoordinationError("thread_archived", "Archived threads are read-only");
       if (!thread) {
         thread = newThread(agent.id, body, "user");
@@ -288,6 +312,11 @@ app.post("/api/agents/:id/messages", async (req, res) => {
       threadId = thread.id;
       state.messages.push(newMessage({ agentId: agent.id, author: "you", body, kind: "message", threadId }));
     });
+    if (posted) {
+      broadcast();
+      requestScheduling();
+      return res.status(202).json({ threadId, messageId: posted.message.id, sequence: posted.message.sequence, created: posted.created });
+    }
     const run = await queueRun(agent, body, { threadId });
     res.status(202).json(run);
   } catch (error) {

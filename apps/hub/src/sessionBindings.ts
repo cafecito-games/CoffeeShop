@@ -90,18 +90,23 @@ const sameContext = (left: HarnessSessionBinding, right: HarnessSessionBinding) 
   && left.transport === right.transport && left.workspace === right.workspace && left.workspaceLeaseId === right.workspaceLeaseId;
 
 /**
- * Whether a binding belongs to exactly the execution context of `run`, allocation included. A
- * binding created under another allocation of the same instance is a different context: the session
- * lives in a process the replacement allocation does not own, so it can never be resumed.
+ * Whether a binding was created for exactly the actor a record names, allocation included. A binding
+ * created under another allocation of the same instance is a different actor context: the session
+ * lives in a process the replacement allocation does not own, so it can never be resumed. An actor
+ * that is absent or half-written on either side never matches.
  */
+export function bindingActorMatches(binding: HarnessSessionBinding, record: { agentId?: string; instanceId?: string; allocationId?: string }) {
+  const [bindingActor, recordedActor] = [actorOf(binding), actorOf(record)];
+  if (bindingActor === undefined || recordedActor === undefined || bindingActor.kind !== recordedActor.kind) return false;
+  return bindingActor.kind === "agent"
+    ? bindingActor.agentId === (recordedActor as { agentId: string }).agentId
+    : bindingActor.instanceId === (recordedActor as { instanceId: string }).instanceId
+      && bindingActor.allocationId === (recordedActor as { allocationId: string }).allocationId;
+}
+
+/** Whether a binding belongs to exactly the execution context of `run`, allocation included. */
 export function bindingMatchesRun(binding: HarnessSessionBinding, run: Run) {
-  const [bindingActor, runActor] = [actorOf(binding), actorOf(run)];
-  if (bindingActor === undefined || runActor === undefined || bindingActor.kind !== runActor.kind) return false;
-  const actorMatches = bindingActor.kind === "agent"
-    ? bindingActor.agentId === (runActor as { agentId: string }).agentId
-    : bindingActor.instanceId === (runActor as { instanceId: string }).instanceId
-      && bindingActor.allocationId === (runActor as { allocationId: string }).allocationId;
-  return actorMatches
+  return bindingActorMatches(binding, run)
     && binding.threadId === run.threadId
     && binding.nodeId === run.nodeId
     && binding.harnessId === run.harnessId

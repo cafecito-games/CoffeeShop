@@ -495,11 +495,13 @@ export function decideDoorbell(
 }
 
 /*
- * Operator messages to an externally orchestrated thread.
+ * Operator messages to a thread the hub does not orchestrate with a configured agent.
  *
- * An external thread has no owner agent, so a message an operator posts to it cannot queue a run.
- * It is appended to the orchestrator's mailbox instead, which makes it one more unacknowledged
- * journal entry the orchestrator pulls and acknowledges like any other.
+ * Neither an externally orchestrated thread nor an instance-orchestrated one has an owner agent, so a
+ * message an operator posts to it cannot queue an agent run. It is appended to the orchestrator's
+ * mailbox instead, which makes it one more unacknowledged journal entry the orchestrator pulls and
+ * acknowledges like any other: an external session is rung about it, and an instance orchestrator is
+ * woken for it by the continuation pass.
  */
 
 const operatorParticipant: TaskMessageParticipant = { type: "operator" };
@@ -519,13 +521,17 @@ export interface OperatorMessage {
 }
 
 /**
- * Records an operator's message to an external thread's orchestrator. A thread that does not exist
- * and one the hub orchestrates itself are refused identically, because neither can receive one.
+ * Records an operator's message to a thread's orchestrator mailbox. A thread that does not exist and
+ * one a legacy configured agent still orchestrates are refused identically, because neither can
+ * receive one: the agent thread takes operator messages through its own entry point.
  * Replaying an idempotency key with the same body returns the original message.
  */
 export function postOperatorMessageInState(state: State, request: OperatorMessageRequest, at: string): OperatorMessage {
   const thread = (state.threads ?? []).find((item) => item.id === request.threadId);
-  if (thread === undefined || threadOrchestrator(thread)?.kind !== "external") throw new CoordinationError("not_found", "Thread not found");
+  const orchestrator = thread === undefined ? undefined : threadOrchestrator(thread);
+  if (thread === undefined || (orchestrator?.kind !== "external" && orchestrator?.kind !== "instance")) {
+    throw new CoordinationError("not_found", "Thread not found");
+  }
   const body = request.body.trim();
   if (!body) throw new CoordinationError("invalid_arguments", "A message needs a body");
   if (body.length > orchestrationToolLimits.messageBodyLength) {

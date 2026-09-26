@@ -1081,7 +1081,7 @@ export function placeTask(task: Task, environment: PlacementEnvironment): Placem
  * attempt is committed. `instanceRunFor` throws only for a run that is not instance-keyed, which this
  * path has already established, so the check reports rather than raises.
  */
-function instanceDispatchIsEncodable(state: Readonly<State>, run: Run): { ok: true } | { ok: false; reason: string } {
+export function instanceDispatchIsEncodable(state: Readonly<State>, run: Run): { ok: true } | { ok: false; reason: string } {
   const instance = (state.instances ?? []).find((item) => item.id === run.instanceId);
   const allocation = (state.allocations ?? []).find((item) => item.id === run.allocationId);
   if (!instance || !allocation) return { ok: false, reason: "the attempt names no known instance allocation" };
