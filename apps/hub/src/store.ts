@@ -26,6 +26,7 @@ import {
   type Thread,
   type TimelineEvent
 } from "@coffee-shop/protocol";
+import { assertPersistedTemplateState, importLegacyAgentTemplates, type LegacyTemplateImport } from "./agentTemplates.js";
 import type { HarnessEventStream, StoredHarnessEvent } from "./harnessEvents.js";
 import {
   assertPersistedInstanceState,
@@ -67,7 +68,11 @@ export interface TaskUpdateRecord {
   threadId: string;
   taskId: string;
   sourceRunId: string;
-  agentId: string;
+  /** Compatibility attribution; absent when the updating attempt was instance-keyed. */
+  agentId?: string;
+  /** Version-5 attribution: the resident instance and allocation of the updating attempt. */
+  instanceId?: string;
+  allocationId?: string;
   idempotencyKey: string;
   /** SHA-256 of the normalized update and its source run. */
   digest: string;
@@ -102,6 +107,8 @@ interface HubOnlyState {
   nodeInstanceResidency?: NodeInstanceResidency[];
   /** Prevents a deliberately emptied catalog from re-importing the legacy profiles file. */
   projectProfilesImported?: boolean;
+  /** One recorded decision per legacy agent; see `importLegacyAgentTemplates`. */
+  legacyTemplateImports?: LegacyTemplateImport[];
 }
 
 /** The persisted state. `orchestratorClients` holds the stored records, secret hash included. */
@@ -126,6 +133,7 @@ const emptyState = (): State => withOrchestrationDefaults({
   instanceDeliveries: [],
   remoteReleaseRequests: [],
   nodeInstanceResidency: [],
+  legacyTemplateImports: [],
   taskSubmissions: [],
   taskUpdates: [],
   taskEventJournal: [],
@@ -260,12 +268,16 @@ export function assertPersistedOrchestratorClientState(state: State) {
     const orchestrator: unknown = thread.orchestrator;
     if (orchestrator === undefined) continue;
     if (!isRecord(orchestrator)) throw new Error(`${context} has a malformed orchestrator`);
-    if (orchestrator.kind === "agent" ? !isNonEmptyString(orchestrator.agentId) : orchestrator.kind === "external" ? !isNonEmptyString(orchestrator.clientId) : true) {
-      throw new Error(`${context} has an unknown orchestrator`);
-    }
-    // A leftover owner agent on an external thread would keep granting that agent owner authority.
-    if (orchestrator.kind === "external" && thread.ownerAgentId !== undefined) {
-      throw new Error(`${context} is externally orchestrated but still names an owner agent`);
+    const identified = orchestrator.kind === "agent" ? isNonEmptyString(orchestrator.agentId)
+      : orchestrator.kind === "instance" ? isNonEmptyString(orchestrator.instanceId)
+        : orchestrator.kind === "external" ? isNonEmptyString(orchestrator.clientId) : false;
+    if (!identified) throw new Error(`${context} has an unknown orchestrator`);
+    /*
+     * A leftover owner agent on a thread that is no longer agent-orchestrated would keep granting that
+     * agent owner authority through any reader that still consults the field directly.
+     */
+    if (orchestrator.kind !== "agent" && thread.ownerAgentId !== undefined) {
+      throw new Error(`${context} is ${orchestrator.kind}-orchestrated but still names an owner agent`);
     }
     if (orchestrator.kind === "agent" && thread.ownerAgentId !== orchestrator.agentId) {
       throw new Error(`${context} disagrees with its own owner agent`);
@@ -604,8 +616,15 @@ export class Store {
     assertPersistedOrchestratorClientState(loaded);
     assertPersistedProjectProfiles(loaded);
     assertPersistedInstanceState(loaded);
+    assertPersistedTemplateState(loaded);
+    /*
+     * The legacy import runs after every assertion, so it never writes on top of state the hub could
+     * not interpret, and it is decided from its own persisted records rather than from a timestamp:
+     * a restart finds every earlier decision and writes nothing.
+     */
+    const importedTemplates = importLegacyAgentTemplates(loaded, new Date().toISOString());
     if (this.sqlite || removedDemoRecords || addedAgentAvatars || addedCoordination || addedThreads || addedOrchestration
-      || addedThreadOrchestrators || addedApprovalResolvers) await this.save(loaded);
+      || addedThreadOrchestrators || addedApprovalResolvers || importedTemplates) await this.save(loaded);
     this.state = loaded;
   }
 
@@ -724,6 +743,21 @@ export const runAttribution = (
     return { instanceId: run.instanceId, allocationId: run.allocationId };
   }
   return run.agentId !== undefined && state.agents.some((item) => item.id === run.agentId) ? { agentId: run.agentId } : {};
+};
+
+/**
+ * The actor keys a runtime *record* copies from its run. Unlike `runAttribution` this is record
+ * identity rather than display attribution, so it does not require the named agent to still be
+ * configured: a session binding, assignment, or artifact must record whose execution context it
+ * belongs to even after that agent was deleted from the roster.
+ */
+export const runActorKeys = (
+  run: Pick<Run, "agentId" | "instanceId" | "allocationId">
+): { agentId?: string; instanceId?: string; allocationId?: string } => {
+  if (run.instanceId !== undefined && run.allocationId !== undefined) {
+    return { instanceId: run.instanceId, allocationId: run.allocationId };
+  }
+  return run.agentId === undefined ? {} : { agentId: run.agentId };
 };
 
 /** Whether an attribution names an actor at all; an unattributable run writes no chat message. */

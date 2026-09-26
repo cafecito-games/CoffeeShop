@@ -22,7 +22,7 @@ import {
 } from "@coffee-shop/protocol";
 import { CoordinationError } from "./coordinationError.js";
 import { callerAgent, callerCanDelegate, callerRun, resolveCallerFor, runSource, type CallerSource } from "./mailbox.js";
-import { newEvent, newId, type State, type Store, type TaskSubmission } from "./store.js";
+import { newEvent, newId, runActorKeys, type State, type Store, type TaskSubmission } from "./store.js";
 
 export const taskBatchLimits = {
   tasks: 32,
@@ -662,9 +662,7 @@ export function assignTaskAttempt(state: State, taskId: string, run: Run, at: st
     runId: run.id,
     // Record identity, not attribution: an instance attempt names its instance and allocation, and
     // never writes an instance id into the agent-typed key.
-    ...(run.agentId === undefined ? {} : { agentId: run.agentId }),
-    ...(run.instanceId === undefined ? {} : { instanceId: run.instanceId }),
-    ...(run.allocationId === undefined ? {} : { allocationId: run.allocationId }),
+    ...runActorKeys(run),
     nodeId: run.nodeId,
     harnessId: run.harnessId,
     transport: run.transport ?? "native-cli",
