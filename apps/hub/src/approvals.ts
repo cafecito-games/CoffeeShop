@@ -108,6 +108,14 @@ export function openApproval(state: State, run: Run, event: PermissionRequestedE
     threadId: run.threadId ?? "",
     runId: run.id,
     nodeId: run.nodeId,
+    /*
+     * Version-5 attribution. An approval carries no agent key at all — it is identified by its run —
+     * so an instance run's approval records the resident and the exact allocation that raised it,
+     * which is what lets a mixed approval audit stay interpretable.
+     */
+    ...(run.instanceId !== undefined && run.allocationId !== undefined
+      ? { instanceId: run.instanceId, allocationId: run.allocationId }
+      : {}),
     title: event.title,
     options: event.options.map((option) => ({ ...option })),
     status: "pending",

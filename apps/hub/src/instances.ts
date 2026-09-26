@@ -29,6 +29,7 @@ import {
   type InstanceHubMessage,
   type InstanceLifecycleRequest,
   type InstanceLifecycleResult,
+  type InstanceDelegationPolicy,
   type InstancePurpose,
   type InstanceReleaseMode,
   type InstanceRun,
@@ -824,6 +825,8 @@ export interface InstanceRequestSeed {
   requirements: ExecutionRequirements;
   purpose?: InstancePurpose;
   creator?: InstanceCreator;
+  /** Hub-granted delegation policy; a model can never supply or widen it. Defaults to closed. */
+  delegation?: InstanceDelegationPolicy;
   idleTimeoutSeconds?: number;
 }
 
@@ -835,7 +838,7 @@ function buildRequestedInstance(threadId: string, seed: InstanceRequestSeed, at:
     threadId,
     creator: seed.creator ? { ...seed.creator } : { ...operatorInstanceCreator },
     ...(seed.purpose ? { purpose: structuredClone(seed.purpose) } : {}),
-    delegation: { canDelegate: false },
+    delegation: { canDelegate: seed.delegation?.canDelegate === true },
     requirements: structuredClone(seed.requirements),
     lease: { idleTimeoutSeconds, expiresAt: leaseExpiry(at, idleTimeoutSeconds) },
     status: "requested",

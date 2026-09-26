@@ -5,7 +5,7 @@ import {
   type Run, type Thread, type ThreadStatus
 } from "@coffee-shop/protocol";
 import { OrchestratorBadge } from "./OrchestratorBadge.js";
-import { describeThreadOrchestrator } from "./orchestratorPresentation.js";
+import { actorLabel, describeThreadOrchestrator } from "./orchestratorPresentation.js";
 
 const statusLabels: Record<ThreadStatus, string> = { active: "Active", completed: "Completed", archived: "Archived" };
 
@@ -78,7 +78,7 @@ export function ThreadsView({ threads, runs, artifacts, agents, orchestratorClie
             <div><dt>Runs</dt><dd>{threadRuns.length}{activeRuns.length ? ` · ${activeRuns.length} active` : ""}</dd></div>
             <div><dt>Artifacts</dt><dd>{threadArtifacts.length}</dd></div>
           </dl>
-          {threadRuns.length > 0 && <div className="thread-runs">{threadRuns.slice(0, 5).map((run) => <button key={run.id} onClick={() => onInspectRun(run.id)}><TerminalWindow size={14} /><span>{agents.find((agent) => agent.id === run.agentId)?.name ?? run.agentId}</span><small>{run.status}</small></button>)}</div>}
+          {threadRuns.length > 0 && <div className="thread-runs">{threadRuns.slice(0, 5).map((run) => <button key={run.id} onClick={() => onInspectRun(run.id)}><TerminalWindow size={14} /><span>{actorLabel(run, agents)}</span><small>{run.status}</small></button>)}</div>}
           <footer>
             {thread.status !== "archived" && <button onClick={() => onContinue(thread)}><ChatCircle size={15} /> {orchestrator.kind === "external" ? "Message orchestrator" : "Continue thread"}</button>}
             {thread.status !== "archived"

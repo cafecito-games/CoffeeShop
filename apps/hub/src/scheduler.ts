@@ -93,11 +93,14 @@ import { dispatchableLease, exclusiveWorkspaceHolder, leasedIsolation, planWorks
  * Nothing depends on input array order, timestamps, or randomness, so the same inventory always
  * yields the same placement.
  *
- * Configured agents remain a candidate set of last resort, used only for a task no offering can
- * serve — notably a task whose project profile demands an isolated workspace lease, because a v5
- * instance dispatch carries no lease grant for Barista to honor. That path, and the legacy
- * `agentId` placement override that reaches it, are the compatibility surface #78 removes when run,
- * thread, session, and mailbox authority migrate off agents; everything else here is offering-first.
+ * Live offerings are the primary candidate set and are evaluated first. Configured agents survive
+ * only as a genuine last resort, reached when no offering can serve the task at all — today that
+ * means a task whose project profile demands an isolated workspace lease, because a v5 instance
+ * dispatch carries no lease grant for Barista to honor (see `residentExclusion`). The legacy
+ * `agentId` placement override still reaches that set deliberately, because an operator who pins a
+ * configured agent is naming its identity, skills, and instructions, and no offering is that agent.
+ * Nothing else prefers an agent: a fleet that publishes offerings alongside a configured agent both
+ * could serve places on the offering.
  */
 
 /** Hub-observed state of a node's current control socket. */
@@ -852,9 +855,9 @@ function normalizeUnsatisfied(entries: readonly UnsatisfiedRequirement[]) {
  * The decision order is fixed. An explicit instance pin is exact: it is authorized and validated
  * against that one instance and nothing else is ever substituted. A task that already owns a
  * requested or provisioning instance waits on it and is never offered again. Otherwise a compatible
- * ready or idle instance in the same thread is reused; failing that, a configured agent is used when
- * one is eligible — the compatibility path #78 removes — and failing that, the best eligible live
- * offering is reserved.
+ * ready or idle instance in the same thread is reused; failing that, the best eligible live offering
+ * is reserved; and only when no offering can serve the task at all is the compatibility set of
+ * configured agents consulted.
  */
 export function placeTask(task: Task, environment: PlacementEnvironment): PlacementDecision {
   const global: UnsatisfiedRequirement[] = [];
@@ -972,32 +975,10 @@ export function placeTask(task: Task, environment: PlacementEnvironment): Placem
   }
 
   /*
-   * Compatibility candidate set. It is consulted before offerings and only while a configured agent
-   * is still eligible, because run, thread, session, and mailbox authority is agent-keyed until #78
-   * migrates it; a leased task attempt in particular can be served only here. Everything an agent
-   * cannot serve — including every workload on a fleet with no configured agents at all — is placed
-   * from live offerings below.
+   * Live offerings, the primary candidate set. A node the override names restricts them exactly as it
+   * restricts agents; an agent pin excludes them entirely, because no offering is the agent the
+   * operator named.
    */
-  const agents = [...environment.agents]
-    .filter((agent) => (pinnedAgentId === undefined || agent.id === pinnedAgentId)
-      && (requiredNodeId === undefined || agent.computeNodeId === requiredNodeId))
-    .sort((left, right) => compareText(left.id, right.id));
-  const agentEvaluations = agents.map((agent) => evaluateCandidate(effective, agent, profile, environment));
-  const eligibleAgents = agentEvaluations.filter((evaluation) => evaluation.candidate !== undefined).sort(compareEligible);
-  if (eligibleAgents.length) {
-    return {
-      kind: "assigned",
-      candidate: eligibleAgents[0].candidate!,
-      diagnostic: diagnostic(eligibleAgents.map((evaluation) => evaluation.candidate!.nodeId), [])
-    };
-  }
-  unsatisfied.push(...agentEvaluations.flatMap((evaluation) => evaluation.unsatisfied));
-  if (agents.length === 0 && pinnedAgentId !== undefined) {
-    unsatisfied.push({ kind: "agent", requirement: "placement override", detail: "no configured agent is a candidate" });
-  }
-
-  // Live offerings. A node the override names restricts them exactly as it restricts agents; an agent
-  // pin excludes them entirely, because no offering is the agent the operator named.
   const offeringNodes = pinnedAgentId !== undefined ? [] : [...environment.nodes]
     .filter((node) => offersInstances(node))
     .filter((node) => requiredNodeId === undefined || node.id === requiredNodeId)
@@ -1031,6 +1012,30 @@ export function placeTask(task: Task, environment: PlacementEnvironment): Placem
       ...(replacing === undefined ? {} : { instanceId: replacing.id }),
       diagnostic: diagnostic(eligibleOfferings.map((evaluation) => evaluation.offering!.nodeId), [])
     };
+  }
+
+  /*
+   * Compatibility candidate set, and the last resort: it is reached only once no live offering can
+   * serve the task. A leased task attempt still lands here, because a v5 instance dispatch carries no
+   * workspace-lease grant for Barista to honour, and so does a task pinned to a configured agent.
+   * Nothing else prefers an agent over an offering.
+   */
+  const agents = [...environment.agents]
+    .filter((agent) => (pinnedAgentId === undefined || agent.id === pinnedAgentId)
+      && (requiredNodeId === undefined || agent.computeNodeId === requiredNodeId))
+    .sort((left, right) => compareText(left.id, right.id));
+  const agentEvaluations = agents.map((agent) => evaluateCandidate(effective, agent, profile, environment));
+  const eligibleAgents = agentEvaluations.filter((evaluation) => evaluation.candidate !== undefined).sort(compareEligible);
+  if (eligibleAgents.length) {
+    return {
+      kind: "assigned",
+      candidate: eligibleAgents[0].candidate!,
+      diagnostic: diagnostic(eligibleAgents.map((evaluation) => evaluation.candidate!.nodeId), [])
+    };
+  }
+  unsatisfied.push(...agentEvaluations.flatMap((evaluation) => evaluation.unsatisfied));
+  if (agents.length === 0 && pinnedAgentId !== undefined) {
+    unsatisfied.push({ kind: "agent", requirement: "placement override", detail: "no configured agent is a candidate" });
   }
   if (replacing !== undefined) {
     unsatisfied.push(...silentNodes, ...offeringEvaluations.flatMap((evaluation) => evaluation.unsatisfied));
@@ -1076,7 +1081,7 @@ export function placeTask(task: Task, environment: PlacementEnvironment): Placem
  * attempt is committed. `instanceRunFor` throws only for a run that is not instance-keyed, which this
  * path has already established, so the check reports rather than raises.
  */
-function instanceDispatchIsEncodable(state: Readonly<State>, run: Run): { ok: true } | { ok: false; reason: string } {
+export function instanceDispatchIsEncodable(state: Readonly<State>, run: Run): { ok: true } | { ok: false; reason: string } {
   const instance = (state.instances ?? []).find((item) => item.id === run.instanceId);
   const allocation = (state.allocations ?? []).find((item) => item.id === run.allocationId);
   if (!instance || !allocation) return { ok: false, reason: "the attempt names no known instance allocation" };
@@ -1330,9 +1335,6 @@ export function runSchedulingPass(state: State, context: SchedulingContext, at: 
       const run: Run = {
         id: newId("run"),
         threadId: task.threadId,
-        // Compatibility: the instance identity also fills the required agent key until #78 migrates
-        // run authority off agents. It never names a configured agent, so no agent-keyed lookup matches.
-        agentId: instance.id,
         instanceId: instance.id,
         allocationId: allocation.id,
         nodeId: allocation.nodeId,

@@ -10,8 +10,13 @@ import {
   type TaskProgress
 } from "@coffee-shop/protocol";
 import { CoordinationError } from "./coordinationError.js";
+import { listThreadInstances } from "./instances.js";
 import {
   assertVisibleArtifacts,
+  callerAgent,
+  callerAttribution,
+  callerCanDelegate,
+  callerInstance,
   mailboxSummary,
   notVisible,
   requireCallerRun,
@@ -88,7 +93,11 @@ function taskSummary(state: Readonly<State>, task: Task) {
     status: task.status,
     ...(source?.taskId !== undefined ? { parentTaskId: source.taskId } : {}),
     dependencies: task.dependencies.map((dependency) => ({ ...dependency })),
-    ...(task.assignment ? { assignedAgentId: task.assignment.agentId, assignedNodeId: task.assignment.nodeId } : {}),
+    ...(task.assignment ? {
+      ...(task.assignment.agentId === undefined ? {} : { assignedAgentId: task.assignment.agentId }),
+      ...(task.assignment.instanceId === undefined ? {} : { assignedInstanceId: task.assignment.instanceId }),
+      assignedNodeId: task.assignment.nodeId
+    } : {}),
     attempts: task.attemptRunIds.length,
     ...(task.progress?.summary !== undefined ? { progress: task.progress.summary } : {}),
     ...(task.progress?.blockedReason !== undefined ? { blockedReason: task.progress.blockedReason } : {}),
@@ -107,7 +116,10 @@ export function taskContext(state: Readonly<State>, sourceRunId: string, argumen
   const values = record(argumentsValue);
   onlyKeys(values, ["taskId"], "get_task_context arguments");
   const caller = resolveCaller(state, sourceRunId);
-  const { run: callingRun, agent: callingAgent } = requireCallerRun(caller, "get_task_context is served only to a hub-hosted run");
+  const { run: callingRun } = requireCallerRun(caller, "get_task_context is served only to a hub-hosted run");
+  const callerDelegates = callerCanDelegate(caller);
+  const callingAgent = callerAgent(caller);
+  const callingInstance = callerInstance(caller);
   const visibility = taskVisibility(state, caller);
   const runs = new Map(state.runs.map((run) => [run.id, run]));
   let focusRun: Run | undefined = callingRun;
@@ -146,12 +158,14 @@ export function taskContext(state: Readonly<State>, sourceRunId: string, argumen
       runId: callingRun.id,
       ...(caller.task ? { taskId: caller.task.id } : {}),
       role: caller.participant?.type ?? "run",
-      canDelegate: callingAgent.canDelegate === true
+      canDelegate: callerDelegates
     },
     task: focusRun ? {
       id: focusRun.id,
       status: focusRun.status,
-      agentId: focusRun.agentId,
+      // Mixed history stays interpretable: whichever identity the run carries is the one reported.
+      ...(focusRun.agentId === undefined ? {} : { agentId: focusRun.agentId }),
+      ...(focusRun.instanceId === undefined ? {} : { instanceId: focusRun.instanceId }),
       objective: focusRun.prompt,
       depth: focusRun.depth,
       parentTaskId: focusRun.parentRunId,
@@ -174,7 +188,8 @@ export function taskContext(state: Readonly<State>, sourceRunId: string, argumen
     delegations: children.map((child) => ({
       taskId: child.id,
       delegationId: delegationByChild.get(child.id)?.id,
-      agentId: child.agentId,
+      ...(child.agentId === undefined ? {} : { agentId: child.agentId }),
+      ...(child.instanceId === undefined ? {} : { instanceId: child.instanceId }),
       status: child.status,
       summary: child.status === "completed" ? child.output.slice(0, 2_000) : child.error
     })),
@@ -182,9 +197,19 @@ export function taskContext(state: Readonly<State>, sourceRunId: string, argumen
     artifacts: (state.artifacts ?? [])
       .filter((artifact) => artifact.uploaded && artifact.threadId === caller.thread.id)
       .slice(0, 16),
-    availableAgents: callingAgent.canDelegate ? state.agents
+    /*
+     * The teammate directory. An instance caller sees only the live residents of its own thread — the
+     * principals it may actually coordinate with — and never the global configured roster. A legacy
+     * agent caller keeps seeing the configured roster it has always seen.
+     */
+    availableAgents: callerDelegates && callingAgent !== undefined ? state.agents
       .filter((agent) => agent.id !== callingAgent.id)
       .map((agent) => ({ id: agent.id, title: agent.title, state: agent.state })) : [],
+    availableInstances: callerDelegates && callingInstance !== undefined
+      ? listThreadInstances(state, caller.thread.id, false).instances
+        .filter((instance) => instance.id !== callingInstance.instance.id)
+        .map((instance) => ({ id: instance.id, title: instance.purpose?.title ?? instance.purpose?.name ?? instance.id, status: instance.status }))
+      : [],
     limits: {
       maxDepth: maxDelegationDepth,
       remainingDepth: Math.max(0, maxDelegationDepth - limitRun.depth),
@@ -295,8 +320,8 @@ export async function delegateTask(store: Store, sourceRunId: string, argumentsV
   const artifactIds = stringArray(values, "artifactIds", 16);
   const preflight = store.read((state) => {
     const caller = resolveCaller(state, sourceRunId);
-    const { run, agent } = requireCallerRun(caller, "delegate_task is served only to a hub-hosted run");
-    if (!agent.canDelegate) throw new CoordinationError("forbidden", "This agent is not allowed to delegate tasks");
+    const { run } = requireCallerRun(caller, "delegate_task is served only to a hub-hosted run");
+    if (!callerCanDelegate(caller)) throw new CoordinationError("forbidden", "This agent is not allowed to delegate tasks");
     const legacy = (state.delegations ?? []).find((item) => item.parentRunId === run.id && item.idempotencyKey === idempotencyKey);
     if (legacy) {
       if (legacy.toAgentId !== targetAgentId || legacy.task !== instructions || JSON.stringify(legacy.artifactIds ?? []) !== JSON.stringify(artifactIds)) {
@@ -350,10 +375,15 @@ export async function createArtifact(store: Store, sourceRunId: string, argument
   let artifact: Artifact | undefined;
   await store.transact((state) => {
     state.artifacts ??= [];
-    const source = state.runs.find((run) => run.id === sourceRunId);
-    if (!source || source.status !== "running") throw new CoordinationError("run_not_active", "The source task is not running");
-    const thread = source.threadId && state.threads?.find((item) => item.id === source.threadId);
-    if (!thread) throw new CoordinationError("not_found", "The source task is not attached to a thread");
+    /*
+     * Authority comes from the same resolution every other hub tool uses, so an instance run whose
+     * resident was released, drained, or replaced cannot register an artifact, and a malformed actor
+     * identity is rejected rather than read as "no instance".
+     */
+    const caller = resolveCaller(state, sourceRunId);
+    const source = caller.principal.kind === "run" ? caller.principal.run : undefined;
+    if (!source) throw new CoordinationError("forbidden", "create_artifact is served only to a hub-hosted run");
+    const thread = caller.thread;
     if (thread.status !== "active") throw new CoordinationError("thread_inactive", "Artifacts require an active thread");
     artifact = state.artifacts.find((item) => item.runId === source.id && item.idempotencyKey === idempotencyKey);
     if (artifact) {
@@ -363,14 +393,16 @@ export async function createArtifact(store: Store, sourceRunId: string, argument
       return false;
     }
     artifact = {
-      id: newId("artifact"), threadId: thread.id, runId: source.id, agentId: source.agentId, relativePath, title,
+      id: newId("artifact"), threadId: thread.id, runId: source.id,
+      // Record identity: an instance run's artifact names its instance and allocation, never an agent key.
+      ...callerAttribution(caller), relativePath, title,
       kind: kind as Artifact["kind"], mediaType, summary, size, sha256,
       downloadPath: "", uploaded: false, idempotencyKey, createdAt: at
     };
     artifact.downloadPath = `/api/artifacts/${encodeURIComponent(artifact.id)}/content`;
     state.artifacts.unshift(artifact);
     thread.updatedAt = at;
-    state.events.unshift(newEvent({ type: "status", title: "Artifact registered", detail: `${title} · ${size} bytes`, threadId: thread.id, agentId: source.agentId, runId: source.id }));
+    state.events.unshift(newEvent({ type: "status", title: "Artifact registered", detail: `${title} · ${size} bytes`, threadId: thread.id, ...callerAttribution(caller), runId: source.id }));
   });
   if (!artifact) throw new CoordinationError("persistence_failed", "The artifact was not registered", true);
   return { artifact, uploadPath: artifact.downloadPath };
@@ -439,7 +471,7 @@ export async function updateTaskForSource(store: Store, source: CallerSource, ar
     const caller = resolveCallerFor(state, source);
     const task = caller.task;
     if (!task) throw new CoordinationError("forbidden", "Only a task attempt can update a task");
-    const { run: callingRun, agent: callingAgent } = requireCallerRun(caller, "Only a task attempt can update a task");
+    const { run: callingRun } = requireCallerRun(caller, "Only a task attempt can update a task");
     const digest = taskUpdateDigest(update, callingRun.id);
     state.taskUpdates ??= [];
     const replay = state.taskUpdates.find((item) => item.threadId === caller.thread.id && item.taskId === task.id && item.idempotencyKey === update.idempotencyKey);
@@ -462,7 +494,9 @@ export async function updateTaskForSource(store: Store, source: CallerSource, ar
     task.progress = progress;
     task.updatedAt = at;
     const record: TaskUpdateRecord = {
-      id: newId("taskupd"), threadId: caller.thread.id, taskId: task.id, sourceRunId: callingRun.id, agentId: callingAgent.id,
+      id: newId("taskupd"), threadId: caller.thread.id, taskId: task.id, sourceRunId: callingRun.id,
+      // Record identity: an instance attempt names its instance and allocation, never an agent key.
+      ...callerAttribution(caller),
       idempotencyKey: update.idempotencyKey, digest, createdAt: at
     };
     state.taskUpdates.push(record);

@@ -13,9 +13,10 @@ import {
   type RunTransportSelection,
   type Snapshot
 } from "@coffee-shop/protocol";
+import { describeHistoricalActor } from "./actors.js";
 import { isContinuationRun } from "./continuationRuns.js";
 import { settleHarnessStateForTerminalRun } from "./harnessEvents.js";
-import { newEvent, newMessage, runAttribution, type State, type Store } from "./store.js";
+import { hasAttribution, newEvent, newMessage, runAttribution, type State, type Store } from "./store.js";
 import { applyAttemptOutcome, attemptIsRetryable, cancelTaskInState, maximumTaskAttempts, type TaskCancellationResult } from "./tasks.js";
 
 /** Re-exported for the version-4 callers that have always read the attempt budget from here. */
@@ -121,8 +122,8 @@ export function failLostTaskAttempts(state: State, nodeId: string, activeRunIds:
     run.finishedAt = at;
     const task = state.tasks?.find((item) => item.id === run.taskId);
     const attribution = runAttribution(state, run);
-    if (attribution.agentId !== undefined) {
-      state.messages.push(newMessage({ agentId: attribution.agentId, author: "system", body: `Run failed: ${lostComputeError}`, kind: "status", threadId: run.threadId, runId: run.id }));
+    if (hasAttribution(attribution)) {
+      state.messages.push(newMessage({ ...attribution, author: "system", body: `Run failed: ${lostComputeError}`, kind: "status", threadId: run.threadId, runId: run.id }));
     }
     state.events.unshift(newEvent({ type: "status", title: "Compute lost", detail: `Run ${run.id} was no longer active on ${nodeId}`, threadId: run.threadId, ...attribution, runId: run.id }));
     updateAgentAfterRunEnded(state, run, at);
@@ -134,44 +135,46 @@ export function failLostTaskAttempts(state: State, nodeId: string, activeRunIds:
 }
 
 /**
- * The presentation a run's lifecycle writes back to. A legacy agent run has its configured agent,
- * whose live state and current action the report updates. An instance run (#77) is executed by a
- * resident instance, which carries no live presentation state at all — its identity is the actor and
- * there is nothing to mark thinking, working, or idle — so the writer works against this shape
- * instead of requiring an agent record and dropping the report when it finds none. That dropped
- * report is exactly what made an instance-keyed attempt stay `queued` for ever.
+ * The presentation a run's lifecycle writes back to, and the single place a lifecycle report decides
+ * how it names its actor. A legacy agent run has its configured agent, whose live state and current
+ * action the report updates — the only remaining writer of that presentation, and only for work that
+ * was already agent-keyed. An instance run (#77) is executed by a resident instance, whose
+ * `busy/idle/draining` state is derived from its allocation and active runs by the instance service
+ * rather than written here, so `present` records only that the resident was touched.
  *
- * `agentId` is absent for an instance run: nothing fabricates an agent identity the fleet does not
- * have, so an event carries no attribution and a chat message — whose `agentId` is required — is not
- * written at all until #79/#81 give instances their own presentation.
+ * `attribution` is the actor identity every event and chat message this report writes carries: an
+ * instance run names its instance and allocation, a legacy run names its configured agent. It is
+ * never both, and an instance identity is never written into the agent-typed key.
  */
 interface RunActor {
   /** Operator-facing name for events. */
   name: string;
-  /** Attribution for events and chat messages; absent for an instance run. */
-  agentId?: string;
+  /** Attribution for events and chat messages. */
+  attribution: { agentId?: string; instanceId?: string; allocationId?: string };
   /** Applies live presentation state; an instance only records that it was touched. */
   present(next: { state: AgentState; action: string }): void;
   touch(at: string): void;
 }
 
 function runActor(state: State, run: Run): RunActor | undefined {
-  const agent = state.agents.find((item) => item.id === run.agentId);
-  if (agent) {
+  if (run.instanceId !== undefined) {
+    const instance = (state.instances ?? []).find((item) => item.id === run.instanceId);
+    if (!instance || run.allocationId === undefined) return undefined;
     return {
-      name: agent.name,
-      agentId: agent.id,
-      present: (next) => { agent.state = next.state; agent.currentAction = next.action; },
-      touch: (at) => { agent.updatedAt = at; }
+      // One definition of an operator-facing actor name, shared with every historical projection.
+      name: describeHistoricalActor(state, run).name,
+      attribution: { instanceId: instance.id, allocationId: run.allocationId },
+      present: () => {},
+      touch: (at) => { instance.updatedAt = at; }
     };
   }
-  if (run.instanceId === undefined) return undefined;
-  const instance = (state.instances ?? []).find((item) => item.id === run.instanceId);
-  if (!instance) return undefined;
+  const agent = state.agents.find((item) => item.id === run.agentId);
+  if (!agent) return undefined;
   return {
-    name: instance.purpose?.name ?? instance.id,
-    present: () => {},
-    touch: (at) => { instance.updatedAt = at; }
+    name: describeHistoricalActor(state, run).name,
+    attribution: { agentId: agent.id },
+    present: (next) => { agent.state = next.state; agent.currentAction = next.action; },
+    touch: (at) => { agent.updatedAt = at; }
   };
 }
 
@@ -336,7 +339,7 @@ export function applyRunLifecycle(state: State, message: RunLifecycleMessage) {
   if (run.status === "cancelled") return false;
   const actor = runActor(state, run);
   if (!actor) return false;
-  const attribution = actor.agentId === undefined ? {} : { agentId: actor.agentId };
+  const attribution = actor.attribution;
   const thread = run.threadId ? state.threads?.find((item) => item.id === run.threadId) : undefined;
 
   if (message.type === "run.started") {
@@ -378,9 +381,7 @@ export function applyRunLifecycle(state: State, message: RunLifecycleMessage) {
     run.output = message.output;
     run.finishedAt = message.at;
     actor.present({ state: "done", action: "Completed just now" });
-    if (actor.agentId !== undefined) {
-      state.messages.push(newMessage({ agentId: actor.agentId, author: "agent", body: message.output || "Completed.", kind: "message", threadId: run.threadId, runId: run.id }));
-    }
+    state.messages.push(newMessage({ ...attribution, author: "agent", body: message.output || "Completed.", kind: "message", threadId: run.threadId, runId: run.id }));
     state.events.unshift(newEvent({ type: "status", title: `${actor.name} finished`, detail: run.prompt.slice(0, 120), threadId: run.threadId, ...attribution, runId: run.id }));
   } else {
     if (!canTransitionRun(run.status, "failed")) return false;
@@ -388,9 +389,7 @@ export function applyRunLifecycle(state: State, message: RunLifecycleMessage) {
     run.error = message.error;
     run.finishedAt = message.at;
     actor.present({ state: "blocked", action: message.error.slice(0, 90) });
-    if (actor.agentId !== undefined) {
-      state.messages.push(newMessage({ agentId: actor.agentId, author: "system", body: `Run failed: ${message.error}`, kind: "status", threadId: run.threadId, runId: run.id }));
-    }
+    state.messages.push(newMessage({ ...attribution, author: "system", body: `Run failed: ${message.error}`, kind: "status", threadId: run.threadId, runId: run.id }));
   }
   actor.touch(message.at);
   if (thread) thread.updatedAt = message.at;

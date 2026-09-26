@@ -2,7 +2,7 @@ import { useEffect, useReducer, useState } from "react";
 import { Prohibit, ShieldWarning, WarningCircle, X } from "@phosphor-icons/react";
 import type { Agent, ApprovalOption, ApprovalRequest, ComputeNode, OrchestratorClient, Run, Task } from "@coffee-shop/protocol";
 import { AccessibleDialog } from "../AccessibleDialog.js";
-import { approvalResolverLabel, isOrchestratorResolution } from "../orchestratorPresentation.js";
+import { actorLabel, approvalResolverLabel, isOrchestratorResolution } from "../orchestratorPresentation.js";
 import { approvalOptionKindLabels, approvalStatusLabels, timeAgo, timeUntil } from "./orchestrationLabels.js";
 
 function randomIdempotencyKey(): string {
@@ -110,7 +110,7 @@ export function ApprovalDialog({ approval, agents, nodes, runs, tasks, orchestra
       <div className="approval-summary"><span className={`approval-status approval-status-${latest.status}`}>{approvalStatusLabels[latest.status]}</span><code>{latest.id}</code></div>
       {latest.detail && <p className="approval-detail">{latest.detail}</p>}
       <dl className="approval-details">
-        <div><dt>Run</dt><dd>{run ? `${agent?.name ?? run.agentId} · ${run.id}` : `${latest.runId} (unavailable)`}</dd></div>
+        <div><dt>Run</dt><dd>{run ? `${agent?.name ?? actorLabel(run, agents)} · ${run.id}` : `${latest.runId} (unavailable)`}</dd></div>
         <div><dt>Node</dt><dd>{node?.name ?? `${latest.nodeId} (unavailable)`}</dd></div>
         {task && <div><dt>Task</dt><dd>{task.title}</dd></div>}
         {latest.toolCallId && <div><dt>Tool call</dt><dd><code>{latest.toolCallId}</code></dd></div>}

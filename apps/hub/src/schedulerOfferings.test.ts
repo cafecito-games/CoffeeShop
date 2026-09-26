@@ -262,7 +262,9 @@ test("the first run is created and dispatched only once the allocation is ready,
   assert.deepEqual(result.attempts[0], { taskId: "one", runId: current.state.runs[0].id, nodeId: "node-alpha", instanceId: instance.id, delivered: false });
   const run = current.state.runs[0];
   assert.deepEqual([run.instanceId, run.allocationId, run.agentId, run.taskId, run.attempt, run.status, run.transport, run.workspace],
-    [instance.id, allocations(current)[0].id, instance.id, "one", 1, "queued", "native-cli", "/workspace"]);
+    [instance.id, allocations(current)[0].id, undefined, "one", 1, "queued", "native-cli", "/workspace"],
+    "an instance run carries no agent key: an instance id is never written into an agent-typed field");
+  assert.equal(taskById(current, "one").assignment?.agentId, undefined, "nor does its assignment");
   assert.equal(run.dispatchedAt, undefined, "the dispatch is a persisted command, not a direct send");
   assert.equal(taskById(current, "one").status, "assigned");
   assert.deepEqual([taskById(current, "one").assignment?.instanceId, taskById(current, "one").assignment?.allocationId],
@@ -781,10 +783,13 @@ test("an instance run reports its whole lifecycle and settles its task", () => {
   assert.equal(taskById(current, "one").status, "completed");
   assert.equal(taskById(current, "one").result, "done");
 
-  // Nothing is attributed to an agent identity the fleet does not have.
-  assert.deepEqual(current.state.messages, []);
+  // Attribution names the instance and its allocation, never an agent identity the fleet lacks.
+  const allocationId = allocations(current)[0].id;
+  assert.deepEqual(current.state.messages.map((message) => [message.agentId, message.instanceId, message.allocationId, message.body]),
+    [[undefined, instanceId, allocationId, "done"]]);
   for (const event of current.state.events) assert.notEqual(event.agentId, instanceId);
-  assert.ok(current.state.events.some((event) => event.title.includes("finished")));
+  const finished = current.state.events.find((event) => event.title.includes("finished"))!;
+  assert.deepEqual([finished.agentId, finished.instanceId, finished.allocationId], [undefined, instanceId, allocationId]);
 
   // The settled attempt returns the resident to idle for the thread's next task.
   assert.equal(runSchedulingPass(current.state, context(current), later(30)).changed, true);
@@ -800,7 +805,8 @@ test("a failed instance run fails its task and a lost one is retried without an 
   assert.equal(applyRunLifecycle(current.state, { type: "run.started", runId, at: later(21) } as never), true);
   assert.equal(applyRunLifecycle(current.state, { type: "run.failed", runId, error: "harness exited", at: later(22) } as never), true);
   assert.equal(taskById(current, "one").status, "failed");
-  assert.deepEqual(current.state.messages, []);
+  assert.deepEqual(current.state.messages.map((message) => [message.agentId, message.instanceId, message.kind]),
+    [[undefined, instances(current)[0].id, "status"]]);
 
   const lost = fixture([node("node-beta")], [task("two")]);
   runSchedulingPass(lost.state, context(lost), at);
@@ -811,7 +817,8 @@ test("a failed instance run fails its task and a lost one is retried without an 
   const failed = failLostTaskAttempts(lost.state, "node-beta", [], later(30));
   assert.deepEqual(failed.map((run) => run.id), [lostRunId]);
   assert.equal(taskById(lost, "two").status, "ready", "the attempt is retried under the existing policy");
-  assert.deepEqual(lost.state.messages, [], "no chat message is attributed to a nonexistent agent");
+  assert.deepEqual(lost.state.messages.map((message) => [message.agentId, message.instanceId, message.kind]),
+    [[undefined, instances(lost)[0].id, "status"]], "no chat message is attributed to a nonexistent agent");
   for (const event of lost.state.events) assert.notEqual(event.agentId, instances(lost)[0].id);
 });
 

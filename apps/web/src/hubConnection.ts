@@ -108,7 +108,9 @@ function isArtifact(value: unknown): boolean {
     && isString(value.id)
     && isOptionalString(value.threadId)
     && isString(value.runId)
-    && isString(value.agentId)
+    && isOptionalString(value.agentId)
+    && isOptionalString(value.instanceId)
+    && isOptionalString(value.allocationId)
     && isString(value.relativePath)
     && isString(value.title)
     && isOneOf(value.kind, ["patch", "report", "test-results", "log", "image", "other"])
@@ -154,7 +156,9 @@ function isRun(value: unknown): boolean {
   return isObject(value)
     && isString(value.id)
     && isOptionalString(value.threadId)
-    && isString(value.agentId)
+    && isOptionalString(value.agentId)
+    && isOptionalString(value.instanceId)
+    && isOptionalString(value.allocationId)
     && isString(value.nodeId)
     && isOneOf(value.harnessId, harnessIds)
     && isString(value.model)
@@ -223,7 +227,9 @@ function isPlacementDiagnostic(value: unknown): boolean {
 function isTaskAssignment(value: unknown): boolean {
   return isObject(value)
     && isString(value.runId)
-    && isString(value.agentId)
+    && isOptionalString(value.agentId)
+    && isOptionalString(value.instanceId)
+    && isOptionalString(value.allocationId)
     && isString(value.nodeId)
     && isOneOf(value.harnessId, harnessIds)
     && isOneOf(value.transport, harnessTransports)
@@ -300,7 +306,9 @@ function isHarnessSessionBinding(value: unknown): boolean {
   return isObject(value)
     && isString(value.id)
     && isString(value.threadId)
-    && isString(value.agentId)
+    && isOptionalString(value.agentId)
+    && isOptionalString(value.instanceId)
+    && isOptionalString(value.allocationId)
     && isString(value.nodeId)
     && isOneOf(value.harnessId, harnessIds)
     && isOneOf(value.transport, harnessTransports)
@@ -462,6 +470,8 @@ function isEvent(value: unknown): boolean {
     && isString(value.title)
     && isString(value.detail)
     && isOptionalString(value.agentId)
+    && isOptionalString(value.instanceId)
+    && isOptionalString(value.allocationId)
     && isOptionalString(value.runId)
     && isOptionalString(value.fromAgentId)
     && isOptionalString(value.toAgentId)
@@ -472,7 +482,9 @@ function isMessage(value: unknown): boolean {
   return isObject(value)
     && isString(value.id)
     && isOptionalString(value.threadId)
-    && isString(value.agentId)
+    && isOptionalString(value.agentId)
+    && isOptionalString(value.instanceId)
+    && isOptionalString(value.allocationId)
     && isOneOf(value.author, ["you", "agent", "system"])
     && isString(value.body)
     && isOneOf(value.kind, ["message", "handoff", "status"])
@@ -483,6 +495,7 @@ function isMessage(value: unknown): boolean {
 function isThreadOrchestrator(value: unknown): boolean {
   if (!isObject(value)) return false;
   if (value.kind === "agent") return isString(value.agentId);
+  if (value.kind === "instance") return isString(value.instanceId);
   return value.kind === "external" && isString(value.clientId);
 }
 

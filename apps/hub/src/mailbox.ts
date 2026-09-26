@@ -8,7 +8,10 @@ import {
   type Agent,
   type OrchestratorAttachment,
   type OrchestratorClient,
+  type AgentInstance,
+  type InstanceAllocation,
   type Run,
+  type RuntimeActor,
   type Task,
   type TaskMailboxEvent,
   type TaskMessage,
@@ -17,6 +20,12 @@ import {
   type TaskMessageView,
   type Thread
 } from "@coffee-shop/protocol";
+import {
+  authorizeInstance,
+  isThreadOrchestratorActor,
+  recordActor,
+  type InstancePrincipal
+} from "./actors.js";
 import { CoordinationError } from "./coordinationError.js";
 import { newId, publicOrchestratorClient, type State, type Store } from "./store.js";
 import { participantKey, taskEventsAfter, taskEventStream } from "./taskEvents.js";
@@ -32,12 +41,23 @@ import { participantKey, taskEventsAfter, taskEventStream } from "./taskEvents.j
  */
 
 /**
- * Who is calling. A hub-hosted caller is a running run executing as an agent; an external caller is
- * a bridge connection holding a live attachment on the thread. Everything a handler needs that is
- * specific to one of them is reached through the helpers below, never by assuming a `Run`.
+ * What a hub-hosted run executes as. A version-5 run executes as a live resident instance of its own
+ * thread, named together with the exact allocation it was dispatched against. A legacy run executes
+ * as a configured agent. Both are runtime principals; neither is derived from the other, and a
+ * historical record's display attribution never produces one (see `describeHistoricalActor`).
+ */
+export type RunRuntime =
+  | { runtime: "instance"; instance: AgentInstance; allocation: InstanceAllocation }
+  | { runtime: "agent"; agent: Agent };
+
+/**
+ * Who is calling. A hub-hosted caller is a running run executing as an instance or as a legacy
+ * configured agent; an external caller is a bridge connection holding a live attachment on the
+ * thread. Everything a handler needs that is specific to one of them is reached through the helpers
+ * below, never by assuming a `Run`.
  */
 export type CallerPrincipal =
-  | { kind: "run"; run: Run; agent: Agent }
+  | ({ kind: "run"; run: Run; actor: RuntimeActor } & RunRuntime)
   | { kind: "external"; client: OrchestratorClient; attachment: OrchestratorAttachment };
 
 export interface Caller {
@@ -63,22 +83,46 @@ export const externalSource = (connectionId: string, threadId: string): CallerSo
 
 /** The calling run, or `undefined` for an external orchestrator. */
 export const callerRun = (caller: Caller) => (caller.principal.kind === "run" ? caller.principal.run : undefined);
-/** The agent the calling run executes as, or `undefined` for an external orchestrator. */
-export const callerAgent = (caller: Caller) => (caller.principal.kind === "run" ? caller.principal.agent : undefined);
+/**
+ * The legacy configured agent the calling run executes as. `undefined` for an external orchestrator
+ * and for an instance run: it is a compatibility identity, never the answer to "may this caller
+ * write".
+ */
+export const callerAgent = (caller: Caller): Agent | undefined =>
+  caller.principal.kind === "run" && caller.principal.runtime === "agent" ? caller.principal.agent : undefined;
+/** The live resident instance the calling run executes as, with its exact allocation. */
+export const callerInstance = (caller: Caller): InstancePrincipal | undefined =>
+  caller.principal.kind === "run" && caller.principal.runtime === "instance"
+    ? { instance: caller.principal.instance, allocation: caller.principal.allocation }
+    : undefined;
+/** The caller's runtime actor, for attributing the records it writes. */
+export const callerActor = (caller: Caller): RuntimeActor | undefined =>
+  caller.principal.kind === "run" ? caller.principal.actor : undefined;
+/** The actor keys a record written by this caller carries; empty for an external orchestrator. */
+export const callerAttribution = (caller: Caller): { agentId?: string; instanceId?: string; allocationId?: string } => {
+  const actor = callerActor(caller);
+  if (actor === undefined) return {};
+  return actor.kind === "agent" ? { agentId: actor.agentId } : { instanceId: actor.instanceId, allocationId: actor.allocationId };
+};
 
 /** A run for a tool that can only be served to a hub-hosted caller. */
 export function requireCallerRun(caller: Caller, message: string) {
-  const run = callerRun(caller);
-  if (!run) throw new CoordinationError("forbidden", message);
-  return { run, agent: (caller.principal as Extract<CallerPrincipal, { kind: "run" }>).agent };
+  if (caller.principal.kind !== "run") throw new CoordinationError("forbidden", message);
+  return { run: caller.principal.run, actor: caller.principal.actor };
 }
 
 /**
- * Whether the caller may submit work and inspect the execution inventory. A hub-hosted caller needs
- * its agent's `canDelegate`; an external orchestrator that reached a handler at all holds the
- * `orchestrate` scope, which is the same authority for its own thread.
+ * Whether the caller may submit work and inspect the execution inventory. An instance run carries the
+ * hub-granted `delegation.canDelegate` of its own record — a model can never self-elevate it. A legacy
+ * run needs its agent's `canDelegate`. An external orchestrator that reached a handler at all holds
+ * the `orchestrate` scope, which is the same authority for its own thread.
  */
-export const callerCanDelegate = (caller: Caller) => (caller.principal.kind === "run" ? caller.principal.agent.canDelegate === true : true);
+export const callerCanDelegate = (caller: Caller) => {
+  if (caller.principal.kind !== "run") return true;
+  return caller.principal.runtime === "instance"
+    ? caller.principal.instance.delegation.canDelegate
+    : caller.principal.agent.canDelegate === true;
+};
 
 export const notVisible = () => new CoordinationError("not_found", "Task not found in the current task lineage");
 const messageNotVisible = () => new CoordinationError("not_found", "Message not found in the current mailbox");
@@ -118,15 +162,32 @@ export function resolveExternalCaller(state: Readonly<State>, connectionId: stri
 export const resolveCallerFor = (state: Readonly<State>, source: CallerSource): Caller =>
   source.kind === "run" ? resolveCaller(state, source.runId) : resolveExternalCaller(state, source.connectionId, source.threadId);
 
+/**
+ * The runtime principal of a running run. An instance run must still be a live resident of its own
+ * thread with its exact allocation active: a released, drained, replaced, or foreign-thread instance
+ * is not a principal and its run can authorize nothing. A malformed actor identity is rejected as
+ * invalid by `recordActor` rather than falling through to the agent path.
+ */
+function runPrincipal(state: Readonly<State>, run: Run, threadId: string): Extract<CallerPrincipal, { kind: "run" }> {
+  const actor = recordActor(run, `Run ${run.id}`);
+  if (actor === undefined) throw new CoordinationError("forbidden", "The source run names no runtime actor");
+  if (actor.kind === "instance") {
+    const principal = authorizeInstance(state, run, `Run ${run.id}`, threadId);
+    if (!principal) throw new CoordinationError("forbidden", "The source run's instance is no longer a live resident of this thread");
+    return { kind: "run", run, actor, runtime: "instance", instance: principal.instance, allocation: principal.allocation };
+  }
+  const agent = state.agents.find((item) => item.id === actor.agentId);
+  if (!agent) throw new CoordinationError("forbidden", "The source agent is not configured");
+  return { kind: "run", run, actor, runtime: "agent", agent };
+}
+
 /** Resolves the authenticated caller of a hub tool; only a running run attached to a thread qualifies. */
 export function resolveCaller(state: Readonly<State>, sourceRunId: string): Caller {
   const run = state.runs.find((item) => item.id === sourceRunId);
   if (!run || run.status !== "running") throw new CoordinationError("run_not_active", "The source task is not running");
   const thread = run.threadId ? state.threads?.find((item) => item.id === run.threadId) : undefined;
   if (!thread) throw new CoordinationError("not_found", "The source task is not attached to a thread");
-  const agent = state.agents.find((item) => item.id === run.agentId);
-  if (!agent) throw new CoordinationError("forbidden", "The source agent is not configured");
-  const principal: CallerPrincipal = { kind: "run", run, agent };
+  const principal = runPrincipal(state, run, thread.id);
   const sourceKey = runSourceKey(run.id);
   if (run.taskId !== undefined) {
     const task = state.tasks?.find((item) => item.id === run.taskId && item.threadId === thread.id && item.attemptRunIds.includes(run.id));
@@ -134,7 +195,9 @@ export function resolveCaller(state: Readonly<State>, sourceRunId: string): Call
     const participant: TaskMessageParticipant = { type: "task", taskId: task.id };
     return { principal, thread, task, participant, scopeKey: participantKey(participant), sourceKey };
   }
-  if (agent.id === thread.ownerAgentId) {
+  // Orchestrator authority is the thread's own record, resolved against the caller's runtime actor:
+  // a replacement instance is not the orchestrator until the thread names it.
+  if (isThreadOrchestratorActor(thread, principal.actor)) {
     const participant: TaskMessageParticipant = { type: "orchestrator" };
     return { principal, thread, participant, scopeKey: participantKey(participant), sourceKey };
   }

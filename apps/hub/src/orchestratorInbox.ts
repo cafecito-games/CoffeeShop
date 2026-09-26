@@ -14,11 +14,18 @@ import {
   type Task,
   type Thread
 } from "@coffee-shop/protocol";
+import { isThreadOrchestratorActor, recordActor } from "./actors.js";
+import {
+  acceptInstanceWorkInState,
+  appendInstanceDispatchInState,
+  currentAllocationInState
+} from "./instances.js";
+import { placementEnvironmentFor, promoteThreadToInstanceInState } from "./legacyPromotion.js";
 import { cancelRunInState } from "./lifecycle.js";
 import { decodeTaskEventCursor, resolveCaller, resolveExternalCaller } from "./mailbox.js";
 import { continuationPrompts } from "./orchestratorContext.js";
-import { dispatchMessageFor, placeTask, type SchedulingContext } from "./scheduler.js";
-import { hasResumeCapability, nodeAdvertisesResume, sessionResumeUnavailableReason } from "./sessionBindings.js";
+import { dispatchMessageFor, instanceDispatchIsEncodable, instanceRunFor, placeTask, type SchedulingContext } from "./scheduler.js";
+import { bindingActorMatches, hasResumeCapability, nodeAdvertisesResume, sessionResumeUnavailableReason } from "./sessionBindings.js";
 import { newEvent, type State, type Store } from "./store.js";
 import { taskEventsAfter, taskEventStream, type TaskEventEntry } from "./taskEvents.js";
 
@@ -43,6 +50,12 @@ export interface ScheduledContinuation {
   threadId: string;
   runId: string;
   nodeId: string;
+  /**
+   * The resident instance the continuation runs as, when the thread is instance-orchestrated. Its
+   * dispatch is already persisted in the instance outbox, so the caller flushes that outbox instead
+   * of sending the run.
+   */
+  instanceId?: string;
   /** Whether the pass recorded a delivery decision; the caller must send exactly these runs. */
   delivered: boolean;
 }
@@ -51,6 +64,15 @@ export interface ContinuationPassResult {
   changed: boolean;
   continuations: ScheduledContinuation[];
 }
+
+/** The actor a record names, or `undefined` for none or a malformed half of one. */
+const actorOf = (record: { agentId?: string; instanceId?: string; allocationId?: string }) => {
+  try {
+    return recordActor(record, "Record");
+  } catch {
+    return undefined;
+  }
+};
 
 /** Whether a journal entry needs the orchestrator's attention. */
 export function isOrchestratorRelevant(state: Readonly<State>, entry: TaskEventEntry) {
@@ -86,8 +108,13 @@ function ensureInbox(state: State, threadId: string, at: string) {
   return inbox;
 }
 
-/** An orchestrator run is a non-task run of the thread's owner. */
-const isOrchestratorRun = (run: Run, thread: Thread) => run.threadId === thread.id && run.agentId === thread.ownerAgentId && run.taskId === undefined;
+/**
+ * An orchestrator run is a non-task run whose runtime actor is the thread's own orchestrator. The
+ * thread's orchestrator record decides it, so an instance-orchestrated thread is recognized exactly
+ * as an agent-orchestrated one was, and a worker resident of the same thread never counts.
+ */
+const isOrchestratorRun = (run: Run, thread: Thread) =>
+  run.threadId === thread.id && run.taskId === undefined && isThreadOrchestratorActor(thread, actorOf(run));
 
 export const activeOrchestratorRun = (state: Readonly<State>, thread: Thread) =>
   state.runs.find((run) => isOrchestratorRun(run, thread) && isActiveRunStatus(run.status));
@@ -185,8 +212,16 @@ export function reconcileOrchestratorInboxes(state: State, at: string) {
   return changed;
 }
 
-/** The placement request for a continuation: the thread owner, on its configured node. */
+/**
+ * The placement request for a continuation: the thread's own orchestrator, pinned exactly. An
+ * instance-orchestrated thread continues on that one instance — never on a substitute resident, and
+ * never on a configured agent.
+ */
 function continuationTask(thread: Thread, at: string): Task {
+  const orchestrator = threadOrchestrator(thread);
+  const placementOverride: Task["placementOverride"] = orchestrator?.kind === "instance"
+    ? { instanceId: orchestrator.instanceId, authorizedBy: "policy" }
+    : { agentId: thread.ownerAgentId, authorizedBy: "policy" };
   return {
     id: `orchestrator-continuation:${thread.id}`,
     threadId: thread.id,
@@ -195,7 +230,7 @@ function continuationTask(thread: Thread, at: string): Task {
     status: "ready",
     requirements: {},
     dependencies: [],
-    placementOverride: { agentId: thread.ownerAgentId, authorizedBy: "policy" },
+    placementOverride,
     idempotencyKey: "",
     attemptRunIds: [],
     createdAt: at,
@@ -209,20 +244,36 @@ function continuationTask(thread: Thread, at: string): Task {
  * transport, and unleased workspace, negotiated with resume or load, still advertised as resumable
  * by the node, and in use by no active run. Anything else is never moved or reused.
  */
-export function resumableOrchestratorBinding(state: Readonly<State>, thread: Thread, run: Pick<Run, "agentId" | "nodeId" | "harnessId" | "transport" | "workspace">) {
+export function resumableOrchestratorBinding(
+  state: Readonly<State>,
+  thread: Thread,
+  run: Pick<Run, "agentId" | "instanceId" | "allocationId" | "nodeId" | "harnessId" | "transport" | "workspace">
+) {
   if (run.transport !== "acp-v1") return undefined;
   const node = state.nodes.find((item) => item.id === run.nodeId);
   if (!nodeAdvertisesResume(node, run.harnessId)) return undefined;
   const refused = new Set((inboxFor(state, thread.id)?.wakes ?? []).filter((wake) => wake.resumeRefused).map((wake) => wake.requestedSessionBindingId));
   const inUse = new Set(state.runs.filter((item) => isActiveRunStatus(item.status) && item.sessionBindingId !== undefined).map((item) => item.sessionBindingId!));
   return (state.sessionBindings ?? [])
-    .filter((binding: HarnessSessionBinding) => binding.threadId === thread.id && binding.agentId === run.agentId && binding.nodeId === run.nodeId
+    .filter((binding: HarnessSessionBinding) => binding.threadId === thread.id && bindingActorMatches(binding, run) && binding.nodeId === run.nodeId
       && binding.harnessId === run.harnessId && binding.transport === "acp-v1" && binding.workspace === run.workspace
       && binding.workspaceLeaseId === undefined && binding.status === "idle" && hasResumeCapability(binding.capabilities) && !inUse.has(binding.id) && !refused.has(binding.id))
     .sort((left, right) => (left.updatedAt < right.updatedAt ? 1 : left.updatedAt > right.updatedAt ? -1 : left.id < right.id ? 1 : -1))[0];
 }
 
-function planThreadContinuation(state: State, thread: Thread, owner: Agent, context: SchedulingContext, at: string): ScheduledContinuation | undefined {
+/**
+ * The range a thread's next continuation would carry, or `undefined` when it needs none. Everything
+ * here is independent of who orchestrates the thread — an active orchestrator run, a back-off, an
+ * open wake, an empty inbox, and the redelivery budget all gate any orchestrator alike.
+ */
+interface ContinuationWindow {
+  events: TaskEventEntry[];
+  processedThrough: number;
+  throughSequence: number;
+  redelivery: boolean;
+}
+
+function continuationWindow(state: Readonly<State>, thread: Thread, at: string): ContinuationWindow | undefined {
   if (activeOrchestratorRun(state, thread)) return undefined;
   const existing = inboxFor(state, thread.id);
   if (existing?.retryAfter !== undefined && Date.parse(at) < Date.parse(existing.retryAfter)) return undefined;
@@ -235,18 +286,17 @@ function planThreadContinuation(state: State, thread: Thread, owner: Agent, cont
   const redelivery = events.every((entry) => entry.sequence <= deliveredThrough);
   if (redelivery && (existing?.redeliveries ?? 0) >= limits.maximumRedeliveries) return undefined;
   const throughSequence = pending.length > events.length ? events.at(-1)!.sequence : taskEventStream(state, thread.id).head;
+  return { events, processedThrough, throughSequence, redelivery };
+}
 
-  const decision = placeTask(continuationTask(thread, at), {
-    agents: state.agents,
-    nodes: state.nodes,
-    runs: state.runs,
-    connection: context.connection,
-    capabilityReport: context.capabilityReport,
-    projectProfile: context.projectProfile,
-    workspaceLeases: state.workspaceLeases,
-    evidenceTTLMilliseconds: context.evidenceTTLMilliseconds,
-    now: at
-  });
+/**
+ * The continuation of an agent-orchestrated thread, on the compatibility path. It is reached only
+ * while the thread still names a configured agent; a promoted thread continues through
+ * `planInstanceContinuation` instead.
+ */
+function planAgentContinuation(state: State, thread: Thread, owner: Agent, window: ContinuationWindow, context: SchedulingContext, at: string): ScheduledContinuation | undefined {
+  const { events, processedThrough, throughSequence, redelivery } = window;
+  const decision = placeTask(continuationTask(thread, at), placementEnvironmentFor(state, context, at));
   if (decision.kind !== "assigned") return undefined;
   const { candidate } = decision;
 
@@ -312,6 +362,91 @@ function planThreadContinuation(state: State, thread: Thread, owner: Agent, cont
 }
 
 /**
+ * The continuation of an instance-orchestrated thread. The thread's own orchestrating instance is
+ * pinned exactly, so the continuation is never substituted onto another resident, and the wake and
+ * its run keep the same deterministic identities the agent path uses.
+ *
+ * It never asks to resume a provider session. A version-5 dispatch carries no session-binding grant
+ * for Barista to honour — Barista rejects a v5 run that names one
+ * (`apps/control-agent/internal/controlplane/instances.go` `instanceDispatchRun`) — so every instance
+ * continuation starts a session with the thread's bounded durable context, which the continuation
+ * prompt always carries. Closing that gap needs a control-agent protocol change, not a hub change.
+ */
+function planInstanceContinuation(state: State, thread: Thread, window: ContinuationWindow, context: SchedulingContext, at: string): ScheduledContinuation | undefined {
+  const { events, processedThrough, throughSequence, redelivery } = window;
+  const decision = placeTask(continuationTask(thread, at), placementEnvironmentFor(state, context, at));
+  // `waiting` is a provisioning instance: the wake is planned by a later pass, once it is ready.
+  if (decision.kind !== "instance") return undefined;
+
+  const inbox = ensureInbox(state, thread.id, at);
+  const generation = inbox.generation + 1;
+  const digest = wakeDigest(thread.id, processedThrough, throughSequence, generation);
+  const runId = `run_wake_${digest}`;
+  if (state.runs.some((run) => run.id === runId)) return undefined;
+  const wakeId = `wake_${digest}`;
+  const prompts = continuationPrompts(state, thread, { wakeId, generation, fromSequence: processedThrough, throughSequence, events, redelivery });
+
+  const current = currentAllocationInState(state, decision.instanceId);
+  if (!current || current.status !== "active") return undefined;
+  const run: Run = {
+    id: runId,
+    threadId: thread.id,
+    instanceId: decision.instanceId,
+    allocationId: current.id,
+    nodeId: current.nodeId,
+    harnessId: current.harnessId,
+    model: current.model,
+    workspace: current.workspace,
+    prompt: prompts.prompt,
+    status: "queued",
+    output: "",
+    depth: 0,
+    createdAt: at,
+    transport: current.transport
+  };
+  /*
+   * The command is validated before anything is committed, so a wake this hub could not encode never
+   * leaves a queued run and an open wake behind for a resident that will never be dispatched to.
+   */
+  if (!instanceDispatchIsEncodable(state, run).ok) return undefined;
+  const accepted = acceptInstanceWorkInState(state, decision.instanceId, at);
+  if (!accepted || accepted.allocation.id !== current.id) return undefined;
+  const appended = appendInstanceDispatchInState(state, instanceRunFor(run), at);
+  if (!appended.ok) return undefined;
+
+  state.runs.unshift(run);
+  inbox.wakes.push({
+    id: wakeId,
+    generation,
+    runId,
+    fromSequence: processedThrough,
+    throughSequence,
+    eventSequences: events.map((entry) => entry.sequence),
+    redelivery,
+    status: "scheduled",
+    createdAt: at,
+    updatedAt: at
+  });
+  inbox.generation = generation;
+  inbox.redeliveries = redelivery ? inbox.redeliveries + 1 : 0;
+  inbox.updatedAt = at;
+  trimWakes(inbox);
+  thread.updatedAt = at;
+  const name = accepted.instance.purpose?.name ?? accepted.instance.id;
+  state.events.unshift(newEvent({
+    type: "run",
+    title: `${name} was woken for ${events.length} inbox ${events.length === 1 ? "event" : "events"}`,
+    detail: "Starting a session with the thread's durable context",
+    threadId: thread.id,
+    instanceId: accepted.instance.id,
+    allocationId: accepted.allocation.id,
+    runId
+  }));
+  // The dispatch is a persisted command in the instance outbox; the caller flushes it, never a socket.
+  return { threadId: thread.id, runId, nodeId: run.nodeId, instanceId: accepted.instance.id, delivered: false };
+}
+
+/**
  * Reconciles wakes and creates at most one continuation per eligible thread, inside the scheduling
  * transaction. Placement uses the scheduler's own evaluation for the thread owner, so connectivity,
  * the reconnect barrier, protocol version, harness, transport, workspace, and capacity all apply.
@@ -323,14 +458,42 @@ export function runContinuationPass(state: State, context: SchedulingContext, at
   const continuations: ScheduledContinuation[] = [];
   for (const thread of state.threads ?? []) {
     if (thread.status !== "active") continue;
-    if (threadOrchestrator(thread)?.kind === "external") continue;
-    const owner = state.agents.find((agent) => agent.id === thread.ownerAgentId);
-    if (!owner) continue;
-    const continuation = planThreadContinuation(state, thread, owner, context, at);
-    if (continuation) {
-      continuations.push(continuation);
-      changed = true;
+    const orchestrator = threadOrchestrator(thread);
+    if (orchestrator === undefined || orchestrator.kind === "external") continue;
+    const window = continuationWindow(state, thread, at);
+    if (!window) continue;
+    if (orchestrator.kind === "instance") {
+      const continuation = planInstanceContinuation(state, thread, window, context, at);
+      if (continuation) {
+        continuations.push(continuation);
+        changed = true;
+      }
+      continue;
     }
+    /*
+     * A thread that still names a configured agent continues on it, exactly as it always did.
+     *
+     * Promotion is reached only when that agent is no longer configured at all — the one condition
+     * that is permanent and cannot heal on its own. A *placement* failure must never promote: an
+     * offline node, an unfinished reconnect barrier, stale capability evidence, or a harness not yet
+     * re-reported all make the owner temporarily unplaceable, and promoting on any of them would
+     * irreversibly take the thread away from a healthy agent seconds before it came back, closing its
+     * live ACP sessions on the way. Such a thread simply waits for the next pass, which is what the
+     * hub did before instances existed.
+     */
+    const owner = state.agents.find((agent) => agent.id === orchestrator.agentId);
+    if (owner) {
+      const continuation = planAgentContinuation(state, thread, owner, window, context, at);
+      if (continuation) {
+        continuations.push(continuation);
+        changed = true;
+      }
+      continue;
+    }
+    // Promotion writes nothing when the template is missing, so an ambiguous migration leaves the
+    // thread and its history untouched and surfaces through the import refusal instead.
+    const promotion = promoteThreadToInstanceInState(state, thread.id, context, at);
+    if (promotion.kind === "promoted") changed = true;
   }
   return { changed, continuations };
 }

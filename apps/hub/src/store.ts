@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import {
   agentAvatarColors,
   agentAvatarShapes,
+  canTransitionSessionBinding,
   harnessEventStreamStatuses,
   isApprovalDeliveryStatus,
   isApprovalStatus,
@@ -26,6 +27,8 @@ import {
   type Thread,
   type TimelineEvent
 } from "@coffee-shop/protocol";
+import { assertPersistedActor, type ActorKeyed } from "./actors.js";
+import { assertPersistedTemplateState, importLegacyAgentTemplates, type LegacyTemplateImport } from "./agentTemplates.js";
 import type { HarnessEventStream, StoredHarnessEvent } from "./harnessEvents.js";
 import {
   assertPersistedInstanceState,
@@ -48,6 +51,9 @@ export interface TaskSubmission {
   sourceKey?: string;
   /** The agent the submitting run executes as; absent for an external orchestrator. */
   creatorAgentId?: string;
+  /** Version-5 attribution: the resident instance and allocation that submitted the batch. */
+  creatorInstanceId?: string;
+  creatorAllocationId?: string;
   idempotencyKey: string;
   /**
    * The key space the idempotency key belongs to. Absent for a caller-supplied batch; a batch the
@@ -67,7 +73,11 @@ export interface TaskUpdateRecord {
   threadId: string;
   taskId: string;
   sourceRunId: string;
-  agentId: string;
+  /** Compatibility attribution; absent when the updating attempt was instance-keyed. */
+  agentId?: string;
+  /** Version-5 attribution: the resident instance and allocation of the updating attempt. */
+  instanceId?: string;
+  allocationId?: string;
   idempotencyKey: string;
   /** SHA-256 of the normalized update and its source run. */
   digest: string;
@@ -102,6 +112,8 @@ interface HubOnlyState {
   nodeInstanceResidency?: NodeInstanceResidency[];
   /** Prevents a deliberately emptied catalog from re-importing the legacy profiles file. */
   projectProfilesImported?: boolean;
+  /** One recorded decision per legacy agent; see `importLegacyAgentTemplates`. */
+  legacyTemplateImports?: LegacyTemplateImport[];
 }
 
 /** The persisted state. `orchestratorClients` holds the stored records, secret hash included. */
@@ -126,6 +138,7 @@ const emptyState = (): State => withOrchestrationDefaults({
   instanceDeliveries: [],
   remoteReleaseRequests: [],
   nodeInstanceResidency: [],
+  legacyTemplateImports: [],
   taskSubmissions: [],
   taskUpdates: [],
   taskEventJournal: [],
@@ -260,12 +273,16 @@ export function assertPersistedOrchestratorClientState(state: State) {
     const orchestrator: unknown = thread.orchestrator;
     if (orchestrator === undefined) continue;
     if (!isRecord(orchestrator)) throw new Error(`${context} has a malformed orchestrator`);
-    if (orchestrator.kind === "agent" ? !isNonEmptyString(orchestrator.agentId) : orchestrator.kind === "external" ? !isNonEmptyString(orchestrator.clientId) : true) {
-      throw new Error(`${context} has an unknown orchestrator`);
-    }
-    // A leftover owner agent on an external thread would keep granting that agent owner authority.
-    if (orchestrator.kind === "external" && thread.ownerAgentId !== undefined) {
-      throw new Error(`${context} is externally orchestrated but still names an owner agent`);
+    const identified = orchestrator.kind === "agent" ? isNonEmptyString(orchestrator.agentId)
+      : orchestrator.kind === "instance" ? isNonEmptyString(orchestrator.instanceId)
+        : orchestrator.kind === "external" ? isNonEmptyString(orchestrator.clientId) : false;
+    if (!identified) throw new Error(`${context} has an unknown orchestrator`);
+    /*
+     * A leftover owner agent on a thread that is no longer agent-orchestrated would keep granting that
+     * agent owner authority through any reader that still consults the field directly.
+     */
+    if (orchestrator.kind !== "agent" && thread.ownerAgentId !== undefined) {
+      throw new Error(`${context} is ${orchestrator.kind}-orchestrated but still names an owner agent`);
     }
     if (orchestrator.kind === "agent" && thread.ownerAgentId !== orchestrator.agentId) {
       throw new Error(`${context} disagrees with its own owner agent`);
@@ -280,6 +297,173 @@ export function assertPersistedOrchestratorClientState(state: State) {
     const context = `Persisted orchestrator attachment ${index}`;
     if (!clientIds.has(attachment.clientId)) throw new Error(`${context} names unknown orchestrator client ${attachment.clientId}`);
     if (!threadIds.has(attachment.threadId)) throw new Error(`${context} names unknown thread ${attachment.threadId}`);
+  }
+}
+
+/**
+ * Migrates the borrowed agent key a version-5 instance record was persisted with before this change.
+ *
+ * Until #78 an instance record had nowhere to put its identity but the required agent key, and the
+ * previous revision filled it with the instance id in two distinguishable shapes:
+ *
+ *  - *Both keys.* `apps/hub/src/scheduler.ts:1335` wrote `agentId: instance.id` beside
+ *    `instanceId`/`allocationId` for every instance-keyed attempt, and `assignTaskAttempt`
+ *    (`apps/hub/src/tasks.ts:663`) copied both onto `task.assignment`. Such a record names two actors
+ *    at once, which `assertPersistedActorState` refuses.
+ *  - *Agent only.* `apps/hub/src/sessionBindings.ts:170` wrote `agentId: run.agentId` — the instance id
+ *    — with no instance half at all, and `apps/hub/src/coordination.ts:366,373` did the same for an
+ *    instance run's artifact and its timeline event. Such a record loads, because it is a well-formed
+ *    legacy agent record; it is simply attributed to an agent that does not exist. For a session
+ *    binding that is not cosmetic: `bindingActorMatches` compares an agent actor to the run's instance
+ *    actor, never matches, and the dispatch cold-starts the provider session while a later
+ *    `session.binding` report naming the binding is rejected. Base `transportPreference` prefers
+ *    `acp-v1`, so every base-revision ACP instance run wrote one.
+ *
+ * Both shapes are recognised without ever guessing between two actors:
+ *
+ *  - The both-keys shape is self-identifying: the agent key holds the *same* string as `instanceId`,
+ *    and no configured agent id can equal an instance id (`newId("instance")` produces
+ *    `instance_<base36>_…`, which the agent id slug generator cannot emit). Only that exact shape is
+ *    stripped; a record naming a genuinely different agent and instance stays ambiguous and is left for
+ *    the assertion to refuse.
+ *  - The agent-only shape has no second key to compare against, so it is resolved against state: the
+ *    agent key is borrowed exactly when it names no configured agent *and* does name a record in
+ *    `state.instances`. An id that names a configured agent is a legacy record and is left alone even
+ *    if an instance shares the id, because a valid legacy reading is never overwritten. An id that
+ *    names neither is a legacy record whose agent was deleted — it keeps naming that agent and renders
+ *    as the raw id, exactly as it did before this migration.
+ *
+ * A malformed identity is never read as an absent one: a record carrying an agent key beside a *half*
+ * instance identity is left untouched in both shapes, so `assertPersistedActorState` still fails the
+ * load with the missing field named.
+ *
+ * Setting the right actor needs the allocation the work ran under, and that is taken from the record's
+ * own run rather than from the instance's current allocation: a session created under a lost allocation
+ * lives in a process the replacement does not own, so inventing one would make a stale session
+ * resumable by the wrong principal. When the run cannot supply it, an optional- or display-only record
+ * is left as it was — the attribution degrades exactly as it already did — and a session binding is
+ * closed and unlinked from its run, so the next dispatch cold-starts deliberately and the next report
+ * creates a replacement instead of resuming a session nobody can address.
+ */
+export function dropBorrowedInstanceAgentKeys(state: State) {
+  let changed = false;
+  const agentIds = new Set(state.agents.map((item) => item.id));
+  const instanceIds = new Set((state.instances ?? []).map((item) => item.id));
+  const runsById = new Map(state.runs.map((run) => [run.id, run]));
+
+  /** The both-keys shape: the agent key repeats `instanceId` and carries no information of its own. */
+  const strip = (record: ActorKeyed | undefined) => {
+    if (!record || record.agentId === undefined || record.instanceId === undefined) return;
+    if (record.agentId !== record.instanceId) return;
+    delete record.agentId;
+    changed = true;
+  };
+
+  /** The instance the record's agent key borrowed, or `undefined` for every other shape. */
+  const borrowedInstanceId = (record: ActorKeyed) => {
+    const { agentId, instanceId, allocationId } = record;
+    if (agentId === undefined || instanceId !== undefined || allocationId !== undefined) return undefined;
+    if (agentIds.has(agentId)) return undefined;
+    return instanceIds.has(agentId) ? agentId : undefined;
+  };
+
+  /** The allocation `instanceId` held when it produced the record, read from the record's own run. */
+  const allocationOf = (instanceId: string, runIds: readonly (string | undefined)[]) => {
+    for (const runId of runIds) {
+      const run = runId === undefined ? undefined : runsById.get(runId);
+      if (run?.instanceId === instanceId && run.allocationId !== undefined) return run.allocationId;
+    }
+    return undefined;
+  };
+
+  /**
+   * Replaces a borrowed agent key with the instance identity its run recorded. Returns `"borrowed"`
+   * when the shape was recognised but no allocation could be recovered, so the caller decides what a
+   * record of its own kind does about it.
+   */
+  const adopt = (record: ActorKeyed | undefined, ...runIds: readonly (string | undefined)[]) => {
+    if (!record) return "untouched" as const;
+    const instanceId = borrowedInstanceId(record);
+    if (instanceId === undefined) return "untouched" as const;
+    const allocationId = allocationOf(instanceId, runIds);
+    if (allocationId === undefined) return "borrowed" as const;
+    delete record.agentId;
+    record.instanceId = instanceId;
+    record.allocationId = allocationId;
+    changed = true;
+    return "migrated" as const;
+  };
+
+  for (const run of state.runs) strip(run);
+  for (const event of state.events) {
+    strip(event);
+    adopt(event, event.runId);
+  }
+  for (const message of state.messages) {
+    strip(message);
+    adopt(message, message.runId);
+  }
+  for (const artifact of state.artifacts ?? []) {
+    strip(artifact);
+    adopt(artifact, artifact.runId);
+  }
+  for (const update of state.taskUpdates ?? []) {
+    strip(update);
+    adopt(update, update.sourceRunId);
+  }
+  for (const approval of state.approvals ?? []) {
+    strip(approval);
+    adopt(approval, approval.runId);
+  }
+  for (const task of state.tasks ?? []) {
+    strip(task.assignment);
+    adopt(task.assignment, task.assignment?.runId);
+  }
+  for (const binding of state.sessionBindings ?? []) {
+    strip(binding);
+    if (adopt(binding, binding.createdByRunId, binding.lastRunId) !== "borrowed") continue;
+    /*
+     * The session's own allocation is unrecoverable, so the binding can never be matched to a run
+     * again. It keeps the agent key it was written with — an actor-less binding would fail the load —
+     * and is closed and unlinked, which is the honest outcome: the run cold-starts.
+     */
+    if (canTransitionSessionBinding(binding.status, "closed")) {
+      binding.status = "closed";
+      changed = true;
+    }
+    for (const run of state.runs) {
+      if (run.sessionBindingId !== binding.id) continue;
+      delete run.sessionBindingId;
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+/**
+ * Rejects persisted runtime records whose actor identity the hub cannot interpret. Every record that
+ * names who produced it must name exactly one actor: a configured agent, or an instance together with
+ * the exact allocation it ran under. A record naming both, or half an instance identity, fails the
+ * load with the offending field named — it is never coerced to the legacy agent path, defaulted, or
+ * dropped, because either would silently hand a record to the wrong principal.
+ *
+ * A record that names no actor at all is accepted only where the hub legitimately writes one: an
+ * event or a chat message it authored itself, or a task update from a principal with no agent. A run,
+ * a task assignment, and an artifact must always say whose work they are.
+ */
+export function assertPersistedActorState(state: State) {
+  for (const [index, run] of state.runs.entries()) assertPersistedActor(run, `Persisted run ${index}`, true);
+  for (const [index, event] of state.events.entries()) assertPersistedActor(event, `Persisted event ${index}`, false);
+  for (const [index, message] of state.messages.entries()) assertPersistedActor(message, `Persisted message ${index}`, false);
+  for (const [index, artifact] of (state.artifacts ?? []).entries()) assertPersistedActor(artifact, `Persisted artifact ${index}`, true);
+  for (const [index, update] of (state.taskUpdates ?? []).entries()) assertPersistedActor(update, `Persisted task update ${index}`, false);
+  for (const [index, task] of (state.tasks ?? []).entries()) {
+    if (task.assignment !== undefined) assertPersistedActor(task.assignment, `Persisted task ${index} assignment`, true);
+  }
+  for (const [index, approval] of (state.approvals ?? []).entries()) {
+    // An approval never carries an agent key; it is identified by its run. Only the instance half can
+    // be half-written, and that must fail the load like any other truncated actor identity.
+    assertPersistedActor(approval, `Persisted approval ${index}`, false);
   }
 }
 
@@ -393,7 +577,7 @@ function removeLegacyDemoRecords(state: State) {
     .filter((agent) => legacyDemoAgents.get(agent.id) === agent.name)
     .map((agent) => agent.id));
   const runIds = new Set(state.runs
-    .filter((run) => legacyDemoRunIds.has(run.id) || agentIds.has(run.agentId))
+    .filter((run) => legacyDemoRunIds.has(run.id) || agentIds.has(run.agentId ?? ""))
     .map((run) => run.id));
   const before = [state.agents.length, state.nodes.length, state.runs.length, state.events.length, state.messages.length];
 
@@ -405,7 +589,7 @@ function removeLegacyDemoRecords(state: State) {
     && !agentIds.has(event.toAgentId ?? "")
     && !runIds.has(event.runId ?? ""));
   state.messages = state.messages.filter((message) =>
-    !agentIds.has(message.agentId)
+    !agentIds.has(message.agentId ?? "")
     && !runIds.has(message.runId ?? ""));
 
   const referencedNodeIds = new Set([
@@ -480,7 +664,9 @@ function addThreadDefaults(state: State) {
       const createdAt = typeof root.createdAt === "string" ? root.createdAt : new Date().toISOString();
       const thread: Thread = {
         id: newId("thread"), title: firstLine.length <= 120 ? firstLine : `${firstLine.slice(0, 119).trimEnd()}…`,
-        objective, summary: "", status: "completed", ownerAgentId: root.agentId, orchestrator: { kind: "agent", agentId: root.agentId }, createdBy: "user",
+        objective, summary: "", status: "completed",
+        ...(root.agentId === undefined ? {} : { ownerAgentId: root.agentId, orchestrator: { kind: "agent" as const, agentId: root.agentId } }),
+        createdBy: "user",
         createdAt, updatedAt: root.finishedAt ?? createdAt, completedAt: root.finishedAt ?? createdAt
       };
       state.threads.push(thread);
@@ -602,8 +788,27 @@ export class Store {
     assertPersistedOrchestratorClientState(loaded);
     assertPersistedProjectProfiles(loaded);
     assertPersistedInstanceState(loaded);
+    assertPersistedTemplateState(loaded);
+    /*
+     * Runs before the actor assertion: a record the previous revision wrote with the borrowed agent
+     * key is migrated, and only a genuinely ambiguous one is refused. It deliberately stays *after*
+     * the session and instance assertions rather than ahead of them. Neither borrowed shape is refused
+     * by an earlier assertion — the both-keys shape reaches only `assertPersistedActorState`, and the
+     * agent-only shape is a well-formed legacy agent record until this migration reinterprets it — so
+     * running earlier would buy nothing, while this migration resolves an agent key against
+     * `state.instances`, `state.agents` and `state.runs` and so must run on an inventory
+     * `assertPersistedInstanceState` has already validated.
+     */
+    const droppedBorrowedKeys = dropBorrowedInstanceAgentKeys(loaded);
+    assertPersistedActorState(loaded);
+    /*
+     * The legacy import runs after every assertion, so it never writes on top of state the hub could
+     * not interpret, and it is decided from its own persisted records rather than from a timestamp:
+     * a restart finds every earlier decision and writes nothing.
+     */
+    const importedTemplates = importLegacyAgentTemplates(loaded, new Date().toISOString());
     if (this.sqlite || removedDemoRecords || addedAgentAvatars || addedCoordination || addedThreads || addedOrchestration
-      || addedThreadOrchestrators || addedApprovalResolvers) await this.save(loaded);
+      || addedThreadOrchestrators || addedApprovalResolvers || droppedBorrowedKeys || importedTemplates) await this.save(loaded);
     this.state = loaded;
   }
 
@@ -706,11 +911,39 @@ export const newMessage = (message: Omit<ChatMessage, "id" | "createdAt">): Chat
 export const newEvent = (event: Omit<TimelineEvent, "id" | "createdAt">): TimelineEvent => ({ ...event, id: newId("evt"), createdAt: new Date().toISOString() });
 
 /**
- * How an event or chat message names the actor behind a run. A legacy agent run names its configured
- * agent; a version-5 instance run carries the instance identity in `agentId` for the required field's
- * sake, and that identity resolves to no agent, so the field is omitted rather than written as an
- * attribution no reader could follow. Every writer that attributes a record to a run uses this, so
- * the two run shapes can never drift apart one call site at a time.
+ * How an event or chat message names the actor behind a run. A version-5 instance run names both
+ * halves of its identity — the instance and the exact allocation — and never an `agentId`, which is
+ * typed as a configured-agent key. A legacy run names its configured agent, and only while that
+ * agent is still configured, so no reader is pointed at a record that is not there. Every writer
+ * that attributes a record to a run uses this, so the two run shapes can never drift apart one call
+ * site at a time.
  */
-export const runAttribution = (state: Readonly<State>, run: Pick<Run, "agentId"> | undefined): { agentId?: string } =>
-  run !== undefined && state.agents.some((item) => item.id === run.agentId) ? { agentId: run.agentId } : {};
+export const runAttribution = (
+  state: Readonly<State>,
+  run: Pick<Run, "agentId" | "instanceId" | "allocationId"> | undefined
+): { agentId?: string; instanceId?: string; allocationId?: string } => {
+  if (run === undefined) return {};
+  if (run.instanceId !== undefined && run.allocationId !== undefined) {
+    return { instanceId: run.instanceId, allocationId: run.allocationId };
+  }
+  return run.agentId !== undefined && state.agents.some((item) => item.id === run.agentId) ? { agentId: run.agentId } : {};
+};
+
+/**
+ * The actor keys a runtime *record* copies from its run. Unlike `runAttribution` this is record
+ * identity rather than display attribution, so it does not require the named agent to still be
+ * configured: a session binding, assignment, or artifact must record whose execution context it
+ * belongs to even after that agent was deleted from the roster.
+ */
+export const runActorKeys = (
+  run: Pick<Run, "agentId" | "instanceId" | "allocationId">
+): { agentId?: string; instanceId?: string; allocationId?: string } => {
+  if (run.instanceId !== undefined && run.allocationId !== undefined) {
+    return { instanceId: run.instanceId, allocationId: run.allocationId };
+  }
+  return run.agentId === undefined ? {} : { agentId: run.agentId };
+};
+
+/** Whether an attribution names an actor at all; an unattributable run writes no chat message. */
+export const hasAttribution = (attribution: { agentId?: string; instanceId?: string }) =>
+  attribution.agentId !== undefined || attribution.instanceId !== undefined;

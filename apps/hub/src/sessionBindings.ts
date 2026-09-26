@@ -10,17 +10,20 @@ import {
   type OrchestratorInbox,
   type Run
 } from "@coffee-shop/protocol";
+import { isThreadOrchestratorActor, recordActor } from "./actors.js";
 import { wakeForRun } from "./continuationRuns.js";
-import { newEvent, newId, runAttribution, type State, type Store } from "./store.js";
+import { newEvent, newId, runActorKeys, runAttribution, type State, type Store } from "./store.js";
 
 /*
  * Harness session bindings.
  *
- * A binding records that an opaque provider session was created for one run's agent, node,
- * harness, transport, workspace (a lease's worktree for a leased run), and thread. Barista reports
- * a session exactly once per run, after the session exists and before its prompt; the hub alone
- * assigns binding identity, lineage, and lifecycle. A binding never moves: a continuation may ask
- * to resume one only on the same node, agent, harness, transport, workspace, and thread, and
+ * A binding records that an opaque provider session was created for one run's actor, node, harness,
+ * transport, workspace (a lease's worktree for a leased run), and thread. The actor is a resident
+ * instance together with the exact allocation it was dispatched against, or, for legacy work, a
+ * configured agent. Barista reports a session exactly once per run, after the session exists and
+ * before its prompt; the hub alone assigns binding identity, lineage, and lifecycle. A binding never
+ * moves: a continuation may ask to resume one only in exactly its own context — the same allocation
+ * included, so an allocation replacement can never resume a session created under the lost one — and
  * anything else starts a new session whose binding replaces it. Provider session history is never
  * authoritative for Coffee Shop state.
  */
@@ -44,18 +47,67 @@ export const nodeAdvertisesResume = (node: ComputeNode | undefined, harnessId: s
  */
 export const sessionResumeUnavailableReason = "unsupported execution: session resume not available for this harness on this Barista";
 
-/** Only a thread owner's non-task run can be continued later; every other session ends with its run. */
-const isContinuable = (state: Readonly<State>, run: Run) =>
-  run.taskId === undefined && state.threads?.some((thread) => thread.id === run.threadId && thread.ownerAgentId === run.agentId) === true;
+/**
+ * Only a thread orchestrator's non-task run can be continued later; every other session ends with
+ * its run. The thread's own orchestrator record decides it, matched against the run's runtime actor,
+ * so an instance-orchestrated thread continues exactly as an agent-orchestrated one did and a worker
+ * resident of the same thread is never mistaken for its orchestrator.
+ */
+const isContinuable = (state: Readonly<State>, run: Run) => {
+  if (run.taskId !== undefined) return false;
+  const thread = state.threads?.find((item) => item.id === run.threadId);
+  return thread !== undefined && isThreadOrchestratorActor(thread, actorOf(run));
+};
+
+/**
+ * The actor a record names, or `undefined` when it names none or names a malformed half of one. A
+ * malformed identity never matches a binding and never continues a session: the resume paths below
+ * are fail-closed, and the load-time assertion is what surfaces the malformed record itself.
+ */
+const actorOf = (record: { agentId?: string; instanceId?: string; allocationId?: string }) => {
+  try {
+    return recordActor(record, "Record");
+  } catch {
+    return undefined;
+  }
+};
+
+/**
+ * Whether two actor identities are the same *logical* actor, ignoring which allocation carried it. A
+ * new session for a replaced allocation closes the stale idle session of the same instance, rather
+ * than leaving an unreachable one behind for ever.
+ */
+const sameActor = (left: HarnessSessionBinding, right: HarnessSessionBinding) => {
+  const [first, second] = [actorOf(left), actorOf(right)];
+  if (first === undefined || second === undefined) return false;
+  if (first.kind !== second.kind) return false;
+  return first.kind === "agent" ? first.agentId === (second as { agentId: string }).agentId
+    : first.instanceId === (second as { instanceId: string }).instanceId;
+};
 
 const sameContext = (left: HarnessSessionBinding, right: HarnessSessionBinding) =>
-  left.threadId === right.threadId && left.agentId === right.agentId && left.nodeId === right.nodeId && left.harnessId === right.harnessId
+  left.threadId === right.threadId && sameActor(left, right) && left.nodeId === right.nodeId && left.harnessId === right.harnessId
   && left.transport === right.transport && left.workspace === right.workspace && left.workspaceLeaseId === right.workspaceLeaseId;
 
-/** Whether a binding belongs to exactly the execution context of `run`. */
+/**
+ * Whether a binding was created for exactly the actor a record names, allocation included. A binding
+ * created under another allocation of the same instance is a different actor context: the session
+ * lives in a process the replacement allocation does not own, so it can never be resumed. An actor
+ * that is absent or half-written on either side never matches.
+ */
+export function bindingActorMatches(binding: HarnessSessionBinding, record: { agentId?: string; instanceId?: string; allocationId?: string }) {
+  const [bindingActor, recordedActor] = [actorOf(binding), actorOf(record)];
+  if (bindingActor === undefined || recordedActor === undefined || bindingActor.kind !== recordedActor.kind) return false;
+  return bindingActor.kind === "agent"
+    ? bindingActor.agentId === (recordedActor as { agentId: string }).agentId
+    : bindingActor.instanceId === (recordedActor as { instanceId: string }).instanceId
+      && bindingActor.allocationId === (recordedActor as { allocationId: string }).allocationId;
+}
+
+/** Whether a binding belongs to exactly the execution context of `run`, allocation included. */
 export function bindingMatchesRun(binding: HarnessSessionBinding, run: Run) {
-  return binding.threadId === run.threadId
-    && binding.agentId === run.agentId
+  return bindingActorMatches(binding, run)
+    && binding.threadId === run.threadId
     && binding.nodeId === run.nodeId
     && binding.harnessId === run.harnessId
     && binding.transport === (run.transport ?? "native-cli")
@@ -167,7 +219,9 @@ export function acceptSessionBinding(state: State, nodeId: string, runId: string
   const binding: HarnessSessionBinding = {
     id: newId("session"),
     threadId: run.threadId,
-    agentId: run.agentId,
+    // Record identity, not attribution: an instance run's session names its instance and the exact
+    // allocation it was created under, and never writes an instance id into the agent-typed key.
+    ...runActorKeys(run),
     nodeId: run.nodeId,
     harnessId: run.harnessId,
     transport: "acp-v1",

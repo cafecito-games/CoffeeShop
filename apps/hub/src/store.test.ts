@@ -97,7 +97,16 @@ test("removes legacy demo records without removing user-created data", async () 
   assert.equal(snapshot.agents[0].avatarColor, "amber");
   assert.deepEqual(snapshot.nodes.map((node) => node.id), ["local-macbook"]);
   assert.deepEqual(snapshot.runs.map((run) => run.id), ["real-run"]);
-  assert.deepEqual(snapshot.events.map((event) => event.id), ["real-event"]);
+  /*
+   * The surviving agent is a minimal legacy record with no harness, model, or workspace, so the
+   * one-shot template import refuses it and says why rather than coercing a template that would place
+   * work differently. That refusal is the only event the load adds.
+   */
+  const imported = snapshot.events.filter((event) => event.title === "Legacy agent could not be imported");
+  assert.equal(imported.length, 1);
+  assert.match(imported[0].detail, /claude-scout.*invalid agent template/);
+  assert.deepEqual(snapshot.events.filter((event) => !imported.includes(event)).map((event) => event.id), ["real-event"]);
+  assert.deepEqual(store.read((state) => state.templates), [], "a refused agent creates no template");
   assert.deepEqual(snapshot.messages.map((message) => message.id), ["real-message"]);
   assert.equal(snapshot.threads?.length, 1);
   assert.equal(snapshot.runs[0].threadId, snapshot.threads?.[0].id);
@@ -456,7 +465,21 @@ test("loads an orchestrator-resolved approval written by a live connection byte 
 
   await store.load();
 
-  assert.deepEqual(await readFile(path), bytes, "a snapshot the hub just wrote is never rewritten on load");
+  /*
+   * The fixture predates the one-shot legacy-agent import, so loading it migrates once: its configured
+   * agent becomes an inert template. A restart then finds that decision and writes nothing, which is
+   * the only property that makes the migration safe to ship.
+   */
+  const migrated = await readFile(path);
+  assert.notDeepEqual(migrated, bytes, "the one-shot legacy import runs on a pre-#78 snapshot");
+  const restarted = new Store(path);
+  await restarted.load();
+  assert.deepEqual(await readFile(path), migrated, "a snapshot the hub just wrote is never rewritten on load");
+  assert.deepEqual(
+    restarted.read((state) => state.legacyTemplateImports?.map((record) => [record.agentId, record.templateId])),
+    [["worker-a", "legacy-worker-a"]],
+    "the import decision is recorded once, by a deterministic marker rather than a timestamp"
+  );
   const snapshot = store.snapshot();
   const approval = snapshot.approvals![0];
   const attachment = snapshot.orchestratorAttachments![0];
@@ -614,7 +637,12 @@ async function loadRunSubmittedFixture() {
 test("loads a state file written before source keys existed without rewriting it", async () => {
   const { store, path, bytes } = await loadRunSubmittedFixture();
 
-  assert.deepEqual(await readFile(path), bytes, "a snapshot the hub just wrote is never rewritten on load");
+  // The pre-#78 fixture migrates its configured agents to templates once; the reload writes nothing.
+  const migrated = await readFile(path);
+  assert.notDeepEqual(migrated, bytes, "the one-shot legacy import runs on a pre-#78 snapshot");
+  const restarted = new Store(path);
+  await restarted.load();
+  assert.deepEqual(await readFile(path), migrated, "a snapshot the hub just wrote is never rewritten on load");
   store.read((state) => {
     assert.ok(!JSON.stringify(state).includes("sourceKey"), "no source key is invented for an existing record");
     assert.equal(recordSourceKey(state.tasks![0]), runSourceKey("run-root"), "a task keeps the identity it was written with");

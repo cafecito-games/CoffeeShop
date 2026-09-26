@@ -21,8 +21,8 @@ import {
   type TaskStatus
 } from "@coffee-shop/protocol";
 import { CoordinationError } from "./coordinationError.js";
-import { callerAgent, callerCanDelegate, callerRun, resolveCallerFor, runSource, type CallerSource } from "./mailbox.js";
-import { newEvent, newId, type State, type Store, type TaskSubmission } from "./store.js";
+import { callerAttribution, callerCanDelegate, callerRun, resolveCallerFor, runSource, type CallerSource } from "./mailbox.js";
+import { newEvent, newId, runActorKeys, type State, type Store, type TaskSubmission } from "./store.js";
 
 export const taskBatchLimits = {
   tasks: 32,
@@ -317,7 +317,8 @@ interface SubmissionSource {
   /** The submitting run, or `undefined` when an external orchestrator submitted the batch. */
   run?: Run;
   threadId: string;
-  agentId?: string;
+  /** The submitting actor: a configured agent, or a resident instance and its exact allocation. */
+  attribution: { agentId?: string; instanceId?: string; allocationId?: string };
   /** The lineage and idempotency identity of the submitter. */
   sourceKey: string;
   /**
@@ -335,7 +336,7 @@ function authorizeSource(state: Readonly<State>, source: CallerSource): Submissi
   return {
     run,
     threadId: caller.thread.id,
-    agentId: callerAgent(caller)?.id,
+    attribution: callerAttribution(caller),
     sourceKey: caller.sourceKey,
     digestIdentity: run ? run.id : caller.sourceKey
   };
@@ -480,7 +481,11 @@ export async function submitTaskBatchForSource(
       id: newId("tasksub"),
       threadId: plan.source.threadId,
       ...(plan.source.run ? { sourceRunId: plan.source.run.id } : { sourceKey: plan.source.sourceKey }),
-      ...(plan.source.agentId === undefined ? {} : { creatorAgentId: plan.source.agentId }),
+      ...(plan.source.attribution.agentId === undefined ? {} : { creatorAgentId: plan.source.attribution.agentId }),
+      ...(plan.source.attribution.instanceId === undefined ? {} : {
+        creatorInstanceId: plan.source.attribution.instanceId,
+        creatorAllocationId: plan.source.attribution.allocationId
+      }),
       idempotencyKey: batch.idempotencyKey,
       digest: plan.digest,
       tasks: batch.tasks.map((task) => ({ key: task.key, taskId: idsByKey.get(task.key)! })),
@@ -495,7 +500,7 @@ export async function submitTaskBatchForSource(
       title: `${created.length} task${created.length === 1 ? "" : "s"} submitted`,
       detail: created.map((task) => task.title).join(", ").slice(0, 240),
       threadId: plan.source.threadId,
-      ...(plan.source.agentId === undefined ? {} : { agentId: plan.source.agentId }),
+      ...plan.source.attribution,
       ...(plan.source.run === undefined ? {} : { runId: plan.source.run.id })
     }));
     result = {
@@ -660,9 +665,9 @@ export function assignTaskAttempt(state: State, taskId: string, run: Run, at: st
   task.attemptRunIds.push(run.id);
   task.assignment = {
     runId: run.id,
-    agentId: run.agentId,
-    ...(run.instanceId === undefined ? {} : { instanceId: run.instanceId }),
-    ...(run.allocationId === undefined ? {} : { allocationId: run.allocationId }),
+    // Record identity, not attribution: an instance attempt names its instance and allocation, and
+    // never writes an instance id into the agent-typed key.
+    ...runActorKeys(run),
     nodeId: run.nodeId,
     harnessId: run.harnessId,
     transport: run.transport ?? "native-cli",
@@ -753,9 +758,12 @@ export interface TaskAttemptProjection {
   runId: string;
   attempt?: number;
   status: Run["status"];
-  agentId: string;
+  /** Compatibility attribution; absent when the attempt was instance-keyed. */
+  agentId?: string;
   /** Version-5: the resident instance that executed the attempt, when it was instance-keyed. */
   instanceId?: string;
+  /** Version-5: the exact allocation the attempt was dispatched against. */
+  allocationId?: string;
   nodeId: string;
   createdAt: string;
   startedAt?: string;
@@ -818,8 +826,10 @@ function projectTask(state: Readonly<State>, task: Task): TaskProjection {
     attempts: task.attemptRunIds.flatMap((runId) => {
       const run = runs.get(runId);
       return run ? [{
-        runId: run.id, attempt: run.attempt, status: run.status, agentId: run.agentId,
-        ...(run.instanceId === undefined ? {} : { instanceId: run.instanceId }), nodeId: run.nodeId,
+        runId: run.id, attempt: run.attempt, status: run.status,
+        ...(run.agentId === undefined ? {} : { agentId: run.agentId }),
+        ...(run.instanceId === undefined ? {} : { instanceId: run.instanceId }),
+        ...(run.allocationId === undefined ? {} : { allocationId: run.allocationId }), nodeId: run.nodeId,
         createdAt: run.createdAt, startedAt: run.startedAt, finishedAt: run.finishedAt, error: run.error,
         transport: run.transport ?? "native-cli",
         ...(run.transportSelection ? { transportSelection: structuredClone(run.transportSelection) } : {})
