@@ -104,7 +104,7 @@ func projectClaudePluginDirectory(projectionContext packProjectionContext) (*Pac
 func confirmClaudePluginDiscovery(ctx context.Context, projectionContext packProjectionContext, projection *PackProjection) error {
 	output, err := runVendorInventory(ctx, projectionContext, []string{"--plugin-dir", projection.Root, "plugin", "details", ManagedProjectionDirectory})
 	if err != nil {
-		return packUnavailablef("the Claude CLI could not confirm that it resolved the projected capability pack skills: %s", err.Error())
+		return packUnavailablef("the Claude CLI could not be asked whether it resolved the projected capability pack skills, so pack discovery is unconfirmed: %s", err.Error())
 	}
 	inventory := claudeSkillInventory(output)
 	for _, name := range projection.SkillNames {

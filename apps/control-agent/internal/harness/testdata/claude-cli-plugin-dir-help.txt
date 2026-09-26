@@ -1,0 +1,13 @@
+  --permission-mode <mode>              Permission mode to use for the session
+                                        (choices: "acceptEdits", "auto",
+                                        "bypassPermissions", "manual",
+                                        "dontAsk", "plan")
+  --plugin-dir <path>                   Load a plugin from a directory or .zip
+                                        for this session only (repeatable:
+                                        --plugin-dir A --plugin-dir B.zip)
+                                        (default: [])
+  --plugin-url <url>                    Fetch a plugin .zip from a URL for this
+                                        session only (repeatable: --plugin-url A
+                                        --plugin-url B) (default: [])
+  -p, --print                           Print response and exit (useful for
+                                        pipes). Note: The workspace trust dialog

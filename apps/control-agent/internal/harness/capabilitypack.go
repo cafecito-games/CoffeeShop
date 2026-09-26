@@ -546,8 +546,8 @@ func (r *Runner) activatePack(ctx context.Context, invocation Invocation, transp
 			r.reportPack("capability pack %s: skill %s declares delegation-only tools that this run was not served, so its delegation path is unavailable", pack.Ref(), skill.ID)
 		}
 	}
-	r.reportPack("capability pack %s (%s) projected for run %s on %s over %s through %s: %s",
-		pack.Ref(), pack.ArchiveDigest, invocation.Run.ID, harnessID, transport, adapter.Surface, strings.Join(projection.SkillNames, ", "))
+	r.reportPack("capability pack activation %s: %s (%s) for run %s on %s over %s through %s: %s",
+		PackProjected, pack.Ref(), pack.ArchiveDigest, invocation.Run.ID, harnessID, transport, adapter.Surface, strings.Join(projection.SkillNames, ", "))
 	return projection, nil
 }
 
@@ -563,9 +563,10 @@ func (r *Runner) unskilled(invocation Invocation, requirement PackRequirement, r
 				Message: "this node requires an active Coffee Shop capability pack and the run was refused before the prompt: " + reason,
 			})
 		}
+		r.reportPack("capability pack activation %s: run %s was refused before the prompt (%s)", PackRefused, invocation.Run.ID, reason)
 		return fmt.Errorf("%w: %s", ErrPackActivation, reason)
 	}
-	r.reportPack("capability pack: run %s proceeds with no Coffee Shop capability pack (%s)", invocation.Run.ID, reason)
+	r.reportPack("capability pack activation %s: run %s proceeds with no Coffee Shop capability pack (%s)", PackUnskilled, invocation.Run.ID, reason)
 	return nil
 }
 
@@ -636,13 +637,34 @@ func writeProjection(root string, pack ActivePack, shape ProjectionShape, metada
 	}
 	names := make([]string, 0, len(written))
 	for path, content := range written {
-		if err := capabilitypack.WriteFileInTree(root, path, content); err != nil {
+		if err := writeProjectionMetadata(root, path, content); err != nil {
 			return nil, fmt.Errorf("write the capability pack projection metadata: %w", err)
 		}
 		names = append(names, path)
 	}
 	slices.Sort(names)
 	return &PackProjection{Shape: shape, Root: root, Files: pack.Tree.Paths(), Metadata: names}, nil
+}
+
+// projectionMetadataPaths is the closed set of Barista-owned files a projection may carry besides the
+// pack's own content: the ownership marker every projection has, and the vendor plugin manifest the
+// Claude CLI requires. Pack content goes through the packaged-path grammar, which deliberately
+// refuses a dot-led segment like `.claude-plugin`, so the metadata paths are an explicit, compiled-in
+// allowlist rather than a relaxation of that grammar. No value here is ever derived from input.
+var projectionMetadataPaths = []string{ProjectionMarkerName, claudePluginManifestPath}
+
+// writeProjectionMetadata writes one Barista-owned metadata file into a projection root this call's
+// caller just created. A path outside the allowlist is refused, so there is no way to write an
+// arbitrary path through this function even if a caller passed one.
+func writeProjectionMetadata(root, path string, content []byte) error {
+	if !slices.Contains(projectionMetadataPaths, path) {
+		return fmt.Errorf("%q is not a Barista projection metadata path", path)
+	}
+	target := filepath.Join(root, filepath.FromSlash(path))
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(target, content, 0o644)
 }
 
 // readProjectionMarker reads the ownership marker at the root of an existing projection. A subtree
@@ -701,48 +723,57 @@ func replaceManagedProjection(parent, root string, pack ActivePack, metadata map
 	if err != nil || information.Mode()&os.ModeSymlink != 0 || !information.IsDir() {
 		return nil, packUnavailablef("the vendor skills root %s is not an existing directory, so Barista has nowhere it owns to project into", parent)
 	}
-	temporary := filepath.Join(parent, ManagedProjectionDirectory+managedProjectionTemporarySuffix)
-	// The temporary sibling is Barista's, and it is the only other path cleanup may remove. A
-	// leftover from an interrupted replacement is removed before the new one is written, never
+	// Exactly one temporary sibling is created, and both of the paths a replacement needs live inside
+	// it: the complete incoming subtree, and the slot the outgoing one is moved to. That is what keeps
+	// the set of paths Barista ever creates in a vendor's skills root to the two acceptance criterion 9
+	// names — the managed subtree and this one sibling — rather than a third.
+	temporary := managedTemporarySibling(parent)
+	incoming := filepath.Join(temporary, "incoming")
+	outgoing := filepath.Join(temporary, "outgoing")
+	// A leftover from an interrupted replacement is removed before the new one is written, never
 	// adopted: it is by definition an incomplete subtree.
 	if err := removeIfOwned(temporary); err != nil {
 		return nil, fmt.Errorf("%w: %s", ErrPackActivation, err.Error())
 	}
-	projection, err := writeProjection(temporary, pack, ProjectionManaged, metadata)
+	projection, err := writeProjection(incoming, pack, ProjectionManaged, metadata)
 	if err != nil {
 		os.RemoveAll(temporary)
 		return nil, err
 	}
 	if hooks.beforeRename != nil {
-		if hookErr := hooks.beforeRename(temporary); hookErr != nil {
+		if hookErr := hooks.beforeRename(incoming); hookErr != nil {
 			os.RemoveAll(temporary)
 			return nil, fmt.Errorf("%w: the managed capability pack projection could not be atomically replaced: %s", ErrPackActivation, hookErr.Error())
 		}
 	}
-	previous := ""
+	movedAside := false
 	if _, statErr := os.Lstat(root); statErr == nil {
-		previous = filepath.Join(parent, ManagedProjectionDirectory+managedProjectionTemporarySuffix+".previous")
-		os.RemoveAll(previous)
-		if renameErr := os.Rename(root, previous); renameErr != nil {
+		if renameErr := os.Rename(root, outgoing); renameErr != nil {
 			os.RemoveAll(temporary)
 			return nil, fmt.Errorf("%w: the previous managed capability pack projection could not be moved aside, so it was left intact", ErrPackActivation)
 		}
+		movedAside = true
 	}
-	if renameErr := os.Rename(temporary, root); renameErr != nil {
-		if previous != "" {
+	if renameErr := os.Rename(incoming, root); renameErr != nil {
+		if movedAside {
 			// Put the previous complete projection back; the operator's state is what it was.
-			os.Rename(previous, root)
+			os.Rename(outgoing, root)
 		}
 		os.RemoveAll(temporary)
 		return nil, fmt.Errorf("%w: the managed capability pack projection could not be atomically replaced, so the previous projection was left intact", ErrPackActivation)
 	}
-	if previous != "" {
-		if removeErr := os.RemoveAll(previous); removeErr != nil {
-			return nil, fmt.Errorf("%w: the previous managed capability pack projection could not be removed after the replacement succeeded", ErrPackActivation)
-		}
+	if removeErr := os.RemoveAll(temporary); removeErr != nil {
+		return nil, fmt.Errorf("%w: the previous managed capability pack projection could not be removed after the replacement succeeded", ErrPackActivation)
 	}
 	projection.Root = root
 	return projection, nil
+}
+
+// managedTemporarySibling is the one Barista-created temporary path inside a vendor's skills root. It
+// is derived from ManagedProjectionDirectory so the two names acceptance criterion 9 excludes share
+// one definition.
+func managedTemporarySibling(parent string) string {
+	return filepath.Join(parent, ManagedProjectionDirectory+managedProjectionTemporarySuffix)
 }
 
 // projectionHooks are the injection points a test uses to interrupt a replacement exactly where a
@@ -854,6 +885,44 @@ func frontMatterName(content []byte) string {
 	return ""
 }
 
+// carriesOwnershipMarker reports whether path is a real directory whose subtree carries a Barista
+// ownership marker, which is the only evidence that makes a leftover Barista's to remove. It never
+// follows a symlink and reads a bounded number of bounded marker files.
+func carriesOwnershipMarker(path string) (bool, string) {
+	information, err := os.Lstat(path)
+	if err != nil {
+		return false, "it could not be inspected"
+	}
+	if information.Mode()&os.ModeSymlink != 0 {
+		return false, "it is a symlink, which is never followed while cleaning"
+	}
+	if !information.IsDir() {
+		return false, "it is not a directory Barista created"
+	}
+	owned := false
+	inspected := 0
+	filepath.WalkDir(path, func(candidate string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil || owned {
+			return nil
+		}
+		if entry.IsDir() || entry.Name() != ProjectionMarkerName || !entry.Type().IsRegular() {
+			return nil
+		}
+		inspected++
+		if inspected > maximumForeignSkillFiles {
+			return fs.SkipAll
+		}
+		if _, err := readProjectionMarker(filepath.Dir(candidate)); err == nil {
+			owned = true
+		}
+		return nil
+	})
+	if !owned {
+		return false, "it carries no Barista ownership marker"
+	}
+	return true, ""
+}
+
 // reconcileStaleProjections removes run-scoped projections a crashed daemon left behind. It runs at
 // daemon start and nowhere else, it only ever removes entries directly beneath the one Barista-owned
 // run-scoped prefix, and it never follows a symlink. Managed projections are deliberately untouched:
@@ -875,6 +944,14 @@ func ReconcileStaleProjections(dataRoot string) ([]string, error) {
 	var failures []string
 	for _, entry := range entries {
 		path := filepath.Join(prefix, entry.Name())
+		// Only a directory that actually carries Barista's ownership marker is removed. Anything else
+		// under the prefix — a file an operator left there, a directory Barista did not write, a
+		// symlink — is retained and reported, because Barista never deletes a path it did not create.
+		owned, reason := carriesOwnershipMarker(path)
+		if !owned {
+			failures = append(failures, fmt.Sprintf("%s was retained because %s", path, reason))
+			continue
+		}
 		if err := removeIfOwned(path); err != nil {
 			failures = append(failures, err.Error())
 			continue

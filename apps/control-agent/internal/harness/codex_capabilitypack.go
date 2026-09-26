@@ -200,7 +200,7 @@ func codexSkillCollisions(parent, root string, projected []string) ([]SkillColli
 func confirmCodexSkillDiscovery(ctx context.Context, projectionContext packProjectionContext, projection *PackProjection) error {
 	output, err := runVendorInventory(ctx, projectionContext, []string{"debug", "prompt-input", "list the available skills"})
 	if err != nil {
-		return packUnavailablef("the Codex CLI could not confirm that it resolved the projected capability pack skills: %s", err.Error())
+		return packUnavailablef("the Codex CLI could not be asked whether it resolved the projected capability pack skills, so pack discovery is unconfirmed: %s", err.Error())
 	}
 	for _, skill := range projectionContext.Pack.Manifest.Skills {
 		path := filepath.Join(projection.Root, filepath.FromSlash(skill.Path))
@@ -212,15 +212,24 @@ func confirmCodexSkillDiscovery(ctx context.Context, projectionContext packProje
 }
 
 // runVendorInventory runs one vendor inventory command against the executable this run will launch.
-// It is read-only by construction — both commands were verified to leave a fake HOME byte-for-byte
-// unchanged — is bounded in time and output, inherits the launch environment so it reads the same
-// configuration root the run will, and is never given the run's MCP token.
+// Both commands were verified read-only against a fake HOME whose every file path, mode, and content
+// digest was identical before and after: `claude --plugin-dir <root> plugin details <name>` and
+// `codex debug prompt-input <prompt>` each changed nothing. It is bounded in time and output,
+// inherits the launch environment so it reads the same configuration root the run will, and is never
+// given the run's MCP token.
+//
+// One property is worth naming precisely, because it is the only way a confirmation touches anything
+// outside the managed subtree: a vendor CLI invoked against a configuration home it has never seen
+// performs its own first-run initialization there — Codex, for instance, seeds its built-in
+// $CODEX_HOME/skills/.system tree. Those are the vendor's writes, made by the vendor's own binary,
+// and the run being confirmed performs exactly the same initialization moments later when it starts.
+// Barista itself writes nothing outside the one named managed subtree and its one temporary sibling.
 func runVendorInventory(ctx context.Context, projectionContext packProjectionContext, arguments []string) (string, error) {
-	if projectionContext.Binary == "" {
-		return "", errors.New("the harness has no resolved executable to confirm discovery with")
-	}
 	if projectionContext.inventory != nil {
 		return projectionContext.inventory(ctx, projectionContext.Binary, arguments)
+	}
+	if projectionContext.Binary == "" {
+		return "", errors.New("the harness has no resolved executable to confirm discovery with")
 	}
 	directory, err := os.MkdirTemp(projectionContext.DataRoot, "barista-pack-confirm-")
 	if err != nil {
