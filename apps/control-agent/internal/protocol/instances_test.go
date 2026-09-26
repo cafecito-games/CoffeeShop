@@ -44,9 +44,9 @@ func instanceFixtureProducer() map[string]any {
 		"release":         InstanceHubMessage{Type: "instance.release", InstanceID: i.ID, AllocationID: a.ID, Mode: "drain"},
 		"heartbeat":       InstanceControlMessage{Type: "heartbeat", NodeID: a.NodeID, ActiveRuns: instancePointer(0), ActiveInstances: instancePointer(1), ActiveInstanceIDs: instancePointer([]string{i.ID}), At: instanceAt},
 		"heartbeat-empty": InstanceControlMessage{Type: "heartbeat", NodeID: a.NodeID, ActiveRuns: instancePointer(0), ActiveInstances: instancePointer(0), ActiveInstanceIDs: instancePointer([]string{}), At: instanceAt},
-		"sync":            InstanceControlMessage{Type: "sync.complete", NodeID: a.NodeID, ActiveRunIDs: instancePointer([]string{}), ActiveInstanceIDs: instancePointer([]string{i.ID}), At: instanceAt},
-		"sync-empty":      InstanceControlMessage{Type: "sync.complete", NodeID: a.NodeID, ActiveInstanceIDs: instancePointer([]string{}), At: instanceAt},
-		"sync-absent":     InstanceControlMessage{Type: "sync.complete", NodeID: a.NodeID, At: instanceAt},
+		"sync":            Outbound{Type: "sync.complete", NodeID: a.NodeID, ActiveRunIDs: instancePointer([]string{}), ActiveInstanceIDs: instancePointer([]string{i.ID}), At: instanceAt},
+		"sync-empty":      Outbound{Type: "sync.complete", NodeID: a.NodeID, ActiveInstanceIDs: instancePointer([]string{}), At: instanceAt},
+		"sync-absent":     Outbound{Type: "sync.complete", NodeID: a.NodeID, At: instanceAt},
 		// register is produced from Outbound, the struct controlplane.Client.attach actually writes.
 		// Producing it from InstanceControlMessage instead hid a real defect: that struct's
 		// ActiveRuns is a pointer, so the fixture carried three top-level keys and passed the v5

@@ -74,6 +74,22 @@ func TestDispatchPreservesDurableThreadIdentity(t *testing.T) {
 // "activeRuns":0 on every message, which heartbeat requires, sync.complete tolerates as optional,
 // and register is refused for. Asserting the whole key set rather than the absence of one field
 // means any future non-omitempty addition to Outbound fails here instead of in the system suite.
+// TestZeroHeartbeatStillEncodesActiveRuns pins the property this fix depends on at the JSON layer:
+// heartbeat's v5 contract requires activeRuns, so an idle node reporting zero must still encode the
+// field. omitempty on a *int drops only nil, but asserting the encoded bytes means a future change
+// to a value type with omitempty -- which would drop a zero -- fails here rather than silently
+// removing a required field from every idle heartbeat.
+func TestZeroHeartbeatStillEncodesActiveRuns(t *testing.T) {
+	activeRuns := 0
+	activeInstances := 0
+	activeInstanceIDs := []string{}
+	data, err := json.Marshal(Outbound{Type: "heartbeat", NodeID: "node-one", ActiveRuns: &activeRuns,
+		ActiveInstances: &activeInstances, ActiveInstanceIDs: &activeInstanceIDs, At: "2026-09-11T12:00:00Z"})
+	require.NoError(t, err)
+	require.Contains(t, string(data), `"activeRuns":0`, "heartbeat must encode a zero activeRuns; its contract requires the field")
+	require.JSONEq(t, `{"type":"heartbeat","nodeId":"node-one","activeRuns":0,"activeInstances":0,"activeInstanceIds":[],"at":"2026-09-11T12:00:00Z"}`, string(data))
+}
+
 func TestRegisterCarriesOnlyTheKeysItsContractAdmits(t *testing.T) {
 	activeInstances := 0
 	data, err := json.Marshal(Outbound{Type: "register", ProtocolVersion: LatestVersion, Node: &ComputeNode{
