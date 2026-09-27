@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  approvalDeliveryStatuses, approvalOptionKinds, approvalStatuses, harnessEventStreamStatuses, harnessIds,
+  approvalDeliveryStatuses, approvalOptionKinds, approvalStatuses, artifactKinds, harnessEventStreamStatuses, harnessIds,
   harnessTransports, placementRequirementKinds, planEntryPriorities, planEntryStatuses, runStatuses,
   sessionBindingStatuses, taskDependencyPolicies, taskMessageKinds, taskStatuses, toolCallKinds,
   toolCallStatuses, workspaceCleanupPolicies, workspaceIsolationPolicies, workspaceLeaseStatuses,
-  workspaceRetentionReasons, orchestratorAttachmentStatuses, orchestratorClientScopes, validateProjectProfile, type Snapshot
+  workspaceRetentionReasons, orchestratorAttachmentStatuses, orchestratorClientScopes, validateArtifactPreview, validateProjectProfile, type Snapshot
 } from "@coffee-shop/protocol";
 
 export type ConnectionStatus = "connecting" | "connected" | "reconnecting" | "disconnected" | "authentication-required";
@@ -113,7 +113,7 @@ function isArtifact(value: unknown): boolean {
     && isOptionalString(value.allocationId)
     && isString(value.relativePath)
     && isString(value.title)
-    && isOneOf(value.kind, ["patch", "report", "test-results", "log", "image", "other"])
+    && isOneOf(value.kind, artifactKinds)
     && isString(value.mediaType)
     && isString(value.summary)
     && isNumber(value.size)
@@ -549,6 +549,8 @@ export function isSnapshot(value: unknown): value is Snapshot {
     && (value.threads === undefined || isArrayOf(value.threads, isThread))
     && (value.delegations === undefined || isArrayOf(value.delegations, isDelegation))
     && (value.artifacts === undefined || isArrayOf(value.artifacts, isArtifact))
+    && (value.artifactPreviews === undefined
+      || isArrayOf(value.artifactPreviews, (preview) => validateArtifactPreview(preview, value.generatedAt).ok))
     && (value.tasks === undefined || isArrayOf(value.tasks, isTask))
     && (value.taskMessages === undefined || isArrayOf(value.taskMessages, isTaskMessage))
     && (value.taskMessageAcknowledgements === undefined || isArrayOf(value.taskMessageAcknowledgements, isTaskMessageAcknowledgement))
