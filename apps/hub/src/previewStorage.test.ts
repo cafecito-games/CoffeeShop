@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { lstat, mkdir, readFile, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, readFile, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
@@ -57,6 +57,22 @@ test("invalid request bytes and an existing conflicting blob never overwrite imm
     (error: unknown) => error instanceof PreviewStorageError && error.code === "storage-conflict"
   );
   assert.equal(await readFile(join(directory, "artifacts", expected.id), "utf8"), "conflict");
+});
+
+test("normalizes an exact legacy blob without rewriting its bytes", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "coffee-shop-preview-storage-"));
+  const storage = new PreviewStorage(directory);
+  const body = Buffer.from("legacy artifact body");
+  const expected = { id: "artifact-one", size: body.length, sha256: digest(body), maximumBytes: body.length };
+  const path = join(directory, "artifacts", expected.id);
+  await mkdir(join(directory, "artifacts"), { mode: 0o700 });
+  await writeFile(path, body);
+  await chmod(path, 0o644);
+
+  assert.equal((await stat(path)).mode & 0o777, 0o644);
+  assert.equal((await storage.ingestArtifact(Readable.from([body]), expected)).replayed, true);
+  assert.deepEqual(await readFile(path), body);
+  assert.equal((await stat(path)).mode & 0o777, 0o600);
 });
 
 test("publishes and strictly re-verifies one canonical prepared tree without overwriting it", async () => {

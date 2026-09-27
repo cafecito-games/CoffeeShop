@@ -760,16 +760,16 @@ async function settleRecoveryFailure(
   at: string
 ) {
   try {
-    const processing = preview.status === "processing"
-      ? await beginProcessing(store, preview.id, at)
-      : await beginProcessing(store, preview.id, at);
+    const processing = await beginProcessing(store, preview.id, at);
     await settleProcessing(store, {
       previewId: preview.id, artifactId: artifact.id, artifactSha256: artifact.sha256,
       processingGeneration: processing.generation, outcome: "failed", failureCode, at
     });
   } catch (error) {
     if (!(error instanceof CoordinationError
-      && ["preview_expired", "invalid_transition", "generation_mismatch", "idempotency_conflict"].includes(error.code))) throw error;
+      && ["preview_expired", "invalid_transition", "generation_mismatch", "idempotency_conflict"].includes(error.code))) {
+      throw preparationError(error);
+    }
   }
 }
 

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile as execFileCallback } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
@@ -596,6 +596,44 @@ test("startup recovery covers committed blob, processing staging, published targ
     await recoverPreviewPreparation(restarted, new PreviewStorage(directory), () => after(4));
     assert.equal(restarted.snapshot(after(5)).artifactPreviews?.[0].status, "ready", `${kind} ready restart`);
     assert.equal(restarted.read((state) => state.previewProcessingReceipts?.length), 1, `${kind} ready replay`);
+  }
+});
+
+test("startup recovery migrates exact legacy blobs and bounds corrupt pre-upload conflicts", async () => {
+  {
+    const { store, storage, directory } = await fixture();
+    const bytes = validBundle();
+    const registered = await register(store, bytes);
+    const artifactDirectory = join(directory, "artifacts");
+    const artifactPath = join(artifactDirectory, registered.artifact.id);
+    await mkdir(artifactDirectory, { mode: 0o700 });
+    await writeFile(artifactPath, bytes);
+    await chmod(artifactPath, 0o644);
+
+    await recoverPreviewPreparation(store, storage, () => after(1));
+
+    assert.equal((await stat(artifactPath)).mode & 0o777, 0o600);
+    assert.equal(store.snapshot(after(2)).artifacts?.[0].uploaded, true);
+    assert.equal(store.snapshot(after(2)).artifactPreviews?.[0].status, "ready");
+  }
+
+  {
+    const { store, storage, directory } = await fixture();
+    const bytes = validBundle();
+    const registered = await register(store, bytes);
+    await mkdir(join(directory, "artifacts"), { mode: 0o700 });
+    await writeFile(join(directory, "artifacts", registered.artifact.id), Buffer.alloc(bytes.length, 1));
+
+    await assert.rejects(
+      recoverPreviewPreparation(store, storage, () => after(1)),
+      (error: unknown) => error instanceof ArtifactIngestionError
+        && error.code === "storage-conflict"
+        && error.failureCode === "storage-conflict"
+        && error.message === "Immutable preview storage conflicts with its registered identity"
+    );
+    assert.equal(store.snapshot(after(2)).artifacts?.[0].uploaded, false);
+    assert.equal(store.snapshot(after(2)).artifactPreviews?.[0].status, "upload-pending");
+    assert.equal(store.snapshot(after(2)).artifactPreviews?.[0].processingGeneration, 0);
   }
 });
 

@@ -166,7 +166,13 @@ async function hashRegularFile(path: string) {
       hash.update(buffer.subarray(0, bytesRead));
       position += bytesRead;
     }
-    return { size: metadata.size, sha256: hash.digest("hex"), mode: metadata.mode & 0o777 };
+    return {
+      size: metadata.size,
+      sha256: hash.digest("hex"),
+      mode: metadata.mode & 0o777,
+      device: metadata.dev,
+      inode: metadata.ino
+    };
   } catch (error) {
     if (error instanceof PreviewStorageError) throw error;
     throw new PreviewStorageError("storage-conflict", "Stored content could not be verified", { cause: error });
@@ -436,9 +442,30 @@ export class PreviewStorage {
     safeDigest(expectation.sha256);
     try {
       await this.requireRealDirectory(this.artifactDirectory);
-      const actual = await hashRegularFile(this.artifactPath(expectation.id));
-      if (actual.size !== expectation.size || actual.sha256 !== expectation.sha256 || actual.mode !== 0o600) {
+      const path = this.artifactPath(expectation.id);
+      const actual = await hashRegularFile(path);
+      if (actual.size !== expectation.size || actual.sha256 !== expectation.sha256
+        || (actual.mode !== 0o600 && actual.mode !== 0o644)) {
         throw new PreviewStorageError("storage-conflict", "Immutable artifact content conflicts with its registration");
+      }
+      if (actual.mode === 0o644) {
+        let handle;
+        try {
+          handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+          const metadata = await handle.stat();
+          if (!metadata.isFile() || metadata.dev !== actual.device || metadata.ino !== actual.inode
+            || (metadata.mode & 0o777) !== 0o644) {
+            throw new PreviewStorageError("storage-conflict", "Legacy artifact content changed during permission migration");
+          }
+          await handle.chmod(0o600);
+          await handle.sync();
+        } finally {
+          await handle?.close();
+        }
+        const normalized = await hashRegularFile(path);
+        if (normalized.size !== expectation.size || normalized.sha256 !== expectation.sha256 || normalized.mode !== 0o600) {
+          throw new PreviewStorageError("storage-conflict", "Legacy artifact content changed during permission migration");
+        }
       }
       return "exact";
     } catch (error) {
