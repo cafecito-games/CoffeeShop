@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import {
   agentAvatarColors,
@@ -51,6 +52,7 @@ import {
   type RemoteReleaseRequest
 } from "./instances.js";
 import { assertPersistedSessionState } from "./persistedSessionState.js";
+import { PreviewStorage } from "./previewStorage.js";
 import { recordTaskEvents, type TaskEventEntry, type TaskEventStream } from "./taskEvents.js";
 
 /** The hub's durable record of one accepted task batch, used to answer idempotent replays. */
@@ -1140,17 +1142,23 @@ export class Store {
   getInstance(id: string) { return this.state.instances?.find((instance) => instance.id === id); }
   getInstanceAllocation(id: string) { return this.state.allocations?.find((allocation) => allocation.id === id); }
 
+  /** Root for Hub-owned bytes, deliberately adjacent to (and outside) the durable state payload. */
+  storageRootDirectory() {
+    return dirname(this.path);
+  }
+
   async writeArtifactContent(id: string, content: Buffer) {
-    const directory = resolve(dirname(this.path), "artifacts");
-    await mkdir(directory, { recursive: true });
-    const destination = resolve(directory, id);
-    const temporary = `${destination}.${process.pid}.tmp`;
-    await writeFile(temporary, content);
-    await rename(temporary, destination);
+    const storage = new PreviewStorage(this.storageRootDirectory());
+    await storage.ingestArtifact(Readable.from([content]), {
+      id,
+      size: content.length,
+      sha256: createHash("sha256").update(content).digest("hex"),
+      maximumBytes: content.length
+    });
   }
 
   async readArtifactContent(id: string) {
-    return readFile(resolve(dirname(this.path), "artifacts", id));
+    return new PreviewStorage(this.storageRootDirectory()).readArtifact(id);
   }
 
   /**

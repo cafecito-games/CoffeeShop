@@ -139,6 +139,10 @@ test("stores artifact bytes outside the JSON snapshot", async () => {
   await store.load();
   await store.writeArtifactContent("artifact-safe-id", Buffer.from("artifact body"));
   assert.equal((await store.readArtifactContent("artifact-safe-id")).toString(), "artifact body");
+  await assert.rejects(store.writeArtifactContent("artifact-safe-id", Buffer.from("replacement")));
+  assert.equal((await store.readArtifactContent("artifact-safe-id")).toString(), "artifact body", "content is immutable");
+  await store.writeArtifactContent("artifact-empty", Buffer.alloc(0));
+  assert.equal((await store.readArtifactContent("artifact-empty")).length, 0, "ordinary empty artifacts remain supported");
   assert.doesNotMatch(await readFile(path, "utf8"), /artifact body/);
 });
 
