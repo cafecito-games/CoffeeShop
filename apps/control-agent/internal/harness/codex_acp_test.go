@@ -51,7 +51,7 @@ func executeCodex(t *testing.T, options codexRunOptions) codexRun {
 	t.Cleanup(func() { acptest.KillDescendants(t, record) })
 	bridgeContext, stopBridge := context.WithCancel(context.Background())
 	t.Cleanup(stopBridge)
-	bridge := mcpserver.New(nil, nil)
+	bridge := mcpserver.New(nil, nil, "")
 	require.NoError(t, bridge.Start(bridgeContext))
 	workspace := t.TempDir()
 	grant, err := bridge.Grant("run-codex", workspace, false)
