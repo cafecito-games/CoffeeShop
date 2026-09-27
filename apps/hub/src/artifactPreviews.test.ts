@@ -297,6 +297,15 @@ test("processing requires exact uploaded bytes, advances generations, and settle
   await assert.rejects(settleProcessing(store, {
     ...settlement, outcome: "failed", failureCode: "bundle-invalid", at: after(180)
   }), errorCode("idempotency_conflict"));
+
+  const settlementExpiry = settled.preview.expiresAt;
+  const renewed = await renewPreview(store, registered.preview.id, previewBundleContract.defaultTtlSeconds, after(240));
+  assert.notEqual(renewed.expiresAt, settlementExpiry);
+  const restarted = new Store(path);
+  await restarted.load();
+  const replayAfterRenewal = await settleProcessing(restarted, { ...settlement, at: after(300) });
+  assert.equal(replayAfterRenewal.preview.expiresAt, settlementExpiry, "replay preserves the settlement-time expiry");
+  assert.equal(restarted.snapshot(after(300)).artifactPreviews?.[0].expiresAt, renewed.expiresAt, "replay keeps the renewed current expiry");
 });
 
 test("failed previews retry with a fresh generation and stale or future results cannot alter it", async () => {
