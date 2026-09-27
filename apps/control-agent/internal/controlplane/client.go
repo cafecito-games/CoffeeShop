@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -75,7 +74,7 @@ func NewClient(cfg config.Config, node protocol.ComputeNode, runner *harness.Run
 	activeInstances := 0
 	client.node.InstanceCapacity = &instanceCapacity
 	client.node.ActiveInstances = &activeInstances
-	client.bridge = mcpserver.New(client.callHub, client.uploadArtifact)
+	client.bridge = mcpserver.New(client.callHub, client.uploadArtifact, cfg.DataRoot)
 	return client
 }
 
@@ -661,11 +660,11 @@ func (client *Client) failPending(err error) {
 func (client *Client) uploadArtifact(ctx context.Context, uploadPath string, content io.Reader, size int64) error {
 	endpoint, err := httpEndpoint(client.config.ControlEndpoint, uploadPath)
 	if err != nil {
-		return err
+		return &mcpserver.UploadError{}
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPut, endpoint, content)
 	if err != nil {
-		return err
+		return &mcpserver.UploadError{}
 	}
 	request.ContentLength = size
 	request.Header.Set("Content-Type", "application/octet-stream")
@@ -674,12 +673,14 @@ func (client *Client) uploadArtifact(ctx context.Context, uploadPath string, con
 	}
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
-		return err
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return &mcpserver.UploadError{Uncertain: true}
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(response.Body, 4*1024))
-		return fmt.Errorf("hub returned %s: %s", response.Status, strings.TrimSpace(string(body)))
+		return &mcpserver.UploadError{StatusCode: response.StatusCode}
 	}
 	return nil
 }

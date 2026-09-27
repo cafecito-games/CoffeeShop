@@ -237,6 +237,236 @@
       "idempotentHint": true,
       "readOnlyHint": false
     },
+    "description": "Package and publish a static directory from the current run workspace as a deterministic preview bundle. Paths are relative, and retries use the same stable idempotency key and unchanged arguments.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "entrypoint": {
+          "type": "string"
+        },
+        "idempotencyKey": {
+          "type": "string"
+        },
+        "relativePath": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "ttlSeconds": {
+          "maximum": 604800,
+          "minimum": 300,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "relativePath",
+        "entrypoint",
+        "title",
+        "idempotencyKey"
+      ],
+      "type": "object"
+    },
+    "name": "publish_preview",
+    "outputSchema": {
+      "properties": {
+        "artifact": {
+          "properties": {
+            "agentId": {
+              "type": "string"
+            },
+            "allocationId": {
+              "type": "string"
+            },
+            "createdAt": {
+              "type": "string"
+            },
+            "downloadPath": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "idempotencyKey": {
+              "type": "string"
+            },
+            "instanceId": {
+              "type": "string"
+            },
+            "kind": {
+              "enum": [
+                "preview-bundle"
+              ],
+              "type": "string"
+            },
+            "mediaType": {
+              "enum": [
+                "application/vnd.coffee-shop.preview-bundle+tar+gzip"
+              ],
+              "type": "string"
+            },
+            "relativePath": {
+              "type": "string"
+            },
+            "runId": {
+              "type": "string"
+            },
+            "sha256": {
+              "type": "string"
+            },
+            "size": {
+              "type": "integer"
+            },
+            "summary": {
+              "type": "string"
+            },
+            "threadId": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            },
+            "uploaded": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "id",
+            "threadId",
+            "runId",
+            "relativePath",
+            "title",
+            "kind",
+            "mediaType",
+            "summary",
+            "size",
+            "sha256",
+            "downloadPath",
+            "uploaded",
+            "idempotencyKey",
+            "createdAt"
+          ],
+          "type": "object"
+        },
+        "created": {
+          "type": "boolean"
+        },
+        "preview": {
+          "properties": {
+            "accessState": {
+              "enum": [
+                "eligible",
+                "unavailable"
+              ],
+              "type": "string"
+            },
+            "agentId": {
+              "type": "string"
+            },
+            "allocationId": {
+              "type": "string"
+            },
+            "artifactId": {
+              "type": "string"
+            },
+            "artifactSha256": {
+              "type": "string"
+            },
+            "createdAt": {
+              "type": "string"
+            },
+            "entrypoint": {
+              "type": "string"
+            },
+            "expiredAt": {
+              "type": "string"
+            },
+            "expiresAt": {
+              "type": "string"
+            },
+            "failedAt": {
+              "type": "string"
+            },
+            "failureCode": {
+              "enum": [
+                "upload-failed",
+                "bundle-invalid",
+                "path-invalid",
+                "entrypoint-invalid",
+                "limit-exceeded",
+                "storage-conflict",
+                "processing-cancelled",
+                "processing-failed"
+              ],
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "instanceId": {
+              "type": "string"
+            },
+            "processingGeneration": {
+              "type": "integer"
+            },
+            "readyAt": {
+              "type": "string"
+            },
+            "runId": {
+              "type": "string"
+            },
+            "status": {
+              "enum": [
+                "upload-pending",
+                "processing",
+                "ready",
+                "failed",
+                "expired"
+              ],
+              "type": "string"
+            },
+            "threadId": {
+              "type": "string"
+            },
+            "updatedAt": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "artifactId",
+            "artifactSha256",
+            "threadId",
+            "runId",
+            "entrypoint",
+            "status",
+            "processingGeneration",
+            "createdAt",
+            "updatedAt",
+            "expiresAt",
+            "accessState"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "artifact",
+        "preview",
+        "created"
+      ],
+      "type": "object"
+    },
+    "title": "Publish preview"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "readOnlyHint": false
+    },
     "description": "Refine the current thread title, objective, or summary, or mark it active or completed. Archival is reserved for the operator.",
     "inputSchema": {
       "additionalProperties": false,

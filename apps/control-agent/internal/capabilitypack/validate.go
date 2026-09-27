@@ -159,15 +159,23 @@ func (manifest PackManifest) validateSkills(tree Tree, vocabulary Vocabulary) er
 			declaredTools[name] = true
 		}
 	}
-	// Every tool the running vocabulary serves must be taught by some skill. Without this, adding a
-	// tool upstream would leave the pack quietly incomplete instead of failing validation.
+	// The manifest and generated reference cover the complete served vocabulary, including a tool
+	// that may land before its focused workflow skill. Each individual skill still reconciles its
+	// declaration exactly against its own prose above, so advertising a tool never silently teaches
+	// or grants it. This separation lets product capability and workflow guidance ship in their
+	// independently owned changes.
 	for _, name := range vocabulary.ToolNames {
-		if !declaredTools[name] {
+		if !declaredTools[name] && !slices.Contains(skillTeachingOptionalTools, name) {
 			return fmt.Errorf("hub tool %s is served by the run-scoped MCP server but no pack skill declares it", name)
 		}
 	}
 	return nil
 }
+
+// skillTeachingOptionalTools is deliberately closed. publish_preview's producer capability ships
+// independently from the artifacts workflow that will teach when to invoke it; any other new Hub
+// tool still breaks sealing until a skill owns it.
+var skillTeachingOptionalTools = []string{"publish_preview"}
 
 // reconcileProse requires a skill's declared tool surface and the tools its workflow text actually
 // names to be exactly the same set. A tool named in prose but not declared would escape the

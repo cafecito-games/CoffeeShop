@@ -4,6 +4,7 @@ go 1.26
 
 require (
 	github.com/stretchr/testify v1.11.1
+	golang.org/x/text v0.42.0
 	nhooyr.io/websocket v1.8.17
 )
 

@@ -47,7 +47,7 @@ func TestRunScopedToolsAndAuthorization(t *testing.T) {
 	defer cancel()
 	server := New(func(_ context.Context, _ string, _ string, _ json.RawMessage) (json.RawMessage, error) {
 		return json.RawMessage(`{"ok":true}`), nil
-	}, nil)
+	}, nil, t.TempDir())
 	require.NoError(t, server.Start(ctx))
 	worker, err := server.Grant("run-worker", t.TempDir(), false)
 	require.NoError(t, err)
@@ -61,7 +61,7 @@ func TestRunScopedToolsAndAuthorization(t *testing.T) {
 	_, workerTools := postRPC(t, worker, `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`)
 	_, orchestratorTools := postRPC(t, orchestrator, `{"jsonrpc":"2.0","id":3,"method":"tools/list"}`)
 	listedWorkerTools := workerTools["result"].(map[string]any)["tools"].([]any)
-	require.Equal(t, []string{"get_task_context", "post_artifact", "update_thread", "send_task_message", "wait_for_task_events", "update_task"}, toolNamesOf(listedWorkerTools))
+	require.Equal(t, []string{"get_task_context", "post_artifact", "publish_preview", "update_thread", "send_task_message", "wait_for_task_events", "update_task"}, toolNamesOf(listedWorkerTools))
 	require.Contains(t, listedWorkerTools[0].(map[string]any), "outputSchema")
 	require.Equal(t, protocol.HubToolNames, toolNamesOf(orchestratorTools["result"].(map[string]any)["tools"].([]any)))
 
@@ -87,7 +87,7 @@ func TestPostArtifactValidatesAndUploadsWorkspaceFile(t *testing.T) {
 		uploaded, err = io.ReadAll(content)
 		require.Equal(t, int64(len(uploaded)), size)
 		return err
-	})
+	}, t.TempDir())
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	require.NoError(t, server.Start(ctx))
@@ -155,7 +155,7 @@ func newTestServer(t *testing.T, caller Caller) *Server {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	server := New(caller, nil)
+	server := New(caller, nil, t.TempDir())
 	require.NoError(t, server.Start(ctx))
 	return server
 }

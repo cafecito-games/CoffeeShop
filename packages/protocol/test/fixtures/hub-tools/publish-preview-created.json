@@ -1,0 +1,36 @@
+{
+  "artifact": {
+    "id": "artifact_mujrnuo0_4fzzzx",
+    "threadId": "thread-one",
+    "runId": "run-root",
+    "agentId": "orchestrator",
+    "relativePath": "site",
+    "title": "Site preview",
+    "kind": "preview-bundle",
+    "mediaType": "application/vnd.coffee-shop.preview-bundle+tar+gzip",
+    "summary": "Static site",
+    "size": 512,
+    "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "downloadPath": "/api/artifacts/artifact_mujrnuo0_4fzzzx/content",
+    "uploaded": false,
+    "idempotencyKey": "preview-site-1",
+    "createdAt": "2026-09-27T12:00:00.000Z"
+  },
+  "preview": {
+    "id": "preview_mujrnuo0_4fzzzx",
+    "artifactId": "artifact_mujrnuo0_4fzzzx",
+    "artifactSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "threadId": "thread-one",
+    "runId": "run-root",
+    "agentId": "orchestrator",
+    "entrypoint": "index.html",
+    "status": "upload-pending",
+    "processingGeneration": 0,
+    "createdAt": "2026-09-27T12:00:00.000Z",
+    "updatedAt": "2026-09-27T12:00:00.000Z",
+    "expiresAt": "2026-09-27T12:05:00.000Z",
+    "accessState": "unavailable"
+  },
+  "uploadPath": "/api/artifacts/artifact_mujrnuo0_4fzzzx/content",
+  "created": true
+}

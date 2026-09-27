@@ -376,6 +376,22 @@ func TestSharedFixtureIsTheVocabularyThePackIsValidatedAgainst(t *testing.T) {
 	}
 }
 
+func TestServedVocabularyMayPrecedeFocusedSkillTeaching(t *testing.T) {
+	tree := canonicalTree(t)
+	manifest, err := Validate(tree, DefaultVocabulary())
+	if err != nil {
+		t.Fatalf("Validate(canonical pack) error = %v", err)
+	}
+	if !slices.Contains(manifest.ToolVocabulary, "publish_preview") {
+		t.Fatal("canonical pack does not advertise publish_preview")
+	}
+	for _, skill := range manifest.Skills {
+		if slices.Contains(skill.declaredTools(), "publish_preview") {
+			t.Fatalf("skill %s teaches publish_preview before its focused workflow change", skill.ID)
+		}
+	}
+}
+
 // TestVocabularyDriftBreaksValidation performs the mutation upstream drift would cause — a rename, an
 // addition, and a removal — against an in-memory copy of the vocabulary, and asserts the canonical
 // pack stops validating each time. Without this, a renamed tool would ship as prose naming a tool
@@ -453,9 +469,9 @@ func TestVocabularyDriftBreaksValidation(t *testing.T) {
 	}
 }
 
-// TestEveryHubToolIsTaughtBySomeSkill proves the pack covers the whole served vocabulary, so adding a
-// tool upstream leaves the pack failing validation rather than quietly incomplete.
-func TestEveryHubToolIsTaughtBySomeSkill(t *testing.T) {
+// TestUntaughtHubToolsAreAnExplicitClosedSet preserves full teaching coverage while allowing the
+// producer capability to land before its separately owned workflow guidance.
+func TestUntaughtHubToolsAreAnExplicitClosedSet(t *testing.T) {
 	manifest, err := Validate(canonicalTree(t), DefaultVocabulary())
 	if err != nil {
 		t.Fatalf("Validate() error = %v", err)
@@ -466,10 +482,26 @@ func TestEveryHubToolIsTaughtBySomeSkill(t *testing.T) {
 			taught[name] = true
 		}
 	}
+	untaught := []string{}
 	for _, name := range protocol.HubToolNames {
 		if !taught[name] {
-			t.Fatalf("no pack skill teaches %s", name)
+			untaught = append(untaught, name)
 		}
+	}
+	if !slices.Equal(untaught, []string{"publish_preview"}) {
+		t.Fatalf("untaught hub tools = %v, want only publish_preview", untaught)
+	}
+	if !slices.Equal(skillTeachingOptionalTools, untaught) {
+		t.Fatalf("skill teaching exceptions = %v, want exact untaught set %v", skillTeachingOptionalTools, untaught)
+	}
+
+	future := DefaultVocabulary()
+	future.ToolNames = append(slices.Clone(future.ToolNames), "future_tool")
+	resealed := editManifest(t, cloneTree(canonicalTree(t)), func(manifest *PackManifest) {
+		manifest.ToolVocabulary = slices.Clone(future.ToolNames)
+	})
+	if _, err := Validate(resealed, future); err == nil || !strings.Contains(err.Error(), "no pack skill declares it") {
+		t.Fatalf("Validate() with an unowned future tool error = %v", err)
 	}
 }
 

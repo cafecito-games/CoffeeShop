@@ -9,6 +9,7 @@ var HubToolNames = []string{
 	"get_task_context",
 	"delegate_task",
 	"post_artifact",
+	"publish_preview",
 	"update_thread",
 	"get_execution_inventory",
 	"submit_tasks",

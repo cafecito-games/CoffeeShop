@@ -14,6 +14,7 @@ import (
 
 	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/config"
 	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/harness"
+	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/mcpserver"
 	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/protocol"
 	"github.com/stretchr/testify/require"
 	"nhooyr.io/websocket"
@@ -82,6 +83,40 @@ func TestRefusedRegistrationKeepsTheLifecycleOutbox(t *testing.T) {
 
 func emptyCapabilityReport(context.Context) protocol.NodeCapabilityReport {
 	return protocol.NodeCapabilityReport{}
+}
+
+func TestArtifactUploaderClassifiesHTTPAndTransportFailuresWithoutResponseDetails(t *testing.T) {
+	for _, status := range []int{400, 408, 425, 429, 500} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				require.Equal(t, "Bearer enrollment-secret", request.Header.Get("Authorization"))
+				require.Equal(t, int64(3), request.ContentLength)
+				writer.WriteHeader(status)
+				_, _ = writer.Write([]byte("credential=must-not-escape"))
+			}))
+			defer server.Close()
+			client := NewClient(config.Config{
+				ControlEndpoint: strings.Replace(server.URL, "http://", "ws://", 1),
+				Concurrency:     1, Token: "enrollment-secret",
+			}, protocol.ComputeNode{ID: "node-one"}, nil, emptyCapabilityReport)
+			err := client.uploadArtifact(context.Background(), "/api/artifacts/one/content", strings.NewReader("abc"), 3)
+			var failure *mcpserver.UploadError
+			require.ErrorAs(t, err, &failure)
+			require.Equal(t, status, failure.StatusCode)
+			require.False(t, failure.Uncertain)
+			require.NotContains(t, err.Error(), "credential")
+			require.NotContains(t, err.Error(), "enrollment-secret")
+		})
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	endpoint := strings.Replace(server.URL, "http://", "ws://", 1)
+	server.Close()
+	client := NewClient(config.Config{ControlEndpoint: endpoint, Concurrency: 1}, protocol.ComputeNode{ID: "node-one"}, nil, emptyCapabilityReport)
+	err := client.uploadArtifact(context.Background(), "/api/artifacts/one/content", strings.NewReader("abc"), 3)
+	var failure *mcpserver.UploadError
+	require.ErrorAs(t, err, &failure)
+	require.True(t, failure.Uncertain)
 }
 
 func TestRunOnceAuthenticatesAndRegisters(t *testing.T) {

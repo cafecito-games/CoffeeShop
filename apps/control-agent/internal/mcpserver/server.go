@@ -70,6 +70,7 @@ func (signal *connectionSignal) mark() {
 type Server struct {
 	caller   Caller
 	uploader Uploader
+	dataRoot string
 
 	mu     sync.RWMutex
 	grants map[string]grant
@@ -77,11 +78,17 @@ type Server struct {
 	server *http.Server
 }
 
-func New(caller Caller, uploader Uploader) *Server {
-	return &Server{caller: caller, uploader: uploader, grants: map[string]grant{}}
+func New(caller Caller, uploader Uploader, dataRoot string) *Server {
+	return &Server{caller: caller, uploader: uploader, dataRoot: dataRoot, grants: map[string]grant{}}
 }
 
 func (server *Server) Start(ctx context.Context) error {
+	// Recovery is deliberately constrained to DataRoot's dedicated child and its reserved regular
+	// filenames. A failure leaves publication fail-closed, but does not take unrelated run tools
+	// offline; each publication revalidates the scratch root before it writes.
+	if server.dataRoot != "" {
+		_ = recoverPreviewPackaging(server.dataRoot)
+	}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return fmt.Errorf("start MCP listener: %w", err)
@@ -238,6 +245,8 @@ func (server *Server) callTool(writer http.ResponseWriter, request *http.Request
 	)
 	if params.Name == "post_artifact" {
 		result, err = server.postArtifact(request.Context(), activeGrant, arguments)
+	} else if params.Name == "publish_preview" {
+		result, err = server.publishPreview(request.Context(), activeGrant, arguments)
 	} else {
 		result, err = server.caller(request.Context(), activeGrant.runID, params.Name, arguments)
 	}

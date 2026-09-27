@@ -5,7 +5,7 @@ import "github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/protoco
 const instructions = "Use get_task_context for the durable thread, your task, its lineage, and your mailbox cursor. " +
 	"Workers report with update_task, ask or answer through send_task_message, and wait for replies or task changes with wait_for_task_events, passing back the cursor it returns. " +
 	"Orchestrators inspect get_execution_inventory and submit parallel work with submit_tasks, describing capabilities rather than machines. " +
-	"Refine or complete the thread with update_thread and post durable outputs with post_artifact. " +
+	"Refine or complete the thread with update_thread, post durable files with post_artifact, and publish static directories with publish_preview. " +
 	"Every mutation takes a stable idempotency key: retry with the same key and arguments after a retryable error."
 
 type schema = map[string]any
@@ -75,6 +75,36 @@ var definitions = map[string]toolDefinition{
 		output: result(schema{
 			"id": text(), "runId": text(), "title": text(), "kind": text(), "downloadPath": text(), "uploaded": boolean(),
 		}, "id", "runId", "title", "kind", "downloadPath", "uploaded"),
+	},
+	"publish_preview": {
+		title:       "Publish preview",
+		description: "Package and publish a static directory from the current run workspace as a deterministic preview bundle. Paths are relative, and retries use the same stable idempotency key and unchanged arguments.",
+		input: object(schema{
+			"relativePath": text(), "entrypoint": text(), "title": text(), "summary": text(),
+			"ttlSeconds": schema{
+				"type": "integer", "minimum": protocol.PreviewBundleContract.MinimumTTLSeconds,
+				"maximum": protocol.PreviewBundleContract.MaximumLifetimeSeconds,
+			},
+			"idempotencyKey": text(),
+		}, "relativePath", "entrypoint", "title", "idempotencyKey"),
+		output: result(schema{
+			"artifact": result(schema{
+				"id": text(), "threadId": text(), "runId": text(), "agentId": text(), "instanceId": text(),
+				"allocationId": text(), "relativePath": text(), "title": text(),
+				"kind": enum(protocol.PreviewBundleArtifactKind), "mediaType": enum(protocol.PreviewBundleMediaType),
+				"summary": text(), "size": integer(), "sha256": text(), "downloadPath": text(),
+				"uploaded": boolean(), "idempotencyKey": text(), "createdAt": text(),
+			}, "id", "threadId", "runId", "relativePath", "title", "kind", "mediaType", "summary", "size", "sha256", "downloadPath", "uploaded", "idempotencyKey", "createdAt"),
+			"preview": result(schema{
+				"id": text(), "artifactId": text(), "artifactSha256": text(), "threadId": text(), "runId": text(),
+				"agentId": text(), "instanceId": text(), "allocationId": text(), "entrypoint": text(),
+				"status": enum(protocol.ArtifactPreviewStatuses...), "processingGeneration": integer(),
+				"createdAt": text(), "updatedAt": text(), "expiresAt": text(), "readyAt": text(),
+				"failedAt": text(), "failureCode": enum(protocol.ArtifactPreviewFailureCodes...),
+				"expiredAt": text(), "accessState": enum(protocol.ArtifactPreviewAccessStates...),
+			}, "id", "artifactId", "artifactSha256", "threadId", "runId", "entrypoint", "status", "processingGeneration", "createdAt", "updatedAt", "expiresAt", "accessState"),
+			"created": boolean(),
+		}, "artifact", "preview", "created"),
 	},
 	"update_thread": {
 		title:       "Update thread",
