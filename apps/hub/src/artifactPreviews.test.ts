@@ -486,7 +486,7 @@ async function loadPreviewFixture(mutate: (state: Record<string, any>) => void =
 }
 
 test("loads preview state emitted by the real lifecycle producer byte-for-byte", async () => {
-  // Produced by registerPreview/beginProcessing/settleProcessing in apps/hub/src/artifactPreviews.ts.
+  // Produced from Go archive/tar bytes through registerPreview/ingestArtifactContent and persistence reload.
   const { store, path, sourceBytes } = await loadPreviewFixture();
   await store.load();
   assert.deepEqual(await readFile(path), sourceBytes, "current producer state needs no migration or coercion");
