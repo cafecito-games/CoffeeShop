@@ -116,6 +116,58 @@ describe("snapshot validation", () => {
     expect(isSnapshot({ ...snapshot("future"), nodes: [node] })).toBe(true);
     expect(isSnapshot({ ...snapshot("bad"), nodes: [{ ...node, harnesses: [{ ...node.harnesses[0], authMode: 42 }] }] })).toBe(false);
   });
+
+  it("accepts every preview status and rejects a malformed present preview collection as a whole", () => {
+    const generatedAt = "2026-09-27T12:04:00.000Z";
+    const base = {
+      id: "preview-one", artifactId: "artifact-one", artifactSha256: "a".repeat(64),
+      threadId: "thread-one", runId: "run-one", agentId: "agent-one", entrypoint: "site/index.html",
+      processingGeneration: 1, createdAt: "2026-09-27T12:00:00.000Z",
+      updatedAt: "2026-09-27T12:02:00.000Z", expiresAt: "2026-09-28T12:00:00.000Z",
+      accessState: "unavailable"
+    };
+    const byStatus = {
+      "upload-pending": { ...base, processingGeneration: 0, updatedAt: base.createdAt },
+      processing: { ...base },
+      ready: { ...base, readyAt: base.updatedAt, accessState: "eligible" },
+      failed: { ...base, failedAt: base.updatedAt, failureCode: "bundle-invalid" },
+      expired: {
+        ...base, updatedAt: base.expiresAt, expiredAt: base.expiresAt
+      }
+    };
+    for (const [status, preview] of Object.entries(byStatus)) {
+      expect(isSnapshot({ ...snapshot(generatedAt), artifactPreviews: [{ ...preview, status }] })).toBe(true);
+    }
+
+    const ready = { ...byStatus.ready, status: "ready" };
+    for (const collection of [
+      null,
+      {},
+      [{ ...ready, status: "published" }],
+      [{ ...ready, accessState: "unavailable" }],
+      [{ ...ready, processingGeneration: 0 }],
+      [{ ...ready, readyAt: undefined }],
+      [{ ...ready, agentId: undefined }],
+      [{ ...ready, entrypoint: "../index.html" }],
+      [{ ...ready, signedUrl: "https://preview.invalid/secret" }],
+      [{ ...ready, token: "secret" }]
+    ]) {
+      expect(isSnapshot({ ...snapshot(generatedAt), artifactPreviews: collection })).toBe(false);
+    }
+    expect(isSnapshot({ ...snapshot(generatedAt), artifactPreviews: undefined })).toBe(true);
+  });
+
+  it("accepts preview-bundle artifact metadata in the shared artifact vocabulary", () => {
+    const artifact = {
+      id: "artifact-one", threadId: "thread-one", runId: "run-one", agentId: "agent-one",
+      relativePath: ".coffee-shop/previews/site.tar.gz", title: "Preview", kind: "preview-bundle",
+      mediaType: "application/vnd.coffee-shop.preview-bundle+tar+gzip", summary: "", size: 512,
+      sha256: "a".repeat(64), downloadPath: "/api/artifacts/artifact-one/content", uploaded: true,
+      idempotencyKey: "preview-one", createdAt: "2026-09-27T12:00:00.000Z"
+    };
+    expect(isSnapshot({ ...snapshot("2026-09-27T12:04:00.000Z"), artifacts: [artifact] })).toBe(true);
+    expect(isSnapshot({ ...snapshot("2026-09-27T12:04:00.000Z"), artifacts: [{ ...artifact, kind: "preview-site" }] })).toBe(false);
+  });
 });
 
 describe("version-4 orchestration snapshot validation", () => {

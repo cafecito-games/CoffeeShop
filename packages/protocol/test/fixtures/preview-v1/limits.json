@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "artifactKind": "preview-bundle",
+  "mediaType": "application/vnd.coffee-shop.preview-bundle+tar+gzip",
+  "allowedEntryTypes": [
+    "regular-file",
+    "directory"
+  ],
+  "maximumCompressedBytes": 10485760,
+  "maximumExpandedBytes": 104857600,
+  "maximumRegularFiles": 2000,
+  "maximumFileBytes": 10485760,
+  "maximumPathBytes": 1024,
+  "maximumExpansionRatio": 20,
+  "minimumTtlSeconds": 300,
+  "defaultTtlSeconds": 86400,
+  "maximumLifetimeSeconds": 604800
+}

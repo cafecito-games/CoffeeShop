@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -5,11 +6,15 @@ import { fileURLToPath } from "node:url";
 import {
   agentAvatarColors,
   agentAvatarShapes,
+  artifactPreviewAccessState,
+  artifactPreviewTtlPolicy,
   canTransitionSessionBinding,
   harnessEventStreamStatuses,
   isApprovalDeliveryStatus,
   isApprovalStatus,
+  isArtifactPreviewFailureCode,
   isTaskDependencyPolicy,
+  isTimestamp,
   isTaskStatus,
   isWorkspaceCleanupPolicy,
   isWorkspaceIsolationPolicy,
@@ -17,8 +22,15 @@ import {
   isOrchestratorAttachmentStatus,
   isOrchestratorClientScope,
   orchestrationCollections,
+  previewBundleArtifactKind,
+  previewBundleLimits,
+  previewBundleMediaType,
+  runSourceKey,
+  validateArtifactPreviewRecord,
   validateProjectProfile,
   withOrchestrationDefaults,
+  type ArtifactPreviewFailureCode,
+  type ArtifactPreviewRecord,
   type ChatMessage,
   type OrchestratorClient,
   type ProjectProfile,
@@ -84,6 +96,79 @@ export interface TaskUpdateRecord {
   createdAt: string;
 }
 
+/** One durable source-scoped decision to create an artifact and its lifecycle record. */
+export interface PreviewRegistrationReceipt {
+  id: string;
+  sourceKey: string;
+  idempotencyKey: string;
+  /** SHA-256 of the normalized semantic request and its complete caller identity. */
+  digest: string;
+  /** The normalized requested TTL, retained so load can verify the semantic digest after renewal. */
+  ttlSeconds: number;
+  artifactId: string;
+  previewId: string;
+  createdAt: string;
+}
+
+/** One normalized terminal result for a single preview processing generation. */
+export interface PreviewProcessingReceipt {
+  id: string;
+  previewId: string;
+  artifactId: string;
+  artifactSha256: string;
+  processingGeneration: number;
+  outcome: "ready" | "failed";
+  failureCode?: ArtifactPreviewFailureCode;
+  /** SHA-256 of semantic identity/outcome fields; producer timestamps are deliberately excluded. */
+  digest: string;
+  settledAt: string;
+}
+
+export interface PreviewRegistrationDigestInput {
+  sourceKey: string;
+  threadId: string;
+  runId: string;
+  agentId?: string;
+  instanceId?: string;
+  allocationId?: string;
+  idempotencyKey: string;
+  relativePath: string;
+  title: string;
+  kind: string;
+  mediaType: string;
+  summary: string;
+  size: number;
+  sha256: string;
+  entrypoint: string;
+  ttlSeconds: number;
+}
+
+export interface PreviewProcessingDigestInput {
+  previewId: string;
+  artifactId: string;
+  artifactSha256: string;
+  processingGeneration: number;
+  outcome: "ready" | "failed";
+  failureCode?: ArtifactPreviewFailureCode;
+}
+
+const semanticDigest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+const previewActorDigest = (input: { agentId?: string; instanceId?: string; allocationId?: string }) =>
+  input.agentId !== undefined ? ["agent", input.agentId] : ["instance", input.instanceId, input.allocationId];
+
+/** Canonical digest for one source-scoped registration; generated ids and timestamps are excluded. */
+export const previewRegistrationDigest = (input: PreviewRegistrationDigestInput) => semanticDigest([
+  "preview-registration-v1", input.sourceKey, input.threadId, input.runId, previewActorDigest(input), input.idempotencyKey,
+  [input.relativePath, input.title, input.kind, input.mediaType, input.summary, input.size, input.sha256],
+  [input.entrypoint, input.ttlSeconds]
+]);
+
+/** Canonical semantic settlement digest; the producer timestamp never changes replay identity. */
+export const previewProcessingDigest = (input: PreviewProcessingDigestInput) => semanticDigest([
+  "preview-processing-v1", input.previewId, input.artifactId, input.artifactSha256,
+  input.processingGeneration, input.outcome, input.failureCode ?? null
+]);
+
 /**
  * The hub's own record of a minted orchestrator credential. It adds the secret hash, which is
  * stripped by `Store.snapshot()` and therefore never reaches a client.
@@ -114,6 +199,8 @@ interface HubOnlyState {
   projectProfilesImported?: boolean;
   /** One recorded decision per legacy agent; see `importLegacyAgentTemplates`. */
   legacyTemplateImports?: LegacyTemplateImport[];
+  previewRegistrationReceipts?: PreviewRegistrationReceipt[];
+  previewProcessingReceipts?: PreviewProcessingReceipt[];
 }
 
 /** The persisted state. `orchestratorClients` holds the stored records, secret hash included. */
@@ -130,6 +217,9 @@ const emptyState = (): State => withOrchestrationDefaults({
   threads: [],
   delegations: [],
   artifacts: [],
+  artifactPreviews: [],
+  previewRegistrationReceipts: [],
+  previewProcessingReceipts: [],
   instances: [],
   allocations: [],
   templates: [],
@@ -188,6 +278,19 @@ export function addInstanceDefaults(state: State) {
   if (state.instanceDeliveries === undefined) state.instanceDeliveries = [];
   if (state.remoteReleaseRequests === undefined) state.remoteReleaseRequests = [];
   if (state.nodeInstanceResidency === undefined) state.nodeInstanceResidency = [];
+}
+
+/**
+ * Adds preview collections only when they are absent from an older state. Explicit null or another
+ * malformed value is preserved so validation can fail closed instead of treating corruption as an
+ * empty collection.
+ */
+export function addArtifactPreviewDefaults(state: State) {
+  let changed = false;
+  if (state.artifactPreviews === undefined) { state.artifactPreviews = []; changed = true; }
+  if (state.previewRegistrationReceipts === undefined) { state.previewRegistrationReceipts = []; changed = true; }
+  if (state.previewProcessingReceipts === undefined) { state.previewProcessingReceipts = []; changed = true; }
+  return changed;
 }
 
 /** Rejects malformed or duplicate persisted profiles before they can affect scheduling. */
@@ -488,6 +591,177 @@ export function assertPersistedHarnessState(state: State) {
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 const isNonEmptyString = (value: unknown): value is string => typeof value === "string" && value.length > 0;
+const hasOnlyStoredKeys = (value: Record<string, unknown>, keys: readonly string[]) =>
+  Object.keys(value).every((key) => keys.includes(key));
+const isDigest = (value: unknown): value is string => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
+
+const previewArtifactKeys = [
+  "id", "threadId", "runId", "agentId", "instanceId", "allocationId", "relativePath", "title", "kind",
+  "mediaType", "summary", "size", "sha256", "downloadPath", "uploaded", "idempotencyKey", "createdAt"
+] as const;
+const registrationReceiptKeys = ["id", "sourceKey", "idempotencyKey", "digest", "ttlSeconds", "artifactId", "previewId", "createdAt"] as const;
+const processingReceiptKeys = [
+  "id", "previewId", "artifactId", "artifactSha256", "processingGeneration", "outcome", "failureCode", "digest", "settledAt"
+] as const;
+
+const sameActor = (
+  left: { agentId?: string; instanceId?: string; allocationId?: string },
+  right: { agentId?: string; instanceId?: string; allocationId?: string }
+) => left.agentId === right.agentId && left.instanceId === right.instanceId && left.allocationId === right.allocationId;
+
+/** Rejects every preview record or private receipt the lifecycle authority could not have written. */
+export function assertPersistedArtifactPreviewState(state: State) {
+  if (!Array.isArray(state.artifactPreviews)) throw new Error("Persisted artifact preview collection is malformed");
+  if (!Array.isArray(state.previewRegistrationReceipts)) throw new Error("Persisted preview registration receipt collection is malformed");
+  if (!Array.isArray(state.previewProcessingReceipts)) throw new Error("Persisted preview processing receipt collection is malformed");
+
+  const previews: ArtifactPreviewRecord[] = [];
+  const previewIds = new Set<string>();
+  const artifactLinks = new Set<string>();
+  for (const [index, value] of state.artifactPreviews.entries()) {
+    const validated = validateArtifactPreviewRecord(value);
+    if (!validated.ok) throw new Error(`Persisted artifact preview ${index} is invalid: ${validated.reason}`);
+    const preview = validated.value;
+    if (previewIds.has(preview.id)) throw new Error(`Persisted artifact preview ${index} repeats preview id ${preview.id}`);
+    if (artifactLinks.has(preview.artifactId)) throw new Error(`Persisted artifact preview ${index} repeats artifact link ${preview.artifactId}`);
+    previewIds.add(preview.id);
+    artifactLinks.add(preview.artifactId);
+    previews.push(preview);
+
+    const artifacts = (state.artifacts ?? []).filter((artifact) => artifact.id === preview.artifactId);
+    if (artifacts.length !== 1) throw new Error(`Persisted artifact preview ${index} names missing or duplicated artifact ${preview.artifactId}`);
+    const artifact = artifacts[0];
+    if (!isRecord(artifact) || !hasOnlyStoredKeys(artifact, previewArtifactKeys)
+      || !isNonEmptyString(artifact.id) || !isNonEmptyString(artifact.threadId) || !isNonEmptyString(artifact.runId)
+      || !isNonEmptyString(artifact.relativePath) || !isNonEmptyString(artifact.title) || typeof artifact.summary !== "string"
+      || typeof artifact.size !== "number" || !Number.isSafeInteger(artifact.size) || artifact.size <= 0
+      || artifact.size > previewBundleLimits.maximumCompressedBytes || !isDigest(artifact.sha256)
+      || !isNonEmptyString(artifact.downloadPath) || typeof artifact.uploaded !== "boolean"
+      || !isNonEmptyString(artifact.idempotencyKey) || !isTimestamp(artifact.createdAt)) {
+      throw new Error(`Persisted artifact preview ${index} links a malformed artifact`);
+    }
+    if (artifact.kind !== previewBundleArtifactKind) throw new Error(`Persisted artifact preview ${index} artifact is not a preview bundle`);
+    if (artifact.mediaType !== previewBundleMediaType) throw new Error(`Persisted artifact preview ${index} artifact has the wrong preview media type`);
+    if (artifact.sha256 !== preview.artifactSha256) throw new Error(`Persisted artifact preview ${index} disagrees with its artifact digest`);
+    if (artifact.threadId !== preview.threadId) throw new Error(`Persisted artifact preview ${index} disagrees with its artifact thread`);
+    if (artifact.runId !== preview.runId) throw new Error(`Persisted artifact preview ${index} disagrees with its artifact run`);
+    if (!sameActor(preview, artifact)) throw new Error(`Persisted artifact preview ${index} disagrees with its artifact actor`);
+    if (artifact.createdAt !== preview.createdAt) throw new Error(`Persisted artifact preview ${index} disagrees with its artifact creation time`);
+    if (artifact.downloadPath !== `/api/artifacts/${encodeURIComponent(artifact.id)}/content`) {
+      throw new Error(`Persisted artifact preview ${index} has an unexpected artifact download path`);
+    }
+
+    const threads = (state.threads ?? []).filter((thread) => thread.id === preview.threadId);
+    if (threads.length !== 1) throw new Error(`Persisted artifact preview ${index} names missing or duplicated thread ${preview.threadId}`);
+    const runs = state.runs.filter((run) => run.id === preview.runId);
+    if (runs.length !== 1 || runs[0].threadId !== preview.threadId) {
+      throw new Error(`Persisted artifact preview ${index} names a missing, duplicated, or foreign run`);
+    }
+    if (!sameActor(preview, runs[0])) throw new Error(`Persisted artifact preview ${index} disagrees with its run actor`);
+  }
+
+  for (const [index, artifact] of (state.artifacts ?? []).entries()) {
+    if (artifact.kind !== previewBundleArtifactKind) continue;
+    if (previews.filter((preview) => preview.artifactId === artifact.id).length !== 1) {
+      throw new Error(`Persisted preview bundle artifact ${index} has no lifecycle record`);
+    }
+  }
+
+  const registrationIds = new Set<string>();
+  const registrationScopes = new Set<string>();
+  const registrationsByPreview = new Map<string, PreviewRegistrationReceipt[]>();
+  for (const [index, value] of state.previewRegistrationReceipts.entries()) {
+    if (!isRecord(value) || !hasOnlyStoredKeys(value, registrationReceiptKeys)
+      || !["id", "sourceKey", "idempotencyKey", "artifactId", "previewId"].every((key) => isNonEmptyString(value[key]))
+      || !isDigest(value.digest) || typeof value.ttlSeconds !== "number" || !Number.isSafeInteger(value.ttlSeconds)
+      || value.ttlSeconds < artifactPreviewTtlPolicy.minimumSeconds
+      || value.ttlSeconds > artifactPreviewTtlPolicy.maximumLifetimeSeconds || !isTimestamp(value.createdAt)) {
+      throw new Error(`Persisted preview registration receipt ${index} is malformed`);
+    }
+    const receipt = value as unknown as PreviewRegistrationReceipt;
+    if (registrationIds.has(receipt.id)) throw new Error(`Persisted preview registration receipt ${index} repeats receipt id ${receipt.id}`);
+    registrationIds.add(receipt.id);
+    const scope = `${receipt.sourceKey}\u0000${receipt.idempotencyKey}`;
+    if (registrationScopes.has(scope)) throw new Error(`Persisted preview registration receipt ${index} repeats its source and idempotency key`);
+    registrationScopes.add(scope);
+    const preview = previews.find((item) => item.id === receipt.previewId);
+    if (!preview) throw new Error(`Persisted preview registration receipt ${index} names an unknown preview`);
+    if (receipt.artifactId !== preview.artifactId) throw new Error(`Persisted preview registration receipt ${index} disagrees with its preview artifact`);
+    if (receipt.sourceKey !== runSourceKey(preview.runId)) throw new Error(`Persisted preview registration receipt ${index} disagrees with its preview source`);
+    const artifact = (state.artifacts ?? []).find((item) => item.id === receipt.artifactId)!;
+    if (receipt.idempotencyKey !== artifact.idempotencyKey) throw new Error(`Persisted preview registration receipt ${index} disagrees with its artifact key`);
+    if (receipt.createdAt !== preview.createdAt) throw new Error(`Persisted preview registration receipt ${index} disagrees with its preview creation time`);
+    const expectedDigest = previewRegistrationDigest({
+      sourceKey: receipt.sourceKey, threadId: preview.threadId, runId: preview.runId,
+      agentId: preview.agentId, instanceId: preview.instanceId, allocationId: preview.allocationId,
+      idempotencyKey: receipt.idempotencyKey, relativePath: artifact.relativePath, title: artifact.title,
+      kind: artifact.kind, mediaType: artifact.mediaType, summary: artifact.summary, size: artifact.size,
+      sha256: artifact.sha256, entrypoint: preview.entrypoint, ttlSeconds: receipt.ttlSeconds
+    });
+    if (receipt.digest !== expectedDigest) throw new Error(`Persisted preview registration receipt ${index} has a corrupt digest`);
+    const group = registrationsByPreview.get(preview.id) ?? [];
+    group.push(receipt);
+    registrationsByPreview.set(preview.id, group);
+  }
+  for (const [index, preview] of previews.entries()) {
+    if (registrationsByPreview.get(preview.id)?.length !== 1) {
+      throw new Error(`Persisted artifact preview ${index} has no registration receipt`);
+    }
+  }
+
+  const processingIds = new Set<string>();
+  const processingGenerations = new Set<string>();
+  const processingByPreview = new Map<string, PreviewProcessingReceipt[]>();
+  for (const [index, value] of state.previewProcessingReceipts.entries()) {
+    const outcomeValid = isRecord(value) && (value.outcome === "ready" || value.outcome === "failed");
+    const failureValid = outcomeValid && (value.outcome === "ready"
+      ? value.failureCode === undefined
+      : isArtifactPreviewFailureCode(value.failureCode));
+    if (!isRecord(value) || !hasOnlyStoredKeys(value, processingReceiptKeys)
+      || !["id", "previewId", "artifactId"].every((key) => isNonEmptyString(value[key]))
+      || !isDigest(value.artifactSha256) || !Number.isSafeInteger(value.processingGeneration)
+      || (value.processingGeneration as number) < 1 || !failureValid || !isDigest(value.digest) || !isTimestamp(value.settledAt)) {
+      throw new Error(`Persisted preview processing receipt ${index} is malformed`);
+    }
+    const receipt = value as unknown as PreviewProcessingReceipt;
+    if (processingIds.has(receipt.id)) throw new Error(`Persisted preview processing receipt ${index} repeats receipt id ${receipt.id}`);
+    processingIds.add(receipt.id);
+    const generationKey = `${receipt.previewId}\u0000${receipt.processingGeneration}`;
+    if (processingGenerations.has(generationKey)) throw new Error(`Persisted preview processing receipt ${index} repeats its preview generation`);
+    processingGenerations.add(generationKey);
+    const preview = previews.find((item) => item.id === receipt.previewId);
+    if (!preview) throw new Error(`Persisted preview processing receipt ${index} names an unknown preview`);
+    if (receipt.artifactId !== preview.artifactId || receipt.artifactSha256 !== preview.artifactSha256) {
+      throw new Error(`Persisted preview processing receipt ${index} disagrees with its preview artifact`);
+    }
+    if (receipt.processingGeneration > preview.processingGeneration) {
+      throw new Error(`Persisted preview processing receipt ${index} exceeds its preview generation`);
+    }
+    const settled = Date.parse(receipt.settledAt);
+    if (settled < Date.parse(preview.createdAt) || settled > Date.parse(preview.updatedAt) || settled >= Date.parse(preview.expiresAt)) {
+      throw new Error(`Persisted preview processing receipt ${index} has an out-of-order settlement time`);
+    }
+    if (receipt.digest !== previewProcessingDigest(receipt)) {
+      throw new Error(`Persisted preview processing receipt ${index} has a corrupt digest`);
+    }
+    const group = processingByPreview.get(preview.id) ?? [];
+    group.push(receipt);
+    processingByPreview.set(preview.id, group);
+  }
+
+  for (const [index, preview] of previews.entries()) {
+    const current = (processingByPreview.get(preview.id) ?? [])
+      .find((receipt) => receipt.processingGeneration === preview.processingGeneration);
+    if ((preview.status === "ready" || (preview.status === "failed" && preview.processingGeneration > 0))
+      && (current === undefined || current.outcome !== preview.status
+        || (preview.status === "failed" && current.failureCode !== preview.failureCode))) {
+      throw new Error(`Persisted artifact preview ${index} has no matching processing receipt`);
+    }
+    if (preview.status === "processing" && current !== undefined) {
+      throw new Error(`Persisted artifact preview ${index} is processing a generation that already settled`);
+    }
+  }
+}
 
 const isApprovalResolvedBy = (value: Record<string, unknown>) =>
   value.kind === "orchestrator"
@@ -779,6 +1053,7 @@ export class Store {
     const addedThreads = addThreadDefaults(loaded);
     const addedOrchestration = addOrchestrationDefaults(loaded);
     addInstanceDefaults(loaded);
+    addArtifactPreviewDefaults(loaded);
     if (this.sqlite) loaded.projectProfiles ??= [];
     const addedApprovalResolvers = addApprovalResolverDefaults(loaded);
     assertPersistedTaskState(loaded);
@@ -801,6 +1076,7 @@ export class Store {
      */
     const droppedBorrowedKeys = dropBorrowedInstanceAgentKeys(loaded);
     assertPersistedActorState(loaded);
+    assertPersistedArtifactPreviewState(loaded);
     /*
      * The legacy import runs after every assertion, so it never writes on top of state the hub could
      * not interpret, and it is decided from its own persisted records rather than from a timestamp:
@@ -822,19 +1098,26 @@ export class Store {
     }
   }
 
-  snapshot(): Snapshot {
+  snapshot(now = new Date().toISOString()): Snapshot {
     const {
       taskSubmissions: _taskSubmissions, taskUpdates: _taskUpdates, taskEventJournal: _taskEventJournal, taskEventStreams: _taskEventStreams,
       harnessEventStreams: _harnessEventStreams, harnessEvents: _harnessEvents,
       instanceLifecycleReceipts: _instanceLifecycleReceipts, instanceReleaseIntents: _instanceReleaseIntents,
       instanceDeliveries: _instanceDeliveries, remoteReleaseRequests: _remoteReleaseRequests,
       nodeInstanceResidency: _nodeInstanceResidency,
-      projectProfilesImported: _projectProfilesImported, orchestratorClients, ...published
+      previewRegistrationReceipts: _previewRegistrationReceipts, previewProcessingReceipts: _previewProcessingReceipts,
+      projectProfilesImported: _projectProfilesImported, orchestratorClients, artifactPreviews, ...published
     } = this.state;
     return structuredClone({
       ...published,
       ...(orchestratorClients === undefined ? {} : { orchestratorClients: orchestratorClients.map(publicOrchestratorClient) }),
-      generatedAt: new Date().toISOString()
+      ...(artifactPreviews === undefined ? {} : {
+        artifactPreviews: artifactPreviews.map((preview) => ({
+          ...preview,
+          accessState: artifactPreviewAccessState(preview, now)
+        }))
+      }),
+      generatedAt: now
     });
   }
 

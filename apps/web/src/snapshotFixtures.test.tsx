@@ -22,6 +22,8 @@ function readFixture(name: string): unknown {
 
 const current = readFixture("hubSnapshot.json");
 const legacy = readFixture("legacyHubSnapshot.json");
+// Produced by apps/hub/test-fixtures/generate-artifact-preview-fixtures.mts through Store.snapshot().
+const preview = readFixture("hubPreviewSnapshot.json");
 
 function renderViews(snapshot: Snapshot) {
   render(<>
@@ -60,13 +62,22 @@ function renderViews(snapshot: Snapshot) {
 }
 
 describe("hub snapshot fixtures", () => {
-  it.each([["current", current], ["legacy", legacy]])("accepts the %s hub snapshot byte-for-byte", (_name, snapshot) => {
+  it.each([["current", current], ["legacy", legacy], ["preview", preview]])("accepts the %s hub snapshot byte-for-byte", (_name, snapshot) => {
     expect(isSnapshot(snapshot)).toBe(true);
   });
 
   it("never publishes a secret or its hash", () => {
     expect(JSON.stringify(current)).not.toContain("secretHash");
     expect(JSON.stringify(current)).not.toContain("csoc_");
+    expect(JSON.stringify(preview)).not.toContain("previewRegistrationReceipts");
+    expect(JSON.stringify(preview)).not.toContain("previewProcessingReceipts");
+    expect(JSON.stringify(preview)).not.toMatch(/signedUrl|bearer|token/i);
+  });
+
+  it("accepts ready preview metadata exactly as the Hub projects it", () => {
+    const snapshot = preview as Snapshot;
+    expect(snapshot.artifactPreviews).toHaveLength(1);
+    expect(snapshot.artifactPreviews?.[0]).toMatchObject({ status: "ready", accessState: "eligible" });
   });
 
   it("renders external orchestration from a snapshot the hub produced", () => {

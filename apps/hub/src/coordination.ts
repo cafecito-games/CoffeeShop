@@ -3,6 +3,7 @@ import {
   artifactKinds,
   isTerminalTaskStatus,
   orchestrationToolLimits,
+  previewBundleArtifactKind,
   type Artifact,
   type PlacementOverride,
   type Run,
@@ -370,6 +371,9 @@ export async function createArtifact(store: Store, sourceRunId: string, argument
     throw new CoordinationError("invalid_arguments", "relativePath must stay within the run workspace");
   }
   if (!(artifactKinds as readonly string[]).includes(kind)) throw new CoordinationError("invalid_arguments", "kind is not recognized");
+  if (kind === previewBundleArtifactKind) {
+    throw new CoordinationError("invalid_arguments", "preview-bundle artifacts require the dedicated preview registration authority");
+  }
   if (typeof size !== "number" || !Number.isSafeInteger(size) || size < 0 || size > 10 * 1024 * 1024) throw new CoordinationError("invalid_arguments", "size must be at most 10 MiB");
   if (!/^[a-f0-9]{64}$/.test(sha256)) throw new CoordinationError("invalid_arguments", "sha256 must be a lowercase SHA-256 digest");
   let artifact: Artifact | undefined;
