@@ -194,7 +194,7 @@ test("registration validates dedicated metadata, path, limits, TTL, and live cal
 });
 
 test("instance registration keeps the exact resident/allocation actor and a replaced allocation loses authority", async () => {
-  const { store } = await previewStore();
+  const { store, path } = await previewStore();
   await store.transact((state) => {
     state.agents = [];
     delete state.threads![0].ownerAgentId;
@@ -220,12 +220,18 @@ test("instance registration keeps the exact resident/allocation actor and a repl
   assert.equal(registered.preview.instanceId, "instance-one");
   assert.equal(registered.preview.allocationId, "allocation-one");
 
-  await store.transact((state) => { state.allocations![0].status = "lost"; });
+  const restarted = new Store(path);
+  await restarted.load();
+  assert.equal(restarted.snapshot().artifactPreviews?.[0].agentId, undefined);
+  assert.equal(restarted.snapshot().artifactPreviews?.[0].instanceId, "instance-one");
+  assert.equal(restarted.snapshot().artifactPreviews?.[0].allocationId, "allocation-one");
+
+  await restarted.transact((state) => { state.allocations![0].status = "lost"; });
   await assert.rejects(
-    registerPreview(store, sourceRun.id, { ...request, idempotencyKey: "replaced-allocation" }, after(60)),
+    registerPreview(restarted, sourceRun.id, { ...request, idempotencyKey: "replaced-allocation" }, after(60)),
     errorCode("forbidden")
   );
-  assert.equal(store.snapshot().artifacts?.length, 1);
+  assert.equal(restarted.snapshot().artifacts?.length, 1);
 });
 
 test("ordinary artifact registration preserves its six kinds and cannot mint a preview bundle", async () => {
@@ -294,7 +300,7 @@ test("processing requires exact uploaded bytes, advances generations, and settle
 });
 
 test("failed previews retry with a fresh generation and stale or future results cannot alter it", async () => {
-  const { store } = await previewStore();
+  const { store, path } = await previewStore();
   const registered = await registerPreview(store, sourceRun.id, request, at);
   await markUploaded(store, registered.artifact.id);
   await beginProcessing(store, registered.preview.id, after(60));
@@ -331,6 +337,21 @@ test("failed previews retry with a fresh generation and stale or future results 
   });
   assert.equal(ready.preview.status, "ready");
   assert.equal(store.read((state) => state.previewProcessingReceipts?.length), 2);
+
+  const restarted = new Store(path);
+  await restarted.load();
+  const firstReplay = await settleProcessing(restarted, {
+    previewId: registered.preview.id, artifactId: registered.artifact.id,
+    artifactSha256: registered.artifact.sha256, processingGeneration: 1,
+    outcome: "failed", failureCode: "bundle-invalid", at: after(300)
+  });
+  assert.equal(firstReplay.replayed, true);
+  assert.equal(firstReplay.preview.status, "failed");
+  assert.equal(firstReplay.preview.processingGeneration, 1);
+  assert.equal(firstReplay.preview.failedAt, after(120));
+  assert.equal(firstReplay.preview.failureCode, "bundle-invalid");
+  assert.equal(firstReplay.preview.readyAt, undefined);
+  assert.equal(restarted.snapshot(after(300)).artifactPreviews?.[0].status, "ready", "historical replay writes nothing");
 });
 
 test("pending failure and every closed failure code remain explicit and retry only after upload", async () => {
@@ -494,8 +515,11 @@ test("load rejects malformed, duplicate, orphaned, or authority-bearing preview 
     ["registration invalid TTL", /registration receipt 0 is malformed/, (state) => { state.previewRegistrationReceipts[0].ttlSeconds = 299; }],
     ["processing future generation", /exceeds its preview generation/, (state) => { state.previewProcessingReceipts[0].processingGeneration = 2; }],
     ["processing unknown outcome", /processing receipt 0 is malformed/, (state) => { state.previewProcessingReceipts[0].outcome = "published"; }],
+    ["processing missing replay expiry", /processing receipt 0 is malformed/, (state) => { delete state.previewProcessingReceipts[0].expiresAt; }],
+    ["processing expiry before settlement", /out-of-order settlement time/, (state) => { state.previewProcessingReceipts[0].expiresAt = after(120); }],
     ["processing corrupt digest", /processing receipt 0 has a corrupt digest/, (state) => { state.previewProcessingReceipts[0].digest = "0".repeat(64); }],
     ["processing leaked token", /processing receipt 0 is malformed/, (state) => { state.previewProcessingReceipts[0].token = "secret"; }],
+    ["terminal settlement mismatch", /has no matching processing receipt/, (state) => { state.artifactPreviews[0].readyAt = after(119); }],
     ["missing current terminal receipt", /has no matching processing receipt/, (state) => { state.previewProcessingReceipts = []; }]
   ];
 

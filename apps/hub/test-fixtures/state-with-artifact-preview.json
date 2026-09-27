@@ -126,7 +126,8 @@
       "processingGeneration": 1,
       "outcome": "ready",
       "digest": "fd2f18c7b2a2d5c7863be1ef19ae2a9dbea44ffd4df05156071517fab45c86a0",
-      "settledAt": "2026-09-27T12:02:00.000Z"
+      "settledAt": "2026-09-27T12:02:00.000Z",
+      "expiresAt": "2026-09-28T12:00:00.000Z"
     }
   ],
   "instances": [],

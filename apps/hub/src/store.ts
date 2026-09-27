@@ -122,6 +122,8 @@ export interface PreviewProcessingReceipt {
   /** SHA-256 of semantic identity/outcome fields; producer timestamps are deliberately excluded. */
   digest: string;
   settledAt: string;
+  /** Expiry in force when this generation settled, retained to reconstruct an exact replay result. */
+  expiresAt: string;
 }
 
 export interface PreviewRegistrationDigestInput {
@@ -601,7 +603,8 @@ const previewArtifactKeys = [
 ] as const;
 const registrationReceiptKeys = ["id", "sourceKey", "idempotencyKey", "digest", "ttlSeconds", "artifactId", "previewId", "createdAt"] as const;
 const processingReceiptKeys = [
-  "id", "previewId", "artifactId", "artifactSha256", "processingGeneration", "outcome", "failureCode", "digest", "settledAt"
+  "id", "previewId", "artifactId", "artifactSha256", "processingGeneration", "outcome", "failureCode", "digest", "settledAt",
+  "expiresAt"
 ] as const;
 
 const sameActor = (
@@ -720,7 +723,8 @@ export function assertPersistedArtifactPreviewState(state: State) {
     if (!isRecord(value) || !hasOnlyStoredKeys(value, processingReceiptKeys)
       || !["id", "previewId", "artifactId"].every((key) => isNonEmptyString(value[key]))
       || !isDigest(value.artifactSha256) || !Number.isSafeInteger(value.processingGeneration)
-      || (value.processingGeneration as number) < 1 || !failureValid || !isDigest(value.digest) || !isTimestamp(value.settledAt)) {
+      || (value.processingGeneration as number) < 1 || !failureValid || !isDigest(value.digest)
+      || !isTimestamp(value.settledAt) || !isTimestamp(value.expiresAt)) {
       throw new Error(`Persisted preview processing receipt ${index} is malformed`);
     }
     const receipt = value as unknown as PreviewProcessingReceipt;
@@ -738,7 +742,10 @@ export function assertPersistedArtifactPreviewState(state: State) {
       throw new Error(`Persisted preview processing receipt ${index} exceeds its preview generation`);
     }
     const settled = Date.parse(receipt.settledAt);
-    if (settled < Date.parse(preview.createdAt) || settled > Date.parse(preview.updatedAt) || settled >= Date.parse(preview.expiresAt)) {
+    const receiptExpiry = Date.parse(receipt.expiresAt);
+    if (settled < Date.parse(preview.createdAt) || settled > Date.parse(preview.updatedAt) || settled >= receiptExpiry
+      || receiptExpiry > Date.parse(preview.expiresAt)
+      || receiptExpiry > Date.parse(preview.createdAt) + artifactPreviewTtlPolicy.maximumLifetimeSeconds * 1_000) {
       throw new Error(`Persisted preview processing receipt ${index} has an out-of-order settlement time`);
     }
     if (receipt.digest !== previewProcessingDigest(receipt)) {
@@ -754,7 +761,8 @@ export function assertPersistedArtifactPreviewState(state: State) {
       .find((receipt) => receipt.processingGeneration === preview.processingGeneration);
     if ((preview.status === "ready" || (preview.status === "failed" && preview.processingGeneration > 0))
       && (current === undefined || current.outcome !== preview.status
-        || (preview.status === "failed" && current.failureCode !== preview.failureCode))) {
+        || (preview.status === "failed" && current.failureCode !== preview.failureCode)
+        || current.settledAt !== (preview.status === "ready" ? preview.readyAt : preview.failedAt))) {
       throw new Error(`Persisted artifact preview ${index} has no matching processing receipt`);
     }
     if (preview.status === "processing" && current !== undefined) {

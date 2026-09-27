@@ -165,6 +165,33 @@ function publicPreview(preview: ArtifactPreviewRecord, now: string): ArtifactPre
   return structuredClone({ ...preview, accessState: artifactPreviewAccessState(preview, now) });
 }
 
+function settledPreview(
+  preview: ArtifactPreviewRecord,
+  receipt: PreviewProcessingReceipt,
+  now: string
+): ArtifactPreview {
+  const settled: ArtifactPreviewRecord = {
+    id: preview.id,
+    artifactId: preview.artifactId,
+    artifactSha256: preview.artifactSha256,
+    threadId: preview.threadId,
+    runId: preview.runId,
+    ...(preview.agentId === undefined ? {} : { agentId: preview.agentId }),
+    ...(preview.instanceId === undefined ? {} : { instanceId: preview.instanceId }),
+    ...(preview.allocationId === undefined ? {} : { allocationId: preview.allocationId }),
+    entrypoint: preview.entrypoint,
+    status: receipt.outcome,
+    processingGeneration: receipt.processingGeneration,
+    createdAt: preview.createdAt,
+    updatedAt: receipt.settledAt,
+    expiresAt: receipt.expiresAt,
+    ...(receipt.outcome === "ready"
+      ? { readyAt: receipt.settledAt }
+      : { failedAt: receipt.settledAt, failureCode: receipt.failureCode! })
+  };
+  return publicPreview(settled, now);
+}
+
 function previewIn(state: State, previewId: string) {
   const preview = state.artifactPreviews?.find((item) => item.id === previewId);
   if (!preview) throw new CoordinationError("not_found", "Preview not found");
@@ -371,7 +398,7 @@ export async function settleProcessing(store: Store, value: unknown) {
       }
       const preview = previewIn(state, input.previewId);
       artifactFor(state, preview);
-      result = { preview: publicPreview(preview, input.at), replayed: true };
+      result = { preview: settledPreview(preview, receipt, input.at), replayed: true };
       return false;
     }
 
@@ -406,7 +433,7 @@ export async function settleProcessing(store: Store, value: unknown) {
       id: newId("previewproc"), previewId: preview.id, artifactId: artifact.id,
       artifactSha256: artifact.sha256, processingGeneration: preview.processingGeneration,
       outcome: input.outcome, ...(input.failureCode === undefined ? {} : { failureCode: input.failureCode }),
-      digest, settledAt: input.at
+      digest, settledAt: input.at, expiresAt: preview.expiresAt
     };
     state.previewProcessingReceipts.push(processingReceipt);
     result = { preview: publicPreview(preview, input.at), replayed: false };
