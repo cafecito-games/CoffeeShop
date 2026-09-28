@@ -41,6 +41,10 @@ import {
   type TimelineEvent
 } from "@coffee-shop/protocol";
 import { assertPersistedActor, type ActorKeyed } from "./actors.js";
+import {
+  assertPersistedAgentTemplateConfigurationState,
+  type AgentTemplateConfigurationReceipt
+} from "./agentTemplateConfiguration.js";
 import { assertPersistedTemplateState, importLegacyAgentTemplates, type LegacyTemplateImport } from "./agentTemplates.js";
 import type { HarnessEventStream, StoredHarnessEvent } from "./harnessEvents.js";
 import {
@@ -203,6 +207,8 @@ interface HubOnlyState {
   projectProfilesImported?: boolean;
   /** One recorded decision per legacy agent; see `importLegacyAgentTemplates`. */
   legacyTemplateImports?: LegacyTemplateImport[];
+  /** Operator-scoped template mutation receipts. Never published to snapshot consumers. */
+  agentTemplateConfigurationReceipts?: AgentTemplateConfigurationReceipt[];
   previewRegistrationReceipts?: PreviewRegistrationReceipt[];
   previewProcessingReceipts?: PreviewProcessingReceipt[];
 }
@@ -233,6 +239,7 @@ const emptyState = (): State => withOrchestrationDefaults({
   remoteReleaseRequests: [],
   nodeInstanceResidency: [],
   legacyTemplateImports: [],
+  agentTemplateConfigurationReceipts: [],
   taskSubmissions: [],
   taskUpdates: [],
   taskEventJournal: [],
@@ -282,6 +289,13 @@ export function addInstanceDefaults(state: State) {
   if (state.instanceDeliveries === undefined) state.instanceDeliveries = [];
   if (state.remoteReleaseRequests === undefined) state.remoteReleaseRequests = [];
   if (state.nodeInstanceResidency === undefined) state.nodeInstanceResidency = [];
+}
+
+/** Adds the private receipt collection only for persisted state written before template CRUD. */
+export function addAgentTemplateConfigurationDefaults(state: State) {
+  if (state.agentTemplateConfigurationReceipts !== undefined) return false;
+  state.agentTemplateConfigurationReceipts = [];
+  return true;
 }
 
 /**
@@ -1063,6 +1077,7 @@ export class Store {
     const addedThreads = addThreadDefaults(loaded);
     const addedOrchestration = addOrchestrationDefaults(loaded);
     addInstanceDefaults(loaded);
+    const addedTemplateConfiguration = addAgentTemplateConfigurationDefaults(loaded);
     addArtifactPreviewDefaults(loaded);
     if (this.sqlite) loaded.projectProfiles ??= [];
     const addedApprovalResolvers = addApprovalResolverDefaults(loaded);
@@ -1074,6 +1089,7 @@ export class Store {
     assertPersistedProjectProfiles(loaded);
     assertPersistedInstanceState(loaded);
     assertPersistedTemplateState(loaded);
+    assertPersistedAgentTemplateConfigurationState(loaded);
     /*
      * Runs before the actor assertion: a record the previous revision wrote with the borrowed agent
      * key is migrated, and only a genuinely ambiguous one is refused. It deliberately stays *after*
@@ -1094,7 +1110,8 @@ export class Store {
      */
     const importedTemplates = importLegacyAgentTemplates(loaded, new Date().toISOString());
     if (this.sqlite || removedDemoRecords || addedAgentAvatars || addedCoordination || addedThreads || addedOrchestration
-      || addedThreadOrchestrators || addedApprovalResolvers || droppedBorrowedKeys || importedTemplates) await this.save(loaded);
+      || addedThreadOrchestrators || addedApprovalResolvers || addedTemplateConfiguration
+      || droppedBorrowedKeys || importedTemplates) await this.save(loaded);
     this.state = loaded;
   }
 
@@ -1115,6 +1132,7 @@ export class Store {
       instanceLifecycleReceipts: _instanceLifecycleReceipts, instanceReleaseIntents: _instanceReleaseIntents,
       instanceDeliveries: _instanceDeliveries, remoteReleaseRequests: _remoteReleaseRequests,
       nodeInstanceResidency: _nodeInstanceResidency,
+      agentTemplateConfigurationReceipts: _agentTemplateConfigurationReceipts,
       previewRegistrationReceipts: _previewRegistrationReceipts, previewProcessingReceipts: _previewProcessingReceipts,
       projectProfilesImported: _projectProfilesImported, orchestratorClients, artifactPreviews, ...published
     } = this.state;

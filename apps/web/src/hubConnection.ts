@@ -4,7 +4,8 @@ import {
   harnessTransports, placementRequirementKinds, planEntryPriorities, planEntryStatuses, runStatuses,
   sessionBindingStatuses, taskDependencyPolicies, taskMessageKinds, taskStatuses, toolCallKinds,
   toolCallStatuses, workspaceCleanupPolicies, workspaceIsolationPolicies, workspaceLeaseStatuses,
-  workspaceRetentionReasons, orchestratorAttachmentStatuses, orchestratorClientScopes, validateArtifactPreview, validateProjectProfile, type Snapshot
+  workspaceRetentionReasons, orchestratorAttachmentStatuses, orchestratorClientScopes, validateAgentInstance,
+  validateAgentTemplate, validateArtifactPreview, validateInstanceAllocation, validateProjectProfile, type Snapshot
 } from "@coffee-shop/protocol";
 
 export type ConnectionStatus = "connecting" | "connected" | "reconnecting" | "disconnected" | "authentication-required";
@@ -134,6 +135,9 @@ function isNode(value: unknown): boolean {
     && isString(value.lastSeen)
     && isNumber(value.activeRuns)
     && isNumber(value.concurrency)
+    && isOptionalNumber(value.instanceCapacity)
+    && isOptionalNumber(value.activeInstances)
+    && !(typeof value.instanceCapacity === "number" && typeof value.activeInstances === "number" && value.activeInstances > value.instanceCapacity)
     && isArrayOf(value.workspaceRoots, isString)
     && isArrayOf(value.harnesses, isHarness)
     && isString(value.version);
@@ -540,7 +544,13 @@ function isThread(value: unknown): boolean {
 }
 
 export function isSnapshot(value: unknown): value is Snapshot {
+  const v5Absent = isObject(value) && value.instances === undefined && value.allocations === undefined && value.templates === undefined;
+  const v5Present = isObject(value)
+    && isArrayOf(value.instances, (instance) => validateAgentInstance(instance).ok)
+    && isArrayOf(value.allocations, (allocation) => validateInstanceAllocation(allocation).ok)
+    && isArrayOf(value.templates, (template) => validateAgentTemplate(template).ok);
   return isObject(value)
+    && (v5Absent || v5Present)
     && isArrayOf(value.agents, isAgent)
     && isArrayOf(value.nodes, isNode)
     && isArrayOf(value.runs, isRun)

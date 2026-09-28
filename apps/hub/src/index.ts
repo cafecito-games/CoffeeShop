@@ -27,6 +27,7 @@ import {
   type Run
 } from "@coffee-shop/protocol";
 import { createConfiguredAgent, markDisconnectedNodesOffline, updateConfiguredAgent } from "./agentConfiguration.js";
+import { createAgentTemplate, deleteAgentTemplate, updateAgentTemplate } from "./agentTemplateConfiguration.js";
 import { ControlConnectionRegistry, type ControlConnection } from "./controlConnections.js";
 import { applyRunLifecycle, cancelPersistedRun, coalesceAsync, failLostTaskAttempts, isReportedByOwningNode, queuedRunsForNode, retryAsync, serializeAsync } from "./lifecycle.js";
 import { CoordinationError } from "./coordination.js";
@@ -563,6 +564,65 @@ app.post("/api/threads/:threadId/instances/:instanceId/release", async (req, res
     res.status(result.replayed ? 200 : 202).json(result);
   } catch (error) {
     instanceRequestFailure(res, error);
+  }
+});
+
+const templateRequestFailure = (response: express.Response, error: unknown) => {
+  const failure = error instanceof CoordinationError
+    ? error
+    : new CoordinationError("internal_error", "The template request failed", true);
+  const status = failure.code === "not_found" ? 404
+    : failure.code === "idempotency_conflict" || failure.code === "conflict" ? 409
+      : failure.code === "invalid_arguments" ? 400 : 500;
+  response.status(status).json({ error: failure.message });
+};
+
+const templateMutationBody = (body: unknown) => {
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    throw new CoordinationError("invalid_arguments", "Template request must be an object");
+  }
+  const { idempotencyKey, ...changes } = body as Record<string, unknown>;
+  if (typeof idempotencyKey !== "string" || idempotencyKey.trim().length === 0) {
+    throw new CoordinationError("invalid_arguments", "idempotencyKey is required");
+  }
+  return { idempotencyKey: idempotencyKey.trim(), changes };
+};
+
+app.get("/api/agent-templates", (_req, res) => {
+  res.json({ templates: store.snapshot().templates ?? [] });
+});
+
+app.post("/api/agent-templates", async (req, res) => {
+  try {
+    const request = templateMutationBody(req.body);
+    const result = await createAgentTemplate(store, "operator", request.idempotencyKey, request.changes);
+    if (!result.replayed) broadcast();
+    res.status(result.replayed ? 200 : 201).json(result);
+  } catch (error) {
+    templateRequestFailure(res, error);
+  }
+});
+
+app.patch("/api/agent-templates/:templateId", async (req, res) => {
+  try {
+    const request = templateMutationBody(req.body);
+    const result = await updateAgentTemplate(store, "operator", request.idempotencyKey, req.params.templateId, request.changes);
+    if (!result.replayed) broadcast();
+    res.json(result);
+  } catch (error) {
+    templateRequestFailure(res, error);
+  }
+});
+
+app.delete("/api/agent-templates/:templateId", async (req, res) => {
+  try {
+    const request = templateMutationBody(req.body);
+    if (Object.keys(request.changes).length !== 0) throw new CoordinationError("invalid_arguments", "Delete accepts only idempotencyKey");
+    const result = await deleteAgentTemplate(store, "operator", request.idempotencyKey, req.params.templateId);
+    if (!result.replayed) broadcast();
+    res.json(result);
+  } catch (error) {
+    templateRequestFailure(res, error);
   }
 });
 

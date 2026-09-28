@@ -25,6 +25,14 @@ test("v5 gates instance lifecycle and excludes every older version", () => {
 });
 
 test("instance and allocation transitions enumerate terminal states and reject unknown values", () => {
+  assert.deepEqual(protocol.terminalInstanceStatuses, ["released", "failed"]);
+  assert.deepEqual(protocol.occupyingAllocationStatuses, ["reserved", "provisioning", "active"]);
+  for (const status of protocol.instanceStatuses) {
+    assert.equal(protocol.isTerminalInstanceStatus(status), ["released", "failed"].includes(status));
+  }
+  for (const status of protocol.allocationStatuses) {
+    assert.equal(protocol.isOccupyingAllocationStatus(status), ["reserved", "provisioning", "active"].includes(status));
+  }
   for (const [statuses, transition] of [[protocol.instanceStatuses, protocol.canTransitionInstance], [protocol.allocationStatuses, protocol.canTransitionAllocation]]) {
     for (const from of statuses) for (const to of statuses) {
       assert.equal(typeof transition(from, to), "boolean");

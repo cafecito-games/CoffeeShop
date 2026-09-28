@@ -8,7 +8,9 @@ import {
   instanceLimits,
   instanceLifecycleDigestInput,
   isActiveRunStatus,
+  occupyingAllocationStatuses,
   supportsControlCapability,
+  terminalInstanceStatuses,
   validateAgentInstance,
   validateAgentTemplate,
   validateInstanceAllocation,
@@ -54,11 +56,10 @@ import { appendInitialTaskInState, applyAttemptOutcome, attemptIsRetryable, init
  * to and a delayed response from a lost allocation can never mutate its replacement.
  */
 
-/** The resident-intent statuses: an allocation in one of these holds a node slot. */
-export const occupyingAllocationStatuses: readonly AllocationStatus[] = ["reserved", "provisioning", "active"];
+/** The resident-intent statuses and terminal instance statuses are shared with snapshot consumers. */
+export { occupyingAllocationStatuses, terminalInstanceStatuses };
 /** Statuses from which an instance may still be placed, replaced, or released. */
 export const nonTerminalInstanceStatuses: readonly InstanceStatus[] = ["requested", "provisioning", "ready", "busy", "idle"];
-export const terminalInstanceStatuses: readonly InstanceStatus[] = ["released", "failed"];
 
 /** The single operator principal behind the hub's bearer-authenticated REST surface. */
 export const operatorInstanceCreator: InstanceCreator = { kind: "operator", operatorId: "operator" };
