@@ -503,6 +503,7 @@ func (client *Client) dispatchInstance(ctx context.Context, message protocol.Ins
 	}
 	run, agent := instanceDispatchRun(instance, instanceRun)
 	execution := &protocol.DispatchExecution{Transport: instanceRun.Transport}
+	execution.SessionBinding = message.SessionBinding
 	if instanceRun.FallbackTransport != nil {
 		execution.FallbackTransport = *instanceRun.FallbackTransport
 	}
@@ -511,8 +512,8 @@ func (client *Client) dispatchInstance(ctx context.Context, message protocol.Ins
 
 // instanceDispatchRun projects the v5 run record and its instance onto the run pipeline's run and
 // agent. The instance's delegation policy is the agent's, and its purpose instructions become the
-// system prompt. A run naming a session binding or a workspace lease is rejected by the dispatch
-// guard, because the v5 message carries no binding grant or lease grant to honor.
+// system prompt. A workspace lease remains unsupported because the v5 message carries no lease
+// grant; a session binding is honored only when the closed message carries its matching grant.
 func instanceDispatchRun(instance protocol.AgentInstance, instanceRun protocol.InstanceRun) (protocol.Run, protocol.Agent) {
 	run := protocol.Run{
 		ID:        instanceRun.ID,

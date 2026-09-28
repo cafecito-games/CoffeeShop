@@ -983,12 +983,16 @@ export function placeTask(task: Task, environment: PlacementEnvironment): Placem
   }
 
   /*
-   * Live offerings are the primary candidate set. Nodes that cannot publish a v5 resident still
-   * pass through evaluation so their protocol/capacity exclusion stays operator-visible; they can
-   * never become eligible. A node override restricts the set exactly as it restricts agents, while
-   * an agent pin excludes it entirely because no offering is the named agent.
+   * Live offerings are the primary candidate set. A node that cannot publish a v5 resident stays
+   * visible as an explicit exclusion only when it has no configured-agent compatibility candidate,
+   * or when an exact requested instance must be placed. Otherwise duplicating the same machine as
+   * both an impossible offering and its legacy agent would pollute the established agent diagnostic.
+   * A node override restricts the set exactly as it restricts agents, while an agent pin excludes it
+   * entirely because no offering is the named agent.
    */
   const offeringNodes = pinnedAgentId !== undefined ? [] : [...environment.nodes]
+    .filter((node) => offersInstances(node) || pinnedRequested !== undefined
+      || !environment.agents.some((agent) => agent.computeNodeId === node.id))
     .filter((node) => requiredNodeId === undefined || node.id === requiredNodeId)
     .sort((left, right) => compareText(left.id, right.id));
   /*
@@ -1089,7 +1093,11 @@ export function placeTask(task: Task, environment: PlacementEnvironment): Placem
  * attempt is committed. `instanceRunFor` throws only for a run that is not instance-keyed, which this
  * path has already established, so the check reports rather than raises.
  */
-export function instanceDispatchIsEncodable(state: Readonly<State>, run: Run): { ok: true } | { ok: false; reason: string } {
+export function instanceDispatchIsEncodable(
+  state: Readonly<State>,
+  run: Run,
+  sessionBinding?: DispatchExecution["sessionBinding"]
+): { ok: true } | { ok: false; reason: string } {
   const instance = (state.instances ?? []).find((item) => item.id === run.instanceId);
   const allocation = (state.allocations ?? []).find((item) => item.id === run.allocationId);
   if (!instance || !allocation) return { ok: false, reason: "the attempt names no known instance allocation" };
@@ -1097,7 +1105,8 @@ export function instanceDispatchIsEncodable(state: Readonly<State>, run: Run): {
     type: "dispatch",
     instance: structuredClone(instance),
     allocation: structuredClone(allocation),
-    run: instanceRunFor(run)
+    run: instanceRunFor(run),
+    ...(sessionBinding ? { sessionBinding: structuredClone(sessionBinding) } : {})
   }, "5");
   return wireValid.ok ? { ok: true } : { ok: false, reason: `the dispatch command is not wire-valid: ${wireValid.reason}` };
 }
@@ -1319,6 +1328,11 @@ export function runSchedulingPass(state: State, context: SchedulingContext, at: 
         templateResolution.kind === "template" ? templateResolution.template : undefined
       );
       const template = templateResolution.kind === "template" ? templateResolution.template : undefined;
+      const purposeDefaults = template === undefined ? undefined : {
+        ...(template.purpose ?? {}),
+        ...(template.instructions === undefined ? {} : { instructions: template.instructions })
+      };
+      const purpose = purposeDefaults !== undefined && Object.keys(purposeDefaults).length > 0 ? purposeDefaults : undefined;
       const candidate = {
         nodeId: offering.nodeId,
         harnessId: offering.harnessId,
@@ -1330,7 +1344,8 @@ export function runSchedulingPass(state: State, context: SchedulingContext, at: 
         ? placeInstanceInState(state, {
           threadId: task.threadId,
           requirements,
-          ...(template?.purpose ? { purpose: template.purpose } : {})
+          ...(purpose === undefined ? {} : { purpose }),
+          ...(template?.delegation === undefined ? {} : { delegation: template.delegation })
         }, candidate, at)
         : reservationAsPlacement(state, decision.instanceId, candidate, at);
       if (placement.kind !== "placed") {
@@ -1403,7 +1418,8 @@ export function runSchedulingPass(state: State, context: SchedulingContext, at: 
        */
       run.taskId = task.id;
       run.attempt = task.attemptRunIds.length + 1;
-      const command = instanceDispatchIsEncodable(state, run);
+      const session = sessionDispatchFor(run, state);
+      const command = instanceDispatchIsEncodable(state, session.run, session.sessionBinding);
       if (!command.ok) {
         changed = recordPlacement(task, {
           evaluatedAt: at,
@@ -1417,7 +1433,7 @@ export function runSchedulingPass(state: State, context: SchedulingContext, at: 
       task.placement = decision.diagnostic;
       // The dispatch is persisted in #75's crash-safe outbox before any socket write, so a crash
       // between the attempt's commit and its send replays the command instead of stranding the run.
-      appendInstanceDispatchInState(state, instanceRunFor(run), at);
+      appendInstanceDispatchInState(state, instanceRunFor(session.run), at, session.sessionBinding);
       thread.updatedAt = at;
       state.events.unshift(newEvent({
         type: "run",

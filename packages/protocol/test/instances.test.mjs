@@ -76,15 +76,15 @@ test("heartbeat residency evidence follows the sync.complete rule and capability
 });
 
 test("Go-produced fixtures validate and round-trip byte-for-byte through the TypeScript encoder", () => {
-  for (const name of ["provision", "dispatch", "release", "ready", "released", "failed", "register", "heartbeat", "heartbeat-empty", "sync", "sync-empty", "sync-absent", "create", "template"]) {
+  for (const name of ["provision", "dispatch", "dispatch-resume", "release", "ready", "released", "failed", "register", "heartbeat", "heartbeat-empty", "sync", "sync-empty", "sync-absent", "create", "template"]) {
     const bytes = readFileSync(new URL(`./fixtures/control-v5/${name}.json`, import.meta.url), "utf8");
     const value = JSON.parse(bytes);
-    const validate = ["provision", "dispatch", "release"].includes(name) ? protocol.validateInstanceHubMessage
+    const validate = ["provision", "dispatch", "dispatch-resume", "release"].includes(name) ? protocol.validateInstanceHubMessage
       : name === "create" ? protocol.validateInstanceLifecycleRequest : name === "template" ? protocol.validateAgentTemplate : protocol.validateInstanceControlMessage;
     const result = validate(value, "5");
     assert.equal(result.ok, true, `${name}: ${result.reason}`);
     assert.equal(JSON.stringify(result.value, null, 2) + "\n", bytes);
-    if (["provision", "dispatch", "release"].includes(name)) {
+    if (["provision", "dispatch", "dispatch-resume", "release"].includes(name)) {
       for (const version of ["1", "2", "3", "4", "6", ""]) assert.equal(protocol.canSendToControlAgent(value, version), false);
     } else if (!["create", "template", "sync-absent"].includes(name)) {
       for (const version of ["1", "2", "3", "4", "6", ""]) assert.equal(protocol.canAcceptFromControlAgent(value, version), false, `${name}/${version}`);

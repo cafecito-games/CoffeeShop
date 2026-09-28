@@ -22,6 +22,7 @@ import {
   type AllocationStatus,
   type ComputeNode,
   type ControlProtocolVersion,
+  type DispatchExecution,
   type ExecutionRequirements,
   type HarnessId,
   type HarnessTransport,
@@ -39,6 +40,7 @@ import {
   type Run
 } from "@coffee-shop/protocol";
 import { CoordinationError } from "./coordinationError.js";
+import { cancelRunInState } from "./lifecycle.js";
 import { newEvent, newId, type State, type Store } from "./store.js";
 import { appendInitialTaskInState, applyAttemptOutcome, attemptIsRetryable, initialTaskOrigin } from "./tasks.js";
 
@@ -992,7 +994,12 @@ export function acceptInstanceWorkInState(state: State, instanceId: string, at: 
  * wire-validated here, so an attempt whose resolved placement disagrees with its allocation is
  * refused before it can be committed rather than silently dropped at send time.
  */
-export function appendInstanceDispatchInState(state: State, run: InstanceRun, at: string): { ok: true } | { ok: false; reason: string } {
+export function appendInstanceDispatchInState(
+  state: State,
+  run: InstanceRun,
+  at: string,
+  sessionBinding?: DispatchExecution["sessionBinding"]
+): { ok: true } | { ok: false; reason: string } {
   const instance = (state.instances ?? []).find((item) => item.id === run.instanceId);
   if (!instance) return { ok: false, reason: "the dispatch names no known instance" };
   const allocation = (state.allocations ?? []).find((item) => item.id === run.allocationId);
@@ -1001,7 +1008,8 @@ export function appendInstanceDispatchInState(state: State, run: InstanceRun, at
     type: "dispatch",
     instance: structuredClone(instance),
     allocation: structuredClone(allocation),
-    run: structuredClone(run)
+    run: structuredClone(run),
+    ...(sessionBinding ? { sessionBinding: structuredClone(sessionBinding) } : {})
   };
   const wireValid = validateInstanceHubMessage(message, "5");
   if (!wireValid.ok) return { ok: false, reason: `the dispatch command is not wire-valid: ${wireValid.reason}` };
@@ -1160,9 +1168,10 @@ function failInstanceAttemptsInState(state: State, instance: AgentInstance, reas
 }
 
 /**
- * Settles every remaining nonterminal allocation of a terminal instance to the same terminal status,
- * and fails the attempts that instance was still carrying: a released or failed resident cannot
- * finish them, and nothing else would ever settle them.
+ * Settles every remaining nonterminal allocation of a terminal instance to the same terminal status.
+ * A cancel release projects the machine-local cancellation onto any still-active attempt even when
+ * its acknowledgement races behind instance.released; every other terminal outcome fails attempts
+ * the resident can no longer finish.
  */
 function settleTerminalInstance(state: State, instance: AgentInstance, at: string) {
   const target = instance.status === "released" ? "released" : "failed";
@@ -1171,7 +1180,13 @@ function settleTerminalInstance(state: State, instance: AgentInstance, at: strin
     allocation.status = target;
     allocation.updatedAt = at;
   }
-  failInstanceAttemptsInState(state, instance, `the executing instance is ${instance.status}`, at);
+  const cancelled = target === "released"
+    && (state.instanceReleaseIntents ?? []).find((intent) => intent.instanceId === instance.id)?.mode === "cancel";
+  if (cancelled) {
+    for (const run of activeRunsForInstance(state, instance.id)) cancelRunInState(state, run.id, at);
+  } else {
+    failInstanceAttemptsInState(state, instance, `the executing instance is ${instance.status}`, at);
+  }
 }
 
 /**
@@ -1411,7 +1426,11 @@ function settleDrainingInstances(state: State, at: string): boolean {
   let changed = false;
   for (const instance of state.instances ?? []) {
     if (instance.status !== "draining") continue;
-    if (activeRunsForInstance(state, instance.id).length > 0) continue;
+    const mode = (state.instanceReleaseIntents ?? []).find((intent) => intent.instanceId === instance.id)?.mode ?? "drain";
+    // Drain waits for natural completion. Cancel must reach Barista while work is still active so
+    // the machine-local supervisor can terminate it; waiting here would make cancel indistinguishable
+    // from drain and could leave a gated or hung provider turn resident forever.
+    if (activeRunsForInstance(state, instance.id).length > 0 && mode !== "cancel") continue;
     const allocation = currentAllocationInState(state, instance.id);
     if (allocation) {
       /*
@@ -1421,7 +1440,6 @@ function settleDrainingInstances(state: State, at: string): boolean {
        */
       const commanded = (state.instanceDeliveries ?? []).some((record) => record.kind === "release" && record.allocationId === allocation.id);
       if (commanded) continue;
-      const mode = (state.instanceReleaseIntents ?? []).find((intent) => intent.instanceId === instance.id)?.mode ?? "drain";
       state.instanceDeliveries ??= [];
       state.instanceDeliveries.push({
         allocationId: allocation.id,

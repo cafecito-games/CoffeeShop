@@ -686,6 +686,41 @@ test("drain waits for active runs and releases an unallocated instance directly"
     assert.equal(state.instanceDeliveries?.filter((record) => record.kind === "release").length, 1);
     assert.equal(state.instances?.[0].status, "draining");
   });
+
+  // Cancel is the operator's machine-local termination request. It must be enqueued while the run
+  // is active; waiting for completion here would silently reduce cancel to drain.
+  const storeThree = await hubStore((state) => { seedThread(state); seedNode(state); });
+  const third = await applyInstanceLifecycle(storeThree, operatorCaller, createRequest("thread-one", {
+    idempotency: { caller: operatorCaller, key: "create-three" }
+  }), at(1));
+  const thirdReservation = await reserveInstanceAllocation(storeThree, third.instance.id, candidate("/work/three"), at(2));
+  assert.equal(thirdReservation.kind, "reserved");
+  await storeThree.transact((state) => {
+    state.runs.push({
+      id: "run-cancel", threadId: "thread-one", instanceId: third.instance.id, allocationId: thirdReservation.allocation.id,
+      nodeId: "node-one", harnessId: "claude-cli", model: "fable", workspace: "/work/three", prompt: "", status: "running",
+      output: "", depth: 0, createdAt: at(2), transport: "native-cli"
+    });
+    return true;
+  });
+  await applyInstanceLifecycle(storeThree, operatorCaller, releaseRequest(third.instance.id, "release-three", "cancel"), at(3));
+  storeThree.read((state) => {
+    const releases = state.instanceDeliveries?.filter((record) => record.kind === "release") ?? [];
+    assert.equal(releases.length, 1);
+    assert.equal(releases[0].message.type === "instance.release" && releases[0].message.mode, "cancel");
+    assert.equal(state.runs.find((run) => run.id === "run-cancel")?.status, "running", "Hub does not pretend the local cancellation already completed");
+  });
+  const cancelled = await receiveInstanceLifecycleReport(
+    storeThree,
+    "node-one",
+    releasedReport(third.instance.id, thirdReservation.allocation.id),
+    at(4)
+  );
+  assert.equal(cancelled.kind, "accepted");
+  storeThree.read((state) => {
+    assert.equal(state.runs.find((run) => run.id === "run-cancel")?.status, "cancelled",
+      "the release acknowledgement converges even if it arrives before run.cancelled");
+  });
 });
 
 test("an omitted renewal and an explicit default renewal never share an idempotency digest", async () => {

@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/acp/acptest"
 )
@@ -90,7 +91,9 @@ func instanceByID(current snapshot, id string) (agentInstance, bool) {
 }
 
 func allocationFor(current snapshot, instanceID string) (instanceAllocation, bool) {
-	for index := len(current.Allocations) - 1; index >= 0; index-- {
+	// The Hub publishes newest allocations first. Replacement keeps terminal history, so walking
+	// backwards would return the lost generation instead of the current one.
+	for index := range current.Allocations {
 		if current.Allocations[index].InstanceID == instanceID {
 			return current.Allocations[index], true
 		}
@@ -167,18 +170,38 @@ func TestInstanceCapacitiesStayIndependent(t *testing.T) {
 		"initialTask": map[string]any{"title": "model-refused", "instructions": "Never weaken this model."},
 	})
 	mismatchTaskID := text(mismatch, "initialTaskId")
+	osMismatchRequirements := exactClaudeInstanceRequirements("capacity-e2e")
+	if runtime.GOOS == "linux" {
+		osMismatchRequirements["operatingSystems"] = []string{"darwin"}
+	} else {
+		osMismatchRequirements["operatingSystems"] = []string{"linux"}
+	}
+	osMismatch := bridge.mustCallTool("spawn_instance", map[string]any{
+		"threadId": threadID, "idempotencyKey": "capacity-os-mismatch", "requirements": osMismatchRequirements,
+		"initialTask": map[string]any{"title": "os-refused", "instructions": "Never weaken this operating system."},
+	})
+	labelMismatchRequirements := exactClaudeInstanceRequirements("label-that-is-not-advertised")
+	labelMismatch := bridge.mustCallTool("spawn_instance", map[string]any{
+		"threadId": threadID, "idempotencyKey": "capacity-label-mismatch", "requirements": labelMismatchRequirements,
+		"initialTask": map[string]any{"title": "label-refused", "instructions": "Never weaken this label."},
+	})
+	osMismatchTaskID := text(osMismatch, "initialTaskId")
+	labelMismatchTaskID := text(labelMismatch, "initialTaskId")
 
 	blocked := cluster.eventually("resident, run, and model exclusions to stay distinct", func(current snapshot) (bool, string) {
 		residentTask, residentFound := current.task(secondTaskID)
 		runTask, runFound := taskByTitle(current, threadID, "run-blocked")
 		modelTask, modelFound := current.task(mismatchTaskID)
-		if !residentFound || !runFound || !modelFound {
+		osTask, osFound := current.task(osMismatchTaskID)
+		labelTask, labelFound := current.task(labelMismatchTaskID)
+		if !residentFound || !runFound || !modelFound || !osFound || !labelFound {
 			return false, "one blocked task is absent"
 		}
-		return hasPlacementKind(residentTask, "resident-capacity") && hasPlacementKind(runTask, "capacity") && hasPlacementKind(modelTask, "model"),
+		return hasPlacementKind(residentTask, "resident-capacity") && hasPlacementKind(runTask, "capacity") &&
+				hasPlacementKind(modelTask, "model") && hasPlacementKind(osTask, "operating-system") && hasPlacementKind(labelTask, "label"),
 			"the distinct placement diagnostics are not present"
 	})
-	if len(blocked.Allocations) != 1 || len(blocked.Instances) != 3 {
+	if len(blocked.Allocations) != 1 || len(blocked.Instances) != 5 {
 		t.Fatalf("capacity refusal mutated resident allocation counts: instances=%d allocations=%d", len(blocked.Instances), len(blocked.Allocations))
 	}
 
@@ -191,6 +214,480 @@ func TestInstanceCapacitiesStayIndependent(t *testing.T) {
 	pinnedRun, _ := completed.latestAttempt(pinnedTask)
 	if pinnedRun.InstanceID != firstInstanceID || len(completed.Allocations) != 1 {
 		t.Fatalf("free run capacity weakened the resident identity: run=%+v allocations=%d", pinnedRun, len(completed.Allocations))
+	}
+}
+
+// TestInstanceRenewalWinsBeforeTheClosedExpiryBoundary proves the ordering of renewal and expiry
+// against the Hub's one serialized state authority. A committed renewal keeps the resident alive
+// when the original boundary passes; the renewed closed boundary then drains and releases it.
+func TestInstanceRenewalWinsBeforeTheClosedExpiryBoundary(t *testing.T) {
+	t.Parallel()
+	cluster := newEnvironment(t, environmentOptions{clockOffset: true})
+	cluster.startNode(nodeOptions{
+		id: "expiry-node", claudeAuthMode: "api", labels: []string{"expiry-e2e"},
+		concurrency: 1, instanceCapacity: integer(2),
+	})
+	clientID, secret := cluster.mintOrchestratorClient("expiry operator", "orchestrate")
+	bridge := cluster.startBridge("instance-expiry", clientID, secret)
+	created := bridge.mustCallTool("create_thread", map[string]any{"title": "Instance expiry", "objective": "Prove the closed lease boundary."})
+	threadID := text(object(created, "thread"), "id")
+	spawned := bridge.mustCallTool("spawn_instance", map[string]any{
+		"threadId": threadID, "idempotencyKey": "expiry-instance", "requirements": exactClaudeInstanceRequirements("expiry-e2e"),
+		"idleTimeoutSeconds": 60,
+	})
+	instanceID := text(object(spawned, "instance"), "id")
+	ready := cluster.eventually("the expiring resident to become ready", func(current snapshot) (bool, string) {
+		instance, known := instanceByID(current, instanceID)
+		allocation, allocated := allocationFor(current, instanceID)
+		return known && allocated && instance.Status == "ready" && allocation.Status == "active", "resident is not active"
+	})
+	before, _ := instanceByID(ready, instanceID)
+	originalExpiry, err := time.Parse(time.RFC3339Nano, before.Lease.ExpiresAt)
+	if err != nil {
+		t.Fatalf("parse original expiry: %v", err)
+	}
+	witness := bridge.mustCallTool("spawn_instance", map[string]any{
+		"threadId": threadID, "idempotencyKey": "expiry-witness", "requirements": exactClaudeInstanceRequirements("expiry-e2e"),
+		"idleTimeoutSeconds": 60,
+	})
+	witnessID := text(object(witness, "instance"), "id")
+	witnessReady := cluster.eventually("the unrenewed expiry witness to become ready", func(current snapshot) (bool, string) {
+		instance, known := instanceByID(current, witnessID)
+		allocation, allocated := allocationFor(current, witnessID)
+		return known && allocated && instance.Status == "ready" && allocation.Status == "active", "expiry witness is not active"
+	})
+	witnessInstance, _ := instanceByID(witnessReady, witnessID)
+	witnessExpiry, err := time.Parse(time.RFC3339Nano, witnessInstance.Lease.ExpiresAt)
+	if err != nil {
+		t.Fatalf("parse witness expiry: %v", err)
+	}
+
+	// Move just short of the first closed boundary, then commit the renewal first. The maintenance
+	// transaction must observe that new expiry rather than racing a stale in-memory timer.
+	timeToOriginalBoundary := time.Until(originalExpiry)
+	if timeToOriginalBoundary <= 2*time.Second {
+		t.Fatalf("system setup consumed the lease before the renewal race: %s", timeToOriginalBoundary)
+	}
+	cluster.hub.advanceClock(timeToOriginalBoundary / 2)
+	var renewed map[string]any
+	if status := cluster.hub.request(http.MethodPost, "/api/threads/"+threadID+"/instances/"+instanceID+"/renew", map[string]any{
+		"idempotencyKey": "expiry-renewal", "idleTimeoutSeconds": 60,
+	}, &renewed); status != http.StatusOK {
+		t.Fatalf("operator renewal returned %d: %v", status, renewed)
+	}
+	renewedExpiry, err := time.Parse(time.RFC3339Nano, text(object(object(renewed, "instance"), "lease"), "expiresAt"))
+	if err != nil || !renewedExpiry.After(originalExpiry) {
+		t.Fatalf("renewal did not commit a later boundary: old=%s renewed=%v err=%v", originalExpiry, renewedExpiry, err)
+	}
+	closedOldBoundary := originalExpiry
+	if witnessExpiry.After(closedOldBoundary) {
+		closedOldBoundary = witnessExpiry
+	}
+	cluster.hub.advanceClock(time.Until(closedOldBoundary) + time.Millisecond)
+	cluster.eventually("maintenance to release the unrenewed witness but preserve the committed renewal", func(current snapshot) (bool, string) {
+		renewedInstance, renewedKnown := instanceByID(current, instanceID)
+		witnessInstance, witnessKnown := instanceByID(current, witnessID)
+		if !renewedKnown || !witnessKnown {
+			return false, "expiry records are incomplete"
+		}
+		return renewedInstance.Status == "ready" && renewedInstance.Lease.ExpiresAt == renewedExpiry.Format(time.RFC3339Nano) && witnessInstance.Status == "released",
+			"maintenance has not resolved the two serialized outcomes"
+	})
+
+	// Equality is expired, not one more instant of lease. Crossing the renewed timestamp by the
+	// smallest clock-file unit lets maintenance drain, await exact Barista acknowledgement, and free.
+	cluster.hub.advanceClock(time.Until(renewedExpiry) + time.Millisecond)
+	terminal := cluster.eventually("the renewed closed boundary to release the resident", func(current snapshot) (bool, string) {
+		instance, known := instanceByID(current, instanceID)
+		allocation, allocated := allocationFor(current, instanceID)
+		node, present := nodeByID(current, "expiry-node")
+		return known && allocated && present && instance.Status == "released" && allocation.Status == "released" &&
+			node.ActiveInstances != nil && *node.ActiveInstances == 0, "renewed expiry has not released or published free capacity"
+	})
+	node, _ := nodeByID(terminal, "expiry-node")
+	if node.ActiveInstances == nil || *node.ActiveInstances != 0 {
+		t.Fatalf("expiry did not return resident capacity: %+v", node)
+	}
+}
+
+// TestInstanceReconnectReplacesLostAllocation proves the real v5 reconnect barrier. Restarting
+// Barista loses its process-local resident table, so the Hub marks only that allocation lost and
+// places the unchanged instance requirements on another eligible node under a fresh allocation.
+func TestInstanceReconnectReplacesLostAllocation(t *testing.T) {
+	t.Parallel()
+	cluster := newEnvironment(t, environmentOptions{})
+	original := cluster.startNode(nodeOptions{
+		id: "replacement-a", claudeAuthMode: "api", labels: []string{"replacement-e2e"},
+		concurrency: 1, instanceCapacity: integer(1),
+	})
+	cluster.startNode(nodeOptions{
+		id: "replacement-b", claudeAuthMode: "api", labels: []string{"replacement-e2e"},
+		concurrency: 1, instanceCapacity: integer(1),
+	})
+	clientID, secret := cluster.mintOrchestratorClient("replacement operator", "orchestrate")
+	bridge := cluster.startBridge("instance-replacement", clientID, secret)
+	created := bridge.mustCallTool("create_thread", map[string]any{"title": "Instance replacement", "objective": "Keep immutable placement intent."})
+	threadID := text(object(created, "thread"), "id")
+	requirements := exactClaudeInstanceRequirements("replacement-e2e")
+	spawned := bridge.mustCallTool("spawn_instance", map[string]any{
+		"threadId": threadID, "idempotencyKey": "replacement-instance", "requirements": requirements,
+	})
+	instanceID := text(object(spawned, "instance"), "id")
+	first := cluster.eventually("the original allocation to become active", func(current snapshot) (bool, string) {
+		instance, known := instanceByID(current, instanceID)
+		allocation, allocated := allocationFor(current, instanceID)
+		return known && allocated && instance.Status == "ready" && allocation.Status == "active" && allocation.NodeID == original.options.id,
+			"original allocation is not active on the deterministic first node"
+	})
+	firstAllocation, _ := allocationFor(first, instanceID)
+	original.proxy.sever()
+	cluster.eventually("the real Barista to reconnect with its exact resident inventory", func(current snapshot) (bool, string) {
+		allocation, allocated := allocationFor(current, instanceID)
+		node, present := nodeByID(current, original.options.id)
+		return allocated && present && allocation.ID == firstAllocation.ID && allocation.Status == "active" &&
+				node.ActiveInstances != nil && *node.ActiveInstances == 1 && strings.Count(original.logs.String(), "connected to") >= 2,
+			"resident inventory has not converged after the severed socket"
+	})
+
+	// The reconnected node reports the truth (no process-local residents) but deliberately no longer
+	// satisfies the immutable label. Replacement therefore has exactly one valid destination.
+	original.stop(true)
+	original.options.labels = nil
+	original.start()
+	replaced := cluster.eventually("the lost allocation to be replaced without weakening requirements", func(current snapshot) (bool, string) {
+		instance, known := instanceByID(current, instanceID)
+		latest, allocated := allocationFor(current, instanceID)
+		if !known || !allocated || latest.ID == firstAllocation.ID {
+			return false, "replacement allocation is absent"
+		}
+		return instance.Status == "ready" && latest.Status == "active" && latest.NodeID == "replacement-b", "replacement is not active on the remaining eligible node"
+	})
+	instance, _ := instanceByID(replaced, instanceID)
+	latest, _ := allocationFor(replaced, instanceID)
+	firstHistory, found := func() (instanceAllocation, bool) {
+		for _, allocation := range replaced.Allocations {
+			if allocation.ID == firstAllocation.ID {
+				return allocation, true
+			}
+		}
+		return instanceAllocation{}, false
+	}()
+	if latest.ID == firstAllocation.ID || len(replaced.Allocations) != 2 || !found || firstHistory.Status != "lost" {
+		t.Fatalf("replacement did not preserve lost history and create one generation: first=%+v latest=%+v all=%+v", firstAllocation, latest, replaced.Allocations)
+	}
+	labels, labelsPresent := instance.Requirements["labels"].([]any)
+	if !labelsPresent || len(labels) != 1 || labels[0] != "replacement-e2e" {
+		t.Fatalf("replacement weakened immutable requirements: %+v", instance.Requirements)
+	}
+}
+
+// TestInstanceUnknownRemoteResidentIsReleased proves the opposite reconciliation direction. A
+// current Barista resident absent from restored Hub authority is never imported into the lifecycle
+// tables and is cancelled once its exact v5 inventory lands. Offline heartbeat counters are not
+// treated as authority while that inventory is unavailable.
+func TestInstanceUnknownRemoteResidentIsReleased(t *testing.T) {
+	t.Parallel()
+	cluster := newEnvironment(t, environmentOptions{})
+	node := cluster.startNode(nodeOptions{
+		id: "orphan-node", claudeAuthMode: "api", labels: []string{"orphan-e2e"},
+		concurrency: 1, instanceCapacity: integer(1),
+	})
+	clientID, secret := cluster.mintOrchestratorClient("orphan operator", "orchestrate")
+	bridge := cluster.startBridge("instance-orphan", clientID, secret)
+	created := bridge.mustCallTool("create_thread", map[string]any{"title": "Unknown resident", "objective": "Never adopt remote residency."})
+	threadID := text(object(created, "thread"), "id")
+	spawned := bridge.mustCallTool("spawn_instance", map[string]any{
+		"threadId": threadID, "idempotencyKey": "orphan-instance", "requirements": exactClaudeInstanceRequirements("orphan-e2e"),
+	})
+	instanceID := text(object(spawned, "instance"), "id")
+	cluster.eventually("the future unknown resident to become active", func(current snapshot) (bool, string) {
+		instance, known := instanceByID(current, instanceID)
+		allocation, allocated := allocationFor(current, instanceID)
+		return known && allocated && instance.Status == "ready" && allocation.Status == "active", "resident is not active"
+	})
+
+	// Hold the Barista outside the restarted Hub until the operator-visible restored snapshot has
+	// been observed. The offline node record is not authoritative inventory in either direction.
+	node.proxy.setPaused(true)
+	cluster.hub.stop()
+	removeHubInstanceAuthority(t, cluster.hub.dataPath)
+	cluster.hub.start()
+	restored := cluster.hub.snapshot()
+	restoredNode, present := nodeByID(restored, node.options.id)
+	if !present || len(restored.Instances) != 0 || len(restored.Allocations) != 0 {
+		t.Fatalf("restored Hub guessed away or adopted remote occupancy: node=%+v instances=%d allocations=%d", restoredNode, len(restored.Instances), len(restored.Allocations))
+	}
+
+	node.proxy.setPaused(false)
+	settled := cluster.eventually("the unknown resident to be released rather than adopted", func(current snapshot) (bool, string) {
+		reconciled, known := nodeByID(current, node.options.id)
+		return known && reconciled.ActiveInstances != nil && *reconciled.ActiveInstances == 0 &&
+			len(current.Instances) == 0 && len(current.Allocations) == 0, "unknown residency has not been evicted"
+	})
+	if _, adopted := instanceByID(settled, instanceID); adopted {
+		t.Fatalf("unknown resident %s was adopted into Hub authority", instanceID)
+	}
+}
+
+func TestInstanceReleaseWaitsForReconnectAcknowledgement(t *testing.T) {
+	t.Parallel()
+	cluster := newEnvironment(t, environmentOptions{})
+	node := cluster.startNode(nodeOptions{
+		id: "release-node", claudeAuthMode: "api", labels: []string{"release-e2e"},
+		concurrency: 1, instanceCapacity: integer(1),
+	})
+	clientID, secret := cluster.mintOrchestratorClient("release operator", "orchestrate")
+	bridge := cluster.startBridge("instance-release", clientID, secret)
+	created := bridge.mustCallTool("create_thread", map[string]any{"title": "Release acknowledgement", "objective": "Keep capacity until exact acknowledgement."})
+	threadID := text(object(created, "thread"), "id")
+	spawned := bridge.mustCallTool("spawn_instance", map[string]any{
+		"threadId": threadID, "idempotencyKey": "release-instance", "requirements": exactClaudeInstanceRequirements("release-e2e"),
+	})
+	instanceID := text(object(spawned, "instance"), "id")
+	cluster.eventually("the releasable resident to become ready", func(current snapshot) (bool, string) {
+		instance, known := instanceByID(current, instanceID)
+		allocation, allocated := allocationFor(current, instanceID)
+		return known && allocated && instance.Status == "ready" && allocation.Status == "active", "resident is not ready"
+	})
+
+	node.proxy.setPaused(true)
+	cluster.hub.restart()
+	var releaseResult map[string]any
+	path := "/api/threads/" + threadID + "/instances/" + instanceID + "/release"
+	if status := cluster.hub.request(http.MethodPost, path, map[string]any{
+		"idempotencyKey": "offline-release", "mode": "drain",
+	}, &releaseResult); status != http.StatusAccepted {
+		t.Fatalf("offline release returned %d: %v", status, releaseResult)
+	}
+	held := cluster.hub.snapshot()
+	heldInstance, _ := instanceByID(held, instanceID)
+	heldAllocation, _ := allocationFor(held, instanceID)
+	if heldInstance.Status != "draining" || heldAllocation.Status != "active" {
+		t.Fatalf("undelivered release guessed successful cleanup: instance=%+v allocation=%+v", heldInstance, heldAllocation)
+	}
+
+	node.proxy.setPaused(false)
+	terminal := cluster.eventually("the replayed release to settle after exact reconnect", func(current snapshot) (bool, string) {
+		instance, known := instanceByID(current, instanceID)
+		allocation, allocated := allocationFor(current, instanceID)
+		reconciled, present := nodeByID(current, node.options.id)
+		return known && allocated && present && reconciled.ActiveInstances != nil && *reconciled.ActiveInstances == 0 &&
+			instance.Status == "released" && allocation.Status == "released", "release has not received exact acknowledgement"
+	})
+	beforeReplay, _ := instanceByID(terminal, instanceID)
+	var replayed map[string]any
+	if status := cluster.hub.request(http.MethodPost, path, map[string]any{
+		"idempotencyKey": "offline-release", "mode": "drain",
+	}, &replayed); status != http.StatusOK || replayed["replayed"] != true {
+		t.Fatalf("terminal release did not replay exactly: status=%d result=%v", status, replayed)
+	}
+	afterReplay := cluster.hub.snapshot()
+	afterReplayInstance, _ := instanceByID(afterReplay, instanceID)
+	afterReplayNode, _ := nodeByID(afterReplay, node.options.id)
+	if beforeReplay.UpdatedAt != afterReplayInstance.UpdatedAt || afterReplayNode.ActiveInstances == nil || *afterReplayNode.ActiveInstances != 0 {
+		t.Fatalf("duplicate terminal release mutated history or capacity: before=%+v after=%+v node=%+v", beforeReplay, afterReplayInstance, afterReplayNode)
+	}
+}
+
+// TestInstanceDelegatingTemplateTools proves the run-scoped surface from a real template-backed
+// resident. The model supplies neither thread authority nor delegation policy; the Hub carries the
+// operator-authored template defaults into the instance and derives every tool caller from its run.
+func TestInstanceDelegatingTemplateTools(t *testing.T) {
+	t.Parallel()
+	cluster := newEnvironment(t, environmentOptions{})
+	node := cluster.startNode(nodeOptions{
+		id: "delegation-node", claudeAuthMode: "api", labels: []string{"delegation-e2e"},
+		concurrency: 1, instanceCapacity: integer(2),
+	})
+	hiddenLegacyAgentID := cluster.createAgent(agentOptions{
+		name: "Hidden legacy reviewer", harnessID: "claude-cli", model: acptest.ClaudeModel,
+		nodeID: node.options.id, workspace: node.directory("hidden-legacy-reviewer"),
+	})
+	requirements := exactClaudeInstanceRequirements("delegation-e2e")
+	var templateResult map[string]any
+	status := cluster.hub.request(http.MethodPost, "/api/agent-templates", map[string]any{
+		"idempotencyKey": "delegating-template",
+		"name":           "Delegating developer", "purpose": map[string]any{"title": "Developer", "summary": "Delegates exact work"},
+		"instructions": "private template instructions", "requirements": requirements,
+		"delegation": map[string]any{"canDelegate": true},
+	}, &templateResult)
+	if status != http.StatusCreated {
+		t.Fatalf("template creation returned %d: %v", status, templateResult)
+	}
+	templateID := text(object(templateResult, "template"), "id")
+
+	clientID, secret := cluster.mintOrchestratorClient("delegation operator", "orchestrate")
+	bridge := cluster.startBridge("instance-delegation", clientID, secret)
+	created := bridge.mustCallTool("create_thread", map[string]any{"title": "Delegating instance", "objective": "Exercise run-scoped instance tools."})
+	threadID := text(object(created, "thread"), "id")
+	childTaskScript := script(t, step{Message: "child exact pin complete"})
+	parentScript := script(t,
+		step{Call: "get_execution_inventory", Arguments: map[string]any{}, As: "inventory"},
+		step{Call: "delegate_task", Arguments: map[string]any{
+			"agentId": hiddenLegacyAgentID, "task": "This hidden target must never run.", "idempotencyKey": "hidden-legacy-target",
+		}, AllowError: true, As: "hidden"},
+		step{Call: "spawn_instance", Arguments: map[string]any{
+			"idempotencyKey": "run-child", "requirements": requirements,
+			"purpose": map[string]any{"name": "Child reviewer"},
+		}, As: "child"},
+		step{Call: "submit_tasks", Arguments: map[string]any{
+			"idempotencyKey": "run-child-task",
+			"tasks": []taskSpecification{{
+				Key: "child", Title: "delegated-child", Instructions: childTaskScript, Requirements: requirements,
+				Pin: map[string]any{"instanceId": "{{child.instance.id}}"},
+			}},
+		}, As: "batch"},
+		step{Message: "spawned {{child.instance.id}} hidden={{hidden.error.code}}"},
+	)
+	bridge.mustCallTool("submit_tasks", map[string]any{
+		"threadId": threadID, "idempotencyKey": "template-parent",
+		"tasks": []taskSpecification{{
+			Key: "parent", Title: "template-parent", Instructions: parentScript,
+			Requirements: map[string]any{"templateId": templateID},
+		}},
+	})
+
+	final := cluster.eventually("the delegated exact child task to complete", func(current snapshot) (bool, string) {
+		parent, parentFound := taskByTitle(current, threadID, "template-parent")
+		child, childFound := taskByTitle(current, threadID, "delegated-child")
+		if !parentFound || !childFound {
+			return false, "parent or child task is absent"
+		}
+		return parent.Status == "completed" && child.Status == "completed", parent.Status + "/" + child.Status
+	})
+	parentTask, _ := taskByTitle(final, threadID, "template-parent")
+	childTask, _ := taskByTitle(final, threadID, "delegated-child")
+	parentRun, _ := final.latestAttempt(parentTask)
+	childRun, _ := final.latestAttempt(childTask)
+	parentInstance, _ := instanceByID(final, parentRun.InstanceID)
+	childInstance, _ := instanceByID(final, childRun.InstanceID)
+	if !parentInstance.Delegation["canDelegate"] || parentInstance.Purpose.Instructions != "private template instructions" {
+		t.Fatalf("template defaults did not reach the resident: %+v", parentInstance)
+	}
+	if childRun.InstanceID == parentRun.InstanceID || childTask.PlacementOverride == nil || childTask.PlacementOverride.InstanceID != childRun.InstanceID {
+		t.Fatalf("run-scoped submit did not keep the exact child pin: task=%+v run=%+v", childTask, childRun)
+	}
+	if !strings.Contains(parentRun.Output, "hidden=target_ineligible") {
+		t.Fatalf("the live instance could see or target a hidden legacy agent: %q", parentRun.Output)
+	}
+	if _, found := taskByTitle(final, threadID, "This hidden target must never run."); found {
+		t.Fatal("the refused hidden legacy target wrote a task")
+	}
+	if text(childInstance.Creator, "kind") != "run" || text(childInstance.Creator, "instanceId") != parentRun.InstanceID {
+		t.Fatalf("child authority was not derived from the live parent run: %+v", childInstance.Creator)
+	}
+}
+
+func TestInstanceLegacyAndNonDelegatingCallersAreRefused(t *testing.T) {
+	t.Parallel()
+	cluster := newEnvironment(t, environmentOptions{})
+	node := cluster.startNode(nodeOptions{
+		id: "authority-node", claudeAuthMode: "api", labels: []string{"authority-e2e"},
+		concurrency: 1, instanceCapacity: integer(1),
+	})
+	requirements := exactClaudeInstanceRequirements("authority-e2e")
+	refusalScript := script(t,
+		step{Call: "spawn_instance", Arguments: map[string]any{
+			"idempotencyKey": "unauthorized-child", "requirements": requirements,
+		}, AllowError: true, As: "refused"},
+		step{Message: "lifecycle={{refused.error.code}}"},
+	)
+
+	legacyAgent := cluster.createAgent(agentOptions{
+		name: "Legacy delegator", harnessID: "claude-cli", model: acptest.ClaudeModel,
+		nodeID: node.options.id, workspace: node.root, canDelegate: true,
+	})
+	legacyQueued := cluster.sendMessage(legacyAgent, refusalScript, "")
+	legacyFinal := cluster.eventually("the delegating legacy run to be denied instance authority", func(current snapshot) (bool, string) {
+		attempt, known := current.run(legacyQueued.ID)
+		return known && attempt.Status == "completed", "legacy authority probe is not completed"
+	})
+	legacyRun, _ := legacyFinal.run(legacyQueued.ID)
+	if !strings.Contains(legacyRun.Output, "lifecycle=forbidden") {
+		t.Fatalf("legacy configured-agent run received instance authority: %q", legacyRun.Output)
+	}
+
+	var templateResult map[string]any
+	status := cluster.hub.request(http.MethodPost, "/api/agent-templates", map[string]any{
+		"idempotencyKey": "nondelegating-template",
+		"name":           "Non-delegating worker", "requirements": requirements,
+		"delegation": map[string]any{"canDelegate": false},
+	}, &templateResult)
+	if status != http.StatusCreated {
+		t.Fatalf("non-delegating template creation returned %d: %v", status, templateResult)
+	}
+	clientID, secret := cluster.mintOrchestratorClient("authority operator", "orchestrate")
+	bridge := cluster.startBridge("instance-authority", clientID, secret)
+	created := bridge.mustCallTool("create_thread", map[string]any{"title": "Instance authority", "objective": "Keep delegation server-authored."})
+	threadID := text(object(created, "thread"), "id")
+	bridge.mustCallTool("submit_tasks", map[string]any{
+		"threadId": threadID, "idempotencyKey": "nondelegating-probe",
+		"tasks": []taskSpecification{{
+			Key: "probe", Title: "nondelegating-probe", Instructions: refusalScript,
+			Requirements: map[string]any{"templateId": text(object(templateResult, "template"), "id")},
+		}},
+	})
+	nondelegating := cluster.eventually("the non-delegating instance run to be denied lifecycle tools", func(current snapshot) (bool, string) {
+		item, found := taskByTitle(current, threadID, "nondelegating-probe")
+		if !found || item.Status != "completed" {
+			return false, "non-delegating authority probe is not completed"
+		}
+		attempt, found := current.latestAttempt(item)
+		return found && strings.Contains(attempt.Output, "lifecycle=forbidden"), "non-delegating refusal is absent"
+	})
+	probe, _ := taskByTitle(nondelegating, threadID, "nondelegating-probe")
+	probeRun, _ := nondelegating.latestAttempt(probe)
+	probeInstance, _ := instanceByID(nondelegating, probeRun.InstanceID)
+	if probeInstance.Delegation["canDelegate"] {
+		t.Fatalf("non-delegating template elevated its live instance: %+v", probeInstance)
+	}
+}
+
+func TestInstanceCancelStopsActiveWork(t *testing.T) {
+	t.Parallel()
+	cluster := newEnvironment(t, environmentOptions{})
+	cluster.startNode(nodeOptions{
+		id: "cancel-node", claudeAuthMode: "api", labels: []string{"cancel-e2e"}, concurrency: 1, instanceCapacity: integer(1),
+	})
+	clientID, secret := cluster.mintOrchestratorClient("cancel operator", "orchestrate")
+	bridge := cluster.startBridge("instance-cancel", clientID, secret)
+	created := bridge.mustCallTool("create_thread", map[string]any{"title": "Cancel instance", "objective": "Terminate active resident work."})
+	threadID := text(object(created, "thread"), "id")
+	var spawned map[string]any
+	if status := cluster.hub.request(http.MethodPost, "/api/threads/"+threadID+"/instances", map[string]any{
+		"idempotencyKey": "cancel-instance", "requirements": exactClaudeInstanceRequirements("cancel-e2e"),
+		"initialTask": map[string]any{"title": "cancel-active", "instructions": script(t, step{Gate: "never-opened"})},
+	}, &spawned); status != http.StatusCreated {
+		t.Fatalf("operator instance create returned %d: %v", status, spawned)
+	}
+	instanceID := text(object(spawned, "instance"), "id")
+	taskID := text(spawned, "initialTaskId")
+	running := cluster.eventually("the cancellable instance turn to start", func(current snapshot) (bool, string) {
+		item, found := current.task(taskID)
+		if !found {
+			return false, "cancel task is absent"
+		}
+		attempt, found := current.latestAttempt(item)
+		return found && attempt.Status == "running", "cancel task is not running"
+	})
+	item, _ := running.task(taskID)
+	attempt, _ := running.latestAttempt(item)
+	var cancelled map[string]any
+	if status := cluster.hub.request(http.MethodPost, "/api/threads/"+threadID+"/instances/"+instanceID+"/release", map[string]any{
+		"idempotencyKey": "cancel-now", "mode": "cancel",
+	}, &cancelled); status != http.StatusAccepted {
+		t.Fatalf("operator cancel returned %d: %v", status, cancelled)
+	}
+	terminal := cluster.eventually("cancel release to terminate the run and resident", func(current snapshot) (bool, string) {
+		instance, known := instanceByID(current, instanceID)
+		allocation, allocated := allocationFor(current, instanceID)
+		run, runFound := current.run(attempt.ID)
+		return known && allocated && runFound && instance.Status == "released" && allocation.Status == "released" && run.Status == "cancelled",
+			"cancel has not settled the run and resident"
+	})
+	node, _ := nodeByID(terminal, "cancel-node")
+	if node.ActiveInstances == nil || *node.ActiveInstances != 0 || node.ActiveRuns != 0 {
+		t.Fatalf("cancel leaked run or resident capacity: %+v", node)
 	}
 }
 
@@ -322,6 +819,40 @@ func TestEphemeralInstanceLifecycle(t *testing.T) {
 		t.Fatalf("conflicting replay mutated lifecycle state: before=%+v after=%+v", beforeInstance, afterInstance)
 	}
 
+	foreignCreated := bridge.mustCallTool("create_thread", map[string]any{"title": "Foreign lifecycle", "objective": "Prove thread isolation."})
+	foreignThreadID := text(object(foreignCreated, "thread"), "id")
+	foreignRead := bridge.callTool("get_instance", map[string]any{"threadId": foreignThreadID, "instanceId": instanceID})
+	missingRead := bridge.callTool("get_instance", map[string]any{"threadId": threadID, "instanceId": "instance-missing"})
+	foreignRenew := bridge.callTool("renew_instance", map[string]any{
+		"threadId": foreignThreadID, "instanceId": instanceID, "idempotencyKey": "foreign-renew",
+	})
+	foreignRelease := bridge.callTool("release_instance", map[string]any{
+		"threadId": foreignThreadID, "instanceId": instanceID, "idempotencyKey": "foreign-release", "mode": "cancel",
+	})
+	foreignPin := bridge.callTool("submit_tasks", map[string]any{
+		"threadId": foreignThreadID, "idempotencyKey": "foreign-pin",
+		"tasks": []taskSpecification{{Key: "foreign", Title: "foreign-pin", Instructions: "Never created.", Pin: map[string]any{"instanceId": instanceID}}},
+	})
+	selfElevating := map[string]any{}
+	for key, value := range spawnArguments {
+		selfElevating[key] = value
+	}
+	selfElevating["idempotencyKey"] = "self-elevating"
+	selfElevating["creator"] = map[string]any{"kind": "operator", "operatorId": "forged"}
+	selfElevating["delegation"] = map[string]any{"canDelegate": true}
+	elevation := bridge.callTool("spawn_instance", selfElevating)
+	if foreignRead.errorCode() != "not_found" || missingRead.errorCode() != foreignRead.errorCode() ||
+		foreignRenew.errorCode() != "not_found" || foreignRelease.errorCode() != "not_found" ||
+		!foreignPin.IsError || !elevation.IsError {
+		t.Fatalf("thread/authority refusals diverged: foreign=%+v missing=%+v renew=%+v release=%+v pin=%+v elevation=%+v",
+			foreignRead, missingRead, foreignRenew, foreignRelease, foreignPin, elevation)
+	}
+	afterRefusals := cluster.hub.snapshot()
+	afterRefusedInstance, _ := instanceByID(afterRefusals, instanceID)
+	if len(afterRefusals.Instances) != len(afterConflict.Instances) || afterRefusedInstance.UpdatedAt != afterInstance.UpdatedAt {
+		t.Fatalf("refused lifecycle calls mutated state: before=%+v after=%+v", afterInstance, afterRefusedInstance)
+	}
+
 	secondScript := script(t, step{Message: "second session={{session}}"})
 	submitted := bridge.mustCallTool("submit_tasks", map[string]any{
 		"threadId": threadID, "idempotencyKey": "instance-second",
@@ -370,6 +901,23 @@ func TestEphemeralInstanceLifecycle(t *testing.T) {
 	if replayedRenewal["replayed"] != true || text(object(object(replayedRenewal, "instance"), "lease"), "expiresAt") != renewExpiry {
 		t.Fatalf("the renewal did not replay exactly: first=%v replay=%v", renewed, replayedRenewal)
 	}
+	bridge.mustCallTool("submit_tasks", map[string]any{
+		"threadId": threadID, "idempotencyKey": "drain-active",
+		"tasks": []taskSpecification{{
+			Key: "active", Title: "drain-active", Instructions: script(t, step{Gate: "drain-active"}), Requirements: requirements,
+			Pin: map[string]any{"instanceId": instanceID},
+		}},
+	})
+	drainRunning := cluster.eventually("the turn that drain must wait for", func(current snapshot) (bool, string) {
+		item, found := taskByTitle(current, threadID, "drain-active")
+		if !found {
+			return false, "drain task is absent"
+		}
+		attempt, found := current.latestAttempt(item)
+		return found && attempt.Status == "running", "drain task is not running"
+	})
+	drainTask, _ := taskByTitle(drainRunning, threadID, "drain-active")
+	drainRun, _ := drainRunning.latestAttempt(drainTask)
 
 	released := bridge.mustCallTool("release_instance", map[string]any{
 		"threadId": threadID, "instanceId": instanceID, "idempotencyKey": "release-once", "mode": "drain",
@@ -377,6 +925,24 @@ func TestEphemeralInstanceLifecycle(t *testing.T) {
 	if released["replayed"] != false {
 		t.Fatalf("the release was not a new lifecycle request: %v", released)
 	}
+	refusedAfterDrain := bridge.callTool("submit_tasks", map[string]any{
+		"threadId": threadID, "idempotencyKey": "after-drain",
+		"tasks": []taskSpecification{{
+			Key: "refused", Title: "after-drain", Instructions: "Must remain queued.", Requirements: requirements,
+			Pin: map[string]any{"instanceId": instanceID},
+		}},
+	})
+	if refusedAfterDrain.errorCode() != "invalid_arguments" {
+		t.Fatalf("a draining instance remained available for a new exact pin: %+v", refusedAfterDrain)
+	}
+	cluster.eventually("drain to refuse new work while preserving the active turn", func(current snapshot) (bool, string) {
+		instance, known := instanceByID(current, instanceID)
+		attempt, running := current.run(drainRun.ID)
+		_, created := taskByTitle(current, threadID, "after-drain")
+		return known && running && !created && instance.Status == "draining" && attempt.Status == "running",
+			"drain has not closed admission without mutating the task graph"
+	})
+	cluster.openGate("drain-active")
 	terminal := cluster.eventually("release acknowledgement to free resident capacity exactly once", func(current snapshot) (bool, string) {
 		instance, known := instanceByID(current, instanceID)
 		allocation, allocated := allocationFor(current, instanceID)

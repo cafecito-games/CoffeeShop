@@ -12,6 +12,7 @@
     ],
     "operatingSystems": [
       "darwin"
-    ]
+    ],
+    "templateId": "template-one"
   }
 }

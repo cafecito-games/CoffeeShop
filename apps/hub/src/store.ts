@@ -1046,6 +1046,7 @@ export class Store {
 
   async load() {
     let loaded: State;
+    let needsInitialSqliteWrite = false;
     if (this.sqlite) {
       await mkdir(dirname(this.path), { recursive: true });
       this.database = new DatabaseSync(this.path);
@@ -1060,6 +1061,7 @@ export class Store {
         loaded = JSON.parse(row.state_json) as State;
       } else {
         loaded = await this.readLegacyState() ?? emptyState();
+        needsInitialSqliteWrite = true;
       }
     } else {
       try {
@@ -1070,6 +1072,7 @@ export class Store {
         return;
       }
     }
+    const beforeMigrations = JSON.stringify(loaded);
     const removedDemoRecords = removeLegacyDemoRecords(loaded);
     const addedAgentAvatars = addMissingAgentAvatars(loaded);
     const addedCoordination = addCoordinationDefaults(loaded);
@@ -1107,11 +1110,14 @@ export class Store {
      * The legacy import runs after every assertion, so it never writes on top of state the hub could
      * not interpret, and it is decided from its own persisted records rather than from a timestamp:
      * a restart finds every earlier decision and writes nothing.
-     */
+    */
     const importedTemplates = importLegacyAgentTemplates(loaded, new Date().toISOString());
-    if (this.sqlite || removedDemoRecords || addedAgentAvatars || addedCoordination || addedThreads || addedOrchestration
-      || addedThreadOrchestrators || addedApprovalResolvers || addedTemplateConfiguration
-      || droppedBorrowedKeys || importedTemplates) await this.save(loaded);
+    // An existing current SQLite row is already authoritative. Avoid manufacturing a new commit
+    // timestamp (and WAL write) merely because the Hub restarted; imports/default migrations still
+    // persist exactly once, and a new database must always receive its initial row.
+    const explicitMigration = removedDemoRecords || addedAgentAvatars || addedCoordination || addedThreads || addedOrchestration
+      || addedThreadOrchestrators || addedApprovalResolvers || addedTemplateConfiguration || droppedBorrowedKeys || importedTemplates;
+    if (needsInitialSqliteWrite || explicitMigration || (this.sqlite && JSON.stringify(loaded) !== beforeMigrations)) await this.save(loaded);
     this.state = loaded;
   }
 

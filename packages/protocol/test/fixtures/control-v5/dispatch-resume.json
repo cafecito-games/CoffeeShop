@@ -1,5 +1,5 @@
 {
-  "type": "instance.provision",
+  "type": "dispatch",
   "instance": {
     "id": "instance-one",
     "threadId": "thread-one",
@@ -27,7 +27,7 @@
       "idleTimeoutSeconds": 1800,
       "expiresAt": "2026-09-24T12:30:00Z"
     },
-    "status": "provisioning",
+    "status": "ready",
     "createdAt": "2026-09-24T12:00:00Z",
     "updatedAt": "2026-09-24T12:00:00Z"
   },
@@ -37,14 +37,36 @@
     "nodeId": "node-one",
     "harnessId": "claude-cli",
     "model": "fable",
-    "transport": "native-cli",
+    "transport": "acp-v1",
     "workspace": "/workspace",
     "lease": {
       "idleTimeoutSeconds": 1800,
       "expiresAt": "2026-09-24T12:30:00Z"
     },
-    "status": "provisioning",
+    "status": "active",
     "createdAt": "2026-09-24T12:00:00Z",
     "updatedAt": "2026-09-24T12:00:00Z"
+  },
+  "run": {
+    "id": "run-one",
+    "threadId": "thread-one",
+    "instanceId": "instance-one",
+    "allocationId": "allocation-one",
+    "nodeId": "node-one",
+    "harnessId": "claude-cli",
+    "model": "fable",
+    "workspace": "/workspace",
+    "prompt": "Implement the shared contracts.",
+    "status": "queued",
+    "output": "",
+    "depth": 0,
+    "createdAt": "2026-09-24T12:00:00Z",
+    "transport": "acp-v1",
+    "sessionBindingId": "session-one"
+  },
+  "sessionBinding": {
+    "id": "session-one",
+    "providerSessionId": "provider-session-one",
+    "resumePrompt": "Continue the shared contracts."
   }
 }

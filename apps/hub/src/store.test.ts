@@ -3,6 +3,7 @@ import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { recordSourceKey, runSourceKey, threadOrchestrator, threadOwnerAgentId } from "@coffee-shop/protocol";
 import { submitTasks, updateTask } from "./coordination.js";
@@ -55,10 +56,20 @@ test("persists production state in SQLite and imports a legacy JSON snapshot onc
 
   // A later change to the legacy file cannot replace state already committed to the database.
   await writeFile(legacyPath, JSON.stringify({ agents: [], nodes: [], runs: [], events: [], messages: [] }));
+  const writeMarker = "2000-01-01T00:00:00.000Z";
+  const probe = new DatabaseSync(databasePath);
+  const persisted = probe.prepare("SELECT state_json FROM hub_state WHERE singleton = 1").get() as { state_json: string };
+  probe.prepare("UPDATE hub_state SET updated_at = ? WHERE singleton = 1").run(writeMarker);
+  probe.close();
   const second = new Store({ databasePath, legacyJsonPath: legacyPath });
   await second.load();
   assert.equal(second.snapshot().events[0].title, "Stored in SQLite");
   assert.equal(second.snapshot().projectProfiles?.[0].id, "uzir");
+  const afterRestart = new DatabaseSync(databasePath);
+  const row = afterRestart.prepare("SELECT state_json, updated_at FROM hub_state WHERE singleton = 1").get() as { state_json: string; updated_at: string };
+  assert.equal(row.state_json, persisted.state_json, "reopening current SQLite state preserves its producer bytes");
+  assert.equal(row.updated_at, writeMarker, "reopening current SQLite state performs no migration write");
+  afterRestart.close();
   assert.match((await readFile(databasePath)).subarray(0, 16).toString(), /^SQLite format 3/);
 });
 

@@ -730,6 +730,25 @@ func TestCancelReleaseTerminatesActiveRunsThenReleases(t *testing.T) {
 	client.handleInstanceMessage(context.Background(), testReleaseMessage(allocation, "cancel"))
 	require.NotNil(t, waitForMessage(t, client, "run.cancelled"), "a cancelling release terminates the resident's active runs")
 	require.NotNil(t, waitForInstanceMessage(t, client, "instance.released", allocation.ID))
+	cancelledAt, releasedAt := -1, -1
+	client.connectionMu.Lock()
+	for index, data := range client.outbox {
+		var envelope struct {
+			Type         string `json:"type"`
+			RunID        string `json:"runId"`
+			AllocationID string `json:"allocationId"`
+		}
+		require.NoError(t, json.Unmarshal(data, &envelope))
+		if envelope.Type == "run.cancelled" && envelope.RunID == "run-one" {
+			cancelledAt = index
+		}
+		if envelope.Type == "instance.released" && envelope.AllocationID == allocation.ID {
+			releasedAt = index
+		}
+	}
+	client.connectionMu.Unlock()
+	require.GreaterOrEqual(t, cancelledAt, 0)
+	require.Greater(t, releasedAt, cancelledAt, "run cancellation must reach the Hub before its resident is released")
 	require.Zero(t, client.activeRuns())
 	require.Zero(t, client.activeInstanceCount())
 

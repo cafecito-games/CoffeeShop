@@ -484,11 +484,15 @@ func (client *Client) dispatchRun(ctx context.Context, run protocol.Run, agent p
 			_, cancelled := client.cancelled[run.ID]
 			client.runsMu.Unlock()
 			cancel()
-			if allocationID != "" {
-				client.finishResidentRun(allocationID, run.ID)
-			}
+			// Publish the terminal run result before freeing resident membership. A cancelling
+			// release waits for that membership to empty and then reports instance.released; if
+			// membership were cleared first, the two goroutines could invert those frames and the
+			// Hub would fail the still-active attempt while settling the released instance.
 			if cancelled {
 				client.send(protocol.Outbound{Type: "run.cancelled", RunID: run.ID, At: now()})
+			}
+			if allocationID != "" {
+				client.finishResidentRun(allocationID, run.ID)
 			}
 		}()
 		var workspacePath string
