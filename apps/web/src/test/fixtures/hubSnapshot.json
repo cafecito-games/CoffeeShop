@@ -458,10 +458,10 @@
           ],
           "activeVersion": "1.0.0",
           "rollbackVersion": "2.0.0",
-          "updateVersion": "2.0.0",
-          "rollbackAvailable": true,
           "provenance": "managed",
           "readiness": "ready",
+          "updateVersion": "2.0.0",
+          "rollbackAvailable": true,
           "diagnosticCodes": [
             "rollback-available",
             "update-available"
@@ -472,9 +472,9 @@
           "id": "coffee-shop-default",
           "declaredVersion": "1.0.0",
           "installedVersions": [],
-          "rollbackAvailable": false,
           "provenance": "none",
           "readiness": "not-applicable",
+          "rollbackAvailable": false,
           "diagnosticCodes": []
         }
       ]
