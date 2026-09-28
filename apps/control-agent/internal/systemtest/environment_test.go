@@ -291,6 +291,7 @@ type harnessRecord struct {
 	IsError          bool            `json:"isError"`
 	ErrorCode        string          `json:"errorCode"`
 	Result           map[string]any  `json:"result"`
+	Message          string          `json:"message"`
 	Completed        bool            `json:"completed"`
 }
 

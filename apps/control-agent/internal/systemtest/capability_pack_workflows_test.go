@@ -178,8 +178,16 @@ func evaluationSteps(t *testing.T, skillID string, evaluation capabilitypack.Eva
 		return previewEvaluation(workflow, context, key, message, "replay")
 	case "coffeeshop-preview/edge-upload-pending":
 		return previewEvaluation(workflow, context, key, message, "pending")
-	case "coffeeshop-preview/edge-processing", "coffeeshop-preview/edge-ready-without-url", "coffeeshop-preview/edge-failed", "coffeeshop-preview/edge-expired", "coffeeshop-preview/edge-incompatible-output":
-		return workflow(context)
+	case "coffeeshop-preview/edge-processing":
+		return previewLifecycleObservation(workflow, context, key, "processing")
+	case "coffeeshop-preview/edge-ready-without-url":
+		return previewLifecycleObservation(workflow, context, key, "ready-without-url")
+	case "coffeeshop-preview/edge-failed":
+		return previewLifecycleObservation(workflow, context, key, "failed")
+	case "coffeeshop-preview/edge-expired":
+		return previewLifecycleObservation(workflow, context, key, "expired")
+	case "coffeeshop-preview/edge-incompatible-output":
+		return previewLifecycleObservation(workflow, context, key, "incompatible-output")
 	case "coffeeshop-preview/edge-changed-revision":
 		return previewEvaluation(workflow, context, key, message, "revision")
 	case "coffeeshop-preview/edge-malformed-result":
@@ -277,6 +285,34 @@ func previewEvaluation(workflow func(...step) []step, context step, key, message
 		panic("unknown preview evaluation mode " + mode)
 	}
 	steps = append(steps, step{Call: "update_task", Arguments: map[string]any{"idempotencyKey": "attach-" + key, "completion": map[string]any{"summary": message, "artifactIds": []string{"{{preview.artifact.id}}"}}}, As: "updated"})
+	return workflow(steps...)
+}
+
+// previewLifecycleObservation keeps the #103 matrix honest about the boundary it owns. A
+// run-scoped publish can create or replay registration, whose immediate producer status is
+// upload-pending; processing, ready, failed, and expired are later Hub preparation/clock states
+// with no worker mutation tool. The installed-projection test consumes exact fixtures emitted by
+// those lifecycle producers. Here every row still proves the real publish/no-publish decision and
+// records the bounded claim the model is allowed to make at this boundary.
+func previewLifecycleObservation(workflow func(...step) []step, context step, key, observation string) []step {
+	root := filepath.ToSlash(filepath.Join("preview", key))
+	content := "<!doctype html><title>preview lifecycle observation</title>"
+	steps := []step{{WriteFile: &writeFile{Path: filepath.ToSlash(filepath.Join(root, "index.html")), Content: content}}, context}
+	if observation == "incompatible-output" {
+		steps[0].WriteFile.Content = "<!doctype html><script src=/app.js></script><script>fetch('/api/live')</script>"
+		return workflow(append(steps, step{Message: "preview-observation=incompatible-output publication=skipped attachment=skipped access-url=none"})...)
+	}
+	arguments := map[string]any{
+		"relativePath": root, "entrypoint": "index.html", "title": key, "idempotencyKey": "preview-" + key,
+	}
+	if observation == "expired" {
+		arguments["ttlSeconds"] = 300
+	}
+	steps = append(steps, step{Call: "publish_preview", Arguments: arguments, As: "publication"})
+	if observation == "processing" {
+		steps = append(steps, step{Call: "publish_preview", Arguments: arguments, As: "replayed"})
+	}
+	steps = append(steps, step{Message: "preview-observation=" + observation + " producer-status={{publication.preview.status}} ready=false attachment=skipped access-url=none"})
 	return workflow(steps...)
 }
 
@@ -433,6 +469,18 @@ func TestCapabilityPackNativeEvaluationMatrix(t *testing.T) {
 			if item.SkillID == "coffeeshop-artifacts" && item.Evaluation.ID == "edge-already-published-earlier-attempt" && len(terminal.Artifacts) != len(before.Artifacts)+1 {
 				t.Fatalf("artifact replay created %d durable records, want exactly one", len(terminal.Artifacts)-len(before.Artifacts))
 			}
+			if item.SkillID == "coffeeshop-preview" {
+				switch item.Evaluation.ID {
+				case "edge-processing", "edge-ready-without-url", "edge-failed", "edge-expired":
+					if len(terminal.Artifacts) != len(before.Artifacts)+1 {
+						t.Fatalf("%s created %d durable preview artifacts, want one", item.Evaluation.ID, len(terminal.Artifacts)-len(before.Artifacts))
+					}
+				case "edge-incompatible-output":
+					if len(terminal.Artifacts) != len(before.Artifacts) {
+						t.Fatalf("incompatible output was published: before=%d after=%d", len(before.Artifacts), len(terminal.Artifacts))
+					}
+				}
+			}
 		}
 	}
 
@@ -506,8 +554,9 @@ type evaluationCallResult struct {
 func requireEvaluationRecords(t *testing.T, cluster *environment, plan systemEvaluationPlan) {
 	t.Helper()
 	type trace struct {
-		Start harnessRecord
-		Calls []evaluationCallResult
+		Start    harnessRecord
+		Calls    []evaluationCallResult
+		Messages []string
 	}
 	traces := map[string]trace{}
 	caseByID := map[string]systemEvaluationCase{}
@@ -556,6 +605,11 @@ func requireEvaluationRecords(t *testing.T, cluster *environment, plan systemEva
 				encoded, _ := json.Marshal(record.Result)
 				last := &current.Calls[len(current.Calls)-1]
 				last.IsError, last.ErrorCode, last.Result = record.IsError, record.ErrorCode, string(encoded)
+			case "evaluation-message":
+				if current == nil {
+					t.Fatalf("%s has an evaluation message outside a case", file)
+				}
+				current.Messages = append(current.Messages, record.Message)
 			case "evaluation-result":
 				if current == nil || current.Start.SkillID != record.SkillID || current.Start.CaseID != record.CaseID {
 					t.Fatalf("%s has an unmatched evaluation result: %+v", file, record)
@@ -594,17 +648,20 @@ func requireEvaluationRecords(t *testing.T, cluster *environment, plan systemEva
 		if !slices.Equal(claude.Calls, codex.Calls) {
 			t.Fatalf("%s Claude/Codex semantic outcomes differ: claude=%+v codex=%+v", identity, claude.Calls, codex.Calls)
 		}
+		if !slices.Equal(claude.Messages, codex.Messages) {
+			t.Fatalf("%s Claude/Codex claims differ: claude=%q codex=%q", identity, claude.Messages, codex.Messages)
+		}
 		if item.Evaluation.Outcome == capabilitypack.OutcomeReportRefusal {
 			last := claude.Calls[len(claude.Calls)-1]
 			if !last.IsError || last.ErrorCode == "" {
 				t.Fatalf("%s did not record its closed denial: %+v", identity, last)
 			}
 		}
-		requireEvaluationSemantics(t, identity, claude.Calls)
+		requireEvaluationSemantics(t, identity, claude.Calls, claude.Messages)
 	}
 }
 
-func requireEvaluationSemantics(t *testing.T, identity string, calls []evaluationCallResult) {
+func requireEvaluationSemantics(t *testing.T, identity string, calls []evaluationCallResult, messages []string) {
 	t.Helper()
 	find := func(tool string) []evaluationCallResult {
 		matches := make([]evaluationCallResult, 0)
@@ -614,6 +671,9 @@ func requireEvaluationSemantics(t *testing.T, identity string, calls []evaluatio
 			}
 		}
 		return matches
+	}
+	hasMessage := func(fragment string) bool {
+		return slices.ContainsFunc(messages, func(message string) bool { return strings.Contains(message, fragment) })
 	}
 	switch identity {
 	case "coffeeshop-artifacts/edge-already-published-earlier-attempt":
@@ -633,6 +693,29 @@ func requireEvaluationSemantics(t *testing.T, identity string, calls []evaluatio
 		published := find("publish_preview")
 		if len(published) != 1 || !strings.Contains(published[0].Result, `"previewStatus":"upload-pending"`) || len(find("update_task")) != 0 {
 			t.Fatalf("%s did not preserve truthful pending state: calls=%+v", identity, calls)
+		}
+	case "coffeeshop-preview/edge-processing":
+		published := find("publish_preview")
+		replayObservedKnownLifecycle := len(published) == 2 && (strings.Contains(published[1].Result, `"previewStatus":"upload-pending"`) ||
+			strings.Contains(published[1].Result, `"previewStatus":"processing"`) ||
+			strings.Contains(published[1].Result, `"previewStatus":"ready"`))
+		if len(published) != 2 || published[0].IsError || published[1].IsError ||
+			!strings.Contains(published[0].Result, `"previewStatus":"upload-pending"`) ||
+			!strings.Contains(published[1].Result, `"created":false`) || !replayObservedKnownLifecycle || len(find("update_task")) != 0 ||
+			!hasMessage("preview-observation=processing producer-status=upload-pending ready=false attachment=skipped access-url=none") {
+			t.Fatalf("%s made an unsupported lifecycle claim: calls=%+v messages=%q", identity, calls, messages)
+		}
+	case "coffeeshop-preview/edge-ready-without-url", "coffeeshop-preview/edge-failed", "coffeeshop-preview/edge-expired":
+		published := find("publish_preview")
+		observation := strings.TrimPrefix(identity, "coffeeshop-preview/edge-")
+		if len(published) != 1 || published[0].IsError || !strings.Contains(published[0].Result, `"previewStatus":"upload-pending"`) ||
+			len(find("update_task")) != 0 || !hasMessage("preview-observation="+observation+" producer-status=upload-pending ready=false attachment=skipped access-url=none") {
+			t.Fatalf("%s made an unsupported lifecycle claim: calls=%+v messages=%q", identity, calls, messages)
+		}
+	case "coffeeshop-preview/edge-incompatible-output":
+		if len(find("publish_preview")) != 0 || len(find("update_task")) != 0 ||
+			!hasMessage("preview-observation=incompatible-output publication=skipped attachment=skipped access-url=none") {
+			t.Fatalf("%s published or attached incompatible output: calls=%+v messages=%q", identity, calls, messages)
 		}
 	case "coffeeshop-preview/edge-changed-revision":
 		published := find("publish_preview")
@@ -921,8 +1004,10 @@ func TestCapabilityPackCrashRecovery(t *testing.T) {
 		return known && run.Status == "running", "attempt is not running"
 	})
 	node.stop(true)
-	if alive := cluster.liveHarnessProcesses(3 * time.Second); len(alive) != 0 {
-		t.Fatalf("provider child survived daemon crash: %v", alive)
+	if runtime.GOOS == "linux" {
+		if alive := cluster.liveHarnessProcesses(3 * time.Second); len(alive) != 0 {
+			t.Fatalf("provider child survived daemon crash: %v", alive)
+		}
 	}
 	cluster.eventually("pack node readiness loss", func(current snapshot) (bool, string) {
 		candidate, known := nodeByID(current, node.options.id)

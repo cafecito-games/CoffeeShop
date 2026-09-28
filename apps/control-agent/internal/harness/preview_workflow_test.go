@@ -33,23 +33,58 @@ type previewWorkflowCall struct {
 }
 
 type previewWorkflowAuthority struct {
-	t             *testing.T
-	status        string
-	malformed     bool
-	mu            sync.Mutex
-	calls         []previewWorkflowCall
-	registered    map[string]map[string]any
-	uploaded      map[string]bool
-	uploads       int
-	attachments   int
-	publicationID string
+	t           *testing.T
+	status      string
+	malformed   bool
+	mu          sync.Mutex
+	calls       []previewWorkflowCall
+	registered  map[string]map[string]any
+	uploaded    map[string]bool
+	fixtures    map[string]map[string]any
+	uploads     int
+	attachments int
 }
 
 func newPreviewWorkflowAuthority(t *testing.T, status string, malformed bool) *previewWorkflowAuthority {
+	encoded, err := os.ReadFile("../../../../apps/hub/test-fixtures/preview-workflow-results.json")
+	require.NoError(t, err)
+	fixtures := map[string]map[string]any{}
+	require.NoError(t, json.Unmarshal(encoded, &fixtures))
 	return &previewWorkflowAuthority{
 		t: t, status: status, malformed: malformed, registered: map[string]map[string]any{},
-		uploaded: map[string]bool{}, publicationID: "preview-workflow-one",
+		uploaded: map[string]bool{}, fixtures: fixtures,
 	}
+}
+
+func (authority *previewWorkflowAuthority) producerResult(status, runID string, arguments map[string]any) (json.RawMessage, error) {
+	fixture := authority.fixtures[status]
+	if fixture == nil {
+		return nil, fmt.Errorf("producer fixture has no %s result", status)
+	}
+	// Round-trip before fault injection so the checked-in producer bytes remain immutable across
+	// subtests and replays.
+	encoded, err := json.Marshal(fixture)
+	if err != nil {
+		return nil, err
+	}
+	var result map[string]any
+	if err := json.Unmarshal(encoded, &result); err != nil {
+		return nil, err
+	}
+	artifact, _ := result["artifact"].(map[string]any)
+	preview, _ := result["preview"].(map[string]any)
+	for _, key := range []string{"relativePath", "title", "kind", "mediaType", "summary", "size", "sha256", "idempotencyKey"} {
+		artifact[key] = arguments[key]
+	}
+	artifact["runId"] = runID
+	preview["runId"] = runID
+	preview["artifactSha256"] = arguments["sha256"]
+	preview["entrypoint"] = arguments["entrypoint"]
+	if authority.malformed {
+		preview, _ := result["preview"].(map[string]any)
+		delete(preview, "id")
+	}
+	return json.Marshal(result)
 }
 
 func decodeWorkflowArguments(t *testing.T, raw json.RawMessage) map[string]any {
@@ -77,23 +112,13 @@ func (authority *previewWorkflowAuthority) call(_ context.Context, runID, operat
 			if !reflect.DeepEqual(previous, arguments) {
 				return nil, &mcpserver.ToolError{Code: "idempotency_conflict", Message: "The publication key already has different arguments"}
 			}
-			return authority.registration(runID, arguments, false, authority.uploaded[key])
+			if authority.status == "upload-pending" && authority.uploaded[key] {
+				return authority.producerResult("upload-pending-replayed", runID, arguments)
+			}
+			return authority.producerResult(authority.status, runID, arguments)
 		}
 		authority.registered[key] = arguments
-		if authority.malformed {
-			result, err := authority.registration(runID, arguments, false, true)
-			if err != nil {
-				return nil, err
-			}
-			var value map[string]any
-			require.NoError(authority.t, json.Unmarshal(result, &value))
-			delete(value, "preview")
-			return json.Marshal(value)
-		}
-		created := authority.status == "upload-pending"
-		alreadyUploaded := authority.status != "upload-pending"
-		authority.uploaded[key] = alreadyUploaded
-		return authority.registration(runID, arguments, created, alreadyUploaded)
+		return authority.producerResult(authority.status, runID, arguments)
 	case "update_task":
 		authority.attachments++
 		return json.Marshal(map[string]any{
@@ -110,46 +135,12 @@ func (authority *previewWorkflowAuthority) upload(_ context.Context, path string
 	data, err := io.ReadAll(content)
 	require.NoError(authority.t, err)
 	require.Equal(authority.t, size, int64(len(data)))
-	require.Equal(authority.t, "/api/artifacts/artifact-preview-one/content", path)
+	fixture := authority.fixtures[authority.status]
+	artifact, _ := fixture["artifact"].(map[string]any)
+	require.Equal(authority.t, artifact["downloadPath"], path)
 	authority.uploads++
 	authority.uploaded[previewPublicationKey] = true
 	return nil
-}
-
-func (authority *previewWorkflowAuthority) registration(runID string, arguments map[string]any, created, uploaded bool) (json.RawMessage, error) {
-	createdAt := "2026-09-28T12:00:00Z"
-	updatedAt := "2026-09-28T12:01:00Z"
-	preview := map[string]any{
-		"id": authority.publicationID, "artifactId": "artifact-preview-one", "artifactSha256": arguments["sha256"],
-		"threadId": "thread-preview", "runId": runID, "agentId": "agent-preview", "entrypoint": arguments["entrypoint"],
-		"status": authority.status, "processingGeneration": 0, "createdAt": createdAt, "updatedAt": createdAt,
-		"expiresAt": "2026-09-28T13:00:00Z", "accessState": "unavailable",
-	}
-	switch authority.status {
-	case "processing":
-		preview["processingGeneration"] = 1
-		preview["updatedAt"] = updatedAt
-	case "ready":
-		preview["processingGeneration"] = 1
-		preview["updatedAt"] = updatedAt
-		preview["readyAt"] = updatedAt
-		preview["accessState"] = "eligible"
-	case "failed":
-		preview["processingGeneration"] = 1
-		preview["updatedAt"] = updatedAt
-		preview["failedAt"] = updatedAt
-		preview["failureCode"] = "bundle-invalid"
-	}
-	return json.Marshal(map[string]any{
-		"artifact": map[string]any{
-			"id": "artifact-preview-one", "threadId": "thread-preview", "runId": runID, "agentId": "agent-preview",
-			"relativePath": arguments["relativePath"], "title": arguments["title"], "kind": arguments["kind"],
-			"mediaType": arguments["mediaType"], "summary": arguments["summary"], "size": arguments["size"],
-			"sha256": arguments["sha256"], "downloadPath": "/api/artifacts/artifact-preview-one/content",
-			"uploaded": uploaded, "idempotencyKey": arguments["idempotencyKey"], "createdAt": createdAt,
-		},
-		"preview": preview, "uploadPath": "/api/artifacts/artifact-preview-one/content", "created": created,
-	})
 }
 
 func installedPreviewWorkflowPack(t *testing.T) ActivePack {
@@ -249,10 +240,14 @@ func previewWorkflowScript(t *testing.T, status string, malformed, replay bool) 
 		"relativePath": "site", "entrypoint": "index.html", "title": "Task dashboard", "summary": "Static task dashboard",
 		"ttlSeconds": 3600, "idempotencyKey": previewPublicationKey,
 	}
-	steps := []map[string]any{
-		{"call": "get_task_context", "as": "context"},
-		{"call": "publish_preview", "arguments": publish, "as": "publication", "allowError": malformed},
+	steps := []map[string]any{{"call": "get_task_context", "as": "context"}}
+	if status == "incompatible" {
+		steps = append(steps, map[string]any{"message": "status=incompatible publication=skipped attachment=skipped access-url=none"})
+		encoded, err := json.Marshal(map[string]any{"steps": steps})
+		require.NoError(t, err)
+		return "<fake-script>" + string(encoded) + "</fake-script>"
 	}
+	steps = append(steps, map[string]any{"call": "publish_preview", "arguments": publish, "as": "publication", "allowError": malformed})
 	if malformed {
 		steps = append(steps, map[string]any{"message": "status=failure error={{publication.error.code}} attachment=skipped"})
 	} else {
@@ -265,13 +260,16 @@ func previewWorkflowScript(t *testing.T, status string, malformed, replay bool) 
 				}, "as": "conflict", "allowError": true},
 			)
 		}
-		steps = append(steps,
-			map[string]any{"call": "update_task", "arguments": map[string]any{
+		if status == "ready" {
+			steps = append(steps, map[string]any{"call": "update_task", "arguments": map[string]any{
 				"idempotencyKey": previewAttachmentKey,
 				"completion":     map[string]any{"summary": "Published preview {{publication.preview.id}} with returned status {{publication.preview.status}}", "artifactIds": []any{"{{publication.artifact.id}}"}},
-			}, "as": "attachment"},
-		)
-		message := "status={{publication.preview.status}} artifact={{publication.artifact.id}} preview={{publication.preview.id}} uploaded={{publication.artifact.uploaded}} expires={{publication.preview.expiresAt}} access-url=operator-only"
+			}, "as": "attachment"})
+		}
+		message := "status={{publication.preview.status}} uploaded={{publication.artifact.uploaded}} attachment=skipped access-url=none"
+		if status == "ready" {
+			message = "status=ready attachment=artifact-only access-url=operator-only"
+		}
 		if status == "failed" {
 			message += " failure-code={{publication.preview.failureCode}}"
 		}
@@ -298,10 +296,12 @@ func TestPreviewWorkflowAtInstalledProjectionBoundary(t *testing.T) {
 		replay       bool
 		wantOutput   []string
 	}{
-		{name: "pending replay and conflict", status: "upload-pending", replay: true, wantOutput: []string{"status=upload-pending", "uploaded=true", "replay-created=false", "conflict=idempotency_conflict"}},
-		{name: "processing", status: "processing", wantOutput: []string{"status=processing", "uploaded=true"}},
+		{name: "pending replay and conflict", status: "upload-pending", replay: true, wantOutput: []string{"status=upload-pending", "uploaded=true", "attachment=skipped", "replay-created=false", "conflict=idempotency_conflict"}},
+		{name: "processing", status: "processing", wantOutput: []string{"status=processing", "uploaded=true", "attachment=skipped", "access-url=none"}},
 		{name: "ready without URL", status: "ready", wantOutput: []string{"status=ready", "access-url=operator-only"}},
-		{name: "failed", status: "failed", wantOutput: []string{"status=failed", "uploaded=true", "failure-code=bundle-invalid"}},
+		{name: "failed", status: "failed", wantOutput: []string{"status=failed", "uploaded=true", "attachment=skipped", "access-url=none", "failure-code=bundle-invalid"}},
+		{name: "expired", status: "expired", wantOutput: []string{"status=expired", "attachment=skipped", "access-url=none"}},
+		{name: "incompatible output", status: "incompatible", wantOutput: []string{"status=incompatible", "publication=skipped", "attachment=skipped", "access-url=none"}},
 		{name: "malformed", status: "upload-pending", malformed: true, wantOutput: []string{"status=failure", "error=invalid_result", "attachment=skipped"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -353,6 +353,17 @@ func TestPreviewWorkflowAtInstalledProjectionBoundary(t *testing.T) {
 			harnessCalls := recordedPreviewWorkflowCalls(t, records)
 			require.NotEmpty(t, harnessCalls)
 			require.Equal(t, "get_task_context", harnessCalls[0].Operation)
+			if test.status == "incompatible" {
+				require.Len(t, harnessCalls, 1)
+				authority.mu.Lock()
+				calls := append([]previewWorkflowCall(nil), authority.calls...)
+				uploads, attachments := authority.uploads, authority.attachments
+				authority.mu.Unlock()
+				require.Len(t, calls, 1)
+				require.Zero(t, uploads)
+				require.Zero(t, attachments)
+				return
+			}
 			require.Equal(t, "publish_preview", harnessCalls[1].Operation)
 			require.Equal(t, map[string]any{
 				"relativePath": "site", "entrypoint": "index.html", "title": "Task dashboard",
@@ -378,24 +389,32 @@ func TestPreviewWorkflowAtInstalledProjectionBoundary(t *testing.T) {
 				require.Len(t, harnessCalls, 2)
 				return
 			}
-			require.Equal(t, 1, attachments)
-			last := calls[len(calls)-1]
-			require.Equal(t, "update_task", last.Operation)
-			require.Equal(t, previewAttachmentKey, last.Arguments["idempotencyKey"])
-			completion := last.Arguments["completion"].(map[string]any)
-			require.Equal(t, []any{"artifact-preview-one"}, completion["artifactIds"])
-			require.Contains(t, completion["summary"], test.status)
+			if test.status == "ready" {
+				require.Equal(t, 1, attachments)
+				last := calls[len(calls)-1]
+				require.Equal(t, "update_task", last.Operation)
+				require.Equal(t, previewAttachmentKey, last.Arguments["idempotencyKey"])
+				completion := last.Arguments["completion"].(map[string]any)
+				artifact := authority.fixtures["ready"]["artifact"].(map[string]any)
+				require.Equal(t, []any{artifact["id"]}, completion["artifactIds"])
+				require.Contains(t, completion["summary"], test.status)
+			} else {
+				require.Zero(t, attachments)
+			}
 			if test.replay {
-				require.Len(t, calls, 5)
-				require.Len(t, harnessCalls, 5)
+				require.Len(t, calls, 4)
+				require.Len(t, harnessCalls, 4)
 				require.Equal(t, 1, uploads, "an exact replay must not upload or create a second preview")
 				require.Len(t, authority.registered, 1, "an exact replay must retain one publication identity")
 				require.Equal(t, harnessCalls[1].Arguments, harnessCalls[2].Arguments)
 				require.Equal(t, previewPublicationKey, calls[3].Arguments["idempotencyKey"])
 				require.NotEqual(t, calls[1].Arguments["title"], calls[3].Arguments["title"])
-			} else {
+			} else if test.status == "ready" {
 				require.Len(t, calls, 3)
 				require.Len(t, harnessCalls, 3)
+			} else {
+				require.Len(t, calls, 2)
+				require.Len(t, harnessCalls, 2)
 			}
 		})
 	}

@@ -178,6 +178,9 @@ func (engine *engine) execute(ctx context.Context, step Step) error {
 		if err != nil {
 			return err
 		}
+		if activeRecorder != nil {
+			activeRecorder.write(map[string]any{"event": "evaluation-message", "message": text})
+		}
 		return engine.host.message(text)
 	case step.Thought != "":
 		text, err := engine.text(step.Thought)

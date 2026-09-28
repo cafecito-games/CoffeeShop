@@ -10,6 +10,8 @@ import (
 	"time"
 )
 
+// Non-Linux Unix has no Pdeathsig equivalent here. Ordinary cancellation still kills the provider
+// process group; an uncatchable Barista crash is reconciled remotely, but child death is not claimed.
 func configureProcessCancellation(command *exec.Cmd) {
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	command.Cancel = func() error {
