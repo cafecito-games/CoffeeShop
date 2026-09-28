@@ -49,6 +49,8 @@ In production, publish two TLS virtual hosts, for example `https://coffee.exampl
 
 Capabilities are response-only bearer secrets in URL paths. Configure proxy, ingress, CDN, browser-observability, and application logs to redact the complete segment after `/_coffee-shop/preview/v1/`; do not log request targets, query strings, `Referer`, cookies, or authorization headers on the preview virtual host. Do not persist an access response in snapshots, analytics, browser storage, chat, or control messages. `HEAD` performs the same authorization and integrity work as `GET`; `Range`, cookies, Hub bearer headers, and `?token=` never add authority.
 
+The run-scoped `publish_preview` tool returns durable artifact/preview metadata and the lifecycle state observed by that call; it never returns a signed access URL. In particular, an uploaded artifact does not by itself mean the preview is ready. Coffee Shop agents attach the artifact ID to their task and report the returned preview ID/status. Only an authenticated operator uses `POST /api/previews/:id/access` (normally through the preview UI) after the preview is ready. The publication lifecycle TTL and the shorter access-capability TTL are separate policies.
+
 Rotate keys with add/activate/drain/remove:
 
 1. Generate a new 32-byte key under a new unique `kid`; add it to `PREVIEW_SIGNING_KEYS` while retaining the old entry.

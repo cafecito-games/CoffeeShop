@@ -1,9 +1,9 @@
 {
   "packSchemaVersion": "1",
   "id": "coffeeshop-capability-pack",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "label": "Coffee Shop capability pack (canonical workflow skills)",
-  "summary": "Focused Coffee Shop workflows for durable task coordination, durable artifact publication, and task and thread reporting. The workflows teach how to use the run-scoped Coffee Shop tools; they grant no capability and carry no endpoint or credential.",
+  "summary": "Focused Coffee Shop workflows for durable task coordination, artifact and static-preview publication, and task and thread reporting. The workflows teach how to use run-scoped Coffee Shop tools; they grant no capability and carry no endpoint or credential.",
   "minimumControlProtocolVersion": "5",
   "toolVocabulary": [
     "get_task_context",
@@ -69,6 +69,16 @@
         "update_task",
         "update_thread"
       ]
+    },
+    {
+      "id": "coffeeshop-preview",
+      "path": "skills/coffeeshop-preview/SKILL.md",
+      "evaluationPath": "evaluations/coffeeshop-preview.json",
+      "requiredTools": [
+        "get_task_context",
+        "publish_preview",
+        "update_task"
+      ]
     }
   ],
   "files": [
@@ -79,6 +89,10 @@
     {
       "path": "evaluations/coffeeshop-coordination.json",
       "sha256": "7a6d6a7b091087094592b21ec062c8da7671239775c51c9d7c0a0cf6f2c3dbfe"
+    },
+    {
+      "path": "evaluations/coffeeshop-preview.json",
+      "sha256": "fd6b5605f9787e82ff92c3f4c494ddfa6a4cf44209b9df1518cef46da42dd493"
     },
     {
       "path": "evaluations/coffeeshop-task-reporting.json",
@@ -99,6 +113,10 @@
     {
       "path": "skills/coffeeshop-coordination/SKILL.md",
       "sha256": "6104ee9471d79a7a2dddf1281848ccbb5ab01183cf5c4866fa6a5f9e70c8eb2b"
+    },
+    {
+      "path": "skills/coffeeshop-preview/SKILL.md",
+      "sha256": "d6cb56a03fe350414dffa4c747ef87c7437e6cfe265e0923d67045dc32bc192a"
     },
     {
       "path": "skills/coffeeshop-task-reporting/SKILL.md",
