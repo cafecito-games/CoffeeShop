@@ -37,10 +37,11 @@ const buildDirectoryPrefix = "coffee-shop-system-build-"
 
 // Built once per test binary by TestMain.
 var (
-	repositoryRoot  string
-	baristaBinary   string
-	adapterBinaries map[string]string
-	nativeDirectory string
+	repositoryRoot         string
+	baristaBinary          string
+	adapterBinaries        map[string]string
+	managedHarnessBinaries map[string]string
+	nativeDirectory        string
 )
 
 func TestMain(m *testing.M) {
@@ -94,6 +95,14 @@ func prepare(m *testing.M) (int, error) {
 			return 0, fmt.Errorf("build %s: %v\n%s", target, err, combined)
 		}
 	}
+	managedHarnessBinaries = map[string]string{"2.0.14": fake}
+	versionB := filepath.Join(buildDirectory, "fakeharness-claude-2.0.15")
+	versionCommand := exec.Command("go", "build", "-ldflags", "-X=main.claudeNativeVersion=2.0.15", "-o", versionB, "./internal/systemtest/fakeharness")
+	versionCommand.Dir = controlAgent
+	if combined, err := versionCommand.CombinedOutput(); err != nil {
+		return 0, fmt.Errorf("build versioned fake harness: %v\n%s", err, combined)
+	}
+	managedHarnessBinaries["2.0.15"] = versionB
 	adapterDirectory := filepath.Join(buildDirectory, "adapters")
 	nativeDirectory = filepath.Join(buildDirectory, "native")
 	adapterBinaries = map[string]string{"codex-cli": filepath.Join(adapterDirectory, "codex-acp"), "claude-cli": filepath.Join(adapterDirectory, "claude-agent-acp")}
@@ -217,11 +226,36 @@ func (environment *environment) teardown() {
 		t.Errorf("fake harness processes outlived their Barista: %v", leaked)
 	}
 	if t.Failed() {
+		environment.assertRetainedDiagnosticsRedacted()
 		t.Logf("retained the failed scenario's environment for diagnosis: %s", environment.root)
 		environment.dumpDiagnostics()
 		return
 	}
 	_ = os.RemoveAll(environment.root)
+}
+
+// assertRetainedDiagnosticsRedacted screens the exact directory a failed scenario leaves behind.
+// The failure names only the file and secret category, never the value.
+func (environment *environment) assertRetainedDiagnosticsRedacted() {
+	secrets := map[string]string{"enrollment token": enrollmentToken}
+	for name, value := range providerCanaries {
+		secrets[name] = value
+	}
+	_ = filepath.WalkDir(environment.root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil || entry.IsDir() {
+			return nil
+		}
+		content, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return nil
+		}
+		for category, secret := range secrets {
+			if bytes.Contains(content, []byte(secret)) {
+				environment.t.Errorf("credential category %s leaked into retained diagnostic file %s", category, path)
+			}
+		}
+		return nil
+	})
 }
 
 // harnessRecord is one line the fake harness recorded.
@@ -231,6 +265,9 @@ type harnessRecord struct {
 	PID              int             `json:"pid"`
 	Environment      map[string]bool `json:"environment"`
 	WorkingDirectory string          `json:"workingDirectory"`
+	Executable       string          `json:"executable"`
+	Version          string          `json:"version"`
+	At               string          `json:"at"`
 	SessionID        string          `json:"sessionId"`
 	Cwd              string          `json:"cwd"`
 	Code             int             `json:"code"`
@@ -706,12 +743,13 @@ type nodeOptions struct {
 	name  string
 	codex bool
 	// claudeAuthMode, when set, installs the Claude ACP adapter under that auth mode.
-	claudeAuthMode   string
-	labels           []string
-	nativeFallback   []string
-	concurrency      int
-	instanceCapacity *int
-	projects         []string
+	claudeAuthMode    string
+	labels            []string
+	nativeFallback    []string
+	concurrency       int
+	instanceCapacity  *int
+	projects          []string
+	componentManifest string
 }
 
 // baristaNode is one real Barista process with its own workspace root, data root, and provider
@@ -730,6 +768,15 @@ type baristaNode struct {
 }
 
 func (environment *environment) startNode(options nodeOptions) *baristaNode {
+	node := environment.prepareNode(options)
+	node.start()
+	return node
+}
+
+// prepareNode creates one node's isolated roots and proxy without starting Barista. Component
+// lifecycle scenarios use this boundary to invoke the real setup CLI against the exact data root
+// the daemon will later open.
+func (environment *environment) prepareNode(options nodeOptions) *baristaNode {
 	t := environment.t
 	t.Helper()
 	if options.name == "" {
@@ -753,7 +800,6 @@ func (environment *environment) startNode(options nodeOptions) *baristaNode {
 	environment.mu.Lock()
 	environment.nodes[options.id] = node
 	environment.mu.Unlock()
-	node.start()
 	return node
 }
 
@@ -785,6 +831,9 @@ func (node *baristaNode) start() {
 		"--workspace-root", node.root, "--concurrency", strconv.Itoa(options.concurrency),
 		"--instance-capacity", strconv.Itoa(instanceCapacity),
 		"--data-root", node.dataRoot,
+	}
+	if options.componentManifest != "" {
+		arguments = append(arguments, "--adapter-manifest", options.componentManifest)
 	}
 	if options.codex {
 		arguments = append(arguments, "--acp-adapter", "codex-cli=sha256:"+sha256File(t, adapterBinaries["codex-cli"])+":"+adapterBinaries["codex-cli"])

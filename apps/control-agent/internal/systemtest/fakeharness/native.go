@@ -13,10 +13,19 @@ import (
 )
 
 // Native CLI versions the fake reports from --version; Barista normalizes the dotted number.
-const (
+// They are variables so the system-test builder can stamp truthful versioned component artifacts
+// with Go's -X linker flag. Production never reads a runtime override.
+var (
 	codexNativeVersion  = "codex-cli 0.46.0"
 	claudeNativeVersion = "2.0.14 (Claude Code)"
 )
+
+func nativeVersion(role string) string {
+	if role == "codex" {
+		return codexNativeVersion
+	}
+	return claudeNativeVersion
+}
 
 // nativeHost emulates a native CLI's JSON event stream on stdout. It has no ACP session, so
 // structured updates are dropped and permission requests cannot be raised.
@@ -28,11 +37,9 @@ type nativeHost struct {
 
 func runNative(recorder *recorder, role string, arguments []string) int {
 	if len(arguments) == 1 && arguments[0] == "--version" {
-		if role == "codex" {
-			fmt.Println(codexNativeVersion)
-		} else {
-			fmt.Println(claudeNativeVersion)
-		}
+		version := nativeVersion(role)
+		recorder.write(map[string]any{"event": "native-version", "version": version})
+		fmt.Println(version)
 		return 0
 	}
 	if inventory, handled := nativeSkillInventory(role, arguments); handled {
@@ -52,7 +59,7 @@ func runNative(recorder *recorder, role string, arguments []string) int {
 			return 64
 		}
 	}
-	recorder.write(map[string]any{"event": "native-run", "mcp": client != nil})
+	recorder.write(map[string]any{"event": "native-run", "mcp": client != nil, "version": nativeVersion(role)})
 	script, err := extractScript(prompt)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "fakeharness: %v\n", err)

@@ -12,14 +12,17 @@ import (
 // recorder appends one JSON object per line to a file named after the role and process ID in the
 // test-owned record directory. Without the directory it records nothing.
 type recorder struct {
-	mu   sync.Mutex
-	file *os.File
+	mu         sync.Mutex
+	file       *os.File
+	role       string
+	executable string
 }
 
 var activeRecorder *recorder
 
 func newRecorder(role string) *recorder {
-	result := &recorder{}
+	executable, _ := os.Executable()
+	result := &recorder{role: role, executable: executable}
 	activeRecorder = result
 	directory := os.Getenv(recordDirectoryVariable)
 	if directory == "" {
@@ -36,7 +39,7 @@ func newRecorder(role string) *recorder {
 		present[name] = set
 	}
 	workingDirectory, _ := os.Getwd()
-	result.write(map[string]any{"event": "start", "role": role, "pid": os.Getpid(), "environment": present, "workingDirectory": workingDirectory})
+	result.write(map[string]any{"event": "start", "role": role, "pid": os.Getpid(), "environment": present, "workingDirectory": workingDirectory, "executable": executable})
 	return result
 }
 
@@ -45,6 +48,12 @@ func (recorder *recorder) write(entry map[string]any) {
 	defer recorder.mu.Unlock()
 	if recorder.file == nil {
 		return
+	}
+	if _, present := entry["role"]; !present {
+		entry["role"] = recorder.role
+	}
+	if _, present := entry["executable"]; !present {
+		entry["executable"] = recorder.executable
 	}
 	entry["at"] = time.Now().UTC().Format(time.RFC3339Nano)
 	encoded, err := json.Marshal(entry)
