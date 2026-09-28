@@ -31,10 +31,12 @@ function renderViews(snapshot: Snapshot) {
       threads={snapshot.threads ?? []}
       runs={snapshot.runs}
       artifacts={snapshot.artifacts ?? []}
+      artifactPreviews={snapshot.artifactPreviews}
       agents={snapshot.agents}
       orchestratorClients={snapshot.orchestratorClients ?? []}
       orchestratorAttachments={snapshot.orchestratorAttachments ?? []}
       canMutate
+      apiFetch={vi.fn()}
       onContinue={vi.fn()}
       onInspectRun={vi.fn()}
       onSetStatus={vi.fn()}
@@ -78,6 +80,9 @@ describe("hub snapshot fixtures", () => {
     const snapshot = preview as Snapshot;
     expect(snapshot.artifactPreviews).toHaveLength(1);
     expect(snapshot.artifactPreviews?.[0]).toMatchObject({ status: "ready", accessState: "eligible" });
+    renderViews(snapshot);
+    expect(screen.getByText("Ready for isolated access")).toBeInTheDocument();
+    expect(screen.getByText("Site preview")).toBeInTheDocument();
   });
 
   it("renders external orchestration from a snapshot the hub produced", () => {

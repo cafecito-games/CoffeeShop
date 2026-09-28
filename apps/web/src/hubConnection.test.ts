@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import type { Snapshot } from "@coffee-shop/protocol";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -151,8 +153,16 @@ describe("snapshot validation", () => {
         ...base, updatedAt: base.expiresAt, expiredAt: base.expiresAt
       }
     };
+    const artifact = {
+      id: "artifact-one", threadId: "thread-one", runId: "run-one", agentId: "agent-one",
+      relativePath: ".coffee-shop/previews/site.tar.gz", title: "Preview", kind: "preview-bundle",
+      mediaType: "application/vnd.coffee-shop.preview-bundle+tar+gzip", summary: "", size: 512,
+      sha256: "a".repeat(64), downloadPath: "/api/artifacts/artifact-one/content", uploaded: true,
+      idempotencyKey: "preview-one", createdAt: base.createdAt
+    };
     for (const [status, preview] of Object.entries(byStatus)) {
-      expect(isSnapshot({ ...snapshot(generatedAt), artifactPreviews: [{ ...preview, status }] })).toBe(true);
+      const correlatedArtifact = status === "upload-pending" ? { ...artifact, uploaded: false } : artifact;
+      expect(isSnapshot({ ...snapshot(generatedAt), artifacts: [correlatedArtifact], artifactPreviews: [{ ...preview, status }] })).toBe(true);
     }
 
     const ready = { ...byStatus.ready, status: "ready" };
@@ -168,9 +178,87 @@ describe("snapshot validation", () => {
       [{ ...ready, signedUrl: "https://preview.invalid/secret" }],
       [{ ...ready, token: "secret" }]
     ]) {
-      expect(isSnapshot({ ...snapshot(generatedAt), artifactPreviews: collection })).toBe(false);
+      expect(isSnapshot({ ...snapshot(generatedAt), artifacts: [artifact], artifactPreviews: collection })).toBe(false);
     }
     expect(isSnapshot({ ...snapshot(generatedAt), artifactPreviews: undefined })).toBe(true);
+  });
+
+  it("accepts the Hub producer's unuploaded registration and generation-zero terminal projections only", () => {
+    // These exact artifact/preview bytes are regenerated and byte-checked by apps/hub/src/hubTools.test.ts.
+    const produced = JSON.parse(readFileSync(join(process.cwd(), "../../packages/protocol/test/fixtures/hub-tools/publish-preview-created.json"), "utf8")) as {
+      artifact: Record<string, unknown>;
+      preview: Record<string, unknown>;
+    };
+    const registered = {
+      ...snapshot("2026-09-27T12:01:00.000Z"),
+      artifacts: [produced.artifact],
+      artifactPreviews: [produced.preview]
+    };
+    expect(isSnapshot(registered)).toBe(true);
+
+    const failed = {
+      ...produced.preview,
+      status: "failed",
+      updatedAt: "2026-09-27T12:01:00.000Z",
+      failedAt: "2026-09-27T12:01:00.000Z",
+      failureCode: "upload-failed"
+    };
+    expect(isSnapshot({ ...registered, artifactPreviews: [failed] })).toBe(true);
+    expect(isSnapshot({ ...registered, artifactPreviews: [{ ...failed, failureCode: "bundle-invalid" }] })).toBe(true);
+
+    const expired = {
+      ...produced.preview,
+      status: "expired",
+      updatedAt: produced.preview.expiresAt,
+      expiredAt: produced.preview.expiresAt
+    };
+    expect(isSnapshot({
+      ...registered,
+      generatedAt: produced.preview.expiresAt,
+      artifactPreviews: [expired]
+    })).toBe(true);
+
+    for (const invalid of [
+      { ...produced.preview, status: "processing", processingGeneration: 1, updatedAt: "2026-09-27T12:01:00.000Z" },
+      { ...failed, processingGeneration: 1 },
+      { ...expired, processingGeneration: 1 },
+      { ...produced.preview, artifactSha256: "b".repeat(64) }
+    ]) expect(isSnapshot({ ...registered, artifactPreviews: [invalid] })).toBe(false);
+  });
+
+  it("rejects duplicate and cross-linked preview records as one snapshot update", () => {
+    const generatedAt = "2026-09-27T12:04:00.000Z";
+    const artifact = {
+      id: "artifact-one", threadId: "thread-one", runId: "run-one", agentId: "agent-one",
+      relativePath: ".coffee-shop/previews/site.tar.gz", title: "Preview", kind: "preview-bundle",
+      mediaType: "application/vnd.coffee-shop.preview-bundle+tar+gzip", summary: "", size: 512,
+      sha256: "a".repeat(64), downloadPath: "/api/artifacts/artifact-one/content", uploaded: true,
+      idempotencyKey: "preview-one", createdAt: "2026-09-27T12:00:00.000Z"
+    };
+    const preview = {
+      id: "preview-one", artifactId: artifact.id, artifactSha256: artifact.sha256,
+      threadId: artifact.threadId, runId: artifact.runId, agentId: artifact.agentId,
+      entrypoint: "site/index.html", status: "ready", processingGeneration: 1,
+      createdAt: artifact.createdAt, updatedAt: "2026-09-27T12:02:00.000Z",
+      expiresAt: "2026-09-28T12:00:00.000Z", readyAt: "2026-09-27T12:02:00.000Z",
+      accessState: "eligible"
+    };
+    const value = { ...snapshot(generatedAt), artifacts: [artifact], artifactPreviews: [preview] };
+    expect(isSnapshot(value)).toBe(true);
+    expect(isSnapshot({ ...value, artifactPreviews: [preview, preview] })).toBe(false);
+    expect(isSnapshot({ ...value, artifactPreviews: [preview, { ...preview, id: "preview-two" }] })).toBe(false);
+    for (const changed of [
+      { artifacts: [] },
+      { artifacts: [{ ...artifact, uploaded: false }] },
+      { artifacts: [{ ...artifact, sha256: "b".repeat(64) }] },
+      { artifacts: [{ ...artifact, threadId: "thread-two" }] },
+      { artifacts: [{ ...artifact, runId: "run-two" }] },
+      { artifacts: [{ ...artifact, agentId: undefined, instanceId: "instance-one", allocationId: "allocation-one" }] }
+    ]) expect(isSnapshot({ ...value, ...changed })).toBe(false);
+
+    const instanceArtifact = { ...artifact, agentId: undefined, instanceId: "instance-one", allocationId: "allocation-one" };
+    const instancePreview = { ...preview, agentId: undefined, instanceId: "instance-one", allocationId: "allocation-one" };
+    expect(isSnapshot({ ...value, artifacts: [instanceArtifact], artifactPreviews: [instancePreview] })).toBe(true);
   });
 
   it("accepts preview-bundle artifact metadata in the shared artifact vocabulary", () => {

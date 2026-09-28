@@ -4,6 +4,7 @@ import { createServer, request, type Server } from "node:http";
 import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Readable } from "node:stream";
 import test from "node:test";
 import express, { type Express } from "express";
 import type { PreparedPreviewManifest } from "./previewStorage.js";
@@ -13,6 +14,7 @@ import {
   listenPreviewTopology,
   parsePreviewDeliveryConfig,
   previewContentType,
+  previewRetryJsonErrorHandler,
   rawRequestAuthority,
   registerPreviewOperatorRoutes,
   requestTargetsPreviewAuthority,
@@ -318,6 +320,7 @@ function operatorApp(
   const app = express();
   app.use(createMainPreviewHostGuard(configuration));
   app.use(express.json({ limit: "1mb" }));
+  app.use(previewRetryJsonErrorHandler);
   app.use(operatorCredentialGuard("operator-secret"));
   registerPreviewOperatorRoutes(app, { ...fixture, configuration, now, broadcast });
   app.use((_request, response) => response.status(200).send("hub fallback"));
@@ -335,6 +338,12 @@ test("operator issuance is authenticated, read-only, exact-schema, and fails clo
     assert.equal((await httpRequest(port, "POST", `/api/previews/${previewId}/access`, "hub.localhost:8787", { body: {} })).status, 401);
     assert.equal((await httpRequest(port, "POST", `/api/previews/${previewId}/renew`, "hub.localhost:8787", {
       body: { ttlSeconds: 86_400 }
+    })).status, 401);
+    assert.equal((await httpRequest(port, "POST", `/api/previews/${previewId}/retry`, "hub.localhost:8787", {
+      body: {}
+    })).status, 401);
+    assert.equal((await httpRequest(port, "POST", `/api/previews/${previewId}/retry`, "hub.localhost:8787", {
+      body: null
     })).status, 401);
     assert.equal((await httpRequest(port, "POST", `/api/previews/${previewId}/access`, "preview.localhost:8788", { body: {} })).status, 421,
       "preview authority never reaches Hub auth or fallback");
@@ -372,6 +381,91 @@ test("operator issuance is authenticated, read-only, exact-schema, and fails clo
   } finally {
     process.env.NODE_ENV = originalNodeEnv;
     await close(server);
+  }
+});
+
+async function failedRetryFixture(stageArtifact: boolean) {
+  const fixture = await preparedFixture();
+  const bytes = await readFile(new URL("../test-fixtures/preview-v1/bundle.tar.gz", import.meta.url));
+  const previewId = fixture.manifest.previewId;
+  await fixture.store.transact((state) => {
+    state.artifactPreviews = state.artifactPreviews?.map((preview) => preview.id === previewId ? {
+      ...preview, status: "failed", failedAt: "2026-09-27T12:03:00.000Z", failureCode: "processing-failed",
+      updatedAt: "2026-09-27T12:03:00.000Z", readyAt: undefined
+    } : preview);
+  });
+  if (stageArtifact) {
+    await fixture.storage.ingestArtifact(Readable.from([bytes]), {
+      id: fixture.manifest.artifactId, size: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex"),
+      maximumBytes: bytes.length
+    });
+  }
+  return fixture;
+}
+
+test("operator retry is authenticated, exact-body, state-bounded, and broadcasts only committed transitions", async () => {
+  const fixture = await failedRetryFixture(true);
+  let broadcasts = 0;
+  const { server, port } = await listen(operatorApp(fixture, enabledConfig(), () => Date.parse(nowIso), () => { broadcasts += 1; }));
+  const headers = { Authorization: "Bearer operator-secret" };
+  try {
+    const previewId = fixture.manifest.previewId;
+    for (const body of [{ extra: true }, [], null, { artifactId: fixture.manifest.artifactId }]) {
+      assert.equal((await httpRequest(port, "POST", `/api/previews/${previewId}/retry`, "hub.localhost:8787", { headers, body })).status, 422);
+    }
+    assert.equal((await httpRequest(port, "POST", "/api/previews/missing/retry", "hub.localhost:8787", { headers, body: {} })).status, 404);
+    assert.equal(broadcasts, 0);
+
+    const accepted = await httpRequest(port, "POST", `/api/previews/${previewId}/retry`, "hub.localhost:8787", { headers, body: {} });
+    assert.equal(accepted.status, 202);
+    const body = JSON.parse(accepted.body.toString("utf8"));
+    assert.deepEqual(Object.keys(body), ["preview", "replayed"]);
+    assert.equal(body.replayed, false);
+    assert.equal(body.preview.status, "ready");
+    assert.equal(body.preview.processingGeneration, 2);
+    assert.equal(broadcasts, 2);
+
+    const terminal = await httpRequest(port, "POST", `/api/previews/${previewId}/retry`, "hub.localhost:8787", { headers, body: {} });
+    assert.equal(terminal.status, 409);
+    assert.equal(broadcasts, 2);
+  } finally { await close(server); }
+});
+
+test("operator retry reports concurrent processing as a replay and settles storage failures without leaking details", async () => {
+  {
+    const fixture = await failedRetryFixture(true);
+    await fixture.store.transact((state) => {
+      state.artifactPreviews = state.artifactPreviews?.map((preview) => ({
+        ...preview, status: "processing", processingGeneration: 2, updatedAt: nowIso,
+        failedAt: undefined, failureCode: undefined
+      }));
+    });
+    let broadcasts = 0;
+    const { server, port } = await listen(operatorApp(fixture, enabledConfig(), () => Date.parse(nowIso), () => { broadcasts += 1; }));
+    try {
+      const replay = await httpRequest(port, "POST", `/api/previews/${fixture.manifest.previewId}/retry`, "hub.localhost:8787", {
+        headers: { Authorization: "Bearer operator-secret" }, body: {}
+      });
+      assert.equal(replay.status, 200);
+      assert.equal(JSON.parse(replay.body.toString("utf8")).replayed, true);
+      assert.equal(broadcasts, 0);
+    } finally { await close(server); }
+  }
+
+  {
+    const fixture = await failedRetryFixture(false);
+    let broadcasts = 0;
+    const { server, port } = await listen(operatorApp(fixture, enabledConfig(), () => Date.parse(nowIso), () => { broadcasts += 1; }));
+    try {
+      const failed = await httpRequest(port, "POST", `/api/previews/${fixture.manifest.previewId}/retry`, "hub.localhost:8787", {
+        headers: { Authorization: "Bearer operator-secret" }, body: {}
+      });
+      assert.equal(failed.status, 409);
+      assert.deepEqual(JSON.parse(failed.body.toString("utf8")), { error: "Preview retry is unavailable" });
+      assert.equal(broadcasts, 2);
+      assert.equal(fixture.store.snapshot(nowIso).artifactPreviews?.[0].status, "failed");
+      assert.equal(fixture.store.snapshot(nowIso).artifactPreviews?.[0].processingGeneration, 2);
+    } finally { await close(server); }
   }
 });
 
