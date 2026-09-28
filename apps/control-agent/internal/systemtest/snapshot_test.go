@@ -2,6 +2,8 @@
 
 package systemtest
 
+import "github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/protocol"
+
 // The subset of the hub's published snapshot the scenarios assert on. Field names follow
 // packages/protocol/src/index.ts; the hub is the only producer.
 
@@ -25,7 +27,13 @@ type snapshot struct {
 	WorkspaceLeases         []workspaceLease         `json:"workspaceLeases"`
 	RunActivity             []map[string]any         `json:"runActivity"`
 	Events                  []timelineEvent          `json:"events"`
+	ComponentInventories    []componentInventory     `json:"componentInventories"`
 }
+
+// Aliases deliberately decode the producer through the exact Go wire contract. This keeps the
+// system fixture closed over the same fields, sort rules, and vocabularies Barista validates.
+type componentInventory = protocol.ComponentInventoryReport
+type componentInventoryEntry = protocol.ComponentInventoryEntry
 
 type agent struct {
 	ID            string `json:"id"`
