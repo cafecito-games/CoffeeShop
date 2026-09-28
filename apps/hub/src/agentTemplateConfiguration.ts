@@ -249,7 +249,7 @@ export async function createAgentTemplate(
   let result: AgentTemplateConfigurationResult | undefined;
   await store.transact((state) => {
     const prior = priorReceipt(state, caller.operator, caller.key, digest);
-    if (prior) { result = { template: prior, replayed: true }; return; }
+    if (prior) { result = { template: prior, replayed: true }; return false; }
     const template = applyInput({ id: `template_${randomUUID()}`, name: input.name as string }, input);
     state.templates ??= [];
     state.templates.push(template);
@@ -275,7 +275,7 @@ export async function updateAgentTemplate(
   let result: AgentTemplateConfigurationResult | undefined;
   await store.transact((state) => {
     const prior = priorReceipt(state, caller.operator, caller.key, digest);
-    if (prior) { result = { template: prior, replayed: true }; return; }
+    if (prior) { result = { template: prior, replayed: true }; return false; }
     const index = (state.templates ?? []).findIndex((template) => template.id === targetId);
     if (index < 0) throw new CoordinationError("not_found", "Template not found");
     const current = state.templates![index];
@@ -305,7 +305,7 @@ export async function deleteAgentTemplate(
   let result: AgentTemplateConfigurationResult | undefined;
   await store.transact((state) => {
     const prior = priorReceipt(state, caller.operator, caller.key, digest);
-    if (prior) { result = { template: prior, replayed: true }; return; }
+    if (prior) { result = { template: prior, replayed: true }; return false; }
     const index = (state.templates ?? []).findIndex((template) => template.id === targetId);
     if (index < 0) throw new CoordinationError("not_found", "Template not found");
     const liveTask = (state.tasks ?? []).some((task) => !isTerminalTaskStatus(task.status) && task.requirements.templateId === targetId);

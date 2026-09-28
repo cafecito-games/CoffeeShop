@@ -904,6 +904,8 @@ button:disabled, textarea:disabled, fieldset:disabled button { cursor: not-allow
 }
 
 @media (max-width: 520px) {
+  .bottom-nav { grid-template-columns: repeat(auto-fit,minmax(44px,1fr)); }
+  .bottom-nav button > span:not(.unread) { display: none; }
   .node-choices { grid-template-columns: 1fr; }
   .avatar-shapes { gap: 4px; }
   .activity-type-options { grid-template-columns: 1fr; }

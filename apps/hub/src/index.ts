@@ -36,6 +36,7 @@ import { detachEveryAttachmentInState, postOperatorMessageInState, type Operator
 import { createHubToolHandler, hubToolError } from "./hubTools.js";
 import {
   applyInstanceLifecycle,
+  applyNodeHeartbeatInState,
   applyNodeResidencyInState,
   classifyInstanceResidentEvidence,
   classifyReportedInstanceCount,
@@ -988,7 +989,15 @@ wss.on("connection", (socket, request) => {
         console.warn(redactor.redact(`refused reported instance usage from ${nodeId}: ${reportedCount.reason}`));
       }
       const reportedInstances = reportedCount.kind === "reported" ? reportedCount.count : undefined;
-      await store.transact((state) => { const node = state.nodes.find((item) => item.id === message.nodeId); if (node) { capacityChanged = node.activeRuns !== message.activeRuns || (reportedInstances !== undefined && node.activeInstances !== reportedInstances); node.lastSeen = message.at; node.activeRuns = message.activeRuns; if (reportedInstances !== undefined) node.activeInstances = reportedInstances; node.status = message.activeRuns ? "busy" : "online"; } });
+      let refusedReportedInstances = false;
+      await store.transact((state) => {
+        ({ capacityChanged, refusedReportedInstances } = applyNodeHeartbeatInState(
+          state, message.nodeId, message.activeRuns, reportedInstances, message.at
+        ));
+      });
+      if (refusedReportedInstances) {
+        console.warn(redactor.redact(`refused reported instance usage from ${nodeId}: count exceeds registered capacity`));
+      }
       /*
        * A heartbeat carries the node's resident identities (#114), classified by the same tri-state
        * reader as the reconnect barrier's: absent infers nothing, an explicitly empty set is an

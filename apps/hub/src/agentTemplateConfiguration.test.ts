@@ -42,7 +42,10 @@ const editable = {
 
 test("operator template creation normalizes fields, replays exactly, and keeps receipts private", async () => {
   const { store } = await fixture();
+  let commits = 0;
+  store.onCommit(() => { commits += 1; });
   const created = await createAgentTemplate(store, "operator", "create-reviewer", editable, at);
+  assert.equal(commits, 1);
   assert.equal(created.replayed, false);
   assert.match(created.template.id, /^template_/);
   assert.deepEqual(created.template, {
@@ -62,6 +65,7 @@ test("operator template creation normalizes fields, replays exactly, and keeps r
     requirements: { labels: ["linux", "trusted"], models: ["default", "fable"] }
   }, later);
   assert.deepEqual({ ...replay, template: { ...replay.template, id: created.template.id } }, { template: created.template, replayed: true });
+  assert.equal(commits, 1, "an exact create replay is a transaction no-op");
   assert.equal(store.snapshot().templates?.length, 1);
   assert.equal(Object.hasOwn(store.snapshot() as object, "agentTemplateConfigurationReceipts"), false);
 
@@ -103,9 +107,19 @@ test("updates preserve imported provenance and delete never re-imports a legacy 
   const imported = store.snapshot().templates?.[0] as AgentTemplate;
   const updated = await updateAgentTemplate(store, "operator", "update-imported", imported.id, { name: "Milo revised", skills: ["Rust", "rust"] }, later);
   assert.deepEqual([updated.template.id, updated.template.legacyAgentId, updated.template.name, updated.template.skills], [imported.id, legacy.id, "Milo revised", ["rust"]]);
+  let commits = 0;
+  const stopCounting = store.onCommit(() => { commits += 1; });
+  const updateReplay = await updateAgentTemplate(store, "operator", "update-imported", imported.id, { name: "Milo revised", skills: ["rust"] }, later);
+  assert.equal(updateReplay.replayed, true);
+  assert.equal(commits, 0, "an exact update replay is a transaction no-op");
 
   const removed = await deleteAgentTemplate(store, "operator", "delete-imported", imported.id, later);
   assert.deepEqual([removed.template.id, removed.template.legacyAgentId, removed.replayed], [imported.id, legacy.id, false]);
+  assert.equal(commits, 1);
+  const deleteReplay = await deleteAgentTemplate(store, "operator", "delete-imported", imported.id, later);
+  assert.equal(deleteReplay.replayed, true);
+  assert.equal(commits, 1, "an exact delete replay is a transaction no-op");
+  stopCounting();
   await store.transact((state) => assert.equal(importLegacyAgentTemplates(state, later), false));
   assert.deepEqual(store.snapshot().templates, []);
   assert.equal(store.read((state) => state.legacyTemplateImports?.[0].templateId), imported.id);

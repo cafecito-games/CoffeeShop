@@ -4,6 +4,8 @@ import {
   defaultInstanceIdleTimeoutSeconds,
   instanceStatuses,
   isTerminalInstanceStatus,
+  maximumInstanceIdleTimeoutSeconds,
+  minimumInstanceIdleTimeoutSeconds,
   type AgentInstance,
   type AgentTemplate,
   type ComputeNode,
@@ -205,6 +207,15 @@ export function CreateInstanceDialog({ threads, templates, canMutate, onClose, o
   async function submit(event: FormEvent) {
     event.preventDefault();
     if (!canMutate || !threadId) return;
+    const idleTimeoutSeconds = Number(idleTimeout);
+    if (!Number.isInteger(idleTimeoutSeconds) || idleTimeoutSeconds < minimumInstanceIdleTimeoutSeconds || idleTimeoutSeconds > maximumInstanceIdleTimeoutSeconds) {
+      setError(`Idle timeout must be a whole number from ${minimumInstanceIdleTimeoutSeconds} to ${maximumInstanceIdleTimeoutSeconds} seconds`);
+      return;
+    }
+    if ((taskTitle.trim().length === 0) !== (taskInstructions.trim().length === 0)) {
+      setError("Initial task title and instructions must be provided together");
+      return;
+    }
     const purpose = { ...(name.trim() ? { name: name.trim() } : {}), ...(title.trim() ? { title: title.trim() } : {}), ...(summary.trim() ? { summary: summary.trim() } : {}), ...(instructions.trim() ? { instructions: instructions.trim() } : {}) };
     const preferences: ExecutionPreferences = { ...(commaList(preferredNodes).length ? { nodeIds: commaList(preferredNodes) } : {}) };
     const requirements: ExecutionRequirements = {
@@ -217,7 +228,7 @@ export function CreateInstanceDialog({ threads, templates, canMutate, onClose, o
     try {
       await onCreate({
         threadId, ...(Object.keys(purpose).length ? { purpose } : {}), requirements,
-        idleTimeoutSeconds: Number(idleTimeout),
+        idleTimeoutSeconds,
         ...(taskTitle.trim() && taskInstructions.trim() ? { initialTask: { title: taskTitle.trim(), instructions: taskInstructions.trim() } } : {})
       });
       onClose();
@@ -228,8 +239,8 @@ export function CreateInstanceDialog({ threads, templates, canMutate, onClose, o
     <form onSubmit={submit}>
       <header><div><small>Operator lifecycle</small><h2 id="create-instance-title">Start an instance</h2></div><button type="button" className="icon-btn" aria-label="Close instance form" onClick={onClose}><X size={17} /></button></header>
       <div className="instance-form-scroll">
-        {activeThreads.length === 0 ? <p className="instance-callout danger">An active thread is required.</p> : <fieldset><legend>Active thread</legend><div className="choice-grid">{activeThreads.map((thread) => <button type="button" key={thread.id} className={threadId === thread.id ? "selected" : ""} onClick={() => setThreadId(thread.id)}>{thread.title}</button>)}</div></fieldset>}
-        <fieldset><legend>Reusable template</legend><div className="choice-grid"><button type="button" className={!templateId ? "selected" : ""} onClick={() => setTemplateId("")}>No template</button>{templates.map((template) => <button type="button" key={template.id} className={templateId === template.id ? "selected" : ""} onClick={() => setTemplateId(template.id)}>{template.name}</button>)}</div></fieldset>
+        {activeThreads.length === 0 ? <p className="instance-callout danger">An active thread is required.</p> : <fieldset><legend>Active thread</legend><div className="choice-grid">{activeThreads.map((thread) => <button type="button" key={thread.id} aria-pressed={threadId === thread.id} className={threadId === thread.id ? "selected" : ""} onClick={() => setThreadId(thread.id)}>{thread.title}</button>)}</div></fieldset>}
+        <fieldset><legend>Reusable template</legend><div className="choice-grid"><button type="button" aria-pressed={!templateId} className={!templateId ? "selected" : ""} onClick={() => setTemplateId("")}>No template</button>{templates.map((template) => <button type="button" key={template.id} aria-pressed={templateId === template.id} className={templateId === template.id ? "selected" : ""} onClick={() => setTemplateId(template.id)}>{template.name}</button>)}</div></fieldset>
         <fieldset><legend>Purpose</legend><div className="form-grid"><TextField label="Name" value={name} onChange={setName} placeholder="Review worker" /><TextField label="Title" value={title} onChange={setTitle} placeholder="Quality review" /></div><TextField label="Summary" value={summary} onChange={setSummary} /><TextField label="Private instructions" value={instructions} onChange={setInstructions} multiline /></fieldset>
         <fieldset><legend>Hard requirements</legend><div className="form-grid"><TextField label="Skills" value={skills} onChange={setSkills} placeholder="typescript, review" /><TextField label="Harnesses" value={harnesses} onChange={setHarnesses} placeholder="codex-cli" /><TextField label="Models" value={models} onChange={setModels} placeholder="default" /><TextField label="Labels" value={labels} onChange={setLabels} placeholder="linux, trusted" /></div></fieldset>
         <fieldset><legend>Preferences & lease</legend><div className="form-grid"><TextField label="Preferred nodes" value={preferredNodes} onChange={setPreferredNodes} placeholder="node-one, node-two" /><TextField label="Idle timeout (seconds)" value={idleTimeout} onChange={setIdleTimeout} /></div></fieldset>
@@ -249,7 +260,7 @@ export function ReleaseInstanceDialog({ instance, canMutate, onClose, onRelease 
   return <AccessibleDialog labelledBy="release-instance-title" onClose={onClose} className="instance-dialog release-dialog"><form onSubmit={submit}>
     <header><div><small>Confirm lifecycle change</small><h2 id="release-instance-title">Release {instanceName(instance)}</h2></div><button type="button" className="icon-btn" aria-label="Close release confirmation" onClick={onClose}><X size={17} /></button></header>
     <p>Drain lets current work finish. Cancel stops active work before the resident is released.</p>
-    <div className="release-choices"><button type="button" className={mode === "drain" ? "selected" : ""} onClick={() => setMode("drain")} data-dialog-initial-focus><strong>Drain</strong><small>Finish current work</small></button><button type="button" className={mode === "cancel" ? "selected danger" : "danger"} onClick={() => setMode("cancel")}><strong>Cancel</strong><small>Stop active work</small></button></div>
+    <div className="release-choices"><button type="button" aria-pressed={mode === "drain"} className={mode === "drain" ? "selected" : ""} onClick={() => setMode("drain")} data-dialog-initial-focus><strong>Drain</strong><small>Finish current work</small></button><button type="button" aria-pressed={mode === "cancel"} className={mode === "cancel" ? "selected danger" : "danger"} onClick={() => setMode("cancel")}><strong>Cancel</strong><small>Stop active work</small></button></div>
     {error && <p className="form-error" role="alert">{error}</p>}
     <footer><button type="button" onClick={onClose}>Keep instance</button><button className="danger-button" disabled={!canMutate || saving}>{saving ? "Releasing…" : `Confirm ${mode}`}</button></footer>
   </form></AccessibleDialog>;

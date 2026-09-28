@@ -249,6 +249,39 @@ export function classifyReportedInstanceCount(frame: unknown, version: ControlPr
   return count === undefined ? { kind: "absent" } : { kind: "reported", count };
 }
 
+/** Keeps the persisted producer projection inside the snapshot consumer's capacity invariant. */
+export function reportedInstanceCountFitsNode(node: ComputeNode, count: number): boolean {
+  return node.instanceCapacity === undefined || count <= node.instanceCapacity;
+}
+
+export interface NodeHeartbeatUpdate {
+  capacityChanged: boolean;
+  refusedReportedInstances: boolean;
+}
+
+/** Applies the heartbeat fields that feed snapshots without ever persisting an invalid capacity pair. */
+export function applyNodeHeartbeatInState(
+  state: State,
+  nodeId: string,
+  activeRuns: number,
+  reportedInstances: number | undefined,
+  observedAt: string
+): NodeHeartbeatUpdate {
+  const node = state.nodes.find((item) => item.id === nodeId);
+  if (!node) return { capacityChanged: false, refusedReportedInstances: false };
+  const acceptedReportedInstances = reportedInstances !== undefined && reportedInstanceCountFitsNode(node, reportedInstances)
+    ? reportedInstances
+    : undefined;
+  const refusedReportedInstances = reportedInstances !== undefined && acceptedReportedInstances === undefined;
+  const capacityChanged = node.activeRuns !== activeRuns
+    || (acceptedReportedInstances !== undefined && node.activeInstances !== acceptedReportedInstances);
+  node.lastSeen = observedAt;
+  node.activeRuns = activeRuns;
+  if (acceptedReportedInstances !== undefined) node.activeInstances = acceptedReportedInstances;
+  node.status = activeRuns ? "busy" : "online";
+  return { capacityChanged, refusedReportedInstances };
+}
+
 /** The canonical principal identity of a lifecycle caller; the two namespaces never collide. */
 export function instanceCreatorSourceKey(creator: InstanceCreator): string {
   switch (creator.kind) {

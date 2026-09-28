@@ -366,9 +366,9 @@ function BottomNav({ view, onView, pendingApprovalCount, legacy }: { view: View;
     ["activity", Activity, "Activity"], ["orchestration", ShieldWarning, "Orchestrate"], ["projects", GitBranch, "Projects"], ["compute", Cpu, "Compute"], ["settings", Gear, "Settings"]
   ];
   return <nav className="bottom-nav">{items.map(([key, Icon, label]) => (
-    <button key={key} className={view === key ? "active" : ""} onClick={() => onView(key)}>
+    <button key={key} aria-label={label} className={view === key ? "active" : ""} onClick={() => onView(key)}>
       <Icon size={21} weight={view === key ? "fill" : "regular"} />
-      <span>{label}</span>
+      <span aria-hidden="true">{label}</span>
       {key === "orchestration" && pendingApprovalCount > 0 && <span className="unread">{pendingApprovalCount}</span>}
     </button>
   ))}</nav>;

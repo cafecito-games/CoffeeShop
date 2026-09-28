@@ -253,6 +253,9 @@ describe("version-5 instance and template operator experience", () => {
     const { default: App } = await import("./App.js");
     render(<App />);
     expect(screen.queryByRole("button", { name: "Agents" })).not.toBeInTheDocument();
+    const bottomNavigation = document.querySelector(".bottom-nav") as HTMLElement;
+    expect(within(bottomNavigation).getByRole("button", { name: "Instances" })).toHaveAttribute("aria-label", "Instances");
+    expect(within(bottomNavigation).getByText("Instances")).toHaveAttribute("aria-hidden", "true");
     fireEvent.click(screen.getAllByRole("button", { name: /Reviewer/ })[0]);
     expect(screen.getByText("Desired requirements")).toBeInTheDocument();
     expect(screen.getByText("Current placement")).toBeInTheDocument();
@@ -275,6 +278,8 @@ describe("version-5 instance and template operator experience", () => {
     fireEvent.click(screen.getByRole("button", { name: "Renew lease" }));
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
     fireEvent.click(screen.getByRole("button", { name: "Release" }));
+    expect(screen.getByRole("button", { name: /^Drain/ })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: /^Cancel/ })).toHaveAttribute("aria-pressed", "false");
     fireEvent.click(screen.getByRole("button", { name: "Confirm drain" }));
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
     expect(fetchMock.mock.calls.map((call) => call[0])).toEqual([
@@ -295,6 +300,9 @@ describe("version-5 instance and template operator experience", () => {
     render(<App />);
     fireEvent.click(screen.getAllByRole("button", { name: "Start instance" })[0]);
     const dialog = screen.getByRole("dialog", { name: "Start an instance" });
+    expect(within(dialog).getByRole("button", { name: thread.title })).toHaveAttribute("aria-pressed", "true");
+    expect(within(dialog).getByRole("button", { name: "No template" })).toHaveAttribute("aria-pressed", "true");
+    expect(within(dialog).getByRole("button", { name: v5Template.name })).toHaveAttribute("aria-pressed", "false");
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Fresh worker" } });
     fireEvent.click(within(dialog).getByRole("button", { name: "Start instance" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("network uncertain");
@@ -303,6 +311,22 @@ describe("version-5 instance and template operator experience", () => {
     const bodies = fetchMock.mock.calls.map((call) => JSON.parse(String((call[1] as RequestInit).body)));
     expect(bodies[0].idempotencyKey).toBe(bodies[1].idempotencyKey);
     expect(bodies[0].creator).toBeUndefined();
+  });
+
+  it("surfaces invalid lease and partial initial-task input before sending", async () => {
+    const fetchMock = vi.mocked(fetch);
+    const { default: App } = await import("./App.js");
+    render(<App />);
+    fireEvent.click(screen.getAllByRole("button", { name: "Start instance" })[0]);
+    const dialog = screen.getByRole("dialog", { name: "Start an instance" });
+    fireEvent.change(screen.getByLabelText("Task title"), { target: { value: "Only a title" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Start instance" }));
+    expect(screen.getByRole("alert")).toHaveTextContent("title and instructions must be provided together");
+    fireEvent.change(screen.getByLabelText("Task title"), { target: { value: "" } });
+    fireEvent.change(screen.getByLabelText("Idle timeout (seconds)"), { target: { value: "not-a-number" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Start instance" }));
+    expect(screen.getByRole("alert")).toHaveTextContent("Idle timeout must be a whole number");
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("creates, updates, and reference-safely deletes templates through dedicated routes", async () => {
@@ -315,6 +339,8 @@ describe("version-5 instance and template operator experience", () => {
     const rendered = render(<App />);
     fireEvent.click(screen.getAllByRole("button", { name: "Templates" })[0]);
     fireEvent.click(screen.getAllByRole("button", { name: "Create template" })[0]);
+    expect(screen.getByRole("button", { name: "cup" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "amber" })).toHaveAttribute("aria-pressed", "true");
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Builder" } });
     fireEvent.click(screen.getByRole("button", { name: "Save template" }));
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
