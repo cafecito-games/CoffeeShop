@@ -1,14 +1,17 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { once } from "node:events";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
+import { build } from "esbuild";
 import { bridgeEnvironmentVariableNames } from "./configuration.js";
 
 const repositoryRoot = fileURLToPath(new URL("../../../", import.meta.url));
 const pluginRoot = `${repositoryRoot}/plugins/coffeeshop-orchestrator`;
 const bundledBridge = `${pluginRoot}/server/index.mjs`;
+const digest = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 
 async function readJson(path: string): Promise<Record<string, any>> {
   return JSON.parse(await readFile(path, "utf8")) as Record<string, any>;
@@ -43,6 +46,28 @@ test("marketplace resolves the installable plugin inside its sparse checkout", a
     name: plugin.name,
     source: plugin.source
   })), [{ name: "coffeeshop-orchestrator", source: "./plugins/coffeeshop-orchestrator" }]);
+});
+
+test("committed plugin bundle is the deterministic bridge build", async () => {
+  const generated = await build({
+    absWorkingDir: `${repositoryRoot}/apps/orchestrator-bridge`,
+    entryPoints: ["src/index.ts"],
+    bundle: true,
+    minify: true,
+    platform: "node",
+    format: "esm",
+    target: "node18",
+    banner: { js: "import { createRequire } from \"node:module\"; const require = createRequire(import.meta.url);" },
+    outfile: bundledBridge,
+    write: false,
+    logLevel: "silent"
+  });
+  assert.equal(generated.outputFiles.length, 1);
+  assert.equal(
+    digest(generated.outputFiles[0].contents),
+    digest(await readFile(bundledBridge)),
+    "the committed plugin bundle is stale; run pnpm --filter @coffee-shop/orchestrator-bridge build:plugin"
+  );
 });
 
 test("bundled plugin bridge starts without workspace dependencies", async () => {

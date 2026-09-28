@@ -6,12 +6,24 @@
     "publish_preview",
     "update_thread",
     "get_execution_inventory",
+    "spawn_instance",
+    "get_instance",
+    "renew_instance",
+    "release_instance",
     "submit_tasks",
     "send_task_message",
     "wait_for_task_events",
     "update_task"
   ],
-  "delegationToolNames": ["delegate_task", "get_execution_inventory", "submit_tasks"],
+  "delegationToolNames": [
+    "delegate_task",
+    "get_execution_inventory",
+    "spawn_instance",
+    "get_instance",
+    "renew_instance",
+    "release_instance",
+    "submit_tasks"
+  ],
   "taskMessageKinds": ["question", "answer", "instruction", "progress", "result", "note"],
   "maximumWaitMilliseconds": 20000,
   "maximumEventsPerWait": 50

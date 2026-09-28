@@ -193,6 +193,25 @@ test("an instance run is the authenticated caller of every hub tool its scope al
   assert.ok(events.cursor);
 });
 
+test("delegate_task refuses an otherwise eligible configured agent absent from the instance caller directory", async () => {
+  const store = await instanceWorld();
+  const hub = fixtureHandler(store);
+  await store.transact((state) => {
+    state.agents = [fixtureAgent("hidden-reviewer", false, {
+      computeNodeId: "node-hidden-reviewer", workspace: "/workspace/hidden-reviewer"
+    })];
+    state.nodes.push(fixtureNode("node-hidden-reviewer"));
+  });
+  const context = await hub.call("get_task_context", "run-one", {}) as { availableAgents: Array<{ id: string }> };
+  assert.deepEqual(context.availableAgents, []);
+  const before = store.read((state) => JSON.stringify([state.tasks, state.taskSubmissions, state.events]));
+
+  await assert.rejects(hub.call("delegate_task", "run-one", {
+    agentId: "hidden-reviewer", task: "Review the change", idempotencyKey: "hidden-review"
+  }), (error: unknown) => error instanceof CoordinationError && error.code === "target_ineligible");
+  assert.equal(store.read((state) => JSON.stringify([state.tasks, state.taskSubmissions, state.events])), before);
+});
+
 test("authority is same-thread, orchestrator-scoped, and never inherited by another resident", async () => {
   const store = await instanceWorld();
   const hub = fixtureHandler(store);

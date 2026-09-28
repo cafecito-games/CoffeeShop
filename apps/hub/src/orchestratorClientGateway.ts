@@ -27,6 +27,8 @@ import { CoordinationError } from "./coordinationError.js";
 import { submitTasksForSource, updateTaskForSource } from "./coordination.js";
 import { deliverApprovalResolution, type ControlAgentSender } from "./harnessGateway.js";
 import { executionInventoryForSource, type InventoryEnvironment } from "./executionInventory.js";
+import { applyInstanceToolForSource, getInstanceForSource, type InstanceToolName } from "./instanceTools.js";
+import { maintainInstanceLifecycle } from "./instances.js";
 import {
   externalSource,
   resolveExternalCaller,
@@ -153,6 +155,7 @@ const externalOrchestratorErrorCodes: Readonly<Record<string, OrchestratorClient
   forbidden: "forbidden",
   not_found: "not_found",
   idempotency_conflict: "conflict",
+  conflict: "conflict",
   thread_in_use: "conflict",
   thread_inactive: "conflict",
   thread_archived: "conflict",
@@ -492,6 +495,25 @@ export function createOrchestratorClientGateway({
         };
       });
 
+      const getInstance = threadScoped((threadId, rest) => ({
+        result: getInstanceForSource(store, externalSource(connectionId!, threadId), rest)
+      }));
+
+      const lifecycleMutation = (operation: Exclude<InstanceToolName, "get_instance">) => threadScoped(async (threadId, rest) => {
+        const at = now();
+        const result = await applyInstanceToolForSource(store, externalSource(connectionId!, threadId), operation, rest, at);
+        if (result.replayed === false) {
+          if (operation === "release_instance") await maintainInstanceLifecycle(store, at);
+          broadcast();
+          if (operation === "spawn_instance" || operation === "release_instance") await settleScheduling();
+        }
+        return { result };
+      });
+
+      const spawnInstance = lifecycleMutation("spawn_instance");
+      const renewInstance = lifecycleMutation("renew_instance");
+      const releaseInstance = lifecycleMutation("release_instance");
+
       const updateTask = threadScoped(async (threadId, rest) => {
         const result = await updateTaskForSource(store, externalSource(connectionId!, threadId), rest, now());
         if (result.created) broadcast();
@@ -602,6 +624,10 @@ export function createOrchestratorClientGateway({
         send_task_message: sendTaskMessage,
         update_thread: updateThread,
         get_execution_inventory: getExecutionInventory,
+        spawn_instance: spawnInstance,
+        get_instance: getInstance,
+        renew_instance: renewInstance,
+        release_instance: releaseInstance,
         list_approvals: listApprovals,
         resolve_approval: resolveApproval
       };
@@ -759,6 +785,10 @@ export const servedExternalOrchestratorTools: readonly ExternalOrchestratorToolN
   "send_task_message",
   "update_thread",
   "get_execution_inventory",
+  "spawn_instance",
+  "get_instance",
+  "renew_instance",
+  "release_instance",
   "list_approvals",
   "resolve_approval"
 ];

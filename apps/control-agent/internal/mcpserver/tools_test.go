@@ -50,6 +50,28 @@ func TestPublishPreviewSchemaKeepsPackagingAuthorityInBarista(t *testing.T) {
 	require.False(t, protocol.IsDelegationHubToolName("publish_preview"))
 }
 
+func TestInstanceLifecycleSchemasAreClosedAndSafe(t *testing.T) {
+	spawn := definitions["spawn_instance"]
+	require.Equal(t, []string{"idempotencyKey", "requirements"}, spawn.input["required"])
+	spawnProperties := spawn.input["properties"].(schema)
+	require.ElementsMatch(t, []string{"idempotencyKey", "requirements", "purpose", "idleTimeoutSeconds", "initialTask"}, mapKeys(spawnProperties))
+	for _, forbidden := range []string{"threadId", "caller", "creator", "canDelegate", "policy", "connectionId"} {
+		require.NotContains(t, spawnProperties, forbidden)
+	}
+
+	for _, name := range []string{"spawn_instance", "renew_instance", "release_instance"} {
+		output := definitions[name].output
+		require.Contains(t, output["required"], "replayed", name)
+		instance := output["properties"].(schema)["instance"].(schema)
+		require.Equal(t, false, instance["additionalProperties"], name)
+		require.NotContains(t, instance["properties"].(schema), "creator", name)
+		allocation := output["properties"].(schema)["allocation"].(schema)
+		require.NotContains(t, allocation["properties"].(schema), "workspace", name)
+	}
+	require.True(t, definitions["get_instance"].readOnly)
+	require.False(t, protocol.IsDelegationHubToolName("publish_preview"))
+}
+
 func mapKeys(value schema) []string {
 	keys := make([]string, 0, len(value))
 	for key := range value {

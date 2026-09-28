@@ -555,6 +555,1414 @@
       "idempotentHint": true,
       "readOnlyHint": false
     },
+    "description": "Request a non-delegating resident instance for this thread. Placement may remain pending; use one stable idempotency key for retries.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "idempotencyKey": {
+          "type": "string"
+        },
+        "idleTimeoutSeconds": {
+          "maximum": 86400,
+          "minimum": 60,
+          "type": "integer"
+        },
+        "initialTask": {
+          "additionalProperties": false,
+          "properties": {
+            "instructions": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "title",
+            "instructions"
+          ],
+          "type": "object"
+        },
+        "purpose": {
+          "additionalProperties": false,
+          "properties": {
+            "instructions": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "summary": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "requirements": {
+          "additionalProperties": false,
+          "properties": {
+            "architectures": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "harnessIds": {
+              "items": {
+                "enum": [
+                  "claude-cli",
+                  "codex-cli",
+                  "shell",
+                  "ag-ui"
+                ],
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "labels": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "minimumConcurrency": {
+              "type": "integer"
+            },
+            "minimumMemoryMegabytes": {
+              "type": "integer"
+            },
+            "models": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "operatingSystems": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "preferences": {
+              "additionalProperties": false,
+              "properties": {
+                "harnessIds": {
+                  "items": {
+                    "enum": [
+                      "claude-cli",
+                      "codex-cli",
+                      "shell",
+                      "ag-ui"
+                    ],
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "labels": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "models": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "nodeIds": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              },
+              "type": "object"
+            },
+            "projectProfileId": {
+              "type": "string"
+            },
+            "skills": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "templateId": {
+              "type": "string"
+            },
+            "transports": {
+              "items": {
+                "enum": [
+                  "native-cli",
+                  "acp-v1"
+                ],
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "workspace": {
+              "additionalProperties": false,
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "repository": {
+                  "type": "string"
+                },
+                "writable": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "writable"
+              ],
+              "type": "object"
+            }
+          },
+          "type": "object"
+        }
+      },
+      "required": [
+        "idempotencyKey",
+        "requirements"
+      ],
+      "type": "object"
+    },
+    "name": "spawn_instance",
+    "outputSchema": {
+      "properties": {
+        "allocation": {
+          "additionalProperties": false,
+          "properties": {
+            "createdAt": {
+              "type": "string"
+            },
+            "harnessId": {
+              "enum": [
+                "claude-cli",
+                "codex-cli",
+                "shell",
+                "ag-ui"
+              ],
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "instanceId": {
+              "type": "string"
+            },
+            "lease": {
+              "additionalProperties": false,
+              "properties": {
+                "expiresAt": {
+                  "type": "string"
+                },
+                "idleTimeoutSeconds": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "idleTimeoutSeconds",
+                "expiresAt"
+              ],
+              "type": "object"
+            },
+            "model": {
+              "type": "string"
+            },
+            "nodeId": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string"
+            },
+            "transport": {
+              "enum": [
+                "native-cli",
+                "acp-v1"
+              ],
+              "type": "string"
+            },
+            "updatedAt": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "instanceId",
+            "nodeId",
+            "harnessId",
+            "model",
+            "transport",
+            "lease",
+            "status",
+            "createdAt",
+            "updatedAt"
+          ],
+          "type": "object"
+        },
+        "initialTaskId": {
+          "type": "string"
+        },
+        "instance": {
+          "additionalProperties": false,
+          "properties": {
+            "createdAt": {
+              "type": "string"
+            },
+            "delegation": {
+              "additionalProperties": false,
+              "properties": {
+                "canDelegate": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "canDelegate"
+              ],
+              "type": "object"
+            },
+            "id": {
+              "type": "string"
+            },
+            "lease": {
+              "additionalProperties": false,
+              "properties": {
+                "expiresAt": {
+                  "type": "string"
+                },
+                "idleTimeoutSeconds": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "idleTimeoutSeconds",
+                "expiresAt"
+              ],
+              "type": "object"
+            },
+            "purpose": {
+              "additionalProperties": false,
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "summary": {
+                  "type": "string"
+                },
+                "title": {
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
+            "requirements": {
+              "additionalProperties": false,
+              "properties": {
+                "architectures": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "harnessIds": {
+                  "items": {
+                    "enum": [
+                      "claude-cli",
+                      "codex-cli",
+                      "shell",
+                      "ag-ui"
+                    ],
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "labels": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "minimumConcurrency": {
+                  "type": "integer"
+                },
+                "minimumMemoryMegabytes": {
+                  "type": "integer"
+                },
+                "models": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "operatingSystems": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "preferences": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "harnessIds": {
+                      "items": {
+                        "enum": [
+                          "claude-cli",
+                          "codex-cli",
+                          "shell",
+                          "ag-ui"
+                        ],
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "labels": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "models": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "nodeIds": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "type": "object"
+                },
+                "projectProfileId": {
+                  "type": "string"
+                },
+                "skills": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "templateId": {
+                  "type": "string"
+                },
+                "transports": {
+                  "items": {
+                    "enum": [
+                      "native-cli",
+                      "acp-v1"
+                    ],
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "workspace": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "path": {
+                      "type": "string"
+                    },
+                    "repository": {
+                      "type": "string"
+                    },
+                    "writable": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "writable"
+                  ],
+                  "type": "object"
+                }
+              },
+              "type": "object"
+            },
+            "status": {
+              "type": "string"
+            },
+            "threadId": {
+              "type": "string"
+            },
+            "updatedAt": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "threadId",
+            "delegation",
+            "requirements",
+            "lease",
+            "status",
+            "createdAt",
+            "updatedAt"
+          ],
+          "type": "object"
+        },
+        "replayed": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "instance",
+        "replayed"
+      ],
+      "type": "object"
+    },
+    "title": "Spawn instance"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "readOnlyHint": true
+    },
+    "description": "Get one same-thread instance and its current occupying allocation, including a terminal instance.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "instanceId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "instanceId"
+      ],
+      "type": "object"
+    },
+    "name": "get_instance",
+    "outputSchema": {
+      "properties": {
+        "allocation": {
+          "additionalProperties": false,
+          "properties": {
+            "createdAt": {
+              "type": "string"
+            },
+            "harnessId": {
+              "enum": [
+                "claude-cli",
+                "codex-cli",
+                "shell",
+                "ag-ui"
+              ],
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "instanceId": {
+              "type": "string"
+            },
+            "lease": {
+              "additionalProperties": false,
+              "properties": {
+                "expiresAt": {
+                  "type": "string"
+                },
+                "idleTimeoutSeconds": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "idleTimeoutSeconds",
+                "expiresAt"
+              ],
+              "type": "object"
+            },
+            "model": {
+              "type": "string"
+            },
+            "nodeId": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string"
+            },
+            "transport": {
+              "enum": [
+                "native-cli",
+                "acp-v1"
+              ],
+              "type": "string"
+            },
+            "updatedAt": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "instanceId",
+            "nodeId",
+            "harnessId",
+            "model",
+            "transport",
+            "lease",
+            "status",
+            "createdAt",
+            "updatedAt"
+          ],
+          "type": "object"
+        },
+        "initialTaskId": {
+          "type": "string"
+        },
+        "instance": {
+          "additionalProperties": false,
+          "properties": {
+            "createdAt": {
+              "type": "string"
+            },
+            "delegation": {
+              "additionalProperties": false,
+              "properties": {
+                "canDelegate": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "canDelegate"
+              ],
+              "type": "object"
+            },
+            "id": {
+              "type": "string"
+            },
+            "lease": {
+              "additionalProperties": false,
+              "properties": {
+                "expiresAt": {
+                  "type": "string"
+                },
+                "idleTimeoutSeconds": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "idleTimeoutSeconds",
+                "expiresAt"
+              ],
+              "type": "object"
+            },
+            "purpose": {
+              "additionalProperties": false,
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "summary": {
+                  "type": "string"
+                },
+                "title": {
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
+            "requirements": {
+              "additionalProperties": false,
+              "properties": {
+                "architectures": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "harnessIds": {
+                  "items": {
+                    "enum": [
+                      "claude-cli",
+                      "codex-cli",
+                      "shell",
+                      "ag-ui"
+                    ],
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "labels": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "minimumConcurrency": {
+                  "type": "integer"
+                },
+                "minimumMemoryMegabytes": {
+                  "type": "integer"
+                },
+                "models": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "operatingSystems": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "preferences": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "harnessIds": {
+                      "items": {
+                        "enum": [
+                          "claude-cli",
+                          "codex-cli",
+                          "shell",
+                          "ag-ui"
+                        ],
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "labels": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "models": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "nodeIds": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "type": "object"
+                },
+                "projectProfileId": {
+                  "type": "string"
+                },
+                "skills": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "templateId": {
+                  "type": "string"
+                },
+                "transports": {
+                  "items": {
+                    "enum": [
+                      "native-cli",
+                      "acp-v1"
+                    ],
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "workspace": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "path": {
+                      "type": "string"
+                    },
+                    "repository": {
+                      "type": "string"
+                    },
+                    "writable": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "writable"
+                  ],
+                  "type": "object"
+                }
+              },
+              "type": "object"
+            },
+            "status": {
+              "type": "string"
+            },
+            "threadId": {
+              "type": "string"
+            },
+            "updatedAt": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "threadId",
+            "delegation",
+            "requirements",
+            "lease",
+            "status",
+            "createdAt",
+            "updatedAt"
+          ],
+          "type": "object"
+        },
+        "replayed": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "instance"
+      ],
+      "type": "object"
+    },
+    "title": "Get instance"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "readOnlyHint": false
+    },
+    "description": "Renew a nonterminal same-thread instance lease. Retry with the same idempotency key and arguments.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "idempotencyKey": {
+          "type": "string"
+        },
+        "idleTimeoutSeconds": {
+          "maximum": 86400,
+          "minimum": 60,
+          "type": "integer"
+        },
+        "instanceId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "instanceId",
+        "idempotencyKey"
+      ],
+      "type": "object"
+    },
+    "name": "renew_instance",
+    "outputSchema": {
+      "properties": {
+        "allocation": {
+          "additionalProperties": false,
+          "properties": {
+            "createdAt": {
+              "type": "string"
+            },
+            "harnessId": {
+              "enum": [
+                "claude-cli",
+                "codex-cli",
+                "shell",
+                "ag-ui"
+              ],
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "instanceId": {
+              "type": "string"
+            },
+            "lease": {
+              "additionalProperties": false,
+              "properties": {
+                "expiresAt": {
+                  "type": "string"
+                },
+                "idleTimeoutSeconds": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "idleTimeoutSeconds",
+                "expiresAt"
+              ],
+              "type": "object"
+            },
+            "model": {
+              "type": "string"
+            },
+            "nodeId": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string"
+            },
+            "transport": {
+              "enum": [
+                "native-cli",
+                "acp-v1"
+              ],
+              "type": "string"
+            },
+            "updatedAt": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "instanceId",
+            "nodeId",
+            "harnessId",
+            "model",
+            "transport",
+            "lease",
+            "status",
+            "createdAt",
+            "updatedAt"
+          ],
+          "type": "object"
+        },
+        "initialTaskId": {
+          "type": "string"
+        },
+        "instance": {
+          "additionalProperties": false,
+          "properties": {
+            "createdAt": {
+              "type": "string"
+            },
+            "delegation": {
+              "additionalProperties": false,
+              "properties": {
+                "canDelegate": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "canDelegate"
+              ],
+              "type": "object"
+            },
+            "id": {
+              "type": "string"
+            },
+            "lease": {
+              "additionalProperties": false,
+              "properties": {
+                "expiresAt": {
+                  "type": "string"
+                },
+                "idleTimeoutSeconds": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "idleTimeoutSeconds",
+                "expiresAt"
+              ],
+              "type": "object"
+            },
+            "purpose": {
+              "additionalProperties": false,
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "summary": {
+                  "type": "string"
+                },
+                "title": {
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
+            "requirements": {
+              "additionalProperties": false,
+              "properties": {
+                "architectures": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "harnessIds": {
+                  "items": {
+                    "enum": [
+                      "claude-cli",
+                      "codex-cli",
+                      "shell",
+                      "ag-ui"
+                    ],
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "labels": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "minimumConcurrency": {
+                  "type": "integer"
+                },
+                "minimumMemoryMegabytes": {
+                  "type": "integer"
+                },
+                "models": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "operatingSystems": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "preferences": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "harnessIds": {
+                      "items": {
+                        "enum": [
+                          "claude-cli",
+                          "codex-cli",
+                          "shell",
+                          "ag-ui"
+                        ],
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "labels": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "models": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "nodeIds": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "type": "object"
+                },
+                "projectProfileId": {
+                  "type": "string"
+                },
+                "skills": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "templateId": {
+                  "type": "string"
+                },
+                "transports": {
+                  "items": {
+                    "enum": [
+                      "native-cli",
+                      "acp-v1"
+                    ],
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "workspace": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "path": {
+                      "type": "string"
+                    },
+                    "repository": {
+                      "type": "string"
+                    },
+                    "writable": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "writable"
+                  ],
+                  "type": "object"
+                }
+              },
+              "type": "object"
+            },
+            "status": {
+              "type": "string"
+            },
+            "threadId": {
+              "type": "string"
+            },
+            "updatedAt": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "threadId",
+            "delegation",
+            "requirements",
+            "lease",
+            "status",
+            "createdAt",
+            "updatedAt"
+          ],
+          "type": "object"
+        },
+        "replayed": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "instance",
+        "replayed"
+      ],
+      "type": "object"
+    },
+    "title": "Renew instance"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "readOnlyHint": false
+    },
+    "description": "Release a same-thread instance by draining work or cancelling it. Retry with the same idempotency key and arguments.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "idempotencyKey": {
+          "type": "string"
+        },
+        "instanceId": {
+          "type": "string"
+        },
+        "mode": {
+          "enum": [
+            "drain",
+            "cancel"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "instanceId",
+        "idempotencyKey",
+        "mode"
+      ],
+      "type": "object"
+    },
+    "name": "release_instance",
+    "outputSchema": {
+      "properties": {
+        "allocation": {
+          "additionalProperties": false,
+          "properties": {
+            "createdAt": {
+              "type": "string"
+            },
+            "harnessId": {
+              "enum": [
+                "claude-cli",
+                "codex-cli",
+                "shell",
+                "ag-ui"
+              ],
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "instanceId": {
+              "type": "string"
+            },
+            "lease": {
+              "additionalProperties": false,
+              "properties": {
+                "expiresAt": {
+                  "type": "string"
+                },
+                "idleTimeoutSeconds": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "idleTimeoutSeconds",
+                "expiresAt"
+              ],
+              "type": "object"
+            },
+            "model": {
+              "type": "string"
+            },
+            "nodeId": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string"
+            },
+            "transport": {
+              "enum": [
+                "native-cli",
+                "acp-v1"
+              ],
+              "type": "string"
+            },
+            "updatedAt": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "instanceId",
+            "nodeId",
+            "harnessId",
+            "model",
+            "transport",
+            "lease",
+            "status",
+            "createdAt",
+            "updatedAt"
+          ],
+          "type": "object"
+        },
+        "initialTaskId": {
+          "type": "string"
+        },
+        "instance": {
+          "additionalProperties": false,
+          "properties": {
+            "createdAt": {
+              "type": "string"
+            },
+            "delegation": {
+              "additionalProperties": false,
+              "properties": {
+                "canDelegate": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "canDelegate"
+              ],
+              "type": "object"
+            },
+            "id": {
+              "type": "string"
+            },
+            "lease": {
+              "additionalProperties": false,
+              "properties": {
+                "expiresAt": {
+                  "type": "string"
+                },
+                "idleTimeoutSeconds": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "idleTimeoutSeconds",
+                "expiresAt"
+              ],
+              "type": "object"
+            },
+            "purpose": {
+              "additionalProperties": false,
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "summary": {
+                  "type": "string"
+                },
+                "title": {
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
+            "requirements": {
+              "additionalProperties": false,
+              "properties": {
+                "architectures": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "harnessIds": {
+                  "items": {
+                    "enum": [
+                      "claude-cli",
+                      "codex-cli",
+                      "shell",
+                      "ag-ui"
+                    ],
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "labels": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "minimumConcurrency": {
+                  "type": "integer"
+                },
+                "minimumMemoryMegabytes": {
+                  "type": "integer"
+                },
+                "models": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "operatingSystems": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "preferences": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "harnessIds": {
+                      "items": {
+                        "enum": [
+                          "claude-cli",
+                          "codex-cli",
+                          "shell",
+                          "ag-ui"
+                        ],
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "labels": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "models": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "nodeIds": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "type": "object"
+                },
+                "projectProfileId": {
+                  "type": "string"
+                },
+                "skills": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "templateId": {
+                  "type": "string"
+                },
+                "transports": {
+                  "items": {
+                    "enum": [
+                      "native-cli",
+                      "acp-v1"
+                    ],
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "workspace": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "path": {
+                      "type": "string"
+                    },
+                    "repository": {
+                      "type": "string"
+                    },
+                    "writable": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "writable"
+                  ],
+                  "type": "object"
+                }
+              },
+              "type": "object"
+            },
+            "status": {
+              "type": "string"
+            },
+            "threadId": {
+              "type": "string"
+            },
+            "updatedAt": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "threadId",
+            "delegation",
+            "requirements",
+            "lease",
+            "status",
+            "createdAt",
+            "updatedAt"
+          ],
+          "type": "object"
+        },
+        "replayed": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "instance",
+        "replayed"
+      ],
+      "type": "object"
+    },
+    "title": "Release instance"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "readOnlyHint": false
+    },
     "description": "Atomically submit a batch of tasks. Name tasks with local keys, depend on sibling keys or existing task ids, and state hard requirements and preferences as capabilities. An optional pin narrows placement to an agent or node and never bypasses requirements. Submission succeeds even when no node can run a task yet.",
     "inputSchema": {
       "additionalProperties": false,
@@ -598,6 +2006,9 @@
                 "additionalProperties": false,
                 "properties": {
                   "agentId": {
+                    "type": "string"
+                  },
+                  "instanceId": {
                     "type": "string"
                   },
                   "nodeId": {
@@ -695,6 +2106,9 @@
                       "type": "string"
                     },
                     "type": "array"
+                  },
+                  "templateId": {
+                    "type": "string"
                   },
                   "transports": {
                     "items": {

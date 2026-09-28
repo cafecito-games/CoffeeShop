@@ -289,6 +289,102 @@ test("two connections attaching the same thread leave exactly one attached, and 
   assert.equal(notice.threadId, threadId);
 });
 
+test("external lifecycle retries converge by credential across reconnects and replaced attachments fail closed", async () => {
+  const context = await harness();
+  const first = await welcomed(context);
+  const threadId = resultOf(await call(first.connection, first.transport, "create_thread", { objective: "Use residents" })).thread.id;
+  const spawnArguments = {
+    threadId,
+    idempotencyKey: "spawn-external",
+    purpose: { name: "Reviewer", instructions: "PRIVATE EXTERNAL INSTRUCTIONS" },
+    requirements: { templateId: "template-reviewer", preferences: { models: ["default"] } },
+    initialTask: { title: "Review", instructions: "Review the change" }
+  };
+
+  const created = resultOf(await call(first.connection, first.transport, "spawn_instance", spawnArguments));
+  assert.equal(created.replayed, false);
+  assert.equal(created.instance.delegation.canDelegate, false);
+  assert.equal(created.instance.purpose.instructions, undefined);
+  assert.equal(created.instance.creator, undefined);
+  assert.ok(created.initialTaskId);
+
+  const second = await welcomed(context);
+  await call(second.connection, second.transport, "attach_thread", { threadId });
+  const replay = resultOf(await call(second.connection, second.transport, "spawn_instance", spawnArguments));
+  assert.deepEqual([replay.instance.id, replay.initialTaskId, replay.replayed], [created.instance.id, created.initialTaskId, true],
+    "connection ids never create a second idempotency namespace");
+
+  const beforeRefusal = context.store.read((state) => JSON.stringify([
+    state.instances, state.tasks, state.instanceLifecycleReceipts, state.events
+  ]));
+  assert.equal(errorOf(await call(first.connection, first.transport, "renew_instance", {
+    threadId, instanceId: created.instance.id, idempotencyKey: "replaced-renew"
+  })).code, "not_attached");
+  assert.equal(context.store.read((state) => JSON.stringify([
+    state.instances, state.tasks, state.instanceLifecycleReceipts, state.events
+  ])), beforeRefusal);
+
+  const read = resultOf(await call(second.connection, second.transport, "get_instance", {
+    threadId, instanceId: created.instance.id
+  }));
+  assert.equal(read.instance.id, created.instance.id);
+  assert.equal(Object.hasOwn(read, "replayed"), false);
+  const pinnedArguments = {
+    threadId,
+    idempotencyKey: "external-pin",
+    tasks: [{ key: "resident", title: "Resident task", instructions: "Run exactly here", pin: { instanceId: created.instance.id } }]
+  };
+  const pinned = resultOf(await call(second.connection, second.transport, "submit_tasks", pinnedArguments));
+  assert.deepEqual(pinned.tasks[0].placementOverride, { instanceId: created.instance.id, authorizedBy: "policy" });
+  const renewed = resultOf(await call(second.connection, second.transport, "renew_instance", {
+    threadId, instanceId: created.instance.id, idempotencyKey: "renew-external", idleTimeoutSeconds: 3600
+  }));
+  assert.deepEqual([renewed.instance.lease.idleTimeoutSeconds, renewed.replayed], [3600, false]);
+  const released = resultOf(await call(second.connection, second.transport, "release_instance", {
+    threadId, instanceId: created.instance.id, idempotencyKey: "release-external", mode: "cancel"
+  }));
+  assert.deepEqual([released.instance.status, released.replayed], ["released", false]);
+  const pinnedReplay = resultOf(await call(second.connection, second.transport, "submit_tasks", pinnedArguments));
+  assert.deepEqual([pinnedReplay.created, pinnedReplay.tasks[0].id], [false, pinned.tasks[0].id],
+    "a previously accepted external pin replays after the resident becomes terminal");
+  assert.equal(resultOf(await call(second.connection, second.transport, "get_instance", {
+    threadId, instanceId: created.instance.id
+  })).instance.status, "released");
+});
+
+test("external lifecycle calls reject detached, cross-thread, malformed, and authority-bearing input without writes", async () => {
+  const context = await harness();
+  const active = await welcomed(context);
+  const firstThread = resultOf(await call(active.connection, active.transport, "create_thread", { objective: "First" })).thread.id;
+  const secondThread = resultOf(await call(active.connection, active.transport, "create_thread", { objective: "Second" })).thread.id;
+  await call(active.connection, active.transport, "attach_thread", { threadId: firstThread });
+  const firstInstance = resultOf(await call(active.connection, active.transport, "spawn_instance", {
+    threadId: firstThread, idempotencyKey: "first-instance", requirements: {}
+  })).instance.id;
+  assert.equal(errorOf(await call(active.connection, active.transport, "get_instance", {
+    threadId: secondThread, instanceId: firstInstance
+  })).code, "not_found", "a valid attachment cannot use another thread to observe an instance");
+  const before = context.store.read((state) => JSON.stringify([
+    state.instances, state.allocations, state.tasks, state.taskSubmissions,
+    state.instanceLifecycleReceipts, state.instanceReleaseIntents, state.instanceDeliveries, state.events
+  ]));
+
+  await call(active.connection, active.transport, "detach_thread", { threadId: secondThread });
+  assert.equal(errorOf(await call(active.connection, active.transport, "spawn_instance", {
+    threadId: secondThread, idempotencyKey: "detached", requirements: {}
+  })).code, "not_attached");
+  for (const argumentsValue of [
+    { threadId: firstThread, idempotencyKey: "creator", requirements: {}, creator: { kind: "operator", operatorId: "operator" } },
+    { threadId: firstThread, idempotencyKey: "caller", requirements: {}, idempotency: { caller: "chosen" } },
+    { threadId: firstThread, idempotencyKey: "delegate", requirements: {}, canDelegate: true },
+    { threadId: firstThread, idempotencyKey: "timeout", requirements: {}, idleTimeoutSeconds: 59 }
+  ]) assert.equal(errorOf(await call(active.connection, active.transport, "spawn_instance", argumentsValue)).code, "invalid_arguments");
+  assert.equal(context.store.read((state) => JSON.stringify([
+    state.instances, state.allocations, state.tasks, state.taskSubmissions,
+    state.instanceLifecycleReceipts, state.instanceReleaseIntents, state.instanceDeliveries, state.events
+  ])), before);
+});
+
 test("detaches a thread and refuses a detach this connection does not hold", async () => {
   const context = await harness();
   const { transport, connection } = await welcomed(context);

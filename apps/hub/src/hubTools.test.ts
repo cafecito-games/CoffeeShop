@@ -4,6 +4,7 @@ import test from "node:test";
 import { CoordinationError } from "./coordination.js";
 import {
   fixtureHandler,
+  fixtureTime,
   foreignRunId,
   listedToolNames,
   orchestrationStore,
@@ -13,6 +14,31 @@ import {
 } from "./hubToolsTestSupport.js";
 
 const isCode = (code: string) => (error: unknown) => error instanceof CoordinationError && error.code === code;
+
+async function seedInstanceCaller(store: Awaited<ReturnType<typeof orchestrationStore>>, canDelegate = true) {
+  await store.transact((state) => {
+    state.instances = [{
+      id: "instance-caller", threadId: "thread-one", creator: { kind: "operator", operatorId: "operator" },
+      purpose: { name: "Coordinator", instructions: "PRIVATE CALLER INSTRUCTIONS" },
+      delegation: { canDelegate }, requirements: {},
+      lease: { idleTimeoutSeconds: 1800, expiresAt: "2026-09-30T12:00:00.000Z" },
+      status: "ready", createdAt: fixtureTime, updatedAt: fixtureTime
+    }];
+    state.allocations = [{
+      id: "allocation-caller", instanceId: "instance-caller", nodeId: "node-orchestrator",
+      harnessId: "codex-cli", model: "default", transport: "native-cli", workspace: "/workspace/private-caller",
+      lease: { idleTimeoutSeconds: 1800, expiresAt: "2026-09-30T12:00:00.000Z" },
+      status: "active", createdAt: fixtureTime, updatedAt: fixtureTime
+    }];
+    state.runs.push({
+      id: "run-instance-caller", threadId: "thread-one", instanceId: "instance-caller", allocationId: "allocation-caller",
+      nodeId: "node-orchestrator", harnessId: "codex-cli", model: "default", transport: "native-cli",
+      workspace: "/workspace/private-caller", prompt: "Coordinate", status: "running", output: "", depth: 0,
+      createdAt: fixtureTime, startedAt: fixtureTime
+    });
+  });
+  return "run-instance-caller";
+}
 
 const parallelBatch = {
   idempotencyKey: "plan-1",
@@ -49,6 +75,146 @@ test("submission success does not depend on scheduling", async () => {
   const hub = fixtureHandler(store, { schedule: () => new Promise(() => undefined) });
   const submitted = await hub.call("submit_tasks", rootRunId, parallelBatch) as { created: boolean };
   assert.equal(submitted.created, true);
+});
+
+test("a live delegating instance run owns idempotent lifecycle mutations and receives only safe projections", async () => {
+  const store = await orchestrationStore();
+  const sourceRunId = await seedInstanceCaller(store);
+  const hub = fixtureHandler(store, { now: () => fixtureTime });
+  const self = await hub.call("get_instance", sourceRunId, { instanceId: "instance-caller" }) as {
+    instance: { creator?: unknown; purpose?: Record<string, unknown> };
+    allocation?: { workspace?: string; id: string };
+  };
+  assert.equal(self.instance.creator, undefined);
+  assert.equal(self.instance.purpose?.instructions, undefined);
+  assert.deepEqual(self.allocation, {
+    id: "allocation-caller", instanceId: "instance-caller", nodeId: "node-orchestrator",
+    harnessId: "codex-cli", model: "default", transport: "native-cli",
+    lease: { idleTimeoutSeconds: 1800, expiresAt: "2026-09-30T12:00:00.000Z" },
+    status: "active", createdAt: fixtureTime, updatedAt: fixtureTime
+  });
+  assert.deepEqual(outputViolations("get_instance", self), []);
+  const spawn = {
+    idempotencyKey: "spawn-reviewer",
+    purpose: { name: "Reviewer", title: "Review resident", summary: "Review changes", instructions: "PRIVATE TARGET INSTRUCTIONS" },
+    requirements: { templateId: "template-reviewer", preferences: { models: ["default"] } },
+    idleTimeoutSeconds: 3600,
+    initialTask: { title: "Initial review", instructions: "Review the patch" }
+  };
+
+  const created = await hub.call("spawn_instance", sourceRunId, spawn) as {
+    instance: { id: string; creator?: unknown; purpose?: Record<string, unknown>; delegation: { canDelegate: boolean }; status: string };
+    allocation?: { workspace?: string };
+    initialTaskId?: string;
+    replayed: boolean;
+  };
+  assert.equal(created.replayed, false);
+  assert.equal(created.instance.status, "requested");
+  assert.deepEqual(created.instance.delegation, { canDelegate: false });
+  assert.ok(created.initialTaskId);
+  assert.equal(created.instance.creator, undefined);
+  assert.equal(created.instance.purpose?.instructions, undefined);
+  assert.equal(created.allocation?.workspace, undefined);
+  assert.deepEqual(outputViolations("spawn_instance", created), []);
+  assert.deepEqual([hub.broadcasts, hub.schedulingRequests], [1, 1]);
+
+  const stateAfterCreate = store.read((state) => JSON.stringify([
+    state.instances, state.allocations, state.tasks, state.instanceLifecycleReceipts, state.events
+  ]));
+  const replay = await hub.call("spawn_instance", sourceRunId, spawn) as typeof created;
+  assert.deepEqual([replay.instance.id, replay.initialTaskId, replay.replayed], [created.instance.id, created.initialTaskId, true]);
+  assert.deepEqual([hub.broadcasts, hub.schedulingRequests], [1, 1], "a replay is not rebroadcast as new work");
+  assert.equal(store.read((state) => JSON.stringify([
+    state.instances, state.allocations, state.tasks, state.instanceLifecycleReceipts, state.events
+  ])), stateAfterCreate);
+  await assert.rejects(hub.call("spawn_instance", sourceRunId, { ...spawn, requirements: {} }), isCode("idempotency_conflict"));
+
+  const receiptsBeforeGet = store.read((state) => state.instanceLifecycleReceipts?.length ?? 0);
+  const read = await hub.call("get_instance", sourceRunId, { instanceId: created.instance.id }) as Record<string, unknown>;
+  assert.deepEqual(outputViolations("get_instance", read), []);
+  assert.equal(Object.hasOwn(read, "replayed"), false);
+  assert.equal(store.read((state) => state.instanceLifecycleReceipts?.length ?? 0), receiptsBeforeGet);
+
+  const renewed = await hub.call("renew_instance", sourceRunId, {
+    instanceId: created.instance.id, idempotencyKey: "renew-reviewer", idleTimeoutSeconds: 7200
+  }) as { instance: { lease: { idleTimeoutSeconds: number } }; replayed: boolean };
+  assert.deepEqual([renewed.instance.lease.idleTimeoutSeconds, renewed.replayed], [7200, false]);
+  assert.deepEqual(outputViolations("renew_instance", renewed), []);
+  assert.deepEqual([hub.broadcasts, hub.schedulingRequests], [2, 1]);
+
+  const released = await hub.call("release_instance", sourceRunId, {
+    instanceId: created.instance.id, idempotencyKey: "release-reviewer", mode: "drain"
+  }) as { instance: { status: string }; replayed: boolean };
+  assert.deepEqual([released.instance.status, released.replayed], ["released", false]);
+  assert.deepEqual(outputViolations("release_instance", released), []);
+  assert.deepEqual([hub.broadcasts, hub.schedulingRequests], [3, 2]);
+  const terminal = await hub.call("get_instance", sourceRunId, { instanceId: created.instance.id }) as { instance: { status: string } };
+  assert.equal(terminal.instance.status, "released", "terminal same-thread instances remain queryable");
+
+  const releaseReplay = await hub.call("release_instance", sourceRunId, {
+    instanceId: created.instance.id, idempotencyKey: "release-reviewer", mode: "drain"
+  }) as { replayed: boolean };
+  assert.equal(releaseReplay.replayed, true);
+  assert.deepEqual([hub.broadcasts, hub.schedulingRequests], [3, 2]);
+
+  const draining = await hub.call("release_instance", sourceRunId, {
+    instanceId: "instance-caller", idempotencyKey: "release-caller", mode: "drain"
+  }) as { instance: { status: string }; allocation?: { workspace?: string }; replayed: boolean };
+  assert.deepEqual([draining.instance.status, draining.replayed], ["draining", false],
+    "an active resident remains draining until its live run settles");
+  assert.equal(draining.allocation?.workspace, undefined);
+  assert.deepEqual(outputViolations("release_instance", draining), []);
+});
+
+test("lifecycle tools reject legacy, nondelegating, authority-bearing, malformed, and foreign calls without writes", async () => {
+  const store = await orchestrationStore();
+  const sourceRunId = await seedInstanceCaller(store, false);
+  const hub = fixtureHandler(store);
+  const before = store.read((state) => JSON.stringify([
+    state.instances, state.allocations, state.tasks, state.instanceLifecycleReceipts, state.events
+  ]));
+
+  await assert.rejects(hub.call("spawn_instance", rootRunId, {
+    idempotencyKey: "legacy", requirements: {}
+  }), isCode("forbidden"), "a delegating configured-agent run is not a live instance principal");
+  await assert.rejects(hub.call("spawn_instance", sourceRunId, {
+    idempotencyKey: "nondelegating", requirements: {}
+  }), isCode("forbidden"));
+  assert.equal(store.read((state) => JSON.stringify([
+    state.instances, state.allocations, state.tasks, state.instanceLifecycleReceipts, state.events
+  ])), before);
+
+  await store.transact((state) => {
+    state.instances!.find((item) => item.id === "instance-caller")!.delegation.canDelegate = true;
+    state.instances!.push({
+      id: "instance-foreign", threadId: "thread-two", creator: { kind: "operator", operatorId: "operator" },
+      delegation: { canDelegate: false }, requirements: {},
+      lease: { idleTimeoutSeconds: 1800, expiresAt: "2026-09-30T12:00:00.000Z" }, status: "ready",
+      createdAt: fixtureTime, updatedAt: fixtureTime
+    });
+  });
+  const missing = await hub.call("get_instance", sourceRunId, { instanceId: "instance-missing" }).catch((error: unknown) => error);
+  const foreign = await hub.call("get_instance", sourceRunId, { instanceId: "instance-foreign" }).catch((error: unknown) => error);
+  assert.ok(missing instanceof CoordinationError && foreign instanceof CoordinationError);
+  assert.deepEqual([foreign.code, foreign.message], [missing.code, missing.message]);
+
+  const beforeInvalid = store.read((state) => JSON.stringify([
+    state.instances, state.allocations, state.tasks, state.taskSubmissions,
+    state.instanceLifecycleReceipts, state.instanceReleaseIntents, state.instanceDeliveries, state.events
+  ]));
+  for (const invalid of [
+    { idempotencyKey: "authority", requirements: {}, creator: { kind: "operator", operatorId: "operator" } },
+    { idempotencyKey: "delegation", requirements: {}, canDelegate: true },
+    { idempotencyKey: "policy", requirements: {}, policy: { canDelegate: true } },
+    { idempotencyKey: "task-extra", requirements: {}, initialTask: { title: "Task", instructions: "Do it", taskId: "chosen" } },
+    { idempotencyKey: "timeout", requirements: {}, idleTimeoutSeconds: 59 },
+    { idempotencyKey: "x".repeat(129), requirements: {} },
+    { idempotencyKey: "purpose-too-large", requirements: {}, purpose: { name: "x".repeat(257) } }
+  ]) await assert.rejects(hub.call("spawn_instance", sourceRunId, invalid), isCode("invalid_arguments"));
+  assert.equal(store.read((state) => JSON.stringify([
+    state.instances, state.allocations, state.tasks, state.taskSubmissions,
+    state.instanceLifecycleReceipts, state.instanceReleaseIntents, state.instanceDeliveries, state.events
+  ])), beforeInvalid, "every rejected request is transactionally side-effect free");
 });
 
 test("a worker question wakes a waiting orchestrator and the answer wakes the worker", async () => {

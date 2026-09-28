@@ -15,6 +15,35 @@ export interface ToolDefinition {
 }
 
 const threadIdProperty = { type: "string", description: "Coffee Shop thread id." } as const;
+const stringList = { type: "array", items: { type: "string" } } as const;
+const requirementsProperty = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    skills: stringList,
+    harnessIds: stringList,
+    models: stringList,
+    transports: stringList,
+    operatingSystems: stringList,
+    architectures: stringList,
+    labels: stringList,
+    minimumConcurrency: { type: "integer" },
+    minimumMemoryMegabytes: { type: "integer" },
+    projectProfileId: { type: "string" },
+    templateId: { type: "string" },
+    workspace: {
+      type: "object",
+      additionalProperties: false,
+      properties: { repository: { type: "string" }, path: { type: "string" }, writable: { type: "boolean" } },
+      required: ["writable"]
+    },
+    preferences: {
+      type: "object",
+      additionalProperties: false,
+      properties: { nodeIds: stringList, harnessIds: stringList, models: stringList, labels: stringList }
+    }
+  }
+} as const;
 
 /**
  * Only the tools the bridge itself interprets constrain their arguments here. The pass-through
@@ -119,6 +148,58 @@ export const toolDefinitions: Readonly<Record<ExternalOrchestratorToolName, Tool
     title: "Get execution inventory",
     description: "Reports the compute nodes, harnesses, providers, and projects available for dispatch.",
     inputSchema: passThroughSchema({}, [])
+  },
+  spawn_instance: {
+    name: "spawn_instance",
+    title: "Spawn instance",
+    description: "Requests a non-delegating resident instance for the attached thread. Placement may remain pending.",
+    inputSchema: closedSchema({
+      threadId: threadIdProperty,
+      idempotencyKey: { type: "string", description: "Stable key for this semantic request." },
+      requirements: requirementsProperty,
+      purpose: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          name: { type: "string" }, title: { type: "string" }, summary: { type: "string" }, instructions: { type: "string" }
+        }
+      },
+      idleTimeoutSeconds: { type: "integer", minimum: 60, maximum: 86400 },
+      initialTask: {
+        type: "object",
+        additionalProperties: false,
+        properties: { title: { type: "string" }, instructions: { type: "string" } },
+        required: ["title", "instructions"]
+      }
+    }, ["threadId", "idempotencyKey", "requirements"])
+  },
+  get_instance: {
+    name: "get_instance",
+    title: "Get instance",
+    description: "Returns one same-thread instance and its current occupying allocation, including terminal instances.",
+    inputSchema: closedSchema({ threadId: threadIdProperty, instanceId: { type: "string" } }, ["threadId", "instanceId"])
+  },
+  renew_instance: {
+    name: "renew_instance",
+    title: "Renew instance",
+    description: "Renews a nonterminal same-thread instance lease with a stable idempotency key.",
+    inputSchema: closedSchema({
+      threadId: threadIdProperty,
+      instanceId: { type: "string" },
+      idempotencyKey: { type: "string" },
+      idleTimeoutSeconds: { type: "integer", minimum: 60, maximum: 86400 }
+    }, ["threadId", "instanceId", "idempotencyKey"])
+  },
+  release_instance: {
+    name: "release_instance",
+    title: "Release instance",
+    description: "Requests drain or cancel release for a same-thread instance with a stable idempotency key.",
+    inputSchema: closedSchema({
+      threadId: threadIdProperty,
+      instanceId: { type: "string" },
+      idempotencyKey: { type: "string" },
+      mode: { type: "string", enum: ["drain", "cancel"] }
+    }, ["threadId", "instanceId", "idempotencyKey", "mode"])
   },
   list_approvals: {
     name: "list_approvals",
