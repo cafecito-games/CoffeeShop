@@ -285,6 +285,29 @@ describe("snapshot validation", () => {
     expect(isSnapshot({ ...snapshot("2026-09-27T12:04:00.000Z"), artifacts: [{ ...artifact, kind: "preview-site" }] })).toBe(false);
   });
 
+  it("accepts exactly one canonical artifact producer and rejects mixed or missing identities", () => {
+    const base = {
+      id: "artifact-one", threadId: "thread-one", relativePath: "report.txt", title: "Report", kind: "report",
+      mediaType: "text/plain", summary: "Ready", size: 5, sha256: "a".repeat(64),
+      downloadPath: "/api/artifacts/artifact-one/content", uploaded: true, idempotencyKey: "report-one",
+      createdAt: "2026-09-28T12:00:00.000Z"
+    };
+    const runArtifact = { ...base, runId: "run-one", agentId: "agent-one" };
+    const externalArtifact = { ...base, sourceKey: "orchestrator-client:client-one" };
+    expect(isSnapshot({ ...snapshot("now"), artifacts: [runArtifact] })).toBe(true);
+    expect(isSnapshot({ ...snapshot("now"), artifacts: [{ ...runArtifact, sourceKey: "run:run-one" }] })).toBe(true);
+    expect(isSnapshot({ ...snapshot("now"), artifacts: [externalArtifact] })).toBe(true);
+    for (const artifact of [
+      base,
+      { ...externalArtifact, runId: "run-one" },
+      { ...externalArtifact, agentId: "agent-one" },
+      { ...runArtifact, sourceKey: "orchestrator-client:client-one" },
+      { ...runArtifact, sourceKey: "run:another" },
+      { ...runArtifact, agentId: undefined },
+      { ...runArtifact, instanceId: "instance-one", allocationId: "allocation-one" }
+    ]) expect(isSnapshot({ ...snapshot("now"), artifacts: [artifact] })).toBe(false);
+  });
+
   it("accepts the v5 triplet only when every collection is present and every entry is valid", () => {
     expect(isSnapshot({ ...snapshot("v5"), ...v5Triplet })).toBe(true);
     expect(isSnapshot(snapshot("legacy"))).toBe(true);

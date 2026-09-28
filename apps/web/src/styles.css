@@ -315,6 +315,13 @@ button:disabled, textarea:disabled, fieldset:disabled button { cursor: not-allow
 .thread-runs button { min-height: 30px; padding: 0 8px; border: 1px solid var(--line); border-radius: 6px; display: inline-flex; align-items: center; gap: 6px; color: var(--secondary); background: var(--surface); font-size: var(--font-size-8); cursor: pointer; }
 .thread-runs button small { color: var(--faint); text-transform: capitalize; }
 .thread-previews { margin-top: 14px; display: grid; gap: 8px; }
+.thread-artifacts { margin-top: 14px; display: grid; gap: 8px; }
+.external-artifact { padding: 12px 14px; border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 8px; display: flex; align-items: center; justify-content: space-between; gap: 16px; background: rgba(10,12,11,.42); }
+.external-artifact span, .external-artifact small { color: var(--faint); font: 600 var(--font-size-7) "DM Mono", monospace; }
+.external-artifact h4 { margin: 4px 0 0; color: var(--text); font-size: var(--font-size-10); }
+.external-artifact p { margin: 5px 0; color: var(--muted); font-size: var(--font-size-8); }
+.external-artifact button { min-height: 36px; padding: 0 10px; border: 1px solid var(--line); border-radius: 6px; display: inline-flex; align-items: center; gap: 6px; color: var(--secondary); background: var(--surface-2); cursor: pointer; }
+.external-artifact button:disabled { opacity: .45; cursor: default; }
 .preview-artifact { padding: 14px; border: 1px solid var(--line); border-left: 3px solid var(--faint); border-radius: 8px; color: var(--secondary); background: rgba(10,12,11,.42); }
 .preview-artifact.preview-ready { border-left-color: var(--success); }
 .preview-artifact.preview-processing, .preview-artifact.preview-upload-pending { border-left-color: var(--accent); }

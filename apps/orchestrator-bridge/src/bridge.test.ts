@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -11,6 +14,7 @@ import {
 import { BridgeServer, channelNotificationMethod } from "./bridgeServer.js";
 import { FakeHub, FakeHubToolError, type FakeHubOptions } from "./fakeHub.js";
 import { HubConnection } from "./hubConnection.js";
+import { canonicalWorkingRoot, captureLocalArtifact, type LocalArtifactGateway } from "./localArtifact.js";
 import { pinnedProtocolRevision } from "./protocolRevision.js";
 
 interface ChannelEvent {
@@ -39,10 +43,11 @@ const waitFor = async (predicate: () => boolean, description: string, timeoutMil
 };
 
 /** Fake-hub behaviour plus the one bridge timing knob some scenarios need to shorten. */
-type HarnessOptions = FakeHubOptions & { requestTimeoutMilliseconds?: number };
+type HarnessOptions = FakeHubOptions & { requestTimeoutMilliseconds?: number; localArtifacts?: LocalArtifactGateway };
 
 async function startHarness(hubOptions: HarnessOptions = { scopes: ["orchestrate"] }, waitForReady = true): Promise<Harness> {
-  const hub = await FakeHub.start(hubOptions);
+  const { localArtifacts, requestTimeoutMilliseconds, ...fakeHubOptions } = hubOptions;
+  const hub = await FakeHub.start(fakeHubOptions);
   const channelEvents: ChannelEvent[] = [];
   const errors: string[] = [];
   const reattachFailures: { threadId: string; code: string }[] = [];
@@ -57,7 +62,7 @@ async function startHarness(hubOptions: HarnessOptions = { scopes: ["orchestrate
     initialReconnectDelayMilliseconds: 5,
     maximumReconnectDelayMilliseconds: 20,
     welcomeTimeoutMilliseconds: 500,
-    requestTimeoutMilliseconds: hubOptions.requestTimeoutMilliseconds ?? 1_500,
+    requestTimeoutMilliseconds: requestTimeoutMilliseconds ?? 1_500,
     random: () => 0,
     onDoorbell: (doorbell) => void bridge?.announceDoorbell(doorbell),
     onAttachmentReplaced: (replaced) => void bridge?.announceAttachmentReplaced(replaced),
@@ -65,7 +70,12 @@ async function startHarness(hubOptions: HarnessOptions = { scopes: ["orchestrate
     onScopesChanged: (scopes) => void bridge?.refreshToolListForScopes(scopes),
     onReattachFailed: (threadId, error) => reattachFailures.push({ threadId, code: error.code })
   });
-  bridge = new BridgeServer({ hub: connection, serverVersion: "0.0.0-test", logError: (message) => errors.push(message) });
+  bridge = new BridgeServer({
+    hub: connection,
+    serverVersion: "0.0.0-test",
+    logError: (message) => errors.push(message),
+    localArtifacts
+  });
 
   const client = new Client({ name: "fake-claude-code", version: "0.0.0-test" }, { capabilities: {} });
   client.fallbackNotificationHandler = async (notification) => {
@@ -196,6 +206,71 @@ test("maps a tool call to an rpc.request and returns the rpc.response result", a
   assert.equal(requests.length, 1);
   assert.equal(requests[0].tool, "submit_tasks");
   assert.deepEqual(requests[0].arguments, { threadId: "thread-1", tasks: [] });
+});
+
+test("post_artifact captures locally, registers and uploads once, then returns only the authoritative artifact", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "coffee-shop-bridge-artifact-"));
+  await mkdir(join(root, "reports"));
+  await writeFile(join(root, "reports", "result.txt"), "hello");
+  const workingRoot = await canonicalWorkingRoot(root);
+  const uploaded: Array<{ token: string; bytes: string }> = [];
+  const uploadToken = "g".repeat(43);
+  let registrations = 0;
+  const artifact = {
+    id: "artifact-one", threadId: "thread-one", sourceKey: "orchestrator-client:client-alpha",
+    relativePath: "reports/result.txt", title: "Result", kind: "report", mediaType: "text/plain", summary: "Ready",
+    size: 5, sha256: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+    downloadPath: "/api/artifacts/artifact-one/content", uploaded: false,
+    idempotencyKey: "result-one", createdAt: "2026-09-28T12:00:00.000Z"
+  };
+  const harness = await startHarness({
+    scopes: ["orchestrate"],
+    localArtifacts: {
+      capture: (value) => captureLocalArtifact(workingRoot, value),
+      upload: async (grant, bytes) => { uploaded.push({ token: grant.token, bytes: bytes.toString() }); }
+    },
+    handle: (request) => {
+      assert.equal(request.tool, "post_artifact");
+      registrations += 1;
+      return registrations === 1
+        ? { artifact, uploadGrant: { path: artifact.downloadPath, token: uploadToken, expiresAt: "2026-09-28T12:05:00.000Z" } }
+        : { artifact: { ...artifact, uploaded: true } };
+    }
+  });
+  t.after(() => harness.close());
+
+  const result = await harness.client.callTool({ name: "post_artifact", arguments: {
+    threadId: "thread-one", relativePath: "reports/result.txt", title: "Result", kind: "report",
+    mediaType: "text/plain", summary: "Ready", idempotencyKey: "result-one"
+  } });
+  assert.equal(result.isError, undefined);
+  assert.deepEqual(parseToolResult(result), { ...artifact, uploaded: true });
+  assert.deepEqual(uploaded, [{ token: uploadToken, bytes: "hello" }]);
+  const requests = harness.hub.receivedOfType("rpc.request").filter((request) => request.tool === "post_artifact");
+  assert.equal(requests.length, 2, "the post-upload replay reads authoritative uploaded state");
+  assert.equal(requests[0].arguments.size, 5);
+  assert.equal(requests[0].arguments.sha256, artifact.sha256);
+  assert.equal(JSON.stringify(result).includes(uploadToken), false);
+});
+
+test("post_artifact local refusals happen before a Hub RPC and never reveal the working root", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "coffee-shop-bridge-artifact-"));
+  const workingRoot = await canonicalWorkingRoot(root);
+  const harness = await startHarness({
+    scopes: ["orchestrate"],
+    localArtifacts: {
+      capture: (value) => captureLocalArtifact(workingRoot, value),
+      upload: async () => assert.fail("upload must not run")
+    }
+  });
+  t.after(() => harness.close());
+  const result = await harness.client.callTool({ name: "post_artifact", arguments: {
+    threadId: "thread-one", relativePath: "../secret", title: "Result", kind: "report",
+    mediaType: "text/plain", idempotencyKey: "result-one"
+  } });
+  assert.equal(result.isError, true);
+  assert.equal(harness.hub.receivedOfType("rpc.request").length, 0);
+  assert.equal(JSON.stringify(result).includes(root), false);
 });
 
 for (const code of orchestratorClientErrorCodes) {

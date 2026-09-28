@@ -217,6 +217,7 @@ type taskMessage struct {
 	Body               string         `json:"body"`
 	CorrelationID      string         `json:"correlationId"`
 	InReplyToMessageID string         `json:"inReplyToMessageId"`
+	ArtifactIDs        []string       `json:"artifactIds"`
 	IdempotencyKey     string         `json:"idempotencyKey"`
 	Actor              *instanceActor `json:"actor"`
 }
@@ -227,16 +228,22 @@ type instanceActor struct {
 }
 
 type artifact struct {
-	ID           string `json:"id"`
-	ThreadID     string `json:"threadId"`
-	RunID        string `json:"runId"`
-	AgentID      string `json:"agentId"`
-	InstanceID   string `json:"instanceId"`
-	AllocationID string `json:"allocationId"`
-	Title        string `json:"title"`
-	Size         int    `json:"size"`
-	SHA256       string `json:"sha256"`
-	Uploaded     bool   `json:"uploaded"`
+	ID             string `json:"id"`
+	ThreadID       string `json:"threadId"`
+	RunID          string `json:"runId"`
+	SourceKey      string `json:"sourceKey"`
+	AgentID        string `json:"agentId"`
+	InstanceID     string `json:"instanceId"`
+	AllocationID   string `json:"allocationId"`
+	RelativePath   string `json:"relativePath"`
+	Title          string `json:"title"`
+	Kind           string `json:"kind"`
+	MediaType      string `json:"mediaType"`
+	Size           int    `json:"size"`
+	SHA256         string `json:"sha256"`
+	DownloadPath   string `json:"downloadPath"`
+	Uploaded       bool   `json:"uploaded"`
+	IdempotencyKey string `json:"idempotencyKey"`
 }
 
 type sessionBinding struct {

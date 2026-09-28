@@ -24,7 +24,7 @@ import {
   type OrchestratorApprovalResolutionResult
 } from "./approvals.js";
 import { CoordinationError } from "./coordinationError.js";
-import { submitTasksForSource, updateTaskForSource } from "./coordination.js";
+import { createArtifactForSource, submitTasksForSource, updateTaskForSource } from "./coordination.js";
 import { deliverApprovalResolution, type ControlAgentSender } from "./harnessGateway.js";
 import { executionInventoryForSource, type InventoryEnvironment } from "./executionInventory.js";
 import { applyInstanceToolForSource, getInstanceForSource, type InstanceToolName } from "./instanceTools.js";
@@ -534,6 +534,18 @@ export function createOrchestratorClientGateway({
         };
       });
 
+      const postArtifact = threadScoped(async (threadId, rest) => {
+        const registered = await createArtifactForSource(store, externalSource(connectionId!, threadId), rest, now());
+        // New records and fresh one-time grants are both durable state mutations.
+        if (registered.created || registered.uploadGrant !== undefined) broadcast();
+        return {
+          result: {
+            artifact: structuredClone(registered.artifact),
+            ...(registered.uploadGrant === undefined ? {} : { uploadGrant: { ...registered.uploadGrant } })
+          }
+        };
+      });
+
       const updateThread = threadScoped(async (threadId, rest) => {
         const thread = await updateThreadForExternalOrchestrator(store, connectionId!, threadId, rest, now());
         broadcast();
@@ -622,6 +634,7 @@ export function createOrchestratorClientGateway({
         submit_tasks: submitTasks,
         update_task: updateTask,
         send_task_message: sendTaskMessage,
+        post_artifact: postArtifact,
         update_thread: updateThread,
         get_execution_inventory: getExecutionInventory,
         spawn_instance: spawnInstance,
@@ -783,6 +796,7 @@ export const servedExternalOrchestratorTools: readonly ExternalOrchestratorToolN
   "submit_tasks",
   "update_task",
   "send_task_message",
+  "post_artifact",
   "update_thread",
   "get_execution_inventory",
   "spawn_instance",

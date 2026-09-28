@@ -1,6 +1,6 @@
-import { approvalResolverKinds, type Agent, type ApprovalResolvedBy, type OrchestratorAttachment, type OrchestratorClient, type Thread } from "@coffee-shop/protocol";
+import { approvalResolverKinds, type Agent, type ApprovalResolvedBy, type Artifact, type OrchestratorAttachment, type OrchestratorClient, type Thread } from "@coffee-shop/protocol";
 import { describe, expect, it } from "vitest";
-import { approvalResolverLabel, describeThreadOrchestrator, sinceLabel } from "./orchestratorPresentation.js";
+import { approvalResolverLabel, describeThreadOrchestrator, externalArtifactProducerLabel, sinceLabel } from "./orchestratorPresentation.js";
 
 const agents: Agent[] = [
   {
@@ -29,6 +29,26 @@ function attachment(overrides: Partial<OrchestratorAttachment>): OrchestratorAtt
 }
 
 const now = Date.parse("2026-09-22T10:00:00Z");
+
+describe("externalArtifactProducerLabel", () => {
+  const artifact = {
+    id: "artifact-one", threadId: "thread-1", sourceKey: "orchestrator-client:orchestrator-client-1",
+    relativePath: "result.txt", title: "Result", kind: "report", mediaType: "text/plain", summary: "", size: 1,
+    sha256: "a".repeat(64), downloadPath: "/api/artifacts/artifact-one/content", uploaded: true,
+    idempotencyKey: "result", createdAt: "2026-09-22T10:00:00Z"
+  } satisfies Artifact;
+
+  it("uses the current client name", () => {
+    expect(externalArtifactProducerLabel(artifact, clients)).toBe("Christian's laptop");
+  });
+
+  it("bounds the fallback identity for a historical client", () => {
+    const historical = { ...artifact, sourceKey: `orchestrator-client:${"x".repeat(80)}` };
+    const label = externalArtifactProducerLabel(historical, []);
+    expect(label).toMatch(/^Unknown orchestrator x+…$/);
+    expect(label!.length).toBeLessThan(60);
+  });
+});
 
 describe("describeThreadOrchestrator", () => {
   it("names the orchestrating agent for an agent thread", () => {

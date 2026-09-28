@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -37,8 +37,13 @@ function sourceRun(): Run {
 }
 
 async function coordinationStore() {
+  return (await coordinationFixture()).store;
+}
+
+async function coordinationFixture() {
   const directory = await mkdtemp(join(tmpdir(), "coffee-shop-coordination-"));
-  const store = new Store(join(directory, "state.json"));
+  const path = join(directory, "state.json");
+  const store = new Store(path);
   await store.load();
   await store.transact((state) => {
     state.agents = [agent("orchestrator", true), agent("reviewer")];
@@ -49,7 +54,7 @@ async function coordinationStore() {
     }];
     state.runs = [sourceRun()];
   });
-  return store;
+  return { store, path };
 }
 
 /** Starts a task's first attempt as a running run of `agentId`, as the scheduler and lifecycle would. */
@@ -165,6 +170,52 @@ test("artifact registration validates metadata and rejects idempotency conflicts
     createArtifact(store, "run-source", { ...argumentsValue, relativePath: "../secret", idempotencyKey: "escape" }),
     (error: unknown) => error instanceof CoordinationError && error.code === "invalid_arguments"
   );
+});
+
+test("run artifact registration preserves the real Barista producer's historical character limits and replay", async () => {
+  const { path } = await coordinationFixture();
+  // Settle this test fixture's unrelated legacy-agent template import before capturing the artifact
+  // producer's bytes, so the subsequent reload can prove the artifact itself causes no migration.
+  const store = new Store(path);
+  await store.load();
+  const segment = "é".repeat(90);
+  const argumentsValue = {
+    // Barista canonicalizes the opened path at apps/control-agent/internal/mcpserver/server.go:355
+    // and forwards these exact metadata strings at server.go:290-292. The MCP schema closes the object,
+    // but it deliberately places no byte bounds on title, summary, mediaType, or idempotencyKey.
+    relativePath: [`${segment}\\literal`, ...Array.from({ length: 5 }, () => segment)].join("/"),
+    title: "界".repeat(100),
+    kind: "report",
+    mediaType: `x/${"é".repeat(64)}`,
+    summary: "é".repeat(2_001),
+    size: 2,
+    sha256: "a".repeat(64),
+    idempotencyKey: "鍵".repeat(64)
+  };
+  for (const field of ["relativePath", "title", "mediaType", "summary", "idempotencyKey"] as const) {
+    assert.ok(Buffer.byteLength(argumentsValue[field], "utf8") > ({
+      relativePath: 1_024, title: 256, mediaType: 128, summary: 2_000, idempotencyKey: 128
+    })[field], `${field} must exercise the historical character-vs-byte boundary`);
+  }
+
+  const first = await createArtifact(store, "run-source", argumentsValue, at);
+  assert.equal(first.artifact.relativePath, argumentsValue.relativePath);
+  assert.match(first.artifact.relativePath, /\\literal\//, "legacy run paths are not rewritten by external POSIX normalization");
+  assert.equal(first.artifact.title, argumentsValue.title);
+  assert.equal(first.artifact.mediaType, argumentsValue.mediaType);
+  assert.equal(first.artifact.idempotencyKey, argumentsValue.idempotencyKey);
+  assert.equal(first.artifact.summary, "é".repeat(2_000), "the legacy producer truncates summary to 2,000 characters");
+
+  const replay = await createArtifact(store, "run-source", { ...argumentsValue, summary: "A changed retry summary" }, at);
+  assert.equal(replay.artifact.id, first.artifact.id, "legacy run replay ignores summary exactly as the historical Hub did");
+  assert.equal(replay.artifact.summary, first.artifact.summary, "replay never rewrites the first stored summary");
+  assert.equal(store.snapshot().artifacts?.length, 1);
+
+  const persisted = await readFile(path);
+  const restarted = new Store(path);
+  await restarted.load();
+  assert.deepEqual(await readFile(path), persisted, "Store accepts the real run producer's persisted bytes without rewriting them");
+  assert.equal(restarted.snapshot().artifacts?.[0]?.title, argumentsValue.title);
 });
 
 test("agents can refine and complete their thread but cannot archive it", async () => {

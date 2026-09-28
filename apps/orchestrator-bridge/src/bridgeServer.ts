@@ -11,6 +11,7 @@ import {
 import {
   isExternalOrchestratorToolName,
   requiredScopeForExternalOrchestratorTool,
+  validateArtifact,
   type ExternalOrchestratorToolName,
   type OrchestratorClientError,
   type OrchestratorClientScope
@@ -18,6 +19,12 @@ import {
 import { negotiateProtocolRevision } from "./protocolRevision.js";
 import { orderedToolDefinitions, toolDefinitions } from "./toolDefinitions.js";
 import type { HubAttachmentReplaced, HubCallOutcome, HubDoorbell } from "./hubConnection.js";
+import {
+  LocalArtifactError,
+  parseArtifactRegistrationResult,
+  type CapturedLocalArtifact,
+  type LocalArtifactGateway
+} from "./localArtifact.js";
 
 export const channelSourceName = "coffeeshop";
 export const channelNotificationMethod = "notifications/claude/channel";
@@ -53,6 +60,7 @@ export interface BridgeServerOptions {
   hub: HubGateway;
   serverVersion: string;
   logError: (message: string) => void;
+  localArtifacts?: LocalArtifactGateway;
 }
 
 const unrememberedAttachmentInstruction =
@@ -148,12 +156,14 @@ export class BridgeServer {
   readonly server: Server<Request, ChannelNotification, Result>;
   private readonly hub: HubGateway;
   private readonly logError: (message: string) => void;
+  private readonly localArtifacts: LocalArtifactGateway | undefined;
   private channelDeliveryObserved = false;
   private listedScopes: readonly OrchestratorClientScope[] = assumedScopes;
 
   constructor(options: BridgeServerOptions) {
     this.hub = options.hub;
     this.logError = options.logError;
+    this.localArtifacts = options.localArtifacts;
     const serverInfo = { name: channelSourceName, version: options.serverVersion };
     this.server = new Server<Request, ChannelNotification, Result>(serverInfo, {
       capabilities: bridgeCapabilities,
@@ -263,6 +273,8 @@ export class BridgeServer {
       return toolError({ code: "forbidden", message: `${name} requires the ${requiredScope} scope, which this Coffee Shop credential does not hold` });
     }
 
+    if (name === "post_artifact") return await this.postArtifact(toolArguments);
+
     const extraWait = name === "get_thread_events" ? requestedWaitMilliseconds(toolArguments) : 0;
     const outcome = await this.hub.call(name, toolArguments, extraWait);
     if (!outcome.ok) {
@@ -273,6 +285,64 @@ export class BridgeServer {
       return toolError(outcome.error);
     }
     return toolSuccess(this.decorate(name, toolArguments, outcome.result));
+  }
+
+  /** Local capture + authenticated registration + one-time HTTP upload + authoritative replay. */
+  private async postArtifact(toolArguments: Record<string, unknown>): Promise<CallToolResult> {
+    if (this.localArtifacts === undefined) {
+      return toolError({ code: "hub_unavailable", message: "local artifact publication is unavailable" });
+    }
+    let captured: CapturedLocalArtifact;
+    try {
+      captured = await this.localArtifacts.capture(toolArguments);
+    } catch (error) {
+      const message = error instanceof LocalArtifactError ? error.message : "the local artifact could not be captured";
+      return toolError({ code: "invalid_arguments", message });
+    }
+    const registered = await this.hub.call("post_artifact", { ...captured.registration });
+    if (!registered.ok) return toolError(registered.error);
+    const first = parseArtifactRegistrationResult(registered.result);
+    if (!first || !this.registrationMatches(first.artifact, captured)) {
+      return toolError({ code: "hub_unavailable", message: "the Hub returned an invalid artifact registration" });
+    }
+    if (first.artifact.uploaded) {
+      return first.uploadGrant === undefined
+        ? toolSuccess(first.artifact)
+        : toolError({ code: "hub_unavailable", message: "the Hub returned inconsistent artifact upload authority" });
+    }
+    if (first.uploadGrant === undefined || first.uploadGrant.path !== first.artifact.downloadPath) {
+      return toolError({ code: "hub_unavailable", message: "the Hub returned no artifact upload authority" });
+    }
+    try {
+      await this.localArtifacts.upload(first.uploadGrant, captured.bytes);
+    } catch {
+      // Never include a thrown message: a transport implementation may have embedded its bearer.
+      return toolError({ code: "hub_unavailable", message: "the artifact upload failed" });
+    }
+    const replayed = await this.hub.call("post_artifact", { ...captured.registration });
+    if (!replayed.ok) return toolError(replayed.error);
+    const final = parseArtifactRegistrationResult(replayed.result);
+    if (!final || final.uploadGrant !== undefined || !final.artifact.uploaded
+      || final.artifact.id !== first.artifact.id || !this.registrationMatches(final.artifact, captured)) {
+      return toolError({ code: "hub_unavailable", message: "the Hub did not confirm the uploaded artifact" });
+    }
+    return toolSuccess(final.artifact);
+  }
+
+  private registrationMatches(artifact: unknown, captured: CapturedLocalArtifact): artifact is Record<string, unknown> {
+    const validated = validateArtifact(artifact);
+    if (!validated.ok) return false;
+    const value = validated.value;
+    const request = captured.registration;
+    return value.threadId === request.threadId
+      && value.relativePath === request.relativePath
+      && value.title === request.title
+      && value.kind === request.kind
+      && value.mediaType === request.mediaType
+      && value.summary === request.summary
+      && value.size === request.size
+      && value.sha256 === request.sha256
+      && value.idempotencyKey === request.idempotencyKey;
   }
 
   /** Applies the bookkeeping and the one result field the bridge owns rather than the hub. */

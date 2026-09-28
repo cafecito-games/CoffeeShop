@@ -1,11 +1,11 @@
-import { Archive, ArrowCounterClockwise, ChatCircle, FolderOpen, TerminalWindow } from "@phosphor-icons/react";
+import { Archive, ArrowCounterClockwise, ChatCircle, DownloadSimple, FolderOpen, TerminalWindow } from "@phosphor-icons/react";
 import { useMemo, useState } from "react";
 import {
-  isActiveRunStatus, type Agent, type Artifact, type ArtifactPreview, type OrchestratorAttachment, type OrchestratorClient,
+  artifactSource, isActiveRunStatus, type Agent, type Artifact, type ArtifactPreview, type OrchestratorAttachment, type OrchestratorClient,
   type Run, type Thread, type ThreadStatus
 } from "@coffee-shop/protocol";
 import { OrchestratorBadge } from "./OrchestratorBadge.js";
-import { actorLabel, describeThreadOrchestrator } from "./orchestratorPresentation.js";
+import { actorLabel, describeThreadOrchestrator, externalArtifactProducerLabel } from "./orchestratorPresentation.js";
 import { PreviewArtifact, type AuthenticatedFetch } from "./PreviewArtifact.js";
 
 const statusLabels: Record<ThreadStatus, string> = { active: "Active", completed: "Completed", archived: "Archived" };
@@ -36,6 +36,7 @@ export function ThreadsView({ threads, runs, artifacts, artifactPreviews, agents
 }) {
   const [showArchived, setShowArchived] = useState(false);
   const [updatingId, setUpdatingId] = useState("");
+  const [downloadingId, setDownloadingId] = useState("");
   const [notice, setNotice] = useState("");
   const visible = useMemo(() => threads
     .filter((thread) => showArchived || thread.status !== "archived")
@@ -53,6 +54,26 @@ export function ThreadsView({ threads, runs, artifacts, artifactPreviews, agents
     }
   }
 
+  async function downloadArtifact(artifact: Artifact) {
+    if (downloadingId) return;
+    setDownloadingId(artifact.id);
+    setNotice("");
+    try {
+      const response = await apiFetch(artifact.downloadPath);
+      if (!response.ok) throw new Error();
+      const objectUrl = URL.createObjectURL(await response.blob());
+      const link = document.createElement("a");
+      link.href = objectUrl;
+      link.download = artifact.relativePath.split("/").at(-1) || artifact.title;
+      link.click();
+      URL.revokeObjectURL(objectUrl);
+    } catch {
+      setNotice("Artifact download unavailable");
+    } finally {
+      setDownloadingId("");
+    }
+  }
+
   return (
     <main className="utility-view threads-view">
       <header className="utility-header">
@@ -66,6 +87,10 @@ export function ThreadsView({ threads, runs, artifacts, artifactPreviews, agents
         const threadArtifacts = artifacts.filter((artifact) => artifact.threadId === thread.id && artifact.uploaded);
         const previewByArtifact = new Map((artifactPreviews ?? []).filter((preview) => preview.threadId === thread.id)
           .map((preview) => [preview.artifactId, preview]));
+        const externalArtifacts = threadArtifacts.filter((artifact) => {
+          const source = artifactSource(artifact);
+          return source.ok && source.value.kind === "external" && !previewByArtifact.has(artifact.id);
+        });
         const participantIds = new Set(threadRuns.map((run) => run.agentId));
         const participants = agents.filter((agent) => participantIds.has(agent.id));
         const activeRuns = threadRuns.filter((run) => isActiveRunStatus(run.status));
@@ -88,6 +113,12 @@ export function ThreadsView({ threads, runs, artifacts, artifactPreviews, agents
             const preview = previewByArtifact.get(artifact.id);
             return preview ? <PreviewArtifact key={artifact.id} artifact={artifact} preview={preview} canMutate={canMutate} apiFetch={apiFetch} compact /> : null;
           })}</section>}
+          {externalArtifacts.length > 0 && <section className="thread-artifacts" aria-label={`External artifacts for ${thread.title}`}>
+            {externalArtifacts.map((artifact) => <article key={artifact.id} className="external-artifact">
+              <div><span>External artifact · {artifact.kind}</span><h4>{artifact.title}</h4>{artifact.summary && <p>{artifact.summary}</p>}<small>Published by {externalArtifactProducerLabel(artifact, orchestratorClients)}</small></div>
+              <button disabled={downloadingId !== ""} onClick={() => void downloadArtifact(artifact)} aria-label={`Download external artifact ${artifact.title}`}><DownloadSimple size={15} /> Download</button>
+            </article>)}
+          </section>}
           <footer>
             {thread.status !== "archived" && <button onClick={() => onContinue(thread)}><ChatCircle size={15} /> {orchestrator.kind === "external" ? "Message orchestrator" : "Continue thread"}</button>}
             {thread.status !== "archived"

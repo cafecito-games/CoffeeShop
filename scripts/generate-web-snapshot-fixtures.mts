@@ -17,6 +17,7 @@ import { fileURLToPath } from "node:url";
 import type { Agent, AgentTemplate, ComputeNode, Run, Snapshot, Thread } from "../packages/protocol/src/index.js";
 import { openApproval, resolveApprovalInState } from "../apps/hub/src/approvals.js";
 import { applyComponentInventory } from "../apps/hub/src/componentInventories.js";
+import { createArtifact } from "../apps/hub/src/coordination.js";
 import { attachThreadInState, createExternalThreadInState, postOperatorMessageInState } from "../apps/hub/src/externalOrchestrators.js";
 import { acceptInstanceWorkInState, applyInstanceLifecycle, applyNodeHeartbeatInState, flushPendingInstanceDeliveries, receiveInstanceLifecycleReport, reconcileNodeInstancesInState, reserveInstanceAllocation } from "../apps/hub/src/instances.js";
 import { applyRunLifecycle } from "../apps/hub/src/lifecycle.js";
@@ -268,6 +269,31 @@ await store.transact((state) => {
   const heartbeat = applyNodeHeartbeatInState(state, node.id, 1, 1, "2026-09-22T12:09:04.000Z");
   return reconciled || heartbeat.capacityChanged;
 });
+
+// This fixture crosses every historical character-vs-byte boundary that Barista can send. Barista
+// canonicalizes the opened path at apps/control-agent/internal/mcpserver/server.go:355 and forwards
+// the remaining model-provided strings verbatim at server.go:290-292; createArtifact is the real Hub
+// producer that trims, bounds, truncates, attributes, and persists the record.
+const compatibilitySegment = "é".repeat(90);
+const compatibilityArtifactArguments = {
+  relativePath: [`${compatibilitySegment}\\literal`, ...Array.from({ length: 5 }, () => compatibilitySegment)].join("/"),
+  title: "界".repeat(100),
+  kind: "report",
+  mediaType: `x/${"é".repeat(64)}`,
+  summary: "é".repeat(2_001),
+  size: 2,
+  sha256: "a".repeat(64),
+  idempotencyKey: "鍵".repeat(64)
+};
+const compatibilityArtifact = await createArtifact(store, run.id, compatibilityArtifactArguments, "2026-09-22T12:09:30.000Z");
+const compatibilityReplay = await createArtifact(store, run.id, {
+  ...compatibilityArtifactArguments,
+  summary: "A changed retry summary"
+}, "2026-09-22T12:09:31.000Z");
+if (compatibilityReplay.artifact.id !== compatibilityArtifact.artifact.id
+  || compatibilityReplay.artifact.summary !== "é".repeat(2_000)) {
+  throw new Error("the legacy run artifact producer did not preserve its historical replay contract");
+}
 
 const snapshot = store.snapshot("2026-09-28T12:10:00.000Z");
 if (snapshot.allocations?.find((item) => item.id === releasedFixture.allocation.id)?.status !== "released"

@@ -1,4 +1,4 @@
-import { externalOrchestratorToolNames, type ExternalOrchestratorToolName } from "@coffee-shop/protocol";
+import { externalOrchestratorToolNames, ordinaryArtifactKinds, type ExternalOrchestratorToolName } from "@coffee-shop/protocol";
 
 export interface ToolSchema {
   type: "object";
@@ -136,6 +136,20 @@ export const toolDefinitions: Readonly<Record<ExternalOrchestratorToolName, Tool
       taskId: { type: "string", description: "Task id." },
       message: { type: "string", description: "Message for the worker." }
     }, ["threadId", "taskId", "message"])
+  },
+  post_artifact: {
+    name: "post_artifact",
+    title: "Post artifact",
+    description: "Publishes one ordinary file beneath this bridge session's startup working directory to an attached thread.",
+    inputSchema: closedSchema({
+      threadId: threadIdProperty,
+      relativePath: { type: "string", description: "Path beneath the bridge startup working directory." },
+      title: { type: "string", description: "Short operator-facing title." },
+      kind: { type: "string", enum: [...ordinaryArtifactKinds] },
+      mediaType: { type: "string", description: "The file's media type." },
+      summary: { type: "string", description: "Optional bounded summary." },
+      idempotencyKey: { type: "string", description: "Stable identity for safe retries and reconnects." }
+    }, ["threadId", "relativePath", "title", "kind", "mediaType", "idempotencyKey"])
   },
   update_thread: {
     name: "update_thread",

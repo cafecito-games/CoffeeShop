@@ -27,6 +27,7 @@ import {
   previewBundleLimits,
   previewBundleMediaType,
   runSourceKey,
+  validateArtifact,
   validateArtifactPreviewRecord,
   validateComponentInventoryReport,
   validateProjectProfile,
@@ -59,6 +60,10 @@ import {
 } from "./instances.js";
 import { assertPersistedSessionState } from "./persistedSessionState.js";
 import { PreviewStorage } from "./previewStorage.js";
+import {
+  assertPersistedArtifactUploadGrantState,
+  type ArtifactUploadGrantRecord
+} from "./artifactUploadGrants.js";
 import { recordTaskEvents, type TaskEventEntry, type TaskEventStream } from "./taskEvents.js";
 
 /** The hub's durable record of one accepted task batch, used to answer idempotent replays. */
@@ -215,6 +220,8 @@ interface HubOnlyState {
   agentTemplateConfigurationReceipts?: AgentTemplateConfigurationReceipt[];
   previewRegistrationReceipts?: PreviewRegistrationReceipt[];
   previewProcessingReceipts?: PreviewProcessingReceipt[];
+  /** One-time external upload capabilities. Plaintext tokens are never stored. */
+  artifactUploadGrants?: ArtifactUploadGrantRecord[];
 }
 
 /** The persisted state. `orchestratorClients` holds the stored records, secret hash included. */
@@ -234,6 +241,7 @@ const emptyState = (): State => withOrchestrationDefaults({
   artifactPreviews: [],
   previewRegistrationReceipts: [],
   previewProcessingReceipts: [],
+  artifactUploadGrants: [],
   instances: [],
   allocations: [],
   templates: [],
@@ -295,6 +303,12 @@ export function addOrchestrationDefaults(state: State) {
   state.orchestratorClients ??= [];
   state.orchestratorAttachments ??= [];
   return changed;
+}
+
+export function addArtifactUploadGrantDefaults(state: State) {
+  if (state.artifactUploadGrants !== undefined) return false;
+  state.artifactUploadGrants = [];
+  return true;
 }
 
 /**
@@ -594,14 +608,17 @@ export function dropBorrowedInstanceAgentKeys(state: State) {
  * dropped, because either would silently hand a record to the wrong principal.
  *
  * A record that names no actor at all is accepted only where the hub legitimately writes one: an
- * event or a chat message it authored itself, or a task update from a principal with no agent. A run,
- * a task assignment, and an artifact must always say whose work they are.
+ * event or a chat message it authored itself, a task update from a principal with no agent, or an
+ * artifact produced by an external orchestrator whose identity lives in `sourceKey`. A run, a task
+ * assignment, and a run-produced artifact must always say whose work they are.
  */
 export function assertPersistedActorState(state: State) {
   for (const [index, run] of state.runs.entries()) assertPersistedActor(run, `Persisted run ${index}`, true);
   for (const [index, event] of state.events.entries()) assertPersistedActor(event, `Persisted event ${index}`, false);
   for (const [index, message] of state.messages.entries()) assertPersistedActor(message, `Persisted message ${index}`, false);
-  for (const [index, artifact] of (state.artifacts ?? []).entries()) assertPersistedActor(artifact, `Persisted artifact ${index}`, true);
+  for (const [index, artifact] of (state.artifacts ?? []).entries()) {
+    assertPersistedActor(artifact, `Persisted artifact ${index}`, artifact.runId !== undefined);
+  }
   for (const [index, update] of (state.taskUpdates ?? []).entries()) assertPersistedActor(update, `Persisted task update ${index}`, false);
   for (const [index, task] of (state.tasks ?? []).entries()) {
     if (task.assignment !== undefined) assertPersistedActor(task.assignment, `Persisted task ${index} assignment`, true);
@@ -639,7 +656,7 @@ const hasOnlyStoredKeys = (value: Record<string, unknown>, keys: readonly string
 const isDigest = (value: unknown): value is string => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
 
 const previewArtifactKeys = [
-  "id", "threadId", "runId", "agentId", "instanceId", "allocationId", "relativePath", "title", "kind",
+  "id", "threadId", "runId", "sourceKey", "agentId", "instanceId", "allocationId", "relativePath", "title", "kind",
   "mediaType", "summary", "size", "sha256", "downloadPath", "uploaded", "idempotencyKey", "createdAt"
 ] as const;
 const registrationReceiptKeys = ["id", "sourceKey", "idempotencyKey", "digest", "ttlSeconds", "artifactId", "previewId", "createdAt"] as const;
@@ -652,6 +669,18 @@ const sameActor = (
   left: { agentId?: string; instanceId?: string; allocationId?: string },
   right: { agentId?: string; instanceId?: string; allocationId?: string }
 ) => left.agentId === right.agentId && left.instanceId === right.instanceId && left.allocationId === right.allocationId;
+
+/** Every persisted/public artifact uses the shared exact run-or-external producer invariant. */
+export function assertPersistedArtifactState(state: State) {
+  if (!Array.isArray(state.artifacts)) throw new Error("Persisted artifact collection is malformed");
+  const ids = new Set<string>();
+  for (const [index, artifact] of state.artifacts.entries()) {
+    const validated = validateArtifact(artifact);
+    if (!validated.ok) throw new Error(`Persisted artifact ${index} is invalid: ${validated.reason}`);
+    if (ids.has(validated.value.id)) throw new Error(`Persisted artifact ${index} repeats artifact id ${validated.value.id}`);
+    ids.add(validated.value.id);
+  }
+}
 
 /** Rejects every preview record or private receipt the lifecycle authority could not have written. */
 export function assertPersistedArtifactPreviewState(state: State) {
@@ -1012,7 +1041,7 @@ function addThreadDefaults(state: State) {
     if (!delegation.threadId && threadId) { delegation.threadId = threadId; changed = true; }
   }
   for (const artifact of state.artifacts ?? []) {
-    const threadId = threadIdForRun.get(artifact.runId);
+    const threadId = artifact.runId === undefined ? undefined : threadIdForRun.get(artifact.runId);
     if (!artifact.threadId && threadId) { artifact.threadId = threadId; changed = true; }
   }
   for (const event of state.events) {
@@ -1108,6 +1137,7 @@ export class Store {
     const addedTemplateConfiguration = addAgentTemplateConfigurationDefaults(loaded);
     const migratedInstanceRequirements = migrateLegacyInstanceState(loaded);
     addArtifactPreviewDefaults(loaded);
+    const addedArtifactUploadGrants = addArtifactUploadGrantDefaults(loaded);
     const addedComponentInventories = addComponentInventoryDefaults(loaded);
     if (this.sqlite) loaded.projectProfiles ??= [];
     const addedApprovalResolvers = addApprovalResolverDefaults(loaded);
@@ -1132,7 +1162,9 @@ export class Store {
      */
     const droppedBorrowedKeys = dropBorrowedInstanceAgentKeys(loaded);
     assertPersistedActorState(loaded);
+    assertPersistedArtifactState(loaded);
     assertPersistedArtifactPreviewState(loaded);
+    assertPersistedArtifactUploadGrantState(loaded);
     assertPersistedComponentInventories(loaded);
     /*
      * The legacy import runs after every assertion, so it never writes on top of state the hub could
@@ -1145,7 +1177,7 @@ export class Store {
     // persist exactly once, and a new database must always receive its initial row.
     const explicitMigration = removedDemoRecords || addedAgentAvatars || addedCoordination || addedThreads || addedOrchestration
       || addedThreadOrchestrators || addedApprovalResolvers || addedTemplateConfiguration || migratedInstanceRequirements
-      || addedComponentInventories || droppedBorrowedKeys || importedTemplates;
+      || addedComponentInventories || addedArtifactUploadGrants || droppedBorrowedKeys || importedTemplates;
     if (needsInitialSqliteWrite || explicitMigration || (this.sqlite && JSON.stringify(loaded) !== beforeMigrations)) await this.save(loaded);
     this.state = loaded;
   }
@@ -1169,6 +1201,7 @@ export class Store {
       nodeInstanceResidency: _nodeInstanceResidency, instanceRequirementsVersion: _instanceRequirementsVersion,
       agentTemplateConfigurationReceipts: _agentTemplateConfigurationReceipts,
       previewRegistrationReceipts: _previewRegistrationReceipts, previewProcessingReceipts: _previewProcessingReceipts,
+      artifactUploadGrants: _artifactUploadGrants,
       projectProfilesImported: _projectProfilesImported, orchestratorClients, artifactPreviews, ...published
     } = this.state;
     return structuredClone({

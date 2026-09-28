@@ -115,6 +115,20 @@ describe("hub snapshot fixtures", () => {
     expect(snapshot.templates![0]).not.toHaveProperty("sessionBindingId");
   });
 
+  it("accepts the real run artifact producer's historical character-bounded metadata", () => {
+    // Produced by scripts/generate-web-snapshot-fixtures.mts through Barista's canonical path shape
+    // (apps/control-agent/internal/mcpserver/server.go:290-292,355), Hub createArtifact, and Store.snapshot().
+    const artifact = (current as Snapshot).artifacts?.find((candidate) => candidate.idempotencyKey === "鍵".repeat(64));
+    expect(artifact).toBeDefined();
+    expect(artifact?.title).toBe("界".repeat(100));
+    expect(artifact?.summary).toBe("é".repeat(2_000));
+    expect(artifact?.mediaType).toBe(`x/${"é".repeat(64)}`);
+    expect(Buffer.byteLength(artifact!.relativePath, "utf8")).toBeGreaterThan(1_024);
+    expect(artifact?.relativePath).toContain("\\literal/");
+    expect(Buffer.byteLength(artifact!.idempotencyKey, "utf8")).toBeGreaterThan(128);
+    expect(isSnapshot(current)).toBe(true);
+  });
+
   it("carries the Hub producer's path-free component inventory without changing legacy shape", () => {
     const snapshot = current as Snapshot;
     expect(snapshot.componentInventories).toHaveLength(1);

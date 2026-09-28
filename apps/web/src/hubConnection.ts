@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  approvalDeliveryStatuses, approvalOptionKinds, approvalStatuses, artifactKinds, harnessEventStreamStatuses, harnessIds,
+  approvalDeliveryStatuses, approvalOptionKinds, approvalStatuses, harnessEventStreamStatuses, harnessIds,
   harnessTransports, placementRequirementKinds, planEntryPriorities, planEntryStatuses, runStatuses,
   sessionBindingStatuses, taskDependencyPolicies, taskMessageKinds, taskStatuses, toolCallKinds,
   toolCallStatuses, workspaceCleanupPolicies, workspaceIsolationPolicies, workspaceLeaseStatuses,
   workspaceRetentionReasons, orchestratorAttachmentStatuses, orchestratorClientScopes, validateAgentInstance,
-  validateAgentTemplate, validateArtifactPreview, validateInstanceAllocation, validateProjectProfile,
+  validateAgentTemplate, validateArtifact, validateArtifactPreview, validateInstanceAllocation, validateProjectProfile,
   validateComponentInventoryReport, validateEffectiveCapabilityPack,
   type ArtifactPreview, type Snapshot
 } from "@coffee-shop/protocol";
@@ -107,24 +107,7 @@ function isDelegation(value: unknown): boolean {
 }
 
 function isArtifact(value: unknown): boolean {
-  return isObject(value)
-    && isString(value.id)
-    && isOptionalString(value.threadId)
-    && isString(value.runId)
-    && isOptionalString(value.agentId)
-    && isOptionalString(value.instanceId)
-    && isOptionalString(value.allocationId)
-    && isString(value.relativePath)
-    && isString(value.title)
-    && isOneOf(value.kind, artifactKinds)
-    && isString(value.mediaType)
-    && isString(value.summary)
-    && isNumber(value.size)
-    && isString(value.sha256)
-    && isString(value.downloadPath)
-    && typeof value.uploaded === "boolean"
-    && isString(value.idempotencyKey)
-    && isString(value.createdAt);
+  return validateArtifact(value).ok;
 }
 
 function isNode(value: unknown): boolean {

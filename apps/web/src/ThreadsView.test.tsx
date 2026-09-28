@@ -1,5 +1,5 @@
-import type { Agent, OrchestratorAttachment, OrchestratorClient, Thread } from "@coffee-shop/protocol";
-import { render, screen } from "@testing-library/react";
+import type { Agent, Artifact, OrchestratorAttachment, OrchestratorClient, Thread } from "@coffee-shop/protocol";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { ThreadsView } from "./ThreadsView.js";
 
@@ -29,16 +29,22 @@ function attachment(overrides: Partial<OrchestratorAttachment> = {}): Orchestrat
   };
 }
 
-function renderThreads(threads: Thread[], attachments: OrchestratorAttachment[] = [], onContinue = vi.fn()) {
+function renderThreads(
+  threads: Thread[],
+  attachments: OrchestratorAttachment[] = [],
+  onContinue = vi.fn(),
+  artifacts: Artifact[] = [],
+  apiFetch = vi.fn()
+) {
   render(<ThreadsView
     threads={threads}
     runs={[]}
-    artifacts={[]}
+    artifacts={artifacts}
     agents={agents}
     orchestratorClients={clients}
     orchestratorAttachments={attachments}
     canMutate
-    apiFetch={vi.fn()}
+    apiFetch={apiFetch}
     onContinue={onContinue}
     onInspectRun={vi.fn()}
     onSetStatus={vi.fn()}
@@ -77,5 +83,27 @@ describe("ThreadsView orchestrator badge", () => {
   it("renders a pre-migration thread that carries only ownerAgentId", () => {
     renderThreads([thread({ ownerAgentId: "agent-one" })]);
     expect(screen.getAllByText("Milo").length).toBeGreaterThan(0);
+  });
+
+  it("renders and authentically downloads an ordinary external artifact attributed by canonical source key", async () => {
+    const artifact: Artifact = {
+      id: "artifact-one", threadId: "thread-1", sourceKey: "orchestrator-client:orchestrator-client-1",
+      relativePath: "reports/result.txt", title: "External result", kind: "report", mediaType: "text/plain",
+      summary: "Ready", size: 5, sha256: "a".repeat(64), downloadPath: "/api/artifacts/artifact-one/content",
+      uploaded: true, idempotencyKey: "external-result", createdAt: "2026-09-22T09:50:00Z"
+    };
+    const apiFetch = vi.fn().mockResolvedValue({ ok: true, blob: async () => new Blob(["hello"]) });
+    vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:artifact");
+    vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => undefined);
+    renderThreads(
+      [thread({ orchestrator: { kind: "external", clientId: "orchestrator-client-1" } })],
+      [attachment()],
+      vi.fn(),
+      [artifact],
+      apiFetch
+    );
+    expect(screen.getByText("Published by Christian's laptop")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Download external artifact External result" }));
+    await waitFor(() => expect(apiFetch).toHaveBeenCalledWith(artifact.downloadPath));
   });
 });

@@ -54,6 +54,7 @@ import {
   type InstanceLifecycleEvidence
 } from "./instances.js";
 import { TaskEventWaiters } from "./mailbox.js";
+import { claimArtifactUploadGrant } from "./artifactUploadGrants.js";
 import { forgetNodeCapabilityReport, getNodeCapabilityReport, recordNodeCapabilityReport } from "./nodeCapabilities.js";
 import { registeredComputeNode } from "./nodeRegistration.js";
 import { createOrchestratorClientRevocations, operatorCredentialGuard, registerOrchestratorClientRoutes } from "./orchestratorClients.js";
@@ -677,6 +678,18 @@ app.get("/api/runs/:id/events", (req, res) => {
 
 app.put("/api/artifacts/:id/content", async (req, res) => {
   try {
+    const authorization = req.header("authorization");
+    const bearer = authorization?.match(/^Bearer\s+([^\s]+)$/i)?.[1];
+    const queryCredential = typeof req.query.token === "string" ? req.query.token : undefined;
+    const needsGrant = authorization !== undefined && bearer !== token;
+    // External upload capabilities are accepted only in the Authorization header and are consumed
+    // before the request body reaches immutable storage. Operator credentials keep their existing
+    // behavior; an explicit malformed/header-or-query capability is never treated as anonymous dev.
+    if ((authorization !== undefined && bearer === undefined)
+      || (queryCredential !== undefined && queryCredential !== token)
+      || (needsGrant && (bearer === undefined || !await claimArtifactUploadGrant(store, req.params.id, bearer)))) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
     await ingestArtifactContent(store, artifactStorage, {
       artifactId: req.params.id,
       contentType: req.headers["content-type"],

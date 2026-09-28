@@ -109,11 +109,21 @@ type bridgeProcess struct {
 // startBridge launches one bridge against the hub and completes the MCP initialize handshake, as
 // Claude Code does before it lists tools.
 func (environment *environment) startBridge(name, clientID, secret string) *bridgeProcess {
+	return environment.startBridgeAt(name, clientID, secret, filepath.Join(repositoryRoot, "apps", "orchestrator-bridge"))
+}
+
+// startBridgeAt launches the bridge with the supplied machine-local working root. The executable
+// remains the repository bridge; only process.cwd(), which defines post_artifact's file authority,
+// changes.
+func (environment *environment) startBridgeAt(name, clientID, secret, workingRoot string) *bridgeProcess {
 	t := environment.t
 	t.Helper()
 	bridge := &bridgeProcess{environment: environment, name: name, clientID: clientID, pending: map[string]chan jsonRPCMessage{}, logs: newBoundedLog()}
-	command := exec.Command("node", "--import", "tsx", filepath.Join("src", "index.ts"))
-	command.Dir = filepath.Join(repositoryRoot, "apps", "orchestrator-bridge")
+	command := exec.Command(
+		filepath.Join(repositoryRoot, "apps", "orchestrator-bridge", "node_modules", ".bin", "tsx"),
+		filepath.Join(repositoryRoot, "apps", "orchestrator-bridge", "src", "index.ts"),
+	)
+	command.Dir = workingRoot
 	command.Env = []string{
 		"PATH=" + os.Getenv("PATH"),
 		"HOME=" + filepath.Join(environment.root, "bridges", name),

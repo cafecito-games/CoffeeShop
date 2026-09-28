@@ -82,5 +82,6 @@
   "previewRegistrationReceipts": [],
   "previewProcessingReceipts": [],
   "componentInventories": [],
-  "legacyTemplateImports": []
+  "legacyTemplateImports": [],
+  "artifactUploadGrants": []
 }
