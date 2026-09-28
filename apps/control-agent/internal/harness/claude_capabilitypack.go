@@ -34,9 +34,9 @@ const claudePluginSkillsDirectory = "./skills"
 // Discovery is confirmed against the same binary, offline and without credentials:
 //
 //	$ claude --plugin-dir <root> plugin details coffee-shop-barista
-//	coffee-shop-barista 1.0.0
+//	coffee-shop-barista 1.1.0
 //	Component inventory
-//	  Skills (3)  coffeeshop-artifacts, coffeeshop-coordination, coffeeshop-task-reporting
+//	  Skills (4)  coffeeshop-artifacts, coffeeshop-coordination, coffeeshop-preview, coffeeshop-task-reporting
 //
 // which also established that Claude keys a skill by the directory it occupies, not by the name its
 // SKILL.md metadata declares — the opposite of Codex. That is why each adapter supplies the vendor's
@@ -116,7 +116,7 @@ func confirmClaudePluginDiscovery(ctx context.Context, projectionContext packPro
 }
 
 // claudeSkillInventory reads the skill names out of `claude plugin details` output. The command's
-// inventory line is "  Skills (3)  a, b, c"; a plugin with none prints "Skills (0)" and no names.
+// inventory line is "  Skills (4)  a, b, c, d"; a plugin with none prints "Skills (0)" and no names.
 func claudeSkillInventory(output string) []string {
 	for _, line := range strings.Split(output, "\n") {
 		trimmed := strings.TrimSpace(line)

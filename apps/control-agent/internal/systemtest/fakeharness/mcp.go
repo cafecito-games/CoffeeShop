@@ -95,6 +95,9 @@ type toolResult struct {
 }
 
 func (client *mcpClient) tool(ctx context.Context, name string, arguments any) (toolResult, error) {
+	if activeRecorder != nil {
+		activeRecorder.write(map[string]any{"event": "mcp-tool-call", "tool": name, "arguments": arguments})
+	}
 	raw, err := client.call(ctx, "tools/call", map[string]any{"name": name, "arguments": arguments})
 	if err != nil {
 		return toolResult{}, err

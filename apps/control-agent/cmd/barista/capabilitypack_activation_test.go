@@ -47,10 +47,10 @@ func TestComponentProbeCoversEveryComponentKind(t *testing.T) {
 
 // packManifestBytes declares only the capability pack, so applying the plan installs exactly one
 // manual artifact and reaches no network.
-func packManifestBytes(platform string) []byte {
+func packManifestBytes(platform string, version string) []byte {
 	return []byte(`{"manifestVersion":"` + setup.ManifestVersion + `","components":[` +
 		`{"id":"coffeeshop-capability-pack","kind":"capability-pack","harnessId":"coffee-shop",` +
-		`"provider":"cafecito-games","label":"Coffee Shop capability pack","version":"1.0.0",` +
+		`"provider":"cafecito-games","label":"Coffee Shop capability pack","version":"` + version + `",` +
 		`"platforms":{"` + platform + `":{"kind":"manual","executablePath":"coffeeshop-capability-pack.tar.gz"}},` +
 		`"launch":{}}]}`)
 }
@@ -68,7 +68,7 @@ func TestActivateTheCanonicalCapabilityPackThroughItsProbe(t *testing.T) {
 	require.NoError(t, err)
 
 	platform := setup.CurrentPlatform()
-	manifestBytes := packManifestBytes(platform)
+	manifestBytes := packManifestBytes(platform, packManifest.Version)
 	manifest, err := setup.ParseManifest(manifestBytes)
 	require.NoError(t, err)
 	require.Equal(t, packManifest.ID, manifest.Components[0].ID)
@@ -113,7 +113,7 @@ func TestActivateTheCanonicalCapabilityPackThroughItsProbe(t *testing.T) {
 	require.NoError(t, active.Verify())
 	verified, err := capabilitypack.ProbeInstalledArtifact(active.Path, packManifest.ID, packManifest.Version)
 	require.NoError(t, err)
-	require.Len(t, verified.Skills, 3)
+	require.Len(t, verified.Skills, 4)
 
 	// A pack whose bytes no longer validate is refused. Verification fails before the probe is even
 	// reached, and nothing is written.

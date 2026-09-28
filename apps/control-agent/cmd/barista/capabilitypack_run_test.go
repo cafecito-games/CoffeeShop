@@ -26,7 +26,7 @@ func installedCapabilityPack(t *testing.T, activate bool) (dataRoot string, mani
 	digest = capabilitypack.ArchiveDigest(archive)
 
 	platform := setup.CurrentPlatform()
-	manifestBytes := packManifestBytes(platform)
+	manifestBytes := packManifestBytes(platform, packManifest.Version)
 	manifest, err = setup.ParseManifest(manifestBytes)
 	require.NoError(t, err)
 	dataRoot = t.TempDir()

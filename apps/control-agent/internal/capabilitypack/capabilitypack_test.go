@@ -97,10 +97,10 @@ func TestCanonicalPackValidates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Validate(canonical pack) error = %v", err)
 	}
-	if len(manifest.Skills) != 3 {
-		t.Fatalf("canonical pack declares %d skills, want the three focused workflows", len(manifest.Skills))
+	if len(manifest.Skills) != 4 {
+		t.Fatalf("canonical pack declares %d skills, want the four focused workflows", len(manifest.Skills))
 	}
-	wantSkills := []string{"coffeeshop-artifacts", "coffeeshop-coordination", "coffeeshop-task-reporting"}
+	wantSkills := []string{"coffeeshop-artifacts", "coffeeshop-coordination", "coffeeshop-preview", "coffeeshop-task-reporting"}
 	got := slices.Sorted(slices.Values(manifest.SkillIDs()))
 	if !slices.Equal(got, wantSkills) {
 		t.Fatalf("canonical pack skills = %v, want %v", got, wantSkills)
@@ -376,20 +376,86 @@ func TestSharedFixtureIsTheVocabularyThePackIsValidatedAgainst(t *testing.T) {
 	}
 }
 
-func TestServedVocabularyMayPrecedeFocusedSkillTeaching(t *testing.T) {
+func TestPreviewWorkflowOwnsPublishPreview(t *testing.T) {
 	tree := canonicalTree(t)
 	manifest, err := Validate(tree, DefaultVocabulary())
 	if err != nil {
 		t.Fatalf("Validate(canonical pack) error = %v", err)
 	}
-	if !slices.Contains(manifest.ToolVocabulary, "publish_preview") {
-		t.Fatal("canonical pack does not advertise publish_preview")
-	}
+	var preview PackSkill
 	for _, skill := range manifest.Skills {
-		if slices.Contains(skill.declaredTools(), "publish_preview") {
-			t.Fatalf("skill %s teaches publish_preview before its focused workflow change", skill.ID)
+		if skill.ID == "coffeeshop-preview" {
+			preview = skill
 		}
 	}
+	if preview.ID == "" {
+		t.Fatal("canonical pack does not declare coffeeshop-preview")
+	}
+	wantTools := []string{"get_task_context", "publish_preview", "update_task"}
+	if !slices.Equal(preview.RequiredTools, wantTools) {
+		t.Fatalf("coffeeshop-preview required tools = %v, want %v", preview.RequiredTools, wantTools)
+	}
+	document := string(tree[preview.Path])
+	invariants := skillSectionBullets(t, document, "## Non-negotiable workflow invariants")
+	wantInvariants := []string{
+		"MUST call `get_task_context` before `publish_preview`.",
+		"MUST reuse one stable publication key and byte-for-byte equivalent arguments for an unchanged retry.",
+		"MUST treat `artifact.uploaded` and `preview.status` as separate facts.",
+		"MUST NOT claim Ready unless the returned `preview.status` is `ready`.",
+		"MUST NOT invent, request, persist, or print a signed access URL or operator credential.",
+		"MUST refuse publication when output needs a server, SPA fallback, root-relative assets, external/API connections, or inline scripts.",
+		"MUST report a publication refusal or malformed result and stop without an alternate tool, broader path, new key, or success claim.",
+		"MUST attach the returned artifact through `update_task` with its own stable key; an exact retry reuses that key and arguments.",
+	}
+	if !slices.Equal(invariants, wantInvariants) {
+		t.Fatalf("coffeeshop-preview invariants = %q, want exact fail-closed contract %q", invariants, wantInvariants)
+	}
+	if !strings.Contains(document, "delivery enforces\n  `connect-src 'none'`.") {
+		t.Fatal("coffeeshop-preview does not name the exact fail-closed connection policy")
+	}
+	for _, forbidden := range []string{"http://", "https://", "signedurl", "authorization: bearer"} {
+		if strings.Contains(strings.ToLower(document), forbidden) {
+			t.Fatalf("coffeeshop-preview leaks or teaches authority-bearing material %q", forbidden)
+		}
+	}
+	suite, err := ParseEvaluationSuite(preview.EvaluationPath, tree[preview.EvaluationPath])
+	if err != nil {
+		t.Fatalf("ParseEvaluationSuite(preview) error = %v", err)
+	}
+	caseIDs := map[string]bool{}
+	for _, evaluation := range suite.Cases {
+		caseIDs[evaluation.ID] = true
+	}
+	for _, required := range []string{
+		"direct-publish-preview", "indirect-share-static-site", "incomplete-no-output",
+		"unrelated-file-artifact", "edge-stable-replay", "edge-upload-pending",
+		"edge-processing", "edge-ready-without-url", "edge-failed", "edge-expired",
+		"edge-malformed-result", "edge-changed-revision", "edge-incompatible-output",
+		"edge-update-task-fails", "edge-no-current-task", "authorization-refused-publication",
+	} {
+		if !caseIDs[required] {
+			t.Fatalf("coffeeshop-preview evaluations omit %s", required)
+		}
+	}
+}
+
+func skillSectionBullets(t *testing.T, document, heading string) []string {
+	t.Helper()
+	start := strings.Index(document, heading+"\n")
+	if start < 0 {
+		t.Fatalf("skill has no %s section", heading)
+	}
+	section := document[start+len(heading)+1:]
+	if end := strings.Index(section, "\n## "); end >= 0 {
+		section = section[:end]
+	}
+	bullets := []string{}
+	for _, line := range strings.Split(section, "\n") {
+		if strings.HasPrefix(line, "- ") {
+			bullets = append(bullets, strings.TrimPrefix(line, "- "))
+		}
+	}
+	return bullets
 }
 
 // TestVocabularyDriftBreaksValidation performs the mutation upstream drift would cause — a rename, an
@@ -469,9 +535,9 @@ func TestVocabularyDriftBreaksValidation(t *testing.T) {
 	}
 }
 
-// TestUntaughtHubToolsAreAnExplicitClosedSet preserves full teaching coverage while allowing the
-// producer capability to land before its separately owned workflow guidance.
-func TestUntaughtHubToolsAreAnExplicitClosedSet(t *testing.T) {
+// TestEveryHubToolIsTaughtByThePack keeps tool publication and workflow guidance atomic: once a
+// tool is served, at least one focused skill owns when and how to use it.
+func TestEveryHubToolIsTaughtByThePack(t *testing.T) {
 	manifest, err := Validate(canonicalTree(t), DefaultVocabulary())
 	if err != nil {
 		t.Fatalf("Validate() error = %v", err)
@@ -488,11 +554,8 @@ func TestUntaughtHubToolsAreAnExplicitClosedSet(t *testing.T) {
 			untaught = append(untaught, name)
 		}
 	}
-	if !slices.Equal(untaught, []string{"publish_preview"}) {
-		t.Fatalf("untaught hub tools = %v, want only publish_preview", untaught)
-	}
-	if !slices.Equal(skillTeachingOptionalTools, untaught) {
-		t.Fatalf("skill teaching exceptions = %v, want exact untaught set %v", skillTeachingOptionalTools, untaught)
+	if len(untaught) != 0 {
+		t.Fatalf("untaught hub tools = %v, want none", untaught)
 	}
 
 	future := DefaultVocabulary()
