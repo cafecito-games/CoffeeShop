@@ -125,13 +125,13 @@ func DecodeCapabilityPackReadinessMessage(data []byte, version string) (Capabili
 
 func v5PackSkills(value any) bool {
 	items, ok := value.([]any)
-	if !ok || !v5Strings(CapabilityPackSkillLimit, v5String(1, LabelOrAcceleratorMaximumBytes))(value) {
+	if !ok || len(items) > CapabilityPackSkillLimit {
 		return false
 	}
 	previous := ""
 	for _, item := range items {
-		current := item.(string)
-		if previous >= current {
+		current, ok := item.(string)
+		if !ok || !validPackString(current) || previous >= current {
 			return false
 		}
 		previous = current
@@ -140,13 +140,19 @@ func v5PackSkills(value any) bool {
 }
 
 var v5ExpectedCapabilityPack = v5Object(map[string]v5Rule{
-	"id": v5ID, "version": v5NormalizedVersion, "requiredSkills": func(value any) bool {
+	"id": func(value any) bool {
+		text, ok := value.(string)
+		return ok && validPackString(text)
+	}, "version": v5NormalizedVersion, "requiredSkills": func(value any) bool {
 		items, ok := value.([]any)
 		return ok && len(items) > 0 && v5PackSkills(value)
 	},
 }, nil)
 var v5EffectiveCapabilityPack = v5Object(map[string]v5Rule{
-	"id": v5ID, "version": v5NormalizedVersion, "skills": func(value any) bool {
+	"id": func(value any) bool {
+		text, ok := value.(string)
+		return ok && validPackString(text)
+	}, "version": v5NormalizedVersion, "skills": func(value any) bool {
 		items, ok := value.([]any)
 		return ok && len(items) > 0 && v5PackSkills(value)
 	},

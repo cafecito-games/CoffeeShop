@@ -443,6 +443,45 @@ test("a requested exact pin reports hard offering mismatch without agent fallbac
   assert.ok(kinds(current, "initial").includes("model"));
 });
 
+test("a standalone requested instance persists an actionable placement refusal", () => {
+  const requested: AgentInstance = {
+    id: "instance-requested", threadId: "thread-one", creator: { kind: "operator", operatorId: "operator" },
+    delegation: { canDelegate: false }, requirements: { models: ["not-offered"] },
+    lease: { idleTimeoutSeconds: 1800, expiresAt: later(1800) }, status: "requested", createdAt: at, updatedAt: at
+  };
+  const current = fixture([node("node-alpha")], [], { instances: [requested] });
+  assert.equal(runSchedulingPass(current.state, context(current), at).changed, true);
+  assert.equal(allocations(current).length, 0);
+  const refusal = current.state.events.find((event) => event.instanceId === requested.id && event.title === "Instance placement waiting");
+  assert.match(refusal?.detail ?? "", /not-offered|different model/);
+  assert.equal(runSchedulingPass(current.state, context(current), later(1)).changed, false, "the same refusal is persisted once, not appended every pass");
+});
+
+test("a requested template instance reserves from effective hard skills and carries their expectation", () => {
+  const template: AgentTemplate = {
+    id: "template-review", name: "Review", skills: ["descriptive-only"], requirements: { skills: ["review"] }
+  };
+  const requested: AgentInstance = {
+    id: "instance-requested", threadId: "thread-one", creator: { kind: "operator", operatorId: "operator" },
+    delegation: { canDelegate: false }, requirements: { templateId: template.id },
+    lease: { idleTimeoutSeconds: 1800, expiresAt: later(1800) }, status: "requested", createdAt: at, updatedAt: at
+  };
+  const current = fixture([node("node-alpha")], [], { instances: [requested], templates: [template] });
+  current.state.allocations = [{
+    id: "allocation-lost", instanceId: requested.id, nodeId: "node-alpha", harnessId: "claude-cli", model: "fable",
+    transport: "native-cli", workspace: "/workspace", lease: { ...requested.lease }, status: "lost", createdAt: at, updatedAt: at
+  }];
+  current.packReadiness.set("node-alpha", {
+    nodeId: "node-alpha", observedAt: at, status: "available", pack: { id: "coffee-shop-core", version: "1.0.0", skills: ["review"] },
+    surfaces: [{ harnessId: "claude-cli", transport: "native-cli" }]
+  });
+  runSchedulingPass(current.state, context(current), at);
+  assert.equal(instances(current)[0].id, requested.id);
+  assert.equal(allocations(current).length, 2, "the lost generation is retained beside its replacement");
+  assert.deepEqual(allocations(current).find((item) => item.status === "reserved")?.expectedCapabilityPack,
+    { id: "coffee-shop-core", version: "1.0.0", requiredSkills: ["review"] });
+});
+
 test("a failed or draining allocation releases the placement and the retry gets fresh identities", () => {
   const current = fixture([node("node-alpha", { instanceCapacity: 2 })], [task("one")]);
   runSchedulingPass(current.state, context(current), at);
@@ -636,6 +675,34 @@ test("a task naming a template may be placed only through that template, and the
   const wrongSkill = fixture([node("node-alpha")], [task("one", { templateId: "template-reviewer", skills: ["go"] })], { templates: [template] });
   runSchedulingPass(wrongSkill.state, context(wrongSkill), at);
   assert.deepEqual(kinds(wrongSkill, "one"), ["template"]);
+});
+
+test("template display skills never become hard readiness requirements", () => {
+  const descriptive: AgentTemplate = {
+    id: "template-descriptive", name: "Historian", skills: ["legacy-metadata"],
+    requirements: { models: ["fable"] }
+  };
+  const current = fixture([node("node-alpha")], [task("one", { templateId: descriptive.id })], { templates: [descriptive] });
+  runSchedulingPass(current.state, context(current), at);
+  assert.equal(allocations(current).length, 1);
+  assert.equal(allocations(current)[0].expectedCapabilityPack, undefined);
+  assert.equal(instances(current)[0].requirements.skills, undefined);
+});
+
+test("effective skill requirements normalize once before template admission and readiness", () => {
+  const template: AgentTemplate = {
+    id: "template-review", name: "Reviewer", skills: ["review", "preview"],
+    requirements: { skills: ["PREVIEW"] }
+  };
+  const current = fixture([node("node-alpha")], [task("one", { templateId: template.id, skills: [" Review ", "PREVIEW", "review"] })], { templates: [template] });
+  current.packReadiness.set("node-alpha", {
+    nodeId: "node-alpha", observedAt: at, status: "available",
+    pack: { id: "coffee-shop-core", version: "1.0.0", skills: ["preview", "review"] },
+    surfaces: [{ harnessId: "claude-cli", transport: "native-cli" }]
+  });
+  runSchedulingPass(current.state, context(current), at);
+  assert.deepEqual(instances(current)[0].requirements.skills, ["preview", "review"]);
+  assert.deepEqual(allocations(current)[0].expectedCapabilityPack?.requiredSkills, ["preview", "review"]);
 });
 
 test("bare skills use only live current-socket pack readiness and persist the exact expectation", () => {

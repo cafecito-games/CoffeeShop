@@ -773,13 +773,10 @@ function capabilityPackExpectationRefusal(
   expected: ExpectedCapabilityPack | undefined
 ): string | undefined {
   const requiredSkills = [...new Set(instance.requirements.skills ?? [])].sort();
-  if (requiredSkills.length === 0 && expected !== undefined) {
-    return "An allocation without skill requirements cannot carry a capability pack expectation";
-  }
   if (requiredSkills.length > 0) {
     if (expected === undefined) return "Skill requirements require an admitted capability pack expectation";
-    if (JSON.stringify(expected.requiredSkills) !== JSON.stringify(requiredSkills)) {
-      return "The capability pack expectation does not exactly cover the instance skill requirements";
+    if (requiredSkills.some((skill) => !expected.requiredSkills.includes(skill))) {
+      return "The capability pack expectation does not cover the instance skill requirements";
     }
   }
   return undefined;

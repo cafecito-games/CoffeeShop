@@ -494,12 +494,8 @@ func PackReadyCombinations() [][2]string {
 func (r *Runner) CapabilityPackReadiness(nodeID, observedAt string) protocol.CapabilityPackReadinessReport {
 	report := protocol.CapabilityPackReadinessReport{NodeID: nodeID, ObservedAt: observedAt, Status: "unavailable", Surfaces: []protocol.CapabilityPackSurface{}}
 	if r.pack == nil {
-		switch {
-		case strings.Contains(r.packUnavailable, "activation ledger"):
-			report.ReasonCode = "activation-rejected"
-		case strings.Contains(r.packUnavailable, "no capability pack version is activated"), strings.Contains(r.packUnavailable, "declares no capability pack"):
-			report.ReasonCode = "not-selected"
-		default:
+		report.ReasonCode = string(r.packUnavailability.ReasonCode)
+		if !slices.Contains(protocol.CapabilityPackReadinessReasonCodes, report.ReasonCode) {
 			report.ReasonCode = "active-unverified"
 		}
 		return report
@@ -521,7 +517,7 @@ func (r *Runner) CapabilityPackReadiness(nodeID, observedAt string) protocol.Cap
 		report.Surfaces = append(report.Surfaces, protocol.CapabilityPackSurface{HarnessID: combination[0], Transport: combination[1]})
 	}
 	if len(report.Surfaces) == 0 {
-		report.ReasonCode = "no-supported-surface"
+		report.ReasonCode = string(PackNoSupportedSurface)
 		return report
 	}
 	skills := slices.Sorted(slices.Values(manifest.SkillIDs()))
@@ -616,7 +612,7 @@ func (r *Runner) activatePack(ctx context.Context, invocation Invocation, transp
 		return nil, fmt.Errorf("%w: %s", ErrPackActivation, err.Error())
 	}
 	if r.pack == nil {
-		reason := r.packUnavailable
+		reason := r.packUnavailability.Detail
 		if reason == "" {
 			reason = "no capability pack is selected on this node"
 		}

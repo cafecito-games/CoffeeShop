@@ -982,8 +982,21 @@ func DecodeInstanceHubMessage(data []byte, version string) (InstanceHubMessage, 
 	if allocation.ExpectedCapabilityPack != nil {
 		expectedSkills = allocation.ExpectedCapabilityPack.RequiredSkills
 	}
-	if (len(requiredSkills) == 0) != (allocation.ExpectedCapabilityPack == nil) ||
-		(allocation.ExpectedCapabilityPack != nil && !slices.Equal(requiredSkills, expectedSkills)) {
+	covered := true
+	if allocation.ExpectedCapabilityPack != nil {
+		expected := make(map[string]struct{}, len(expectedSkills))
+		for _, skill := range expectedSkills {
+			expected[skill] = struct{}{}
+		}
+		for _, skill := range requiredSkills {
+			if _, ok := expected[skill]; !ok {
+				covered = false
+				break
+			}
+		}
+	}
+	if (len(requiredSkills) > 0 && allocation.ExpectedCapabilityPack == nil) ||
+		(allocation.ExpectedCapabilityPack != nil && !covered) {
 		return message, fmt.Errorf("instance skill requirements and allocation capability pack expectation mismatch")
 	}
 	if message.Type == "instance.provision" {

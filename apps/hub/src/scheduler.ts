@@ -530,7 +530,8 @@ function capabilityPackExpectation(
   add: (kind: PlacementRequirementKind, requirement: string, detail: string) => void
 ): ExpectedCapabilityPack | undefined {
   if (requiredSkills === undefined || requiredSkills.length === 0) return undefined;
-  const required = [...new Set(requiredSkills)].sort(compareText);
+  const required = normalizeSkillIdentifiers(requiredSkills);
+  if (required.length === 0) return undefined;
   const connection = environment.connection(offering.nodeId);
   if (!connection || !supportsControlCapability(connection.protocolVersion, "capability-pack-readiness")) {
     add("protocol-version", "capability-pack-readiness", "compute node's current socket cannot report capability pack readiness");
@@ -671,7 +672,10 @@ export type TemplateResolution =
   | { kind: "template"; template: AgentTemplate }
   | { kind: "unsatisfied"; unsatisfied: UnsatisfiedRequirement };
 
-const templateSkills = (template: AgentTemplate) => new Set((template.skills ?? []).map((skill) => skill.toLowerCase()));
+const normalizeSkillIdentifiers = (skills: readonly string[] | undefined): string[] =>
+  [...new Set((skills ?? []).map((skill) => skill.trim().toLowerCase()).filter(Boolean))].sort(compareText);
+
+const templateSkills = (template: AgentTemplate) => new Set(normalizeSkillIdentifiers(template.skills));
 
 /**
  * The template a task must be placed through, if any. A task naming `templateId` may use only that
@@ -679,7 +683,7 @@ const templateSkills = (template: AgentTemplate) => new Set((template.skills ?? 
  * they are hard execution requirements proved directly from live capability-pack readiness.
  */
 export function resolveTaskTemplate(task: Task, templates: readonly AgentTemplate[]): TemplateResolution {
-  const required = (task.requirements.skills ?? []).map((skill) => skill.toLowerCase());
+  const required = normalizeSkillIdentifiers(task.requirements.skills);
   const named = task.requirements.templateId;
   const ordered = [...templates].sort((left, right) => compareText(left.id, right.id));
   if (named !== undefined) {
@@ -714,9 +718,13 @@ const union = (left: readonly string[] | undefined, right: readonly string[] | u
  * is a default and the task's is a request.
  */
 export function requirementsThroughTemplate(requirements: ExecutionRequirements, template: AgentTemplate | undefined): ExecutionRequirements {
-  if (!template) return requirements;
+  const normalizedRequirements: ExecutionRequirements = { ...requirements };
+  const ownSkills = normalizeSkillIdentifiers(requirements.skills);
+  if (ownSkills.length === 0) delete normalizedRequirements.skills;
+  else normalizedRequirements.skills = ownSkills;
+  if (!template) return normalizedRequirements;
   const extra = template.requirements ?? {};
-  const merged: ExecutionRequirements = { ...requirements };
+  const merged: ExecutionRequirements = { ...normalizedRequirements };
   const narrow = <K extends "harnessIds" | "models" | "transports" | "operatingSystems" | "architectures">(key: K) => {
     const value = intersect(requirements[key], extra[key]);
     if (value === undefined) delete merged[key];
@@ -730,8 +738,8 @@ export function requirementsThroughTemplate(requirements: ExecutionRequirements,
   const labels = union(requirements.labels, extra.labels);
   if (labels === undefined) delete merged.labels;
   else merged.labels = labels;
-  const skills = union(requirements.skills, union(template.skills, extra.skills));
-  if (skills === undefined) delete merged.skills;
+  const skills = normalizeSkillIdentifiers(union(normalizedRequirements.skills, extra.skills));
+  if (skills.length === 0) delete merged.skills;
   else merged.skills = skills;
   for (const key of ["minimumConcurrency", "minimumMemoryMegabytes"] as const) {
     const values = [requirements[key], extra[key]].filter((value): value is number => value !== undefined);
@@ -1238,6 +1246,21 @@ function recordPlacement(task: Task, diagnostic: PlacementDiagnostic) {
   return true;
 }
 
+/** Persists the current refusal for a lifecycle-requested instance that has no task record of its own. */
+function recordInstancePlacementRefusal(state: State, instance: AgentInstance, detail: string) {
+  const bounded = detail.slice(0, 512);
+  const current = state.events.find((event) => event.instanceId === instance.id && event.title === "Instance placement waiting");
+  if (current?.detail === bounded) return false;
+  state.events.unshift(newEvent({
+    type: "status",
+    title: "Instance placement waiting",
+    detail: bounded,
+    threadId: instance.threadId,
+    instanceId: instance.id
+  }));
+  return true;
+}
+
 function inconsistentAssignment(state: Readonly<State>, task: Task): string | undefined {
   if (task.status === "ready") return task.assignment ? "a ready task still records an assignment" : undefined;
   if (task.status !== "assigned" && task.status !== "running") return undefined;
@@ -1366,7 +1389,14 @@ export function runSchedulingPass(state: State, context: SchedulingContext, at: 
       updatedAt: at
     };
     const decision = placeTask(intent, environmentFor());
-    if (decision.kind !== "offering") continue;
+    if (decision.kind !== "offering") {
+      const refusal = decision.diagnostic.unsatisfied[0];
+      const detail = refusal === undefined
+        ? "no live offering currently satisfies this instance request"
+        : `${refusal.kind} ${refusal.requirement}: ${refusal.detail}`;
+      changed = recordInstancePlacementRefusal(state, instance, detail) || changed;
+      continue;
+    }
     const reserved = reservationAsPlacement(state, instance.id, {
       nodeId: decision.offering.nodeId,
       harnessId: decision.offering.harnessId,
@@ -1376,6 +1406,7 @@ export function runSchedulingPass(state: State, context: SchedulingContext, at: 
       ...(decision.offering.expectedCapabilityPack === undefined ? {} : { expectedCapabilityPack: decision.offering.expectedCapabilityPack })
     }, at);
     if (reserved.kind === "placed") changed = true;
+    else changed = recordInstancePlacementRefusal(state, instance, reserved.reason) || changed;
   }
   for (const task of [...readyTasks(state)]) {
     const thread = state.threads?.find((item) => item.id === task.threadId);

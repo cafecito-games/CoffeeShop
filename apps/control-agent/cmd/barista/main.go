@@ -198,7 +198,7 @@ func run(args []string) int {
 	}
 	activePack, packUnavailable := activeCapabilityPack(componentManifest, ownership, activation, cfg.DataRoot, version)
 	if activePack == nil {
-		log.Printf("capability pack: %s; runs on this node are %s", packUnavailable, cfg.CapabilityPackRequirement)
+		log.Printf("capability pack: %s; runs on this node are %s", packUnavailable.Detail, cfg.CapabilityPackRequirement)
 	} else {
 		log.Printf("capability pack %s@%s (%s) is active; runs on this node are %s",
 			activePack.ID, activePack.Version, activePack.ArchiveDigest, cfg.CapabilityPackRequirement)

@@ -3,6 +3,7 @@ package protocol
 import (
 	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -68,4 +69,28 @@ func TestCapabilityPackExpectationAndProofValidate(t *testing.T) {
 	require.NoError(t, selection.Validate())
 	selection.EffectiveCapabilityPack.Skills = nil
 	require.Error(t, selection.Validate())
+}
+
+func TestCapabilityPackIdentifiersMatchTypeScriptBoundsAndGrammar(t *testing.T) {
+	valid := ExpectedCapabilityPack{ID: strings.Repeat("a", 64), Version: "1.0.0", RequiredSkills: []string{strings.Repeat("b", 64)}}
+	require.NoError(t, valid.Validate())
+	for name, mutate := range map[string]func(*ExpectedCapabilityPack){
+		"long id":    func(pack *ExpectedCapabilityPack) { pack.ID = strings.Repeat("a", 65) },
+		"mixed id":   func(pack *ExpectedCapabilityPack) { pack.ID = "Mixed-Case" },
+		"long skill": func(pack *ExpectedCapabilityPack) { pack.RequiredSkills = []string{strings.Repeat("b", 65)} },
+		"mixed skill": func(pack *ExpectedCapabilityPack) {
+			pack.RequiredSkills = []string{"Mixed-Case"}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := valid
+			mutate(&candidate)
+			require.Error(t, candidate.Validate())
+			encoded, err := json.Marshal(candidate)
+			require.NoError(t, err)
+			var decoded any
+			require.NoError(t, json.Unmarshal(encoded, &decoded))
+			require.False(t, v5ExpectedCapabilityPack(decoded))
+		})
+	}
 }

@@ -1213,12 +1213,14 @@ test("store load rejects malformed or duplicated instance state", async () => {
     (state.instances as AgentInstance[])[0].requirements.skills = ["coffeeshop-preview"];
     state.allocations = [allocationFor(baseInstance, "allocation-one")];
   }, /Skill requirements require an admitted capability pack expectation/);
-  await rejects((state) => {
-    state.allocations = [{
-      ...allocationFor(baseInstance, "allocation-one"),
-      expectedCapabilityPack: { id: "coffeeshop-capability-pack", version: "1.1.0", requiredSkills: ["coffeeshop-preview"] }
-    }];
-  }, /without skill requirements cannot carry a capability pack expectation/);
+  const templateDerived = structuredClone(goodState) as Record<string, unknown>;
+  (templateDerived.instances as AgentInstance[])[0].status = "provisioning";
+  templateDerived.allocations = [{
+    ...allocationFor(baseInstance, "allocation-one"),
+    expectedCapabilityPack: { id: "coffeeshop-capability-pack", version: "1.1.0", requiredSkills: ["coffeeshop-preview"] }
+  }];
+  await writeFile(path, JSON.stringify(templateDerived));
+  await new Store(path).load();
   // An explicit null is malformed persisted state, not an absent legacy collection.
   await rejects((state) => { state.instances = null; }, /Persisted instances collection is not an array/);
   await rejects((state) => { state.remoteReleaseRequests = null; }, /Persisted remoteReleaseRequests collection is not an array/);

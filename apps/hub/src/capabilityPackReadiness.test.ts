@@ -32,13 +32,30 @@ test("readiness belongs only to the current capable socket and clears explicitly
   let current = true;
   const connection = { supportsCapability: true, isCurrent: () => current, nodeId: "node-one" };
   assert.deepEqual(receiveCapabilityPackReadiness(connection, report()), { kind: "accepted", changed: true });
-  assert.deepEqual(getCapabilityPackReadiness("node-one"), report());
+  assert.deepEqual(getCapabilityPackReadiness("node-one"), { ...report(), observedAt: "2026-09-28T12:00:00.000Z" });
   assert.deepEqual(receiveCapabilityPackReadiness(connection, report()), { kind: "replayed", changed: false });
   assert.deepEqual(receiveCapabilityPackReadiness(connection, report("2026-09-28T11:59:59Z")), { kind: "older", changed: false });
   current = false;
   assert.deepEqual(receiveCapabilityPackReadiness(connection, report("2026-09-28T12:00:01Z")), { kind: "ignored", changed: false });
   assert.equal(forgetCapabilityPackReadiness("node-one"), true);
   assert.equal(getCapabilityPackReadiness("node-one"), undefined);
+});
+
+test("equivalent timestamp spellings replay and chronological comparison is instant-based", () => {
+  forgetCapabilityPackReadiness("node-one");
+  const connection = { supportsCapability: true, isCurrent: () => true, nodeId: "node-one" };
+  assert.deepEqual(receiveCapabilityPackReadiness(connection, report("2026-09-28T12:00:00.100Z")), { kind: "accepted", changed: true });
+  assert.equal(getCapabilityPackReadiness("node-one")?.observedAt, "2026-09-28T12:00:00.100Z");
+  const equivalent = report("2026-09-28T14:00:00.100+02:00");
+  assert.deepEqual(receiveCapabilityPackReadiness(connection, {
+    status: equivalent.status, surfaces: equivalent.surfaces, pack: equivalent.pack,
+    observedAt: equivalent.observedAt, nodeId: equivalent.nodeId
+  }), { kind: "replayed", changed: false }, "wire key order is not evidence");
+  assert.deepEqual(receiveCapabilityPackReadiness(connection, report("2026-09-28T13:59:59.900+02:00")), { kind: "older", changed: false });
+  assert.equal(receiveCapabilityPackReadiness(connection, {
+    ...report("2026-09-28T14:00:00.100+02:00"), status: "unavailable", pack: undefined, surfaces: [], reasonCode: "not-selected"
+  }).kind, "rejected");
+  forgetCapabilityPackReadiness("node-one");
 });
 
 test("readiness fails closed for identity, capability, and conflicting evidence", () => {

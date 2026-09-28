@@ -50,6 +50,12 @@ test("allocation expectations and effective proofs share exact normalized pack i
   assert.equal(validateExpectedCapabilityPack(expected).ok, true);
   assert.equal(validateExpectedCapabilityPack({ ...expected, requiredSkills: [] }).ok, false);
   assert.equal(validateExpectedCapabilityPack({ ...expected, requiredSkills: ["z", "a"] }).ok, false);
+  assert.equal(validateExpectedCapabilityPack({ ...expected, id: "a".repeat(64) }).ok, true);
+  assert.equal(validateExpectedCapabilityPack({ ...expected, id: "a".repeat(65) }).ok, false);
+  assert.equal(validateExpectedCapabilityPack({ ...expected, id: "Mixed-Case" }).ok, false);
+  assert.equal(validateExpectedCapabilityPack({ ...expected, requiredSkills: ["a".repeat(64)] }).ok, true);
+  assert.equal(validateExpectedCapabilityPack({ ...expected, requiredSkills: ["a".repeat(65)] }).ok, false);
+  assert.equal(validateExpectedCapabilityPack({ ...expected, requiredSkills: ["Mixed-Case"] }).ok, false);
   assert.equal(validateRunTransportSelection({
     requestedTransport: "native-cli",
     selectedTransport: "native-cli",

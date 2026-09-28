@@ -81,27 +81,30 @@ func activeCapabilityPack(
 	activation setup.ActivationState,
 	dataRoot string,
 	build string,
-) (*harness.ActivePack, string) {
+) (*harness.ActivePack, harness.CapabilityPackUnavailability) {
+	unavailable := func(detail string, reasonCode harness.CapabilityPackReadinessReasonCode) (*harness.ActivePack, harness.CapabilityPackUnavailability) {
+		return nil, harness.CapabilityPackUnavailability{Detail: detail, ReasonCode: reasonCode}
+	}
 	entries := manifest.ComponentsOfKind(setup.ComponentKindCapabilityPack)
 	if len(entries) == 0 {
-		return nil, "this Barista's component manifest declares no capability pack"
+		return unavailable("this Barista's component manifest declares no capability pack", harness.PackNotSelected)
 	}
 	if activation.Rejection != nil {
 		// A rejected ledger is never read as "no pack selected": no pack is resolved at all, and the
 		// reason names the ledger rather than the selection.
-		return nil, "the activation ledger could not be accepted, so no capability pack was resolved"
+		return unavailable("the activation ledger could not be accepted, so no capability pack was resolved", harness.PackActivationRejected)
 	}
 	if len(entries) > 1 {
 		// Duplicate or conflicting pack identities resolve as ambiguous, never newest-wins.
-		return nil, "this Barista's component manifest declares more than one capability pack, which is ambiguous"
+		return unavailable("this Barista's component manifest declares more than one capability pack, which is ambiguous", harness.PackActiveUnverified)
 	}
 	entry := entries[0]
 	installed, err := setup.ActiveInstalledComponent(dataRoot, manifest, setup.CurrentPlatform(), ledger, activation, entry.Ref().Identity())
 	switch {
 	case errors.Is(err, setup.ErrComponentNotActivated):
-		return nil, "no capability pack version is activated on this node"
+		return unavailable("no capability pack version is activated on this node", harness.PackNotSelected)
 	case err != nil:
-		return nil, "the activated capability pack version could not be verified"
+		return unavailable("the activated capability pack version could not be verified", harness.PackActiveUnverified)
 	}
 	// The selection's bytes are read and validated here, through the same validator that packaged
 	// them, and read again immediately before every projection through the returned Reread.
@@ -125,7 +128,7 @@ func activeCapabilityPack(
 	}
 	tree, packManifest, digest, err := reread()
 	if err != nil {
-		return nil, "the activated capability pack is not a valid Coffee Shop capability pack"
+		return unavailable("the activated capability pack is not a valid Coffee Shop capability pack", harness.PackActiveUnverified)
 	}
 	return &harness.ActivePack{
 		ID:            packManifest.ID,
@@ -135,7 +138,7 @@ func activeCapabilityPack(
 		Tree:          tree,
 		Build:         build,
 		Reread:        reread,
-	}, ""
+	}, harness.CapabilityPackUnavailability{}
 }
 
 // componentProbe is the compiled-in candidate probe activation and rollback run before a selection

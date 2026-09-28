@@ -1710,15 +1710,17 @@ export function validateComponentInventoryReport(value: unknown): Validation<Com
   return accept(value as unknown as ComponentInventoryReport);
 }
 
+const capabilityPackString = (value: unknown): value is string => typeof value === "string"
+  && byteLength(value) <= labelOrAcceleratorMaximumBytes && labelOrAcceleratorPattern.test(value);
 const capabilityPackSkills = (value: unknown): value is string[] => sortedUnique(
-  value, capabilityPackReadinessLimits.skills, componentString
+  value, capabilityPackReadinessLimits.skills, capabilityPackString
 ) && (value as string[]).length > 0;
 const capabilityPackIdentity = (value: unknown): value is CapabilityPackIdentity => isRecord(value)
   && hasOnlyKeys(value, ["id", "version", "skills"])
-  && componentString(value.id) && componentVersion(value.version) && capabilityPackSkills(value.skills);
+  && capabilityPackString(value.id) && componentVersion(value.version) && capabilityPackSkills(value.skills);
 export function validateExpectedCapabilityPack(value: unknown): Validation<ExpectedCapabilityPack> {
   if (!isRecord(value) || !hasOnlyKeys(value, ["id", "version", "requiredSkills"])
-    || !componentString(value.id) || !componentVersion(value.version) || !capabilityPackSkills(value.requiredSkills)) {
+    || !capabilityPackString(value.id) || !componentVersion(value.version) || !capabilityPackSkills(value.requiredSkills)) {
     return reject("expected capability pack is malformed");
   }
   return accept(value as unknown as ExpectedCapabilityPack);
@@ -3346,8 +3348,8 @@ export function validateInstanceHubMessage(value: unknown, version: ControlProto
     || instance.value.lease.expiresAt !== allocation.value.lease.expiresAt) return reject("instance and allocation identity or lease mismatch");
   const requiredSkills = [...new Set(instance.value.requirements.skills ?? [])].sort();
   const expectedSkills = allocation.value.expectedCapabilityPack?.requiredSkills;
-  if ((requiredSkills.length === 0) !== (expectedSkills === undefined)
-    || (expectedSkills !== undefined && JSON.stringify(expectedSkills) !== JSON.stringify(requiredSkills))) {
+  if ((requiredSkills.length > 0 && expectedSkills === undefined)
+    || (expectedSkills !== undefined && requiredSkills.some((skill) => !expectedSkills.includes(skill)))) {
     return reject("instance skill requirements and allocation capability pack expectation mismatch");
   }
   if (value.type === "instance.provision") {

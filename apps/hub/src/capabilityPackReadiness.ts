@@ -55,13 +55,24 @@ export function receiveCapabilityPackReadiness(
   if (validated.value.nodeId !== connection.nodeId) {
     return { kind: "rejected", changed: false, reason: "capability pack readiness does not match the registered node" };
   }
+  const value = validated.value;
+  const canonical: CapabilityPackReadinessReport = {
+    nodeId: value.nodeId,
+    observedAt: new Date(Date.parse(value.observedAt)).toISOString(),
+    status: value.status,
+    ...(value.pack === undefined ? {} : { pack: { id: value.pack.id, version: value.pack.version, skills: [...value.pack.skills] } }),
+    surfaces: value.surfaces.map((surface) => ({ harnessId: surface.harnessId, transport: surface.transport })),
+    ...(value.reasonCode === undefined ? {} : { reasonCode: value.reasonCode })
+  };
   const current = reports.get(connection.nodeId);
-  if (current && validated.value.observedAt < current.observedAt) return { kind: "older", changed: false };
-  if (current && validated.value.observedAt === current.observedAt) {
-    return JSON.stringify(current) === JSON.stringify(validated.value)
+  const candidateInstant = Date.parse(canonical.observedAt);
+  const currentInstant = current === undefined ? undefined : Date.parse(current.observedAt);
+  if (currentInstant !== undefined && candidateInstant < currentInstant) return { kind: "older", changed: false };
+  if (currentInstant !== undefined && candidateInstant === currentInstant) {
+    return JSON.stringify(current) === JSON.stringify(canonical)
       ? { kind: "replayed", changed: false }
       : { kind: "rejected", changed: false, reason: "capability pack readiness timestamp conflicts with current evidence" };
   }
-  reports.set(connection.nodeId, structuredClone(validated.value));
+  reports.set(connection.nodeId, canonical);
   return { kind: "accepted", changed: true };
 }
