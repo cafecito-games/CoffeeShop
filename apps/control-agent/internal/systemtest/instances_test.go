@@ -231,9 +231,10 @@ func TestInstanceRenewalWinsBeforeTheClosedExpiryBoundary(t *testing.T) {
 	bridge := cluster.startBridge("instance-expiry", clientID, secret)
 	created := bridge.mustCallTool("create_thread", map[string]any{"title": "Instance expiry", "objective": "Prove the closed lease boundary."})
 	threadID := text(object(created, "thread"), "id")
+	const leaseSeconds = 120
 	spawned := bridge.mustCallTool("spawn_instance", map[string]any{
 		"threadId": threadID, "idempotencyKey": "expiry-instance", "requirements": exactClaudeInstanceRequirements("expiry-e2e"),
-		"idleTimeoutSeconds": 60,
+		"idleTimeoutSeconds": leaseSeconds,
 	})
 	instanceID := text(object(spawned, "instance"), "id")
 	ready := cluster.eventually("the expiring resident to become ready", func(current snapshot) (bool, string) {
@@ -248,7 +249,7 @@ func TestInstanceRenewalWinsBeforeTheClosedExpiryBoundary(t *testing.T) {
 	}
 	witness := bridge.mustCallTool("spawn_instance", map[string]any{
 		"threadId": threadID, "idempotencyKey": "expiry-witness", "requirements": exactClaudeInstanceRequirements("expiry-e2e"),
-		"idleTimeoutSeconds": 60,
+		"idleTimeoutSeconds": leaseSeconds,
 	})
 	witnessID := text(object(witness, "instance"), "id")
 	witnessReady := cluster.eventually("the unrenewed expiry witness to become ready", func(current snapshot) (bool, string) {
@@ -271,7 +272,7 @@ func TestInstanceRenewalWinsBeforeTheClosedExpiryBoundary(t *testing.T) {
 	cluster.hub.advanceClock(timeToOriginalBoundary / 2)
 	var renewed map[string]any
 	if status := cluster.hub.request(http.MethodPost, "/api/threads/"+threadID+"/instances/"+instanceID+"/renew", map[string]any{
-		"idempotencyKey": "expiry-renewal", "idleTimeoutSeconds": 60,
+		"idempotencyKey": "expiry-renewal", "idleTimeoutSeconds": leaseSeconds,
 	}, &renewed); status != http.StatusOK {
 		t.Fatalf("operator renewal returned %d: %v", status, renewed)
 	}
@@ -571,8 +572,14 @@ func TestInstanceDelegatingTemplateTools(t *testing.T) {
 	if !strings.Contains(parentRun.Output, "hidden=target_ineligible") {
 		t.Fatalf("the live instance could see or target a hidden legacy agent: %q", parentRun.Output)
 	}
-	if _, found := taskByTitle(final, threadID, "This hidden target must never run."); found {
-		t.Fatal("the refused hidden legacy target wrote a task")
+	threadTaskCount := 0
+	for _, item := range final.Tasks {
+		if item.ThreadID == threadID {
+			threadTaskCount++
+		}
+	}
+	if threadTaskCount != 2 {
+		t.Fatalf("the refused hidden legacy target changed the thread's exact task count: got %d, want parent and child only", threadTaskCount)
 	}
 	if text(childInstance.Creator, "kind") != "run" || text(childInstance.Creator, "instanceId") != parentRun.InstanceID {
 		t.Fatalf("child authority was not derived from the live parent run: %+v", childInstance.Creator)
