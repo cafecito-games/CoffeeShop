@@ -141,6 +141,17 @@ test("lifecycle digest preserves identity and normalizes only semantic defaults 
   assert.equal(digest({ ...renew, idleTimeoutSeconds: 1800 }), digest({ ...renew, idleTimeoutSeconds: 1800 }));
 });
 
+test("get-instance requests are a closed scoped query shape", () => {
+  const request = { threadId: "thread-one", instanceId: "instance-one" };
+  assert.deepEqual(protocol.validateGetInstanceRequest(request), { ok: true, value: request });
+  for (const invalid of [
+    { instanceId: "instance-one" },
+    { ...request, instanceId: "bad/id" },
+    { ...request, caller: { kind: "operator", operatorId: "operator" } },
+    { ...request, includeTerminal: true }
+  ]) assert.equal(protocol.validateGetInstanceRequest(invalid).ok, false);
+});
+
 test("legacy actor-only records remain readable but cannot become a v5 dispatch", () => {
   assert.deepEqual(protocol.validateRuntimeActor({ kind: "agent", agentId: "agent-one" }), { ok: true, value: { kind: "agent", agentId: "agent-one" } });
   assert.equal(protocol.validateRuntimeActor({ kind: "instance", instanceId: "i", allocationId: "a" }).ok, true);

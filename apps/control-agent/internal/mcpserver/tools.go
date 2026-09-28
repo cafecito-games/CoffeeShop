@@ -5,6 +5,7 @@ import "github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/protoco
 const instructions = "Use get_task_context for the durable thread, your task, its lineage, and your mailbox cursor. " +
 	"Workers report with update_task, ask or answer through send_task_message, and wait for replies or task changes with wait_for_task_events, passing back the cursor it returns. " +
 	"Orchestrators inspect get_execution_inventory and submit parallel work with submit_tasks, describing capabilities rather than machines. " +
+	"Delegating resident orchestrators may spawn_instance, inspect it with get_instance, renew_instance while it is needed, and release_instance when it is done. " +
 	"Refine or complete the thread with update_thread, post durable files with post_artifact, and publish static directories with publish_preview. " +
 	"Every mutation takes a stable idempotency key: retry with the same key and arguments after a retryable error."
 
@@ -42,9 +43,50 @@ func requirementsSchema() schema {
 		"skills": strings, "harnessIds": list(enum(protocol.HarnessIDs...)), "models": strings,
 		"transports": list(enum(protocol.HarnessTransports...)), "operatingSystems": strings, "architectures": strings,
 		"labels": strings, "minimumConcurrency": integer(), "minimumMemoryMegabytes": integer(), "projectProfileId": text(),
+		"templateId":  text(),
 		"workspace":   object(schema{"repository": text(), "path": text(), "writable": boolean()}, "writable"),
 		"preferences": object(schema{"nodeIds": strings, "harnessIds": list(enum(protocol.HarnessIDs...)), "models": strings, "labels": strings}),
 	})
+}
+
+func purposeSchema(includeInstructions bool) schema {
+	properties := schema{"name": text(), "title": text(), "summary": text()}
+	if includeInstructions {
+		properties["instructions"] = text()
+	}
+	return object(properties)
+}
+
+func leaseSchema() schema {
+	return object(schema{"idleTimeoutSeconds": integer(), "expiresAt": text()}, "idleTimeoutSeconds", "expiresAt")
+}
+
+func safeInstanceSchema() schema {
+	return object(schema{
+		"id": text(), "threadId": text(), "purpose": purposeSchema(false),
+		"delegation":   object(schema{"canDelegate": boolean()}, "canDelegate"),
+		"requirements": requirementsSchema(), "lease": leaseSchema(), "status": text(),
+		"createdAt": text(), "updatedAt": text(),
+	}, "id", "threadId", "delegation", "requirements", "lease", "status", "createdAt", "updatedAt")
+}
+
+func safeAllocationSchema() schema {
+	return object(schema{
+		"id": text(), "instanceId": text(), "nodeId": text(), "harnessId": enum(protocol.HarnessIDs...),
+		"model": text(), "transport": enum(protocol.HarnessTransports...), "lease": leaseSchema(), "status": text(),
+		"createdAt": text(), "updatedAt": text(),
+	}, "id", "instanceId", "nodeId", "harnessId", "model", "transport", "lease", "status", "createdAt", "updatedAt")
+}
+
+func instanceToolResultSchema(mutation bool) schema {
+	required := []string{"instance"}
+	if mutation {
+		required = append(required, "replayed")
+	}
+	return result(schema{
+		"instance": safeInstanceSchema(), "allocation": safeAllocationSchema(),
+		"initialTaskId": text(), "replayed": boolean(),
+	}, required...)
 }
 
 type toolDefinition struct {
@@ -135,6 +177,40 @@ var definitions = map[string]toolDefinition{
 		}, "generatedAt", "agents", "nodes", "truncated"),
 		readOnly: true,
 	},
+	"spawn_instance": {
+		title:       "Spawn instance",
+		description: "Request a non-delegating resident instance for this thread. Placement may remain pending; use one stable idempotency key for retries.",
+		input: object(schema{
+			"idempotencyKey": text(), "requirements": requirementsSchema(), "purpose": purposeSchema(true),
+			"idleTimeoutSeconds": schema{"type": "integer", "minimum": protocol.MinimumInstanceIdleTimeoutSeconds, "maximum": protocol.MaximumInstanceIdleTimeoutSeconds},
+			"initialTask":        object(schema{"title": text(), "instructions": text()}, "title", "instructions"),
+		}, "idempotencyKey", "requirements"),
+		output: instanceToolResultSchema(true),
+	},
+	"get_instance": {
+		title:       "Get instance",
+		description: "Get one same-thread instance and its current occupying allocation, including a terminal instance.",
+		input:       object(schema{"instanceId": text()}, "instanceId"),
+		output:      instanceToolResultSchema(false),
+		readOnly:    true,
+	},
+	"renew_instance": {
+		title:       "Renew instance",
+		description: "Renew a nonterminal same-thread instance lease. Retry with the same idempotency key and arguments.",
+		input: object(schema{
+			"instanceId": text(), "idempotencyKey": text(),
+			"idleTimeoutSeconds": schema{"type": "integer", "minimum": protocol.MinimumInstanceIdleTimeoutSeconds, "maximum": protocol.MaximumInstanceIdleTimeoutSeconds},
+		}, "instanceId", "idempotencyKey"),
+		output: instanceToolResultSchema(true),
+	},
+	"release_instance": {
+		title:       "Release instance",
+		description: "Release a same-thread instance by draining work or cancelling it. Retry with the same idempotency key and arguments.",
+		input: object(schema{
+			"instanceId": text(), "idempotencyKey": text(), "mode": enum(protocol.InstanceReleaseModes...),
+		}, "instanceId", "idempotencyKey", "mode"),
+		output: instanceToolResultSchema(true),
+	},
 	"submit_tasks": {
 		title: "Submit tasks",
 		description: "Atomically submit a batch of tasks. Name tasks with local keys, depend on sibling keys or existing task ids, and state hard requirements and preferences as capabilities. " +
@@ -144,7 +220,7 @@ var definitions = map[string]toolDefinition{
 			"tasks": list(object(schema{
 				"key": text(), "title": text(), "instructions": text(), "requirements": requirementsSchema(),
 				"dependencies": list(object(schema{"key": text(), "taskId": text(), "policy": enum("require-success", "allow-failure")})),
-				"pin":          object(schema{"agentId": text(), "nodeId": text()}),
+				"pin":          object(schema{"instanceId": text(), "agentId": text(), "nodeId": text()}),
 			}, "key", "title", "instructions")),
 		}, "idempotencyKey", "tasks"),
 		output: result(schema{

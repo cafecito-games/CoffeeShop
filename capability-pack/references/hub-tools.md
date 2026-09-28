@@ -14,6 +14,10 @@ served tool description in the run; never assume a shape from this file.
 | `publish_preview` | every run |
 | `update_thread` | every run |
 | `get_execution_inventory` | only a run allowed to delegate |
+| `spawn_instance` | only a run allowed to delegate |
+| `get_instance` | only a run allowed to delegate |
+| `renew_instance` | only a run allowed to delegate |
+| `release_instance` | only a run allowed to delegate |
 | `submit_tasks` | only a run allowed to delegate |
 | `send_task_message` | every run |
 | `wait_for_task_events` | every run |

@@ -55,10 +55,34 @@ When they are available:
   actually exist rather than from a guess about the fleet.
 - `submit_tasks` for a batch: name each task with a local key, express dependencies between sibling
   keys or existing task ids, and state hard requirements as capabilities rather than as machines. A
-  batch is atomic, and submission succeeding does not mean a node can run it yet.
-- `delegate_task` for one bounded piece of work pinned to a specific visible agent.
+  batch is atomic, and submission succeeding does not mean a node can run it yet. When the durable
+  context gives you a resident instance id and the work must run there, use its `instanceId` pin;
+  that exact pin never falls back to another resident, configured agent, or offering.
+- `delegate_task` for one bounded piece of work pinned to a specific agent in `availableAgents`.
+  Never name a configured agent that the durable directory did not show you.
 - Keep every returned id and read the delegated task back through the durable record rather than
   assuming an outcome.
+
+## Managing resident instances
+
+The lifecycle tools are delegation-only and the Hub additionally serves them only to a live resident
+instance principal. A delegating legacy configured-agent run may see their names but will be refused;
+report that refusal instead of trying to manufacture an instance identity.
+
+- Call `spawn_instance` with a stable idempotency key and declarative requirements. Put template and
+  ranked preference choices inside `requirements`; never invent authority, creator, delegation, or
+  policy fields. A successful request may still be waiting for placement, and every spawned instance
+  is non-delegating.
+- Call `get_instance` with an instance id from the durable record to inspect its current state. It is
+  a read, needs no idempotency key, and terminal instances remain readable.
+- Call `renew_instance` only while a nonterminal instance is still needed. Reuse the same key and
+  arguments for a retry; a new key represents a new renewal.
+- Call `release_instance` once work is done. Choose `drain` to let active work settle or `cancel` to
+  request cancellation, and retain the stable key. Success records intent; it does not promise that
+  a disconnected node has already removed the resident.
+
+Never guess an instance id or substitute a similar resident. A missing or foreign instance is
+intentionally indistinguishable, and an authorization refusal is the final outcome for this run.
 
 ## Idempotency
 

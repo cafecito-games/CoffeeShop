@@ -62,7 +62,7 @@ interface UpdateResult {
 interface SubmissionResult {
   created: boolean;
   taskIdsByKey: Record<string, string>;
-  tasks: Array<{ id: string; status: string; placementOverride?: { agentId?: string; nodeId?: string; authorizedBy: string } }>;
+  tasks: Array<{ id: string; status: string; placementOverride?: { instanceId?: string; agentId?: string; nodeId?: string; authorizedBy: string } }>;
 }
 
 const isCode = (code: string) => (error: unknown): error is CoordinationError =>
@@ -273,6 +273,59 @@ test("a pin becomes a policy-authorized placement override on the stored task", 
   assert.deepEqual(storedTask(store, nodePinned.taskIdsByKey["pinned-node"]).placementOverride, { nodeId: "node-worker-c", authorizedBy: "policy" });
 });
 
+test("an instance pin is authorized atomically, stays stable on replay, and never accepts a hidden target", async () => {
+  const store = await orchestrationStore();
+  const hub = fixtureHandler(store);
+  await store.transact((state) => {
+    state.instances = [
+      {
+        id: "instance-ready", threadId: "thread-one", creator: { kind: "operator", operatorId: "operator" },
+        delegation: { canDelegate: false }, requirements: {}, lease: { idleTimeoutSeconds: 1800, expiresAt: fixtureTime },
+        status: "ready", createdAt: fixtureTime, updatedAt: fixtureTime
+      },
+      {
+        id: "instance-foreign", threadId: "thread-two", creator: { kind: "operator", operatorId: "operator" },
+        delegation: { canDelegate: false }, requirements: {}, lease: { idleTimeoutSeconds: 1800, expiresAt: fixtureTime },
+        status: "ready", createdAt: fixtureTime, updatedAt: fixtureTime
+      },
+      {
+        id: "instance-terminal", threadId: "thread-one", creator: { kind: "operator", operatorId: "operator" },
+        delegation: { canDelegate: false }, requirements: {}, lease: { idleTimeoutSeconds: 1800, expiresAt: fixtureTime },
+        status: "released", createdAt: fixtureTime, updatedAt: fixtureTime
+      }
+    ];
+  });
+  const argumentsValue = {
+    idempotencyKey: "pin-instance",
+    tasks: [{ key: "resident", title: "Resident", instructions: "Run here", pin: { instanceId: "instance-ready" } }]
+  };
+  const submitted = await hub.call("submit_tasks", rootRunId, argumentsValue) as SubmissionResult;
+  assert.deepEqual(submitted.tasks[0].placementOverride, { instanceId: "instance-ready", authorizedBy: "policy" });
+
+  await store.transact((state) => {
+    state.instances!.find((item) => item.id === "instance-ready")!.status = "released";
+  });
+  const replay = await hub.call("submit_tasks", rootRunId, argumentsValue) as SubmissionResult;
+  assert.deepEqual([replay.created, replay.tasks[0].id], [false, submitted.tasks[0].id],
+    "an exact accepted replay does not revalidate a target that later became terminal");
+
+  const before = store.read((state) => JSON.stringify([state.tasks, state.taskSubmissions, state.events]));
+  const refusals: unknown[] = [];
+  for (const [idempotencyKey, instanceId] of [
+    ["pin-missing", "instance-missing"],
+    ["pin-foreign", "instance-foreign"],
+    ["pin-terminal", "instance-terminal"]
+  ]) {
+    refusals.push(await hub.call("submit_tasks", rootRunId, {
+      idempotencyKey,
+      tasks: [{ key: "resident", title: "Resident", instructions: "Run here", pin: { instanceId } }]
+    }).catch((error: unknown) => error));
+  }
+  assert.ok(refusals.every((error) => error instanceof CoordinationError && error.code === "invalid_target"));
+  assert.deepEqual(refusals.map((error) => (error as CoordinationError).message), Array(3).fill("The pinned instance is not available in this thread"));
+  assert.equal(store.read((state) => JSON.stringify([state.tasks, state.taskSubmissions, state.events])), before);
+});
+
 test("pins naming unknown targets are rejected without writing anything", async () => {
   const store = await orchestrationStore();
   const hub = fixtureHandler(store);
@@ -294,6 +347,8 @@ test("malformed pins and direct placement overrides are invalid arguments", asyn
     { idempotencyKey: "pin-string", tasks: [{ key: "string-pin", title: "Pin", instructions: "Work", pin: "worker-b" }] },
     { idempotencyKey: "pin-empty", tasks: [{ key: "empty-pin", title: "Pin", instructions: "Work", pin: {} }] },
     { idempotencyKey: "pin-field", tasks: [{ key: "field-pin", title: "Pin", instructions: "Work", pin: { agentId: "worker-b", extra: true } }] },
+    { idempotencyKey: "pin-instance-agent", tasks: [{ key: "ambiguous", title: "Pin", instructions: "Work", pin: { instanceId: "instance-one", agentId: "worker-b" } }] },
+    { idempotencyKey: "pin-instance-node", tasks: [{ key: "ambiguous", title: "Pin", instructions: "Work", pin: { instanceId: "instance-one", nodeId: "node-worker-b" } }] },
     {
       idempotencyKey: "pin-direct",
       tasks: [{ key: "direct-override", title: "Direct", instructions: "Work", placementOverride: { agentId: "worker-b", authorizedBy: "policy" } }]
