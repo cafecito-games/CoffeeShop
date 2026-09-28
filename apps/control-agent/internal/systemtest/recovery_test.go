@@ -47,7 +47,8 @@ func TestControlConnectionPartition(t *testing.T) {
 		submitTasks("partition-graph", "batch", taskSpecification{
 			Key: "partitioned", Title: "partitioned",
 			Instructions: "Work through a network partition.\n" + partitioned,
-			Requirements: map[string]any{"skills": []string{"build"}, "harnessIds": []string{"codex-cli"}},
+			Requirements: map[string]any{"harnessIds": []string{"codex-cli"}},
+			Pin:          map[string]any{"agentId": cluster.codexBuilder},
 		}),
 		step{Message: "submitted {{batch.submissionId}}"},
 	)
@@ -156,7 +157,7 @@ func TestLostAttemptIsRetriedAfterBaristaCrash(t *testing.T) {
 		submitTasks("resilient-graph", "batch", taskSpecification{
 			Key: "resilient", Title: "resilient",
 			Instructions: "Survive your compute dying.\n" + resilient,
-			Requirements: map[string]any{"skills": []string{"build"}, "harnessIds": []string{"codex-cli"}},
+			Requirements: map[string]any{"harnessIds": []string{"codex-cli"}},
 		}),
 		step{Message: "submitted {{batch.submissionId}}"},
 	)
@@ -251,7 +252,7 @@ func TestHubRestartPreservesDurableState(t *testing.T) {
 		submitTasks("durable-graph", "batch", taskSpecification{
 			Key: "durable", Title: "durable",
 			Instructions: "Finish across a hub restart.\n" + durable,
-			Requirements: map[string]any{"skills": []string{"build"}, "harnessIds": []string{"claude-cli"}},
+			Requirements: map[string]any{"harnessIds": []string{"claude-cli"}},
 		}),
 		step{Message: "submitted {{batch.submissionId}}"},
 	)
@@ -349,7 +350,7 @@ func TestApprovalExpiry(t *testing.T) {
 		submitTasks("approval-expiry", "batch", taskSpecification{
 			Key: "needs-approval", Title: "needs-approval",
 			Instructions: "Ask for a deployment decision.\n" + needsApproval,
-			Requirements: map[string]any{"skills": []string{"build"}, "harnessIds": []string{"codex-cli"}},
+			Requirements: map[string]any{"harnessIds": []string{"codex-cli"}},
 		}),
 		step{Message: "submitted {{batch.submissionId}}"},
 	)
@@ -596,12 +597,12 @@ func TestMixedProtocolVersions(t *testing.T) {
 			taskSpecification{
 				Key: "legacy-only", Title: "legacy-only",
 				Instructions: "Run on the legacy fleet.\n" + script(t, step{Message: "legacy work ran"}),
-				Requirements: map[string]any{"skills": []string{"legacy"}},
+				Pin:          map[string]any{"agentId": legacyAgent},
 			},
 			taskSpecification{
 				Key: "modern", Title: "modern",
 				Instructions: "Run on the modern fleet.\n" + script(t, step{Message: "modern done"}),
-				Requirements: map[string]any{"skills": []string{"build"}, "harnessIds": []string{"claude-cli"}},
+				Requirements: map[string]any{"harnessIds": []string{"claude-cli"}},
 			},
 		),
 		step{Message: "submitted {{batch.submissionId}}"},

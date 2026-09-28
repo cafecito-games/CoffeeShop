@@ -36,6 +36,8 @@ afterEach(() => vi.useRealTimers());
 
 describe("PreviewArtifact", () => {
   it("presents the five closed lifecycle states and ready-unavailable without color-only meaning", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-27T12:04:00.000Z"));
     const cases: Array<[ArtifactPreview, string]> = [
       [preview({ status: "upload-pending", processingGeneration: 0, readyAt: undefined, accessState: "unavailable", updatedAt: createdAt }), "Waiting for bundle upload"],
       [preview({ status: "processing", readyAt: undefined, accessState: "unavailable" }), "Preparing preview · generation 1"],

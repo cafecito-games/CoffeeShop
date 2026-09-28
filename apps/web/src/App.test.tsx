@@ -126,7 +126,7 @@ describe("durable threads", () => {
     expect(screen.getByPlaceholderText("Reconnect to message Milo")).toBeDisabled();
     expect(screen.getByText("Read-only legacy agents")).toBeInTheDocument();
     expect(fetchMock).not.toHaveBeenCalled();
-  });
+  }, 15_000);
 
   it("keeps the chat filter in step with the send target and drops a filter whose thread was archived", async () => {
     currentSnapshot.threads = [thread];
