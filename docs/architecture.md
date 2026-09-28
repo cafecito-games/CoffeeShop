@@ -242,6 +242,14 @@ The capability prefix authorizes exact regular files from one canonical manifest
 
 An unref'ed 15-second maintenance pass persists due lifecycle expirations and broadcasts only a changed snapshot. It is not an access authority: issuance and delivery compare the current clock against both the signed expiry and persisted lifecycle expiry on every request, so a delayed sweep cannot extend access. Prepared content stays immutable after expiry for audit/recovery and is backed up with the Hub database and artifact blobs.
 
+## Capability-pack execution authority
+
+Pack execution follows one authority chain: setup installs a sealed archive; Barista selects and validates it once at startup; compiled adapters determine the supported harness/transport surfaces; current-socket readiness admits the exact node/surface and required skill; the allocation freezes that pack id/version and skill subset; then Barista rereads, projects, vendor-confirms, and reports the full effective pack before the Hub accepts `run.started` and exposes run-scoped tools. Component inventory, configured-agent labels, setup pins, and files left by an old process are informational only.
+
+The shipped surface is deliberately asymmetric: Claude and Codex `native-cli` have verified projection adapters; neither `acp-v1` combination does. Skill-required ACP work therefore stays unplaced, while no-skill ACP work remains compatible. Claude projections are run-scoped and removed at settlement. Codex owns one managed subtree at `$CODEX_HOME/skills/coffee-shop-barista`, selected once per Barista lifetime. No projected document carries an endpoint, token, credential, or scheduling authority; the run-scoped MCP grant is the only action boundary.
+
+The system matrix is derived from the installed, validated archive and executes every declared evaluation twice, once per supported native surface. Its fake provider deterministically observes the real projection and real served tools and drives real Hub effects. This proves integration and fail-closed behavior, not that a live model will follow prose for every possible prompt.
+
 ## What to build next
 
 The MVP deliberately proves the seams before adding infrastructure. Recommended order:

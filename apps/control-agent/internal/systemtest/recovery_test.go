@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
+	"sync"
 	"testing"
 	"time"
 
@@ -419,9 +421,13 @@ const legacyNodeID = "node-legacy"
 type legacyBarista struct {
 	connection   *websocket.Conn
 	lifetime     context.Context
+	writeMu      sync.Mutex
+	stateMu      sync.Mutex
 	nodeID       string
 	version      string
 	dispatches   chan json.RawMessage
+	residentIDs  map[string]bool
+	ready        chan struct{}
 	synchronized bool
 }
 
@@ -445,22 +451,35 @@ func startCompatibilityBarista(t *testing.T, hubPort int, workspaceRoot, nodeID,
 	// Registered after the environment's own teardown, so this runs first and the connection closes
 	// before the hub does.
 	t.Cleanup(func() { connection.Close(websocket.StatusNormalClosure, "scenario finished") })
-	barista := &legacyBarista{connection: connection, lifetime: lifetime, nodeID: nodeID, version: version, dispatches: make(chan json.RawMessage, 16)}
+	barista := &legacyBarista{
+		connection: connection, lifetime: lifetime, nodeID: nodeID, version: version,
+		dispatches: make(chan json.RawMessage, 16), residentIDs: map[string]bool{}, ready: make(chan struct{}),
+	}
 	reportedVersion := "0.0." + version + "-compatibility"
 	if version == "3" {
 		reportedVersion = "0.0.3-legacy"
 	}
+	node := &protocol.ComputeNode{
+		ID: nodeID, Name: "Compatibility node", Kind: "local", Platform: "linux-amd64", Status: "online",
+		LastSeen: legacyTimestamp(), Concurrency: 2, WorkspaceRoots: []string{workspaceRoot},
+		Harnesses: []protocol.HarnessProfile{{
+			ID: "codex-cli", Label: "Codex", Description: "codex-cli 0.40.0", Binary: "codex",
+			Available: true, AuthMode: "local-account", Models: []string{},
+		}},
+		Version: reportedVersion,
+	}
+	if version == "5" {
+		capacity, active := 16, 0
+		node.InstanceCapacity = &capacity
+		node.ActiveInstances = &active
+		node.Harnesses = []protocol.HarnessProfile{{
+			ID: "claude-cli", Label: "Claude", Description: "controlled protocol-v5 peer", Binary: "claude",
+			Available: true, AuthMode: "local-subscription", Models: []string{"sonnet"}, Transports: []string{"native-cli"},
+		}}
+	}
 	if err := barista.send(protocol.Outbound{
 		Type: "register", ProtocolVersion: version,
-		Node: &protocol.ComputeNode{
-			ID: nodeID, Name: "Compatibility node", Kind: "local", Platform: "linux-amd64", Status: "online",
-			LastSeen: legacyTimestamp(), Concurrency: 2, WorkspaceRoots: []string{workspaceRoot},
-			Harnesses: []protocol.HarnessProfile{{
-				ID: "codex-cli", Label: "Codex", Description: "codex-cli 0.40.0", Binary: "codex",
-				Available: true, AuthMode: "local-account", Models: []string{},
-			}},
-			Version: reportedVersion,
-		},
+		Node: node,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -468,15 +487,37 @@ func startCompatibilityBarista(t *testing.T, hubPort int, workspaceRoot, nodeID,
 	return barista
 }
 
-func (barista *legacyBarista) send(message protocol.Outbound) error {
+func (barista *legacyBarista) send(message any) error {
 	encoded, err := json.Marshal(message)
 	if err != nil {
 		return err
 	}
+	barista.writeMu.Lock()
+	defer barista.writeMu.Unlock()
 	return barista.connection.Write(barista.lifetime, websocket.MessageText, encoded)
 }
 
 func legacyTimestamp() string { return time.Now().UTC().Format(time.RFC3339Nano) }
+
+func (barista *legacyBarista) waitSynchronized(t *testing.T) {
+	t.Helper()
+	select {
+	case <-barista.ready:
+	case <-time.After(processDeadline):
+		t.Fatalf("version-%s peer %s did not pass its reconnect barrier", barista.version, barista.nodeID)
+	}
+}
+
+func (barista *legacyBarista) residentEvidence() (int, []string) {
+	barista.stateMu.Lock()
+	defer barista.stateMu.Unlock()
+	ids := make([]string, 0, len(barista.residentIDs))
+	for id := range barista.residentIDs {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return len(ids), ids
+}
 
 // readLoop answers the hub until the connection closes. All sends and the synchronization flag stay
 // on this goroutine, and dispatches reach the scenario only through the channel.
@@ -501,16 +542,56 @@ func (barista *legacyBarista) readLoop() {
 			// later ones are answered as heartbeats.
 			if barista.synchronized {
 				activeRuns := 0
-				_ = barista.send(protocol.Outbound{Type: "heartbeat", NodeID: barista.nodeID, ActiveRuns: &activeRuns, At: legacyTimestamp()})
+				heartbeat := protocol.Outbound{Type: "heartbeat", NodeID: barista.nodeID, ActiveRuns: &activeRuns, At: legacyTimestamp()}
+				if barista.version == "5" {
+					activeInstances, residentIDs := barista.residentEvidence()
+					heartbeat.ActiveInstances = &activeInstances
+					heartbeat.ActiveInstanceIDs = &residentIDs
+				}
+				_ = barista.send(heartbeat)
 			} else {
 				barrier := protocol.Outbound{Type: "sync.complete", NodeID: barista.nodeID, At: legacyTimestamp()}
-				if barista.version == "4" {
+				if barista.version == "4" || barista.version == "5" {
 					empty := []string{}
 					barrier.ActiveRunIDs = &empty
+					if barista.version == "5" {
+						barrier.ActiveInstanceIDs = &empty
+					}
 				}
 				_ = barista.send(barrier)
 				barista.synchronized = true
+				close(barista.ready)
 			}
+		case "instance.provision":
+			if barista.version != "5" {
+				continue
+			}
+			message, decodeErr := protocol.DecodeInstanceHubMessage(data, "5")
+			if decodeErr != nil || message.Instance == nil || message.Allocation == nil {
+				continue
+			}
+			barista.stateMu.Lock()
+			barista.residentIDs[message.Instance.ID] = true
+			barista.stateMu.Unlock()
+			_ = barista.send(protocol.InstanceControlMessage{
+				Type: "instance.ready", NodeID: barista.nodeID, InstanceID: message.Instance.ID,
+				AllocationID: message.Allocation.ID, At: legacyTimestamp(),
+			})
+		case "instance.release":
+			if barista.version != "5" {
+				continue
+			}
+			message, decodeErr := protocol.DecodeInstanceHubMessage(data, "5")
+			if decodeErr != nil {
+				continue
+			}
+			barista.stateMu.Lock()
+			delete(barista.residentIDs, message.InstanceID)
+			barista.stateMu.Unlock()
+			_ = barista.send(protocol.InstanceControlMessage{
+				Type: "instance.released", NodeID: barista.nodeID, InstanceID: message.InstanceID,
+				AllocationID: message.AllocationID, At: legacyTimestamp(),
+			})
 		case "dispatch":
 			select {
 			case barista.dispatches <- append(json.RawMessage(nil), data...):

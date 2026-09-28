@@ -73,6 +73,8 @@ Run `barista --help` for the full command line. Environment equivalents are `CON
 
 Barista may also install verified, versioned provider harnesses under its own data root. Upgrades follow `setup plan` → `setup apply` → `setup activate` → service restart; a live daemon never hot-adopts a changed selection. Rollback also requires a restart, and prune removes only verified inactive owned bytes. Provider login remains local and separate throughout. See the [tested managed-harness procedure](docs/operations.md#upgrading-restarting-rolling-back-and-pruning-a-managed-harness).
 
+The canonical `coffeeshop-capability-pack@1.2.0` is proven from its installed archive, not from checkout files. `task system:test:capability-pack` executes every declared evaluation on Claude and Codex native CLIs, proves ACP skill work fails closed while ordinary ACP remains usable, and covers readiness freshness, cleanup, restart-bounded upgrade, and rollback. The deterministic provider substitute proves Coffee Shop's projection, MCP, authority, and durable-state integration; it is not a model-quality score.
+
 ## Task catalog
 
 ```text

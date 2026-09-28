@@ -33,12 +33,16 @@ type Step struct {
 	// Update writes one raw ACP session/update payload (ACP only; the native CLIs ignore it).
 	Update json.RawMessage `json:"update,omitempty"`
 	// Call invokes a Coffee Shop MCP tool with Arguments and stores the result under As. A tool
-	// error fails the script unless AllowError is set, in which case the {"error":...} object is
-	// stored instead.
-	Call       string          `json:"call,omitempty"`
-	Arguments  json.RawMessage `json:"arguments,omitempty"`
-	As         string          `json:"as,omitempty"`
-	AllowError bool            `json:"allowError,omitempty"`
+	// error fails the script unless AllowError is set. ExpectErrorCode is the strict alternative:
+	// it requires an error with that closed Coffee Shop code before storing the result.
+	Call            string          `json:"call,omitempty"`
+	Arguments       json.RawMessage `json:"arguments,omitempty"`
+	As              string          `json:"as,omitempty"`
+	AllowError      bool            `json:"allowError,omitempty"`
+	ExpectErrorCode string          `json:"expectErrorCode,omitempty"`
+	// MutateResultRemove removes one dotted path from a successful producer result before it is
+	// exposed to subsequent steps. This is test-only fault injection at the serialized boundary.
+	MutateResultRemove string `json:"mutateResultRemove,omitempty"`
 	// WaitFor long-polls wait_for_task_events, advancing the run's own cursor, until an event
 	// containing every field of the given object arrives; the event is stored under As.
 	WaitFor json.RawMessage `json:"waitFor,omitempty"`
@@ -174,6 +178,9 @@ func (engine *engine) execute(ctx context.Context, step Step) error {
 		if err != nil {
 			return err
 		}
+		if activeRecorder != nil {
+			activeRecorder.write(map[string]any{"event": "evaluation-message", "message": text})
+		}
 		return engine.host.message(text)
 	case step.Thought != "":
 		text, err := engine.text(step.Thought)
@@ -198,12 +205,19 @@ func (engine *engine) execute(ctx context.Context, step Step) error {
 	case step.Gate != "":
 		return engine.gate(step.Gate)
 	case step.WriteFile != nil:
-		path, err := engine.localPath(step.WriteFile.Path)
+		relative, err := engine.text(step.WriteFile.Path)
+		if err != nil {
+			return err
+		}
+		path, err := engine.localPath(relative)
 		if err != nil {
 			return err
 		}
 		content, err := engine.text(step.WriteFile.Content)
 		if err != nil {
+			return err
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			return err
 		}
 		return os.WriteFile(path, []byte(content), 0o644)
@@ -246,14 +260,61 @@ func (engine *engine) call(ctx context.Context, step Step) error {
 	if err != nil {
 		return err
 	}
-	if result.IsError && !step.AllowError {
+	if step.ExpectErrorCode != "" {
+		code := toolErrorCode(result.Value)
+		if !result.IsError || code != step.ExpectErrorCode {
+			return fmt.Errorf("tool %s error code=%q, want %q", step.Call, code, step.ExpectErrorCode)
+		}
+	} else if result.IsError && !step.AllowError {
 		encoded, _ := json.Marshal(result.Value)
 		return fmt.Errorf("tool %s failed: %s", step.Call, encoded)
+	}
+	if step.MutateResultRemove != "" {
+		if result.IsError {
+			return fmt.Errorf("tool %s cannot mutate an error result", step.Call)
+		}
+		mutated, removed := removeResultPath(result.Value, step.MutateResultRemove)
+		if !removed {
+			return fmt.Errorf("tool %s result has no %s field to mutate", step.Call, step.MutateResultRemove)
+		}
+		result.Value = mutated
 	}
 	if step.As != "" {
 		engine.variables[step.As] = result.Value
 	}
 	return nil
+}
+
+func toolErrorCode(value any) string {
+	object, _ := value.(map[string]any)
+	failure, _ := object["error"].(map[string]any)
+	code, _ := failure["code"].(string)
+	return code
+}
+
+func removeResultPath(value any, path string) (any, bool) {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return nil, false
+	}
+	var copy any
+	if json.Unmarshal(encoded, &copy) != nil {
+		return nil, false
+	}
+	segments := strings.Split(path, ".")
+	current, _ := copy.(map[string]any)
+	for _, segment := range segments[:len(segments)-1] {
+		current, _ = current[segment].(map[string]any)
+		if current == nil {
+			return nil, false
+		}
+	}
+	last := segments[len(segments)-1]
+	if _, present := current[last]; !present {
+		return nil, false
+	}
+	delete(current, last)
+	return copy, true
 }
 
 // waitDeadline bounds one WaitFor step; the test's own deadlines are shorter, so a missing event

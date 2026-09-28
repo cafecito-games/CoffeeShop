@@ -67,7 +67,10 @@ func runNative(recorder *recorder, role string, arguments []string) int {
 	}
 	workingDirectory, _ := os.Getwd()
 	host := &nativeHost{role: role, done: make(chan struct{})}
-	runErr := newEngine(host, client, prompt, workingDirectory, "").run(context.Background(), script)
+	handled, runErr := runNativeEvaluation(host, client, role, arguments, prompt, workingDirectory)
+	if !handled {
+		runErr = newEngine(host, client, prompt, workingDirectory, "").run(context.Background(), script)
+	}
 	var crashed crash
 	if errors.As(runErr, &crashed) {
 		return crashed.code
@@ -91,7 +94,11 @@ func nativeSkillInventory(role string, arguments []string) (string, bool) {
 		if len(arguments) != 3 || arguments[0] != "debug" || arguments[1] != "prompt-input" {
 			return "", false
 		}
-		root := filepath.Join(os.Getenv("CODEX_HOME"), "skills")
+		home := os.Getenv("CODEX_HOME")
+		if home == "" {
+			home = filepath.Join(os.Getenv("HOME"), ".codex")
+		}
+		root := filepath.Join(home, "skills")
 		paths := skillDocumentPaths(root)
 		encoded, _ := json.Marshal(map[string]any{"skills": paths})
 		return string(encoded) + "\n", true

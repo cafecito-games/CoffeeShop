@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/capabilitypack"
 	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/protocol"
@@ -20,6 +21,9 @@ const systemCapabilityPackID = "coffeeshop-capability-pack"
 
 type installedSystemCapabilityPack struct {
 	archive      []byte
+	digest       string
+	manifest     capabilitypack.PackManifest
+	tree         capabilitypack.Tree
 	manifestPath string
 	path         string
 	version      string
@@ -87,7 +91,22 @@ func installSystemCapabilityPack(t *testing.T, node *baristaNode, activate bool)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return installedSystemCapabilityPack{archive: archive, manifestPath: manifestPath, path: installed.Path, version: pack.Version}
+	installedBytes, err := os.ReadFile(installed.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	installedTree, err := capabilitypack.ArchiveTree(installedBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	installedManifest, err := capabilitypack.ValidateArchive(installedBytes, capabilitypack.DefaultVocabulary())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return installedSystemCapabilityPack{
+		archive: installedBytes, digest: capabilitypack.ArchiveDigest(installedBytes), manifest: installedManifest,
+		tree: installedTree, manifestPath: manifestPath, path: installed.Path, version: pack.Version,
+	}
 }
 
 func capabilityPackInventory(report componentInventory) (componentInventoryEntry, bool) {
@@ -107,6 +126,128 @@ func capabilityPackRequirements() map[string]any {
 		"transports":       []string{"native-cli"},
 		"operatingSystems": []string{runtime.GOOS},
 	}
+}
+
+func controlledCapabilityPackReport(nodeID, observedAt, version string) protocol.CapabilityPackReadinessReport {
+	return protocol.CapabilityPackReadinessReport{
+		NodeID: nodeID, ObservedAt: observedAt, Status: "available",
+		Pack: &protocol.CapabilityPackIdentity{
+			ID: systemCapabilityPackID, Version: version,
+			Skills: []string{"coffeeshop-artifacts", "coffeeshop-coordination", "coffeeshop-preview", "coffeeshop-task-reporting"},
+		},
+		Surfaces: []protocol.CapabilityPackSurface{{HarnessID: "claude-cli", Transport: "native-cli"}},
+	}
+}
+
+func sendControlledCapabilityPackReport(t *testing.T, peer *legacyBarista, report protocol.CapabilityPackReadinessReport) error {
+	t.Helper()
+	return peer.send(protocol.CapabilityPackReadinessMessage{Type: "capability-pack.readiness", Report: report})
+}
+
+// TestCapabilityPackEvidenceFreshnessAndConflict crosses the serialized v5 socket rather than
+// calling Hub helpers. It proves the in-memory authority preserves one semantic observation across
+// replay/ordering attacks, belongs to the exact current connection, disappears on Hub restart, and
+// only fresh post-reconnect evidence can create a new allocation expectation.
+func TestCapabilityPackEvidenceFreshnessAndConflict(t *testing.T) {
+	cluster := newEnvironment(t, environmentOptions{})
+	workspace := filepath.Join(cluster.root, "controlled-pack-workspace")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const nodeID = "pack-evidence-peer"
+	first := startCompatibilityBarista(t, cluster.hub.port, workspace, nodeID, "5")
+	first.waitSynchronized(t)
+
+	baseTime := time.Now().UTC().Truncate(time.Millisecond)
+	admitted := controlledCapabilityPackReport(nodeID, baseTime.Format(time.RFC3339Nano), "1.2.0")
+	if err := sendControlledCapabilityPackReport(t, first, admitted); err != nil {
+		t.Fatal(err)
+	}
+	if err := sendControlledCapabilityPackReport(t, first, admitted); err != nil {
+		t.Fatal(err)
+	}
+	if err := sendControlledCapabilityPackReport(t, first,
+		controlledCapabilityPackReport(nodeID, baseTime.Add(-time.Second).Format(time.RFC3339Nano), "1.0.9")); err != nil {
+		t.Fatal(err)
+	}
+	conflict := protocol.CapabilityPackReadinessReport{
+		NodeID: nodeID, ObservedAt: admitted.ObservedAt, Status: "unavailable", Surfaces: []protocol.CapabilityPackSurface{}, ReasonCode: "not-selected",
+	}
+	if err := sendControlledCapabilityPackReport(t, first, conflict); err != nil {
+		t.Fatal(err)
+	}
+
+	clientID, secret := cluster.mintOrchestratorClient("Pack evidence operator", "orchestrate")
+	bridge := cluster.startBridge("pack-evidence-first", clientID, secret)
+	created := bridge.mustCallTool("create_thread", map[string]any{
+		"title": "Capability-pack evidence", "objective": "Use only fresh current-socket readiness.",
+	})
+	threadID := text(object(created, "thread"), "id")
+	spawn := func(session *bridgeProcess, key string) string {
+		result := session.mustCallTool("spawn_instance", map[string]any{
+			"threadId": threadID, "idempotencyKey": key, "requirements": map[string]any{
+				"skills": []string{"coffeeshop-preview"}, "harnessIds": []string{"claude-cli"},
+				"models": []string{"sonnet"}, "transports": []string{"native-cli"},
+			},
+		})
+		return text(object(result, "instance"), "id")
+	}
+	assertExpectedVersion := func(instanceID, version string) {
+		cluster.eventually("controlled pack allocation "+instanceID+" to preserve version "+version, func(current snapshot) (bool, string) {
+			allocation, found := allocationFor(current, instanceID)
+			if !found || allocation.ExpectedCapabilityPack == nil {
+				return false, "allocation expectation is absent"
+			}
+			return allocation.ExpectedCapabilityPack.ID == systemCapabilityPackID &&
+					allocation.ExpectedCapabilityPack.Version == version &&
+					slices.Equal(allocation.ExpectedCapabilityPack.RequiredSkills, []string{"coffeeshop-preview"}),
+				"allocation expectation does not match preserved evidence"
+		})
+	}
+	firstInstance := spawn(bridge, "evidence-first")
+	assertExpectedVersion(firstInstance, "1.2.0")
+
+	if err := first.connection.Close(1000, "replace controlled peer"); err != nil {
+		t.Fatal(err)
+	}
+	cluster.eventually("the first controlled socket to release current authority", func(current snapshot) (bool, string) {
+		node, found := nodeByID(current, nodeID)
+		return found && node.Status == "offline", "first controlled socket still owns the node"
+	})
+	second := startCompatibilityBarista(t, cluster.hub.port, workspace, nodeID, "5")
+	second.waitSynchronized(t)
+	secondReport := controlledCapabilityPackReport(nodeID, baseTime.Add(time.Minute).Format(time.RFC3339Nano), "1.2.1")
+	if err := sendControlledCapabilityPackReport(t, second, secondReport); err != nil {
+		t.Fatal(err)
+	}
+	// The Hub normally closes a superseded socket. If the old write races that close and succeeds,
+	// current-socket authorization must still ignore it; either transport outcome is acceptable.
+	_ = sendControlledCapabilityPackReport(t, first,
+		controlledCapabilityPackReport(nodeID, baseTime.Add(2*time.Minute).Format(time.RFC3339Nano), "1.2.0"))
+	secondInstance := spawn(bridge, "evidence-second")
+	assertExpectedVersion(secondInstance, "1.2.1")
+
+	cluster.hub.restart()
+	cluster.eventually("Hub restart to clear connection-scoped readiness", func(current snapshot) (bool, string) {
+		node, found := nodeByID(current, nodeID)
+		return found && node.Status == "offline", "controlled node is not offline after restart"
+	})
+	reconnectedBridge := cluster.startBridge("pack-evidence-reconnected", clientID, secret)
+	reconnectedBridge.mustCallTool("attach_thread", map[string]any{"threadId": threadID})
+	blockedInstance := spawn(reconnectedBridge, "evidence-after-restart")
+	cluster.eventually("stale persisted node state to remain ineligible", func(current snapshot) (bool, string) {
+		instance, found := instanceByID(current, blockedInstance)
+		_, allocated := allocationFor(current, blockedInstance)
+		return found && instance.Status == "requested" && !allocated, "stale readiness created an allocation"
+	})
+
+	third := startCompatibilityBarista(t, cluster.hub.port, workspace, nodeID, "5")
+	third.waitSynchronized(t)
+	thirdReport := controlledCapabilityPackReport(nodeID, baseTime.Add(3*time.Minute).Format(time.RFC3339Nano), "1.1.2")
+	if err := sendControlledCapabilityPackReport(t, third, thirdReport); err != nil {
+		t.Fatal(err)
+	}
+	assertExpectedVersion(blockedInstance, "1.1.2")
 }
 
 // TestCapabilityPackReadinessGatesInstanceWork crosses the real #99 setup and process scaffolding,

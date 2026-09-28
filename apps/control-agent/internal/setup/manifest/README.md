@@ -124,7 +124,7 @@ It is deliberately *not* one of the other two kinds. `Manifest.Validate` require
 
 ### `coffeeshop-capability-pack` — the canonical Coffee Shop workflows
 
-* Pin: **1.1.0**, provider `cafecito-games`, harness identity `coffee-shop`.
+* Pin: **1.2.0**, provider `cafecito-games`, harness identity `coffee-shop`.
 * `harnessId` is `coffee-shop` because the field is mandatory kebab-case for every entry and the pack is harness-agnostic: it belongs to no provider CLI. It must not collide with `claude-cli` or `codex-cli`, and the one-provider-per-`harnessId` rule keeps `coffee-shop` owned by `cafecito-games` alone.
 * `platforms` carries the identical distribution on all four supported keys. The pack is platform-independent, but `platforms` must be non-empty with `GOOS-GOARCH` keys and there is no fallback platform, so every supported platform is listed explicitly.
 * `launch` is `{}` and must stay so: nothing launches a pack. `Manifest.Validate` refuses a non-empty launch template for this kind for the same reason it refuses one on a harness.
@@ -141,13 +141,14 @@ It is deliberately *not* one of the other two kinds. `Manifest.Validate` require
   barista setup apply --plan plan.json \
     --manual-artifact coffeeshop-capability-pack=$PWD/dist/capability-pack/coffeeshop-capability-pack.tar.gz \
     --manual-checksum coffeeshop-capability-pack=<sha256>
-  barista setup activate --kind capability-pack --id coffeeshop-capability-pack --version 1.1.0
+  barista setup activate --kind capability-pack --id coffeeshop-capability-pack --version 1.2.0
   ```
 
 * Activation runs no process. The probe re-validates the installed bytes through the same `internal/capabilitypack` entry point that packaged them — pack manifest grammar, per-file digests, path containment, skill metadata, declared tool vocabulary against `protocol.HubToolNames`, secret and endpoint screening — and additionally refuses an archive whose own declared pack id or version is not the one this entry pins. A pack that stops validating never becomes active, and a failed activation leaves both ledgers and every installed file exactly as they were.
 * `barista doctor` reports a capability pack with `harness=not-applicable`, not `harness=missing`. The pack has no provider CLI of its own, so an absent harness is not a gap to chase; `harnessApplicable` is `false` in the JSON report and presentation must read it before rendering `harnessInstalled`.
 * Authentication is not a concept for this kind: a pack carries no credential, no endpoint, and no absolute machine path, and validation rejects one that does. Skills teach workflows; the run-scoped Coffee Shop MCP server remains the only live action and authorization layer.
 * The pack tree itself lives at `capability-pack/` in this repository and is the single source of truth for workflow content. Bump this entry's `version` together with `capability-pack/pack.json` — the probe refuses an archive whose declared version differs — then re-run plan/apply/activate. The previous version's files stay installed as the rollback target until an explicit `barista setup prune`.
+* Contributor procedure, closed evaluation coverage, sealing, and the focused real-process gate are documented in [`capability-pack/README.md`](../../../../../capability-pack/README.md). `task system:test:capability-pack` consumes the installed archive and proves both native surfaces, ACP refusal, cleanup, and restart-bounded upgrade/rollback.
 
 ## Harness launch templates are empty and stay empty
 

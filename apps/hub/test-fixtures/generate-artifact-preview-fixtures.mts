@@ -12,7 +12,7 @@ import {
   type Agent,
   type Run
 } from "@coffee-shop/protocol";
-import { registerPreview } from "../src/artifactPreviews.js";
+import { beginProcessing, expireDuePreviews, registerPreview, settleProcessing } from "../src/artifactPreviews.js";
 import { templateFromLegacyAgent } from "../src/agentTemplates.js";
 import { ingestArtifactContent } from "../src/previewPreparation.js";
 import { PreviewStorage } from "../src/previewStorage.js";
@@ -27,6 +27,7 @@ const paxBundleUrl = new URL("./preview-v1/pax-bundle.tar.gz", import.meta.url);
 const manifestUrl = new URL("./preview-v1/manifest.json", import.meta.url);
 const indexUrl = new URL("./preview-v1/content/site/index.html", import.meta.url);
 const scriptUrl = new URL("./preview-v1/content/site/app.js", import.meta.url);
+const workflowResultsUrl = new URL("./preview-workflow-results.json", import.meta.url);
 const producerUrl = new URL("./generate-preview-bundle.go", import.meta.url);
 const check = process.argv.includes("--check");
 
@@ -65,28 +66,82 @@ async function generate() {
     const bundle = execFileSync("go", ["run", fileURLToPath(producerUrl)], { maxBuffer: 2 * 1024 * 1024 });
     const paxBundle = execFileSync("go", ["run", fileURLToPath(producerUrl), "--long-pax"], { maxBuffer: 2 * 1024 * 1024 });
     const digest = createHash("sha256").update(bundle).digest("hex");
-    const store = new Store(generatedStatePath);
-    const storage = new PreviewStorage(directory);
-    await store.load();
     const imported = templateFromLegacyAgent(agent);
     assert.equal(imported.ok, true);
-    await store.transact((state) => {
-      state.agents = [agent];
-      state.threads = [{
-        id: "thread-one", title: "Preview", objective: "Publish the preview", summary: "", status: "active",
-        ownerAgentId: agent.id, orchestrator: { kind: "agent", agentId: agent.id }, createdBy: "user",
-        createdAt: at, updatedAt: at
-      }];
-      state.runs = [run];
-      state.templates = [imported.template];
-      state.legacyTemplateImports = [{ agentId: agent.id, templateId: imported.template.id, at }];
-    });
-    const registered = await registerPreview(store, run.id, {
+    const seed = async (target: Store) => {
+      await target.load();
+      await target.transact((state) => {
+        state.agents = [agent];
+        state.threads = [{
+          id: "thread-one", title: "Preview", objective: "Publish the preview", summary: "", status: "active",
+          ownerAgentId: agent.id, orchestrator: { kind: "agent", agentId: agent.id }, createdBy: "user",
+          createdAt: at, updatedAt: at
+        }];
+        state.runs = [run];
+        state.templates = [imported.template];
+        state.legacyTemplateImports = [{ agentId: agent.id, templateId: imported.template.id, at }];
+      });
+    };
+    const store = new Store(generatedStatePath);
+    const storage = new PreviewStorage(directory);
+    await seed(store);
+    const request = {
       relativePath: ".coffee-shop/previews/site.tar.gz", title: "Site preview",
       kind: previewBundleArtifactKind, mediaType: previewBundleMediaType, summary: "Static site",
       size: bundle.length, sha256: digest, entrypoint: "site/index.html",
       ttlSeconds: 24 * 60 * 60, idempotencyKey: "preview-one"
-    }, at);
+    };
+    const registered = await registerPreview(store, run.id, request, at);
+
+    // These are exact replay results from the authoritative lifecycle producer. The only direct
+    // state write supplies the same uploaded precondition the ingestion route owns; every preview
+    // transition and every serialized result comes from artifactPreviews.ts.
+    const fixtureSequence = sequence;
+    const workflowStore = new Store(join(directory, "workflow-state.json"));
+    await seed(workflowStore);
+    const workflowRegistered = await registerPreview(workflowStore, run.id, request, at);
+    const workflowResults: Record<string, unknown> = { "upload-pending": workflowRegistered };
+    await workflowStore.transact((state) => {
+      const artifact = state.artifacts?.find((candidate) => candidate.id === workflowRegistered.artifact.id);
+      assert.ok(artifact);
+      artifact.uploaded = true;
+    });
+    workflowResults["upload-pending-replayed"] = await registerPreview(workflowStore, run.id, request, after(30));
+    const processing = await beginProcessing(workflowStore, workflowRegistered.preview.id, after(60));
+    workflowResults.processing = await registerPreview(workflowStore, run.id, request, after(61));
+    await settleProcessing(workflowStore, {
+      previewId: workflowRegistered.preview.id, artifactId: workflowRegistered.artifact.id, artifactSha256: digest,
+      processingGeneration: processing.generation, outcome: "ready", at: after(120)
+    });
+    workflowResults.ready = await registerPreview(workflowStore, run.id, request, after(121));
+
+    const failedRequest = { ...request, relativePath: ".coffee-shop/previews/failed.tar.gz", idempotencyKey: "preview-failed" };
+    const failedRegistered = await registerPreview(workflowStore, run.id, failedRequest, after(130));
+    await workflowStore.transact((state) => {
+      const artifact = state.artifacts?.find((candidate) => candidate.id === failedRegistered.artifact.id);
+      assert.ok(artifact);
+      artifact.uploaded = true;
+    });
+    const failedProcessing = await beginProcessing(workflowStore, failedRegistered.preview.id, after(140));
+    await settleProcessing(workflowStore, {
+      previewId: failedRegistered.preview.id, artifactId: failedRegistered.artifact.id, artifactSha256: digest,
+      processingGeneration: failedProcessing.generation, outcome: "failed", failureCode: "bundle-invalid", at: after(150)
+    });
+    workflowResults.failed = await registerPreview(workflowStore, run.id, failedRequest, after(151));
+
+    const expiredRequest = {
+      ...request, relativePath: ".coffee-shop/previews/expired.tar.gz", idempotencyKey: "preview-expired", ttlSeconds: 5 * 60
+    };
+    const expiredRegistered = await registerPreview(workflowStore, run.id, expiredRequest, after(160));
+    await workflowStore.transact((state) => {
+      const artifact = state.artifacts?.find((candidate) => candidate.id === expiredRegistered.artifact.id);
+      assert.ok(artifact);
+      artifact.uploaded = true;
+    });
+    await expireDuePreviews(workflowStore, after(461));
+    workflowResults.expired = await registerPreview(workflowStore, run.id, expiredRequest, after(462));
+    await sameBytes(workflowResultsUrl, Buffer.from(`${JSON.stringify(workflowResults, null, 2)}\n`));
+    sequence = fixtureSequence;
     const times = [after(60), after(120)];
     await ingestArtifactContent(store, storage, {
       artifactId: registered.artifact.id,

@@ -14,7 +14,7 @@ const capabilityPackReadinessFixture = "../../../../packages/protocol/test/fixtu
 func availablePackReadiness() CapabilityPackReadinessMessage {
 	return CapabilityPackReadinessMessage{Type: "capability-pack.readiness", Report: CapabilityPackReadinessReport{
 		NodeID: "node-one", ObservedAt: "2026-09-28T12:00:00Z", Status: "available",
-		Pack: &CapabilityPackIdentity{ID: "coffeeshop-capability-pack", Version: "1.1.0", Skills: []string{
+		Pack: &CapabilityPackIdentity{ID: "coffeeshop-capability-pack", Version: "1.2.0", Skills: []string{
 			"coffeeshop-artifacts", "coffeeshop-coordination", "coffeeshop-preview", "coffeeshop-task-reporting",
 		}},
 		Surfaces: []CapabilityPackSurface{{HarnessID: "claude-cli", Transport: "native-cli"}, {HarnessID: "codex-cli", Transport: "native-cli"}},
@@ -61,7 +61,7 @@ func TestCapabilityPackReadinessIsExactAndV5Only(t *testing.T) {
 }
 
 func TestCapabilityPackExpectationAndProofValidate(t *testing.T) {
-	expected := ExpectedCapabilityPack{ID: "coffeeshop-capability-pack", Version: "1.1.0", RequiredSkills: []string{"coffeeshop-preview"}}
+	expected := ExpectedCapabilityPack{ID: "coffeeshop-capability-pack", Version: "1.2.0", RequiredSkills: []string{"coffeeshop-preview"}}
 	require.NoError(t, expected.Validate())
 	require.Error(t, (ExpectedCapabilityPack{ID: expected.ID, Version: expected.Version, RequiredSkills: []string{}}).Validate())
 	selection := RunTransportSelection{RequestedTransport: TransportNativeCLI, SelectedTransport: TransportNativeCLI,

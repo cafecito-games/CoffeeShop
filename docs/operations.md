@@ -207,6 +207,37 @@ Apply and activate do not signal or reconfigure another Barista process. A runni
 
 Rollback verifies the retained bytes again and consumes the retained target; it does not swap the failed version into a new rollback slot, so a second rollback refuses instead of oscillating. Prune removes only inactive, digest-matching files recorded in the ownership ledger. It retains the active and rollback versions, drifted files, unowned files, directories, and symlinks, and never follows a symlink. Investigate a retention before changing bytes or ledgers by hand.
 
+### Installing and verifying the canonical capability pack
+
+Build from the tagged checkout, retain the printed checksum, and use the same manifest for every setup command. The canonical `components.json` describes all five managed components: on a fresh data root, first plan/apply the four harness and adapter prerequisites with every manual artifact/checksum named by that plan, following the component-specific commands in `apps/control-agent/internal/setup/manifest/README.md`. The focused sequence below is exact only once those prerequisites are already owned, so the resulting plan contains the capability pack as its sole install operation; `setup apply` deliberately refuses a partially supplied fresh-root plan.
+
+```bash
+task capability-pack:build
+sha256sum dist/capability-pack/coffeeshop-capability-pack.tar.gz
+barista setup plan --data-root <path> --manifest components.json --out pack-plan.json
+barista setup apply --data-root <path> --manifest components.json --plan pack-plan.json \
+  --manual-artifact coffeeshop-capability-pack=$PWD/dist/capability-pack/coffeeshop-capability-pack.tar.gz \
+  --manual-checksum coffeeshop-capability-pack=<sha256>
+barista setup activate --data-root <path> --manifest components.json \
+  --kind capability-pack --id coffeeshop-capability-pack --version 1.2.0
+barista doctor --json --data-root <path> --manifest components.json
+```
+
+Activation does not hot-adopt. Restart Barista, then require a fresh current-socket readiness report and a new run whose allocation expectation and effective-pack proof agree. For an upgrade, repeat plan/apply/activate with the next manifest, restart, and verify. To back out, run the following with the manifest that selected the current version, then restart again:
+
+The canonical 1.2.0 source tree was built twice independently with the repository packer and compared byte-for-byte. Both 13,803-byte archives had SHA-256 `8d34308e592a110864bf6d068c4c32e44ba9c8b4ae9bb325bf06791c2b5f1d0a`; release automation must reproduce that digest from the tagged source before supplying the manual checksum.
+
+```bash
+barista setup rollback --data-root <path> --manifest components-next.json \
+  --kind capability-pack --id coffeeshop-capability-pack
+barista setup prune --data-root <path> --manifest components-next.json \
+  --kind capability-pack --id coffeeshop-capability-pack
+```
+
+`not-reported` means the current peer supplied no inventory; `not-applicable` means the pack has no harness executable. Neither means execution-ready. A missing/stale readiness report, absent skill, unsupported ACP surface, projection collision, archive drift, or mismatched effective proof must leave skill work waiting or fail it before the prompt. Inspect fixed diagnostic codes and restart/reconnect state; never repair the symptom by copying a projection, widening a requirement, or moving a provider credential to the Hub.
+
+Run `task system:test:capability-pack` for the named pack slice, `task system:test` for all real-process scenarios, and `GOMAXPROCS=8 task ci` before release.
+
 Component inventory is informational. While the node is connected, its report describes the selection that process verified. A disconnect retains the last report for diagnosis but the node is offline, so the evidence is not live. A fresh registration clears that old report before accepting the new process's post-ack report; a Hub restart preserves the last accepted report with the node's offline state. Absence on a version-4 peer means “not reported,” never “none installed.” None of these states qualifies a node, allocation, or run for scheduling.
 
 Installation and authentication are separate steps, and installing proves nothing about the second. See the next section.

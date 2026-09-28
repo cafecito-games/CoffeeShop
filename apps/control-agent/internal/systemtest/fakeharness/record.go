@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -52,7 +53,9 @@ func (recorder *recorder) write(entry map[string]any) {
 	if _, present := entry["role"]; !present {
 		entry["role"] = recorder.role
 	}
-	if _, present := entry["executable"]; !present {
+	event, _ := entry["event"].(string)
+	pathSafeEvaluation := strings.HasPrefix(event, "evaluation-") || strings.HasPrefix(event, "mcp-tool")
+	if _, present := entry["executable"]; !present && !pathSafeEvaluation {
 		entry["executable"] = recorder.executable
 	}
 	entry["at"] = time.Now().UTC().Format(time.RFC3339Nano)

@@ -271,6 +271,28 @@ type harnessRecord struct {
 	SessionID        string          `json:"sessionId"`
 	Cwd              string          `json:"cwd"`
 	Code             int             `json:"code"`
+	PackID           string          `json:"packId"`
+	PackVersion      string          `json:"packVersion"`
+	PackDigest       string          `json:"packDigest"`
+	SkillID          string          `json:"skillId"`
+	CaseID           string          `json:"caseId"`
+	Class            string          `json:"class"`
+	Outcome          string          `json:"outcome"`
+	HarnessID        string          `json:"harnessId"`
+	Transport        string          `json:"transport"`
+	DiscoveredSkills []string        `json:"discoveredSkills"`
+	SelectedSkill    string          `json:"selectedSkill"`
+	SelectedSHA256   string          `json:"selectedSkillSha256"`
+	ServedTools      []string        `json:"servedTools"`
+	VisibleTools     []string        `json:"visibleTools"`
+	HiddenTool       string          `json:"hiddenTool"`
+	Tool             string          `json:"tool"`
+	Arguments        map[string]any  `json:"arguments"`
+	IsError          bool            `json:"isError"`
+	ErrorCode        string          `json:"errorCode"`
+	Result           map[string]any  `json:"result"`
+	Message          string          `json:"message"`
+	Completed        bool            `json:"completed"`
 }
 
 // harnessRecords returns every record the fake harness wrote, grouped by the file (one process).
@@ -750,6 +772,9 @@ type nodeOptions struct {
 	instanceCapacity  *int
 	projects          []string
 	componentManifest string
+	// fakeEvaluationPlan is test-only provider input inherited through Barista. The plan contains
+	// semantic pack/case identity and actions, never an endpoint, token, or machine authority.
+	fakeEvaluationPlan string
 }
 
 // baristaNode is one real Barista process with its own workspace root, data root, and provider
@@ -860,6 +885,9 @@ func (node *baristaNode) start() {
 	}
 	for name, value := range providerCanaries {
 		environmentVariables = append(environmentVariables, name+"="+value)
+	}
+	if options.fakeEvaluationPlan != "" {
+		environmentVariables = append(environmentVariables, "COFFEE_SHOP_FAKE_EVALUATION_PLAN="+options.fakeEvaluationPlan)
 	}
 	command := exec.Command(baristaBinary, arguments...)
 	command.Dir = node.home

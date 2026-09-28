@@ -44,7 +44,7 @@ func instanceFixtureProducer() map[string]any {
 	packInstance.Requirements.Skills = &packSkills
 	packAllocation := a
 	packAllocation.ExpectedCapabilityPack = &ExpectedCapabilityPack{
-		ID: "coffeeshop-capability-pack", Version: "1.1.0",
+		ID: "coffeeshop-capability-pack", Version: "1.2.0",
 		RequiredSkills: []string{"coffeeshop-preview", "coffeeshop-review", "template-skill"},
 	}
 	packProvisionInstance := packInstance
@@ -149,7 +149,7 @@ func TestSkillBoundInstanceMessagesRequireCoveringPackExpectation(t *testing.T) 
 	require.Error(t, err)
 
 	message.Allocation.ExpectedCapabilityPack = &ExpectedCapabilityPack{
-		ID: "coffeeshop-capability-pack", Version: "1.1.0", RequiredSkills: []string{"coffeeshop-preview", "coffeeshop-review", "template-skill"},
+		ID: "coffeeshop-capability-pack", Version: "1.2.0", RequiredSkills: []string{"coffeeshop-preview", "coffeeshop-review", "template-skill"},
 	}
 	encoded, err = json.Marshal(message)
 	require.NoError(t, err)

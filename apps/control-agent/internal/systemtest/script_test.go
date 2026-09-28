@@ -18,6 +18,8 @@ type step struct {
 	Arguments           any         `json:"arguments,omitempty"`
 	As                  string      `json:"as,omitempty"`
 	AllowError          bool        `json:"allowError,omitempty"`
+	ExpectErrorCode     string      `json:"expectErrorCode,omitempty"`
+	MutateResultRemove  string      `json:"mutateResultRemove,omitempty"`
 	WaitFor             any         `json:"waitFor,omitempty"`
 	AcknowledgeDelivery bool        `json:"acknowledgeDelivery,omitempty"`
 	Permission          *permission `json:"permission,omitempty"`

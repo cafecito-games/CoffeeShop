@@ -34,7 +34,7 @@ const claudePluginSkillsDirectory = "./skills"
 // Discovery is confirmed against the same binary, offline and without credentials:
 //
 //	$ claude --plugin-dir <root> plugin details coffee-shop-barista
-//	coffee-shop-barista 1.1.0
+//	coffee-shop-barista 1.2.0
 //	Component inventory
 //	  Skills (4)  coffeeshop-artifacts, coffeeshop-coordination, coffeeshop-preview, coffeeshop-task-reporting
 //
