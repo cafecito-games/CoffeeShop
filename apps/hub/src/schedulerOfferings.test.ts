@@ -397,6 +397,47 @@ test("an explicit instance pin is authorized and exact", () => {
   assert.deepEqual(kinds(ambiguous, "one"), ["agent"]);
 });
 
+test("a lifecycle-requested instance reserves an offering before its exact initial task runs", () => {
+  const requested: AgentInstance = {
+    id: "instance-requested", threadId: "thread-one", creator: { kind: "operator", operatorId: "operator" },
+    delegation: { canDelegate: false }, requirements: { harnessIds: ["claude-cli"], models: ["fable"] },
+    lease: { idleTimeoutSeconds: 1800, expiresAt: later(1800) }, status: "requested", createdAt: at, updatedAt: at
+  };
+  const current = fixture([node("node-alpha")], [task("initial", requested.requirements, {
+    placementOverride: { instanceId: requested.id, authorizedBy: "policy" }
+  })], { instances: [requested] });
+
+  const first = runSchedulingPass(current.state, context(current), at);
+  assert.equal(first.changed, true);
+  assert.equal(instances(current).length, 1, "the lifecycle identity is reused rather than duplicated");
+  assert.equal(instances(current)[0].status, "provisioning");
+  assert.equal(allocations(current).length, 1);
+  assert.equal(allocations(current)[0].instanceId, requested.id);
+  assert.equal(deliveries(current, "provision").length, 1);
+  assert.equal(current.state.runs.length, 0, "dispatch waits for the exact ready acknowledgement");
+  assert.equal(taskById(current, "initial").placementOverride?.instanceId, requested.id);
+
+  const second = runSchedulingPass(current.state, context(current), later(1));
+  assert.equal(second.changed, false);
+  assert.equal(allocations(current).length, 1, "a repeated pass cannot reserve twice");
+});
+
+test("a requested exact pin reports hard offering mismatch without agent fallback", () => {
+  const requested: AgentInstance = {
+    id: "instance-requested", threadId: "thread-one", creator: { kind: "operator", operatorId: "operator" },
+    delegation: { canDelegate: false }, requirements: { models: ["other-model"] },
+    lease: { idleTimeoutSeconds: 1800, expiresAt: later(1800) }, status: "requested", createdAt: at, updatedAt: at
+  };
+  const current = fixture([node("node-alpha")], [task("initial", requested.requirements, {
+    placementOverride: { instanceId: requested.id, authorizedBy: "policy" }
+  })], { instances: [requested] });
+
+  runSchedulingPass(current.state, context(current), at);
+  assert.equal(allocations(current).length, 0);
+  assert.equal(current.state.runs.length, 0);
+  assert.ok(kinds(current, "initial").includes("model"));
+});
+
 test("a failed or draining allocation releases the placement and the retry gets fresh identities", () => {
   const current = fixture([node("node-alpha", { instanceCapacity: 2 })], [task("one")]);
   runSchedulingPass(current.state, context(current), at);

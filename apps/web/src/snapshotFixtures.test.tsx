@@ -7,6 +7,7 @@ import { isSnapshot } from "./hubConnection.js";
 import { ApprovalsView } from "./orchestration/ApprovalsView.js";
 import { SettingsView } from "./settings/SettingsView.js";
 import { ThreadsView } from "./ThreadsView.js";
+import { currentAllocationFor } from "./instances/instancePresentation.js";
 
 /*
  * Both fixtures are bytes the hub itself publishes. `hubSnapshot.json` is what `Store.snapshot()`
@@ -72,6 +73,21 @@ describe("hub snapshot fixtures", () => {
     expect(JSON.stringify(preview)).not.toContain("previewRegistrationReceipts");
     expect(JSON.stringify(preview)).not.toContain("previewProcessingReceipts");
     expect(JSON.stringify(preview)).not.toMatch(/signedUrl|bearer|token/i);
+  });
+
+  it("carries the Hub producer's exact v5 instance triplet and inert template defaults", () => {
+    const snapshot = current as Snapshot;
+    expect(snapshot.instances).toHaveLength(1);
+    expect(snapshot.allocations).toHaveLength(1);
+    expect(snapshot.templates).toHaveLength(1);
+    const instance = snapshot.instances![0];
+    expect(currentAllocationFor(instance.id, snapshot.allocations!)).toMatchObject({
+      kind: "current",
+      allocation: { instanceId: instance.id, status: "active" }
+    });
+    expect(snapshot.templates![0]).not.toHaveProperty("nodeId");
+    expect(snapshot.templates![0]).not.toHaveProperty("status");
+    expect(snapshot.templates![0]).not.toHaveProperty("sessionBindingId");
   });
 
   it("accepts ready preview metadata exactly as the Hub projects it", () => {

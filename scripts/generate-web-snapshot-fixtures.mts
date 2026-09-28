@@ -1,7 +1,7 @@
 /*
  * Regenerates the hub-snapshot fixtures the PWA tests load.
  *
- *   pnpm exec tsx scripts/generate-web-snapshot-fixtures.mts
+ *   pnpm --filter @coffee-shop/hub exec tsx ../../scripts/generate-web-snapshot-fixtures.mts
  *
  * The current fixture is whatever `Store.snapshot()` (apps/hub/src/store.ts) publishes for a state
  * built with the hub's own orchestration functions, so the PWA is tested against bytes the hub
@@ -14,10 +14,11 @@ import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { Agent, ComputeNode, Run, Snapshot, Thread } from "../packages/protocol/src/index.js";
+import type { Agent, AgentTemplate, ComputeNode, Run, Snapshot, Thread } from "../packages/protocol/src/index.js";
 import { openApproval, resolveApprovalInState } from "../apps/hub/src/approvals.js";
 import { attachThreadInState, createExternalThreadInState, postOperatorMessageInState } from "../apps/hub/src/externalOrchestrators.js";
 import { mintOrchestratorClient } from "../apps/hub/src/orchestratorClients.js";
+import { applyInstanceLifecycle, flushPendingInstanceDeliveries, receiveInstanceLifecycleReport, reserveInstanceAllocation } from "../apps/hub/src/instances.js";
 import { Store } from "../apps/hub/src/store.js";
 import { newThread } from "../apps/hub/src/threads.js";
 
@@ -27,9 +28,17 @@ const fixtureDirectory = join(repositoryRoot, "apps/web/src/test/fixtures");
 
 const node: ComputeNode = {
   id: "node-workshop", name: "Workshop", kind: "home-server", platform: "darwin · arm64", status: "online",
-  lastSeen: "2026-09-22T12:00:00.000Z", activeRuns: 1, concurrency: 2, workspaceRoots: ["/srv/workspaces"],
-  harnesses: [{ id: "claude-cli", label: "Claude", description: "Claude Code", available: true, authMode: "local-subscription", models: ["sonnet"] }],
+  lastSeen: "2026-09-22T12:00:00.000Z", activeRuns: 1, concurrency: 2, instanceCapacity: 2, activeInstances: 1,
+  workspaceRoots: ["/srv/workspaces"],
+  harnesses: [{ id: "claude-cli", label: "Claude", description: "Claude Code", available: true, authMode: "local-subscription", models: ["sonnet"], transports: ["native-cli", "acp-v1"] }],
   version: "0.1.0+fixture"
+};
+
+const template: AgentTemplate = {
+  id: "template-reviewer", name: "Reviewer", purpose: { title: "Reviewer", summary: "Reviews exact instance work" },
+  avatarShape: "bean", avatarColor: "sky", instructions: "Review carefully", skills: ["review"], tags: ["quality"],
+  requirements: { harnessIds: ["claude-cli"], models: ["sonnet"], transports: ["acp-v1"] },
+  delegation: { canDelegate: false }
 };
 
 const agent: Agent = {
@@ -56,23 +65,32 @@ function declaredKeys(name: string): Set<string> {
 function reduceToLegacyShape(snapshot: Snapshot): Record<string, unknown> {
   const snapshotKeys = declaredKeys("Snapshot");
   const threadKeys = declaredKeys("Thread");
+  const nodeKeys = declaredKeys("ComputeNode");
+  const harnessKeys = declaredKeys("HarnessProfile");
   const legacy = Object.fromEntries(Object.entries(snapshot).filter(([key]) => snapshotKeys.has(key)));
   legacy.threads = (snapshot.threads ?? [])
     // A hub of that vintage has no external threads: every thread it publishes has an owner agent.
     .filter((thread) => thread.ownerAgentId !== undefined)
     .map((thread) => Object.fromEntries(Object.entries(thread).filter(([key]) => threadKeys.has(key))));
+  legacy.nodes = snapshot.nodes.map((node) => {
+    const reduced = Object.fromEntries(Object.entries(node).filter(([key]) => nodeKeys.has(key)));
+    reduced.harnesses = node.harnesses.map((harness) => Object.fromEntries(Object.entries(harness).filter(([key]) => harnessKeys.has(key))));
+    return reduced;
+  });
   return legacy;
 }
 
 const directory = await mkdtemp(join(tmpdir(), "coffee-shop-fixture-"));
 const store = new Store(join(directory, "state.json"));
 await store.load();
+let externalThreadId = "";
 
 await store.transact((state) => {
   state.agents = [agent];
   state.nodes = [node];
   state.events = [];
   state.messages = [];
+  state.templates = [template];
 
   const agentThread: Thread = newThread(agent.id, "Ship the login path", "user", "2026-09-22T12:00:00.000Z");
   (state.threads ??= []).push(agentThread);
@@ -89,6 +107,7 @@ await store.transact((state) => {
     objective: "Rework the checkout funnel",
     title: "Checkout funnel"
   }, "2026-09-22T12:02:00.000Z");
+  externalThreadId = created.thread.id;
   attachThreadInState(state, { threadId: created.thread.id, clientId: orchestrating.client.id, connectionId: "connection-2" }, "2026-09-22T12:03:00.000Z");
   postOperatorMessageInState(state, { threadId: created.thread.id, body: "Please prioritize the login path" }, "2026-09-22T12:04:00.000Z");
 
@@ -114,6 +133,26 @@ await store.transact((state) => {
   );
   if (resolution.kind !== "resolved") throw new Error(`the fixture approval was not resolved: ${resolution.kind}`);
 });
+
+const fixtureOperator = { kind: "operator" as const, operatorId: "fixture-generator" };
+const lifecycle = await applyInstanceLifecycle(store, fixtureOperator, {
+  operation: "create",
+  threadId: externalThreadId,
+  idempotency: { caller: fixtureOperator, key: "fixture-instance" },
+  purpose: { name: "Checkout Reviewer", title: "Reviewer", summary: "Reviews the checkout funnel", instructions: "private fixture instructions" },
+  requirements: { templateId: template.id, harnessIds: ["claude-cli"], models: ["sonnet"], transports: ["acp-v1"] },
+  idleTimeoutSeconds: 1800
+}, "2026-09-22T12:07:00.000Z");
+const reservation = await reserveInstanceAllocation(store, lifecycle.instance.id, {
+  nodeId: node.id, harnessId: "claude-cli", model: "sonnet", transport: "acp-v1", workspace: "/srv/workspaces"
+}, "2026-09-22T12:07:01.000Z");
+if (reservation.kind !== "reserved") throw new Error(`fixture instance was not reserved: ${reservation.kind}`);
+await flushPendingInstanceDeliveries(store, () => true);
+const ready = await receiveInstanceLifecycleReport(store, node.id, {
+  type: "instance.ready", instanceId: lifecycle.instance.id, allocationId: reservation.allocation.id,
+  at: "2026-09-22T12:07:02.000Z"
+}, "2026-09-22T12:07:02.000Z");
+if (ready.kind !== "accepted") throw new Error(`fixture instance was not ready: ${ready.reason}`);
 
 const snapshot = store.snapshot();
 await mkdir(fixtureDirectory, { recursive: true });

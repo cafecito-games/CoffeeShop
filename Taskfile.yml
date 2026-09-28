@@ -59,6 +59,13 @@ tasks:
     cmds:
       - go test -tags system -count=1 -timeout 10m ./internal/systemtest/...
 
+  system:test:instances:
+    desc: Run the focused real-Hub/latest-Barista ephemeral-instance lifecycle proof
+    deps: [protocol:build]
+    dir: apps/control-agent
+    cmds:
+      - go test -tags system -count=1 -timeout 5m -run '^TestEphemeralInstance' ./internal/systemtest/...
+
   capability-pack:build:
     desc: Build the deterministic Coffee Shop capability pack archive
     dir: apps/control-agent

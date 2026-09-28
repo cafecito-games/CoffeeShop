@@ -50,7 +50,7 @@ import {
   type ResidentInstanceUsage
 } from "./instances.js";
 import { computeNodeProjectReadiness, defaultEvidenceTTLMilliseconds } from "./projectReadiness.js";
-import { sessionDispatchFor, type SessionDispatchSource } from "./sessionBindings.js";
+import { resumableSessionBindingFor, sessionDispatchFor, type SessionDispatchSource } from "./sessionBindings.js";
 import { newEvent, newId, type State } from "./store.js";
 import { assignTaskAttempt, readyTasks, taskReadiness } from "./tasks.js";
 import { dispatchableLease, exclusiveWorkspaceHolder, leasedIsolation, planWorkspaceLease } from "./workspaceLeases.js";
@@ -909,6 +909,7 @@ export function placeTask(task: Task, environment: PlacementEnvironment): Placem
 
   // An explicit pin is exact: no offering, reuse, or agent may stand in for the instance it names.
   const pinned = override && authorizedOverride ? override.instanceId : undefined;
+  let pinnedRequested: AgentInstance | undefined;
   if (pinned !== undefined) {
     const instance = (environment.instances ?? []).find((item) => item.id === pinned);
     if (!instance) {
@@ -919,12 +920,19 @@ export function placeTask(task: Task, environment: PlacementEnvironment): Placem
       const allocation = (environment.allocations ?? []).find((item) => item.instanceId === instance.id && item.status === "active")!;
       return { kind: "instance", instanceId: instance.id, diagnostic: diagnostic([allocation.nodeId], []) };
     }
-    // A pinned instance that is still coming up is a wait, not a failure: its allocation is already
-    // reserved, so re-placing the task could only overbook the fleet with a second resident.
-    if (instance.threadId === task.threadId && (instance.status === "requested" || instance.status === "provisioning")) {
+    /*
+     * A requested pinned instance without an allocation still needs its first reservation. Keep its
+     * exact identity and evaluate only live offerings below; once a reservation exists, waiting is
+     * correct and prevents a second resident slot from being consumed.
+     */
+    const awaitsFirstAllocation = instance.threadId === task.threadId && instance.status === "requested"
+      && !(environment.allocations ?? []).some((item) => item.instanceId === instance.id && occupyingAllocation(item.status));
+    if (awaitsFirstAllocation) pinnedRequested = instance;
+    else if (instance.threadId === task.threadId && (instance.status === "requested" || instance.status === "provisioning")) {
       return { kind: "waiting", instanceId: instance.id, diagnostic: diagnostic([], failures) };
+    } else {
+      return { kind: "unsatisfied", diagnostic: diagnostic([], failures) };
     }
-    return { kind: "unsatisfied", diagnostic: diagnostic([], failures) };
   }
 
   // A task that already owns an instance waits on exactly that instance, so a second pass can
@@ -948,10 +956,10 @@ export function placeTask(task: Task, environment: PlacementEnvironment): Placem
    * An instance whose allocation was lost returns to `requested` and keeps its identity, so its
    * replacement allocates afresh against the same record rather than becoming a second resident.
    */
-  const replacing = owned !== undefined && owned.status === "requested"
+  const replacing = pinnedRequested ?? (owned !== undefined && owned.status === "requested"
     && !(environment.allocations ?? []).some((item) => item.instanceId === owned.id && occupyingAllocation(item.status))
     ? owned
-    : undefined;
+    : undefined);
   const reusable = replacing !== undefined || pinnedAgentId !== undefined
     ? []
     : reusableInstances(effective, environment, profile, requiredNodeId);
@@ -1020,10 +1028,10 @@ export function placeTask(task: Task, environment: PlacementEnvironment): Placem
    * workspace-lease grant for Barista to honour, and so does a task pinned to a configured agent.
    * Nothing else prefers an agent over an offering.
    */
-  const agents = [...environment.agents]
+  const agents = pinned === undefined ? [...environment.agents]
     .filter((agent) => (pinnedAgentId === undefined || agent.id === pinnedAgentId)
       && (requiredNodeId === undefined || agent.computeNodeId === requiredNodeId))
-    .sort((left, right) => compareText(left.id, right.id));
+    .sort((left, right) => compareText(left.id, right.id)) : [];
   const agentEvaluations = agents.map((agent) => evaluateCandidate(effective, agent, profile, environment));
   const eligibleAgents = agentEvaluations.filter((evaluation) => evaluation.candidate !== undefined).sort(compareEligible);
   if (eligibleAgents.length) {
@@ -1259,6 +1267,42 @@ export function runSchedulingPass(state: State, context: SchedulingContext, at: 
     evidenceTTLMilliseconds: context.evidenceTTLMilliseconds,
     now: at
   });
+  /*
+   * A lifecycle request creates the durable identity before placement and may have no initial task.
+   * Drive those requested identities through the same offering authority as task-created residents;
+   * the synthetic intent is never persisted and configured-agent compatibility is deliberately
+   * ignored because an instance can only be provisioned by a live version-five offering.
+   */
+  for (const instance of [...(state.instances ?? [])].sort((left, right) => compareText(left.id, right.id))) {
+    if (instance.status !== "requested"
+      || (state.allocations ?? []).some((item) => item.instanceId === instance.id && occupyingAllocation(item.status))) continue;
+    const thread = state.threads?.find((item) => item.id === instance.threadId);
+    if (thread?.status !== "active") continue;
+    const intent: Task = {
+      id: `instance-placement:${instance.id}`,
+      threadId: instance.threadId,
+      title: instance.purpose?.name ?? instance.id,
+      instructions: "",
+      status: "ready",
+      requirements: structuredClone(instance.requirements),
+      dependencies: [],
+      idempotencyKey: `instance-placement:${instance.id}`,
+      attemptRunIds: [],
+      placementInstanceId: instance.id,
+      createdAt: instance.createdAt,
+      updatedAt: at
+    };
+    const decision = placeTask(intent, environmentFor());
+    if (decision.kind !== "offering") continue;
+    const reserved = reservationAsPlacement(state, instance.id, {
+      nodeId: decision.offering.nodeId,
+      harnessId: decision.offering.harnessId,
+      model: decision.offering.model,
+      transport: decision.offering.transport,
+      workspace: decision.offering.workspace
+    }, at);
+    if (reserved.kind === "placed") changed = true;
+  }
   for (const task of [...readyTasks(state)]) {
     const thread = state.threads?.find((item) => item.id === task.threadId);
     if (thread?.status !== "active" || taskReadiness(state, task).outcome !== "satisfied") continue;
@@ -1349,6 +1393,8 @@ export function runSchedulingPass(state: State, context: SchedulingContext, at: 
         createdAt: at,
         transport: allocation.transport
       };
+      const resumable = resumableSessionBindingFor(run, { nodes: state.nodes, sessionBindings: state.sessionBindings });
+      if (resumable) run.sessionBindingId = resumable.id;
       /*
        * The attempt's own identity is decided before the command is validated, because the wire
        * record carries it, and the command is validated before the attempt is committed, so a record

@@ -536,7 +536,8 @@ export async function applyInstanceLifecycle(
           instructions: request.initialTask.instructions,
           requirements: structuredClone(request.requirements),
           idempotencyKey: initialTaskIdempotencyKey(sourceKey, thread.id, request.idempotency.key),
-          sourceKey
+          sourceKey,
+          instanceId: instance.id
         }, at).id;
       }
       state.instances ??= [];

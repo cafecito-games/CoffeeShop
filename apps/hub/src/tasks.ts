@@ -528,6 +528,8 @@ export interface InitialTaskSeed {
   idempotencyKey: string;
   /** The canonical principal identity of the instance lifecycle caller. */
   sourceKey: string;
+  /** The instance created atomically with this task; the scheduler must never substitute another. */
+  instanceId: string;
 }
 
 /**
@@ -548,7 +550,8 @@ export function appendInitialTaskInState(state: State, threadId: string, seed: I
       dependencies: []
     }]
   });
-  const digest = taskBatchDigest(batch, threadId, seed.sourceKey);
+  const placementOverride: PlacementOverride = { instanceId: seed.instanceId, authorizedBy: "policy" };
+  const digest = taskBatchDigest(batch, threadId, seed.sourceKey, { initial: placementOverride });
   const prior = state.taskSubmissions?.find((item) =>
     item.threadId === threadId && item.origin === initialTaskOrigin && item.idempotencyKey === seed.idempotencyKey);
   if (prior) {
@@ -565,6 +568,7 @@ export function appendInitialTaskInState(state: State, threadId: string, seed: I
     status: "pending",
     requirements: structuredClone(batch.tasks[0].requirements),
     dependencies: [],
+    placementOverride,
     sourceKey: seed.sourceKey,
     idempotencyKey: seed.idempotencyKey,
     attemptRunIds: [],

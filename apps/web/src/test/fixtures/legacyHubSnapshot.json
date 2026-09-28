@@ -41,6 +41,10 @@
           "authMode": "local-subscription",
           "models": [
             "sonnet"
+          ],
+          "transports": [
+            "native-cli",
+            "acp-v1"
           ]
         }
       ],
@@ -59,44 +63,60 @@
       "status": "running",
       "output": "",
       "depth": 0,
-      "threadId": "thread_mud4zi3v_v96kiv",
+      "threadId": "thread_mukuym6u_d9fsg2",
       "createdAt": "2026-09-22T12:00:00.000Z"
     }
   ],
   "events": [
     {
       "type": "status",
+      "title": "Instance allocation reserved",
+      "detail": "Checkout Reviewer · provisioning on node-workshop",
+      "threadId": "thread_mukuym6v_m86hwn",
+      "id": "evt_mukuym6z_dbxfv5",
+      "createdAt": "2026-09-28T06:20:07.259Z"
+    },
+    {
+      "type": "status",
+      "title": "Instance requested",
+      "detail": "Checkout Reviewer · requested",
+      "threadId": "thread_mukuym6v_m86hwn",
+      "id": "evt_mukuym6x_qbg6p2",
+      "createdAt": "2026-09-28T06:20:07.257Z"
+    },
+    {
+      "type": "status",
       "title": "Approval approved",
       "detail": "Write to config.json",
-      "threadId": "thread_mud4zi3v_v96kiv",
+      "threadId": "thread_mukuym6u_d9fsg2",
       "agentId": "milo",
       "runId": "run-login",
-      "id": "evt_mud4zi3x_o5zjpm",
-      "createdAt": "2026-09-22T20:38:35.373Z"
+      "id": "evt_mukuym6v_cbsowp",
+      "createdAt": "2026-09-28T06:20:07.255Z"
     },
     {
       "type": "status",
       "title": "Approval requested",
       "detail": "Write to config.json",
-      "threadId": "thread_mud4zi3v_v96kiv",
+      "threadId": "thread_mukuym6u_d9fsg2",
       "agentId": "milo",
       "runId": "run-login",
-      "id": "evt_mud4zi3x_zf2tmg",
-      "createdAt": "2026-09-22T20:38:35.373Z"
+      "id": "evt_mukuym6v_vaq3o7",
+      "createdAt": "2026-09-28T06:20:07.255Z"
     },
     {
       "type": "status",
       "title": "Thread created",
       "detail": "Checkout funnel",
-      "threadId": "thread_mud4zi3w_tudoki",
-      "id": "evt_mud4zi3w_qiucv4",
-      "createdAt": "2026-09-22T20:38:35.372Z"
+      "threadId": "thread_mukuym6v_m86hwn",
+      "id": "evt_mukuym6v_qwjhud",
+      "createdAt": "2026-09-28T06:20:07.255Z"
     }
   ],
   "messages": [],
   "threads": [
     {
-      "id": "thread_mud4zi3v_v96kiv",
+      "id": "thread_mukuym6u_d9fsg2",
       "title": "Ship the login path",
       "objective": "Ship the login path",
       "summary": "",
@@ -114,8 +134,8 @@
   "tasks": [],
   "taskMessages": [
     {
-      "id": "taskmsg_mud4zi3x_jy1h4z",
-      "threadId": "thread_mud4zi3w_tudoki",
+      "id": "taskmsg_mukuym6v_4ui8lb",
+      "threadId": "thread_mukuym6v_m86hwn",
       "sender": {
         "type": "operator"
       },
@@ -127,7 +147,7 @@
       "body": "Please prioritize the login path",
       "artifactIds": [],
       "sourceKey": "operator",
-      "idempotencyKey": "opmsg_mud4zi3x_iw1lme",
+      "idempotencyKey": "opmsg_mukuym6v_880z4w",
       "createdAt": "2026-09-22T12:04:00.000Z"
     }
   ],
@@ -135,9 +155,9 @@
   "sessionBindings": [],
   "approvals": [
     {
-      "id": "approval_mud4zi3x_fyn8o5",
+      "id": "approval_mukuym6v_gexgv3",
       "harnessApprovalId": "acp-permission-1",
-      "threadId": "thread_mud4zi3v_v96kiv",
+      "threadId": "thread_mukuym6u_d9fsg2",
       "runId": "run-login",
       "nodeId": "node-workshop",
       "title": "Write to config.json",
@@ -160,8 +180,8 @@
       "resolvedAt": "2026-09-22T12:06:00.000Z",
       "resolvedBy": {
         "kind": "orchestrator",
-        "clientId": "orchestrator-client-a17822b2f216a5c9",
-        "attachmentId": "attachment_mud4zi3w_opbgp4"
+        "clientId": "orchestrator-client-ddad4cf081a7d322",
+        "attachmentId": "attachment_mukuym6v_k7hn4n"
       },
       "delivery": {
         "status": "pending",
@@ -173,5 +193,5 @@
     }
   ],
   "workspaceLeases": [],
-  "generatedAt": "2026-09-22T20:38:35.373Z"
+  "generatedAt": "2026-09-28T06:20:07.261Z"
 }

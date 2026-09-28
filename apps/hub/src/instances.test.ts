@@ -220,6 +220,7 @@ test("creates an instance and its initial task atomically", async () => {
     assert.equal(task.threadId, "thread-one");
     assert.equal(task.status, "ready");
     assert.equal(task.sourceKey, "operator:operator");
+    assert.deepEqual(task.placementOverride, { instanceId: result.instance.id, authorizedBy: "policy" });
   });
 });
 

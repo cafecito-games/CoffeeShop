@@ -7,7 +7,7 @@ import type { AcpAgentCapabilities, HarnessSessionBinding, HarnessSessionBinding
 import { fixtureAgent, fixtureNode, fixtureRun, fixtureTime, orchestrationStore, rootRunId } from "./hubToolsTestSupport.js";
 import { applyRunLifecycle, cancelRunInState } from "./lifecycle.js";
 import { dispatchMessageFor } from "./scheduler.js";
-import { acceptSessionBinding, retainedTerminalSessionBindings, sessionDispatchFor, settleSessionBindingsForTerminalRun, type SessionBindingOutcome } from "./sessionBindings.js";
+import { acceptSessionBinding, resumableSessionBindingFor, retainedTerminalSessionBindings, sessionDispatchFor, settleSessionBindingsForTerminalRun, type SessionBindingOutcome } from "./sessionBindings.js";
 import { Store, type State } from "./store.js";
 
 const later = (minutes: number) => new Date(Date.parse(fixtureTime) + minutes * 60_000).toISOString();
@@ -280,6 +280,47 @@ test("a terminal run settles its bindings: idle with capabilities only after a c
     settleSessionBindingsForTerminalRun(state, "run-unknown", later(2));
     assert.equal(state.sessionBindings![0].status, "idle", "an unrelated terminal run settles nothing");
     return true;
+  });
+});
+
+test("a completed instance task leaves one exact-allocation session for the next task", async () => {
+  const store = await orchestrationStore();
+  await store.transact((state) => {
+    state.nodes = advertisingNodes;
+    const first = acpRun({
+      agentId: undefined,
+      instanceId: "instance-one",
+      allocationId: "allocation-one",
+      taskId: "task-one",
+      status: "completed",
+      transportSelection: { requestedTransport: "acp-v1", selectedTransport: "acp-v1", acp: resumable }
+    });
+    const resident = binding({
+      agentId: undefined,
+      instanceId: "instance-one",
+      allocationId: "allocation-one",
+      status: "active",
+      lastRunId: first.id,
+      capabilities: undefined
+    });
+    state.runs.unshift(first);
+    state.sessionBindings = [resident];
+    settleSessionBindingsForTerminalRun(state, first.id, later(1));
+    assert.equal(resident.status, "idle");
+    assert.deepEqual(resident.capabilities, resumable);
+
+    const next = acpRun({
+      id: "run-next",
+      agentId: undefined,
+      instanceId: "instance-one",
+      allocationId: "allocation-one",
+      taskId: "task-two"
+    });
+    assert.equal(resumableSessionBindingFor(next, { nodes: state.nodes, sessionBindings: state.sessionBindings })?.id, resident.id);
+    assert.equal(resumableSessionBindingFor({ ...next, allocationId: "allocation-replacement" }, {
+      nodes: state.nodes, sessionBindings: state.sessionBindings
+    }), undefined, "a replacement allocation never adopts the old provider session");
+    return false;
   });
 });
 
