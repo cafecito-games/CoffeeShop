@@ -28,6 +28,7 @@ import {
   previewBundleMediaType,
   runSourceKey,
   validateArtifactPreviewRecord,
+  validateComponentInventoryReport,
   validateProjectProfile,
   withOrchestrationDefaults,
   type ArtifactPreviewFailureCode,
@@ -250,8 +251,29 @@ const emptyState = (): State => withOrchestrationDefaults({
   orchestratorInboxes: [],
   orchestratorClients: [],
   orchestratorAttachments: [],
-  projectProfiles: []
+  projectProfiles: [],
+  componentInventories: []
 });
+
+/** Adds the informational inventory collection to states written before component reporting. */
+export function addComponentInventoryDefaults(state: State) {
+  if (state.componentInventories !== undefined) return false;
+  state.componentInventories = [];
+  return true;
+}
+
+export function assertPersistedComponentInventories(state: State) {
+  if (!Array.isArray(state.componentInventories)) throw new Error("Persisted component inventory collection is malformed");
+  const nodeIds = new Set(state.nodes.map((node) => node.id));
+  const reported = new Set<string>();
+  for (const [index, report] of state.componentInventories.entries()) {
+    const validated = validateComponentInventoryReport(report);
+    if (!validated.ok) throw new Error(`Persisted component inventory ${index} is invalid: ${validated.reason}`);
+    if (!nodeIds.has(validated.value.nodeId)) throw new Error(`Persisted component inventory ${index} names an unknown node`);
+    if (reported.has(validated.value.nodeId)) throw new Error(`Persisted component inventory ${index} repeats node ${validated.value.nodeId}`);
+    reported.add(validated.value.nodeId);
+  }
+}
 
 export function addOrchestrationDefaults(state: State) {
   const changed = orchestrationCollections.some((collection) => state[collection] == null) || state.taskSubmissions == null
@@ -1082,6 +1104,7 @@ export class Store {
     addInstanceDefaults(loaded);
     const addedTemplateConfiguration = addAgentTemplateConfigurationDefaults(loaded);
     addArtifactPreviewDefaults(loaded);
+    const addedComponentInventories = addComponentInventoryDefaults(loaded);
     if (this.sqlite) loaded.projectProfiles ??= [];
     const addedApprovalResolvers = addApprovalResolverDefaults(loaded);
     assertPersistedTaskState(loaded);
@@ -1106,6 +1129,7 @@ export class Store {
     const droppedBorrowedKeys = dropBorrowedInstanceAgentKeys(loaded);
     assertPersistedActorState(loaded);
     assertPersistedArtifactPreviewState(loaded);
+    assertPersistedComponentInventories(loaded);
     /*
      * The legacy import runs after every assertion, so it never writes on top of state the hub could
      * not interpret, and it is decided from its own persisted records rather than from a timestamp:
@@ -1116,7 +1140,7 @@ export class Store {
     // timestamp (and WAL write) merely because the Hub restarted; imports/default migrations still
     // persist exactly once, and a new database must always receive its initial row.
     const explicitMigration = removedDemoRecords || addedAgentAvatars || addedCoordination || addedThreads || addedOrchestration
-      || addedThreadOrchestrators || addedApprovalResolvers || addedTemplateConfiguration || droppedBorrowedKeys || importedTemplates;
+      || addedThreadOrchestrators || addedApprovalResolvers || addedTemplateConfiguration || addedComponentInventories || droppedBorrowedKeys || importedTemplates;
     if (needsInitialSqliteWrite || explicitMigration || (this.sqlite && JSON.stringify(loaded) !== beforeMigrations)) await this.save(loaded);
     this.state = loaded;
   }

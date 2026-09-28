@@ -63,6 +63,48 @@ export interface ComputeNode {
   version: string;
 }
 
+export const componentKinds = ["harness", "acp-adapter", "capability-pack"] as const;
+export type ComponentKind = typeof componentKinds[number];
+export const componentProvenances = ["managed", "external", "none", "rejected"] as const;
+export type ComponentProvenance = typeof componentProvenances[number];
+export const componentReadinesses = ["ready", "inactive", "unavailable", "rejected", "unhealthy", "not-applicable"] as const;
+export type ComponentReadiness = typeof componentReadinesses[number];
+export const componentDiagnosticCodes = [
+  "activation-rejected", "not-activated", "active-unverified", "harness-unavailable",
+  "auth-unavailable", "auth-unhealthy", "platform-unsupported", "update-available", "rollback-available"
+] as const;
+export type ComponentDiagnosticCode = typeof componentDiagnosticCodes[number];
+export const componentInventoryLimits = {
+  components: 64,
+  installedVersions: 32,
+  diagnosticCodes: 16,
+  identifierBytes: 128,
+  versionBytes: 32
+} as const;
+
+/** Bounded, path-free facts reported by one Barista for one manifest component identity. */
+export interface ComponentInventoryEntry {
+  kind: ComponentKind;
+  id: string;
+  harnessId?: string;
+  declaredVersion: string;
+  installedVersions: string[];
+  activeVersion?: string;
+  rollbackVersion?: string;
+  provenance: ComponentProvenance;
+  readiness: ComponentReadiness;
+  updateVersion?: string;
+  rollbackAvailable: boolean;
+  diagnosticCodes: ComponentDiagnosticCode[];
+}
+
+/** A complete inventory snapshot for one registered Barista, never scheduler authority. */
+export interface ComponentInventoryReport {
+  nodeId: string;
+  observedAt: string;
+  components: ComponentInventoryEntry[];
+}
+
 /** Compatibility-only persisted agent. New reusable defaults use AgentTemplate. */
 export interface Agent {
   id: string;
@@ -371,6 +413,8 @@ export interface Snapshot {
   workspaceLeases?: WorkspaceLease[];
   /** Hub-managed project definitions used for readiness checks and isolated workspace leases. */
   projectProfiles?: ProjectProfile[];
+  /** Last accepted informational component reports, retained when their nodes disconnect. */
+  componentInventories?: ComponentInventoryReport[];
   /** Version-4: bounded projections of accepted structured harness events, one per run. */
   runActivity?: RunActivity[];
   generatedAt: string;
@@ -475,6 +519,7 @@ export type ControlAgentToHub =
   | { type: "session.binding"; runId: string; binding: HarnessSessionBindingUpdate; at: string }
   | { type: "workspace.lease"; runId: string; lease: WorkspaceLeaseUpdate; at: string }
   | { type: "capability.report"; report: NodeCapabilityReport }
+  | { type: "component.inventory"; report: ComponentInventoryReport }
   | { type: "approval.undeliverable"; runId: string; approvalId: string; reason: string; at: string };
 
 /** @deprecated Use HubToControlAgent. */
@@ -493,14 +538,15 @@ export const controlProtocolVersions = ["1", "2", "3", "4", "5"] as const;
 export type ControlProtocolVersion = typeof controlProtocolVersions[number];
 export const latestControlProtocolVersion: ControlProtocolVersion = "5";
 
-export const controlProtocolCapabilities = ["replay-barrier", "hub-rpc", "orchestration", "instances"] as const;
+export const controlProtocolCapabilities = ["replay-barrier", "hub-rpc", "orchestration", "instances", "component-inventory"] as const;
 export type ControlProtocolCapability = typeof controlProtocolCapabilities[number];
 
 const capabilityIntroducedIn: Readonly<Record<ControlProtocolCapability, ControlProtocolVersion>> = {
   "replay-barrier": "2",
   "hub-rpc": "3",
   orchestration: "4",
-  instances: "5"
+  instances: "5",
+  "component-inventory": "5"
 };
 
 const isOneOf = <T extends string>(values: readonly T[]) => (value: unknown): value is T =>
@@ -551,6 +597,8 @@ export function requiredCapabilityForControlAgentMessage(message: ControlAgentTo
     case "capability.report":
     case "approval.undeliverable":
       return "orchestration";
+    case "component.inventory":
+      return "component-inventory";
     case "register":
       return message.node.instanceCapacity !== undefined || message.node.activeInstances !== undefined ? "instances" : undefined;
     case "heartbeat":
@@ -570,7 +618,7 @@ export function requiredCapabilityForControlAgentMessage(message: ControlAgentTo
  * forwarded on the strength of its remaining fields.
  */
 const hubToControlAgentMessageTypes = ["dispatch", "cancel", "hub.rpc.response", "approval.decision", "workspace.cleanup", "workspace.lease.confirmed", "ping"] as const;
-const controlAgentToHubMessageTypes = ["register", "sync.complete", "heartbeat", "run.started", "run.output", "run.completed", "run.failed", "run.cancelled", "hub.rpc.request", "harness.event", "session.binding", "workspace.lease", "capability.report", "approval.undeliverable"] as const;
+const controlAgentToHubMessageTypes = ["register", "sync.complete", "heartbeat", "run.started", "run.output", "run.completed", "run.failed", "run.cancelled", "hub.rpc.request", "harness.event", "session.binding", "workspace.lease", "capability.report", "component.inventory", "approval.undeliverable"] as const;
 const knownMessageType = (type: string, legacy: readonly string[], instance: readonly string[]) =>
   legacy.includes(type) || instance.includes(type);
 
@@ -585,6 +633,8 @@ export const canAcceptFromControlAgent = (message: ControlAgentToHub | InstanceC
   if (!knownMessageType(message.type, controlAgentToHubMessageTypes, instanceControlMessageTypes)) return false;
   const capability = requiredCapabilityForControlAgentMessage(message);
   if (capability === "instances") return validateInstanceControlMessage(message, version).ok;
+  if (capability === "component-inventory") return supportsControlCapability(version, capability)
+    && message.type === "component.inventory" && validateComponentInventoryReport(message.report).ok;
   return isControlProtocolVersion(version) && (capability === undefined || supportsControlCapability(version, capability));
 };
 
@@ -1576,6 +1626,63 @@ const isDiagnostic = (value: unknown) => isBoundedString(value, harnessEventLimi
 
 const accept = <T>(value: T): Validation<T> => ({ ok: true, value });
 const reject = <T>(reason: string): Validation<T> => ({ ok: false, reason });
+
+const componentIdentifierPattern = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const componentString = (value: unknown): value is string => typeof value === "string"
+  && byteLength(value) <= componentInventoryLimits.identifierBytes && componentIdentifierPattern.test(value);
+const componentVersion = (value: unknown): value is string => isNormalizedVersion(value)
+  && byteLength(value) <= componentInventoryLimits.versionBytes;
+const sortedUnique = <T extends string>(value: unknown, limit: number, check: (item: unknown) => item is T): value is T[] =>
+  Array.isArray(value) && value.length <= limit && value.every(check)
+  && value.every((item, index) => index === 0 || value[index - 1] < item);
+
+export function validateComponentInventoryEntry(value: unknown): Validation<ComponentInventoryEntry> {
+  if (!isRecord(value) || !hasOnlyKeys(value, [
+    "kind", "id", "harnessId", "declaredVersion", "installedVersions", "activeVersion", "rollbackVersion",
+    "provenance", "readiness", "updateVersion", "rollbackAvailable", "diagnosticCodes"
+  ])) return reject("component inventory entry must contain only declared fields");
+  if (!isOneOf(componentKinds)(value.kind) || !componentString(value.id)
+    || !isOptional(value.harnessId, componentString) || !componentVersion(value.declaredVersion)) {
+    return reject("component inventory entry identity is malformed");
+  }
+  if (value.kind === "capability-pack" ? value.harnessId !== undefined : value.harnessId === undefined) {
+    return reject("component inventory harness identity does not match its kind");
+  }
+  if (!sortedUnique(value.installedVersions, componentInventoryLimits.installedVersions, componentVersion)
+    || !isOptional(value.activeVersion, componentVersion) || !isOptional(value.rollbackVersion, componentVersion)
+    || !isOptional(value.updateVersion, componentVersion)) return reject("component inventory versions are malformed");
+  if (!isOneOf(componentProvenances)(value.provenance) || !isOneOf(componentReadinesses)(value.readiness)
+    || typeof value.rollbackAvailable !== "boolean"
+    || !sortedUnique(value.diagnosticCodes, componentInventoryLimits.diagnosticCodes, isOneOf(componentDiagnosticCodes))) {
+    return reject("component inventory status is malformed");
+  }
+  const installedVersions = value.installedVersions as string[];
+  const rollbackVersion = value.rollbackVersion as string | undefined;
+  if (value.rollbackAvailable !== (rollbackVersion !== undefined && installedVersions.includes(rollbackVersion))) {
+    return reject("component inventory rollback facts conflict");
+  }
+  if (value.kind === "capability-pack" && value.readiness !== "not-applicable") {
+    return reject("capability pack executable readiness must be not-applicable");
+  }
+  return accept(value as unknown as ComponentInventoryEntry);
+}
+
+export function validateComponentInventoryReport(value: unknown): Validation<ComponentInventoryReport> {
+  if (!isRecord(value) || !hasOnlyKeys(value, ["nodeId", "observedAt", "components"])
+    || !componentString(value.nodeId) || !isTimestamp(value.observedAt)
+    || !Array.isArray(value.components) || value.components.length > componentInventoryLimits.components) {
+    return reject("component inventory report is malformed");
+  }
+  let previousKey: string | undefined;
+  for (const [index, component] of value.components.entries()) {
+    const validated = validateComponentInventoryEntry(component);
+    if (!validated.ok) return reject(`component inventory entry ${index} is invalid: ${validated.reason}`);
+    const key = `${validated.value.kind}\u0000${validated.value.id}`;
+    if (previousKey !== undefined && previousKey >= key) return reject("component inventory keys must be sorted and unique");
+    previousKey = key;
+  }
+  return accept(value as unknown as ComponentInventoryReport);
+}
 
 export interface PreviewBundlePathOptions {
   /** Entrypoints are regular HTML files, never directories or extensionless aliases. */

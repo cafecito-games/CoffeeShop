@@ -24,12 +24,13 @@ import (
 )
 
 type Client struct {
-	config                config.Config
-	node                  protocol.ComputeNode
-	runner                *harness.Runner
-	bridge                *mcpserver.Server
-	buildCapabilityReport func(context.Context) protocol.NodeCapabilityReport
-	workspaces            *workspace.Manager
+	config                  config.Config
+	node                    protocol.ComputeNode
+	runner                  *harness.Runner
+	bridge                  *mcpserver.Server
+	buildCapabilityReport   func(context.Context) protocol.NodeCapabilityReport
+	buildComponentInventory func(context.Context) protocol.ComponentInventoryReport
+	workspaces              *workspace.Manager
 	// leaseConfirmationTimeout bounds how long a leased run waits for the hub to confirm its
 	// active lease; zero means defaultLeaseConfirmationTimeout.
 	leaseConfirmationTimeout time.Duration
@@ -75,6 +76,13 @@ func NewClient(cfg config.Config, node protocol.ComputeNode, runner *harness.Run
 	client.node.InstanceCapacity = &instanceCapacity
 	client.node.ActiveInstances = &activeInstances
 	client.bridge = mcpserver.New(client.callHub, client.uploadArtifact, cfg.DataRoot)
+	return client
+}
+
+// WithComponentInventory installs the fresh, connection-scoped inventory builder. It is kept out
+// of the generic outbox: attach invokes it only after this socket's registration acknowledgement.
+func (client *Client) WithComponentInventory(build func(context.Context) protocol.ComponentInventoryReport) *Client {
+	client.buildComponentInventory = build
 	return client
 }
 
@@ -185,6 +193,17 @@ func (client *Client) attach(ctx context.Context, connection *websocket.Conn) er
 	if err := awaitRegistrationAcknowledgement(ctx, connection); err != nil {
 		client.connection = nil
 		return err
+	}
+	if client.buildComponentInventory != nil {
+		report := client.buildComponentInventory(ctx)
+		if err := report.Validate(); err != nil {
+			client.connection = nil
+			return fmt.Errorf("build component inventory: %w", err)
+		}
+		if err := write(ctx, connection, protocol.ComponentInventoryMessage{Type: "component.inventory", Report: report}); err != nil {
+			client.connection = nil
+			return err
+		}
 	}
 	for len(client.outbox) > 0 {
 		if err := writeBytes(ctx, connection, client.outbox[0]); err != nil {
@@ -744,7 +763,7 @@ func (client *Client) cancelRuns() {
 	}
 }
 
-func write(ctx context.Context, connection *websocket.Conn, message protocol.Outbound) error {
+func write(ctx context.Context, connection *websocket.Conn, message any) error {
 	data, err := json.Marshal(message)
 	if err != nil {
 		return err

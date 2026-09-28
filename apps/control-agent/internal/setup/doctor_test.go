@@ -2,10 +2,12 @@ package setup
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -159,9 +161,98 @@ func TestRunDoctorReportsComponentAndHubStatus(t *testing.T) {
 	require.Equal(t, []string{"no platform distribution for darwin-arm64"}, unsupported.Notes)
 	require.Empty(t, unsupported.ComponentPath)
 
+	startupRefused := AssessComponents(context.Background(), manifest, ledger, dataRoot, "darwin-arm64", activation, harnesses,
+		ComponentAssessmentOptions{ACPStartupEvidenceKnown: true})
+	for _, assessment := range startupRefused {
+		if assessment.Component.ID == "ready-acp" {
+			require.Equal(t, "unhealthy", assessment.Readiness)
+			require.Equal(t, ComponentProvenanceNone, assessment.Provenance)
+			require.Contains(t, assessment.DiagnosticCodes, "active-unverified")
+		}
+	}
+	startupReadyProfiles := slices.Clone(harnesses)
+	startupReadyProfiles[0].Transports = []string{protocol.TransportNativeCLI, protocol.TransportACP}
+	startupReady := AssessComponents(context.Background(), manifest, ledger, dataRoot, "darwin-arm64", activation, startupReadyProfiles,
+		ComponentAssessmentOptions{ACPStartupEvidenceKnown: true})
+	for _, assessment := range startupReady {
+		if assessment.Component.ID == "ready-acp" {
+			require.Equal(t, "ready", assessment.Readiness)
+			require.Equal(t, ComponentProvenanceManaged, assessment.Provenance)
+			require.NotContains(t, assessment.DiagnosticCodes, "active-unverified")
+		}
+	}
+
 	require.True(t, report.HubConnectivity.Reachable)
 	require.Equal(t, "http://hub.example:8787", report.HubConnectivity.Endpoint)
 	require.Empty(t, report.HubConnectivity.Detail)
+}
+
+func TestComponentAssessmentIsDeterministicAndRemoteProjectionIsPathFree(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("auth probe fixture is a shell script")
+	}
+	manifest := doctorManifestFixture(t)
+	dataRoot := t.TempDir()
+	probe := writeProbeScript(t, t.TempDir(), "ready", "#!/bin/sh\nexit 0\n")
+	harnesses := []protocol.HarnessProfile{{ID: "claude-cli", Available: true, Binary: probe}}
+	assessments := AssessComponents(context.Background(), manifest, OwnershipLedger{}, dataRoot, "darwin-arm64", ActivationState{}, harnesses)
+	require.Len(t, assessments, 4)
+	for index := 1; index < len(assessments); index++ {
+		left := string(assessments[index-1].Component.Kind) + "\x00" + assessments[index-1].Component.ID
+		right := string(assessments[index].Component.Kind) + "\x00" + assessments[index].Component.ID
+		require.Less(t, left, right)
+	}
+	projected := ComponentInventoryReport("node-one", "2026-09-28T12:00:00Z", assessments)
+	require.NoError(t, projected.Validate())
+	encoded, err := json.Marshal(projected)
+	require.NoError(t, err)
+	require.NotContains(t, string(encoded), `"installedVersions":null`)
+	require.NotContains(t, string(encoded), `"diagnosticCodes":null`)
+	require.NotContains(t, string(encoded), dataRoot)
+	for _, forbidden := range []string{"dataRoot", "componentPath", "notes", "contentSha256", "authDocsUrl", "executablePath", "environment", "command", "raw probe"} {
+		require.NotContains(t, string(encoded), forbidden)
+	}
+	require.Equal(t, ComponentProvenanceNone, doctorEntryFor(RunDoctor(context.Background(), manifest, OwnershipLedger{}, dataRoot, "darwin-arm64", ActivationState{}, harnesses, "", nil), "ready-acp").Provenance)
+	for _, assessment := range assessments {
+		if assessment.Component.ID == "unsupported-acp" {
+			require.Equal(t, []string{"platform-unsupported"}, assessment.DiagnosticCodes)
+		}
+	}
+}
+
+func TestComponentAssessmentEnumeratesOnlyVerifiedOwnedVersions(t *testing.T) {
+	manifest := doctorManifestFixture(t)
+	declared := manifest.Components[0]
+	retained := declared
+	retained.Version = "0.9.0"
+	drifted := declared
+	drifted.Version = "0.8.0"
+	dataRoot := t.TempDir()
+	ledger, _ := installOwnedComponent(t, dataRoot, OwnershipLedger{}, declared, []byte("declared"))
+	ledger, _ = installOwnedComponent(t, dataRoot, ledger, retained, []byte("retained"))
+	ledger, driftedPath := installOwnedComponent(t, dataRoot, ledger, drifted, []byte("drifted"))
+	require.NoError(t, os.WriteFile(driftedPath, []byte("tampered"), 0o755))
+
+	assessments := AssessComponents(context.Background(), manifest, ledger, dataRoot, "darwin-arm64", ActivationState{}, nil)
+	var ready ComponentAssessment
+	for _, assessment := range assessments {
+		if assessment.Component.ID == declared.ID {
+			ready = assessment
+		}
+	}
+	require.Equal(t, []string{"0.9.0", "1.0.0"}, ready.InstalledVersions,
+		"all and only ownership records that pass containment, type, and digest verification are reported")
+}
+
+func TestRejectedCapabilityPackRemainsNonExecutableAndSerializable(t *testing.T) {
+	entry := capabilityPackEntry("1.0.0")
+	activation := ActivationState{Rejection: errors.New("rejected activation fixture")}
+	assessment := AssessComponents(context.Background(), declaredManifest(t, entry), OwnershipLedger{}, t.TempDir(), "darwin-arm64", activation, nil)
+	require.Len(t, assessment, 1)
+	require.Equal(t, ComponentProvenanceRejected, assessment[0].Provenance)
+	require.Equal(t, "not-applicable", assessment[0].Readiness)
+	require.Equal(t, []string{"activation-rejected"}, assessment[0].DiagnosticCodes)
+	require.NoError(t, ComponentInventoryReport("node-one", "2026-09-28T12:00:00Z", assessment).Validate())
 }
 
 // TestRunDoctorNeverRunsAuthProbeForUninstalledHarness proves the core of fix 2's runtime

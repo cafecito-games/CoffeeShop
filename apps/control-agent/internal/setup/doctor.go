@@ -160,6 +160,7 @@ func RunDoctor(
 	harnesses []protocol.HarnessProfile,
 	controlEndpoint string,
 	dial func(ctx context.Context, endpoint string) error,
+	assessmentOptions ...ComponentAssessmentOptions,
 ) Report {
 	report := Report{
 		Platform:         platform,
@@ -168,71 +169,15 @@ func RunDoctor(
 		ProjectReadiness: ProjectReadinessNotAvailable,
 		Activation:       activationStatus(activation),
 	}
-	for index := range manifest.Components {
-		entry := manifest.Components[index]
-		harnessProfile, discovered := findHarnessProfile(harnesses, entry.HarnessID)
-		doctorEntry := ComponentDoctorEntry{
-			Component:        entry.Ref(),
-			HarnessID:        entry.HarnessID,
-			HarnessInstalled: discovered && harnessProfile.Available,
-			// A kind with no harness of its own never claims one is installed, and says so explicitly
-			// rather than leaving a false to be read as a missing dependency.
-			HarnessApplicable: entry.Kind.HasHarnessOfItsOwn(),
-			AuthReadiness:     AuthReadinessUnknown,
-			Provenance:        ComponentProvenanceNone,
-		}
-		if !doctorEntry.HarnessApplicable {
-			doctorEntry.HarnessInstalled = false
-		}
-		// The activated version is resolved through the one launch-resolution path, so doctor can
-		// never report a provenance the daemon would not act on. The resolution is read-only.
-		activeInstalled, activeErr := ActiveInstalledComponent(dataRoot, manifest, platform, ledger, activation, entry.Ref().Identity())
-		describeActivation(&doctorEntry, activation, activeErr, doctorEntry.HarnessInstalled)
-		distribution, supported := entry.Platforms[platform]
-		if !supported {
-			// A component with no distribution for this platform stays visible in the report with a
-			// note; silently dropping it would hide unsupported-platform gaps the operator asked
-			// doctor to surface.
-			doctorEntry.Notes = append(doctorEntry.Notes, "no platform distribution for "+platform)
-			report.Components = append(report.Components, doctorEntry)
-			continue
-		}
-		targetPath, err := ComponentTargetPath(dataRoot, entry, distribution)
-		if err != nil {
-			// A kind with no install location is reported as a gap rather than guessed at; the note
-			// names only the kind, which is a closed vocabulary value, never manifest free text.
-			doctorEntry.Notes = append(doctorEntry.Notes, "no install location for component kind "+string(entry.Kind))
-			report.Components = append(report.Components, doctorEntry)
-			continue
-		}
-		doctorEntry.ComponentPath = targetPath
-		// Installed means the ledger record still matches the file on disk — a stale ledger entry
-		// over a deleted or corrupted file must not report as installed. observeCurrentState makes
-		// exactly that distinction, and anything ambiguous classifies as not installed.
-		doctorEntry.ComponentInstalled = observeCurrentState(targetPath, ledger) == ExpectedOwnedMatch
-		if doctorEntry.ComponentInstalled && doctorEntry.ActiveVersion == "" && activation.Rejection == nil {
-			// Installation and activation are separate operations, so an installed-but-unselected
-			// version is a reportable gap rather than a silent one.
-			doctorEntry.Notes = append(doctorEntry.Notes, "installed but not activated; run `barista setup activate`")
-		}
-		if spec, allowed := AuthProbeAllowlist[entry.HarnessID]; allowed && doctorEntry.HarnessInstalled {
-			doctorEntry.AuthReadiness = RunAuthProbe(ctx, harnessProfile.Binary, spec.Arguments, spec.SuccessExitCode)
-		}
-		// ACP launch readiness is exactly the conjunction of the three inputs the adapter launch path
-		// itself requires: a discovered harness, an activated adapter version that re-verifies right
-		// now (activeErr == nil, which is what acpadapter.Load resolves), and ready authentication. It
-		// deliberately does not require the *manifest-pinned* version to be the activated one: a
-		// retained version the manifest no longer declares still launches, so reporting it as
-		// not-ready would contradict the daemon.
-		doctorEntry.ACPLaunchReady = entry.Kind == ComponentKindACPAdapter &&
-			doctorEntry.HarnessInstalled &&
-			activeErr == nil &&
-			doctorEntry.AuthReadiness == AuthReadinessReady
-		if activeErr == nil && activeInstalled.Ref().Version != entry.Version {
-			doctorEntry.Notes = append(doctorEntry.Notes,
-				"the active version is retained from an earlier manifest and is no longer declared by this one")
-		}
-		report.Components = append(report.Components, doctorEntry)
+	for _, assessment := range AssessComponents(ctx, manifest, ledger, dataRoot, platform, activation, harnesses, assessmentOptions...) {
+		report.Components = append(report.Components, ComponentDoctorEntry{
+			Component: assessment.Component, HarnessID: assessment.HarnessID,
+			HarnessInstalled: assessment.HarnessInstalled, HarnessApplicable: assessment.HarnessApplicable,
+			ComponentInstalled: assessment.ComponentInstalled, ComponentPath: assessment.ComponentPath,
+			AuthReadiness: assessment.AuthReadiness, ACPLaunchReady: assessment.ACPLaunchReady,
+			ActiveVersion: assessment.ActiveVersion, RollbackVersion: assessment.RollbackVersion,
+			Provenance: assessment.Provenance, Notes: assessment.Notes,
+		})
 	}
 	report.HubConnectivity = HubConnectivity{Endpoint: sanitizeEndpointForDisplay(controlEndpoint)}
 	if dial == nil {

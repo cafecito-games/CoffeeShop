@@ -137,6 +137,7 @@
   "orchestratorInboxes": [],
   "orchestratorAttachments": [],
   "projectProfiles": [],
+  "componentInventories": [],
   "tasks": [],
   "taskMessages": [],
   "taskMessageAcknowledgements": [],

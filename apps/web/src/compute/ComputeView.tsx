@@ -1,4 +1,5 @@
-import type { ComputeNode } from "@coffee-shop/protocol";
+import type { ComponentInventoryReport, ComputeNode } from "@coffee-shop/protocol";
+import type { ConnectionStatus } from "../hubConnection.js";
 import { ArrowRight, Cloud, Command, HouseLine, Laptop, Plus, TerminalWindow } from "@phosphor-icons/react";
 import { useEffect, useRef, useState } from "react";
 import { ApprovalPolicyBadge } from "./ApprovalPolicyBadge.js";
@@ -9,7 +10,11 @@ function KindIcon({ kind }: { kind: ComputeNode["kind"] }) {
   return kind === "local" ? <Laptop size={20} /> : kind === "home-server" ? <HouseLine size={20} /> : <Cloud size={20} />;
 }
 
-export function ComputeView({ nodes }: { nodes: ComputeNode[] }) {
+export function ComputeView({ nodes, componentInventories = [], connectionStatus = "connected" }: {
+  nodes: ComputeNode[];
+  componentInventories?: ComponentInventoryReport[];
+  connectionStatus?: ConnectionStatus;
+}) {
   const [selectedNodeId, setSelectedNodeId] = useState<string>();
   const [onboarding, setOnboarding] = useState(false);
   const addComputeRef = useRef<HTMLButtonElement>(null);
@@ -46,7 +51,7 @@ export function ComputeView({ nodes }: { nodes: ComputeNode[] }) {
         })}
       </div>
       <section className="worker-callout"><TerminalWindow size={19} /><div><strong>Bring another machine online</strong><p>Barista connects outbound; model credentials never leave the compute machine. Use Add compute for validated setup.</p></div></section>
-      {selectedNodeId && <NodeDetailDialog selectedNodeId={selectedNodeId} node={selectedNode} onClose={closeNodeDetail} fallbackFocus={() => addComputeRef.current} />}
+      {selectedNodeId && <NodeDetailDialog selectedNodeId={selectedNodeId} node={selectedNode} inventory={componentInventories.find((report) => report.nodeId === selectedNodeId)} connectionStatus={connectionStatus} onClose={closeNodeDetail} fallbackFocus={() => addComputeRef.current} />}
       {onboarding && <OnboardingDialog onClose={() => setOnboarding(false)} />}
     </main>
   );

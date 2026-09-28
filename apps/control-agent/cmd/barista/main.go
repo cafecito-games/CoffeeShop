@@ -209,7 +209,16 @@ func run(args []string) int {
 	runner := newRunner(nativeProfiles, profiles, driver, cfg).WithManagedHarnesses(harness.ManagedHarnesses(resolutions)).
 		WithCapabilityPack(activePack, packUnavailable, cfg.CapabilityPackRequirement, cfg.DataRoot).
 		WithCapabilityPackReport(func(line string) { log.Print(line) })
-	client := controlplane.NewClient(cfg, node, runner, buildCapabilityReport)
+	buildComponentInventory := func(buildContext context.Context) protocol.ComponentInventoryReport {
+		options := setup.ComponentAssessmentOptions{CapabilityPackResolutionKnown: true, ACPStartupEvidenceKnown: true}
+		if activePack != nil {
+			resolved := setup.ComponentRef{Kind: setup.ComponentKindCapabilityPack, ID: activePack.ID, Version: activePack.Version}
+			options.ResolvedCapabilityPack = &resolved
+		}
+		assessment := setup.AssessComponents(buildContext, componentManifest, ownership, cfg.DataRoot, setup.CurrentPlatform(), activation, profiles, options)
+		return setup.ComponentInventoryReport(cfg.NodeID, time.Now().UTC().Format(time.RFC3339Nano), assessment)
+	}
+	client := controlplane.NewClient(cfg, node, runner, buildCapabilityReport).WithComponentInventory(buildComponentInventory)
 	if err := client.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		log.Printf("Barista stopped: %v", err)
 		return 1

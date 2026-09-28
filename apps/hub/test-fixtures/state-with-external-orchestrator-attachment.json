@@ -69,5 +69,18 @@
   "taskMessageAcknowledgements": [],
   "sessionBindings": [],
   "approvals": [],
-  "workspaceLeases": []
+  "workspaceLeases": [],
+  "instances": [],
+  "allocations": [],
+  "templates": [],
+  "instanceLifecycleReceipts": [],
+  "instanceReleaseIntents": [],
+  "instanceDeliveries": [],
+  "remoteReleaseRequests": [],
+  "nodeInstanceResidency": [],
+  "artifactPreviews": [],
+  "previewRegistrationReceipts": [],
+  "previewProcessingReceipts": [],
+  "componentInventories": [],
+  "legacyTemplateImports": []
 }

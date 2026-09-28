@@ -1,0 +1,50 @@
+{
+  "type": "component.inventory",
+  "report": {
+    "nodeId": "node-one",
+    "observedAt": "2026-09-28T12:00:00Z",
+    "components": [
+      {
+        "kind": "acp-adapter",
+        "id": "claude-acp",
+        "harnessId": "claude-cli",
+        "declaredVersion": "2.0.0",
+        "installedVersions": [
+          "1.0.0",
+          "2.0.0"
+        ],
+        "activeVersion": "1.0.0",
+        "rollbackVersion": "2.0.0",
+        "provenance": "managed",
+        "readiness": "ready",
+        "updateVersion": "2.0.0",
+        "rollbackAvailable": true,
+        "diagnosticCodes": [
+          "rollback-available",
+          "update-available"
+        ]
+      },
+      {
+        "kind": "capability-pack",
+        "id": "coffee-shop-default",
+        "declaredVersion": "1.0.0",
+        "installedVersions": [],
+        "provenance": "none",
+        "readiness": "not-applicable",
+        "rollbackAvailable": false,
+        "diagnosticCodes": []
+      },
+      {
+        "kind": "harness",
+        "id": "codex-cli",
+        "harnessId": "codex-cli",
+        "declaredVersion": "1.2.3",
+        "installedVersions": [],
+        "provenance": "external",
+        "readiness": "ready",
+        "rollbackAvailable": false,
+        "diagnosticCodes": []
+      }
+    ]
+  }
+}

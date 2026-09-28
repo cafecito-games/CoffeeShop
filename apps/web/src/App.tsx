@@ -640,7 +640,7 @@ function CoffeeShopApp() {
             onInspectRun={setSelectedRunId}
           />
         )}
-        {effectiveView === "compute" && <ComputeView nodes={snapshot.nodes} />}
+        {effectiveView === "compute" && <ComputeView nodes={snapshot.nodes} componentInventories={snapshot.componentInventories} connectionStatus={connection} />}
         {effectiveView === "projects" && <ProjectsView profiles={snapshot.projectProfiles ?? []} canMutate={canMutate} apiFetch={apiFetch} />}
         {effectiveView === "settings" && <SettingsView connection={connection} nodes={snapshot.nodes} generatedAt={snapshot.generatedAt} orchestratorClients={orchestratorClients} canMutate={canMutate} apiFetch={apiFetch} />}
       </div>
