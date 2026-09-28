@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -31,6 +33,10 @@ func runNative(recorder *recorder, role string, arguments []string) int {
 		} else {
 			fmt.Println(claudeNativeVersion)
 		}
+		return 0
+	}
+	if inventory, handled := nativeSkillInventory(role, arguments); handled {
+		fmt.Print(inventory)
 		return 0
 	}
 	prompt, endpoint, err := nativeInvocation(role, arguments)
@@ -67,6 +73,57 @@ func runNative(recorder *recorder, role string, arguments []string) int {
 		host.emit(map[string]any{"type": "result", "subtype": "success", "result": host.last})
 	}
 	return 0
+}
+
+// nativeSkillInventory implements the two read-only vendor discovery commands Barista uses to
+// confirm that a projected capability pack is visible before it sends the prompt. The fake reads
+// the projection the real adapter wrote; it does not synthesize names from the test script.
+func nativeSkillInventory(role string, arguments []string) (string, bool) {
+	switch role {
+	case "codex":
+		if len(arguments) != 3 || arguments[0] != "debug" || arguments[1] != "prompt-input" {
+			return "", false
+		}
+		root := filepath.Join(os.Getenv("CODEX_HOME"), "skills")
+		paths := skillDocumentPaths(root)
+		encoded, _ := json.Marshal(map[string]any{"skills": paths})
+		return string(encoded) + "\n", true
+	case "claude":
+		if len(arguments) != 5 || arguments[0] != "--plugin-dir" || arguments[2] != "plugin" || arguments[3] != "details" {
+			return "", false
+		}
+		paths := skillDocumentPaths(filepath.Join(arguments[1], "skills"))
+		version := "unknown"
+		var manifest struct {
+			Version string `json:"version"`
+		}
+		if content, err := os.ReadFile(filepath.Join(arguments[1], ".claude-plugin", "plugin.json")); err == nil {
+			_ = json.Unmarshal(content, &manifest)
+			if manifest.Version != "" {
+				version = manifest.Version
+			}
+		}
+		names := make([]string, 0, len(paths))
+		for _, path := range paths {
+			names = append(names, filepath.Base(filepath.Dir(path)))
+		}
+		slices.Sort(names)
+		return fmt.Sprintf("%s %s\nComponent inventory\n  Skills (%d)  %s\n", arguments[4], version, len(names), strings.Join(names, ", ")), true
+	default:
+		return "", false
+	}
+}
+
+func skillDocumentPaths(root string) []string {
+	paths := []string{}
+	_ = filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err == nil && !entry.IsDir() && entry.Name() == "SKILL.md" {
+			paths = append(paths, path)
+		}
+		return nil
+	})
+	slices.Sort(paths)
+	return paths
 }
 
 // nativeInvocation extracts the prompt and the Coffee Shop MCP endpoint from the exact command

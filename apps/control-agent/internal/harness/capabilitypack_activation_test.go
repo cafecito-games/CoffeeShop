@@ -2014,7 +2014,7 @@ func TestSurfaceRecordingsCarryNoTestDependencyOnAMachinePath(t *testing.T) {
 		content, err := os.ReadFile(source)
 		require.NoError(t, err)
 		// The fragments are assembled at run time so this guard's own literals cannot trip it.
-		for _, fragments := range [][]string{{"/home", "/coder"}, {"probe", "-real"}, {"probe", "-collide"}, {"probe", "-claude"}, {"probe", "-codex"}} {
+		for _, fragments := range [][]string{{"/home", "/coder"}, {"probe", "-real"}, {"probe", "-109"}, {"probe", "-collide"}, {"probe", "-claude"}, {"probe", "-codex"}} {
 			require.NotContains(t, string(content), strings.Join(fragments, ""),
 				"%s depends on a path from the machine the recordings were captured on", source)
 		}

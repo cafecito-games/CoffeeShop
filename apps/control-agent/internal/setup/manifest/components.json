@@ -95,7 +95,7 @@
       "harnessId": "coffee-shop",
       "provider": "cafecito-games",
       "label": "Coffee Shop capability pack (canonical workflow skills)",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "platforms": {
         "darwin-amd64": { "kind": "manual", "executablePath": "coffeeshop-capability-pack.tar.gz" },
         "darwin-arm64": { "kind": "manual", "executablePath": "coffeeshop-capability-pack.tar.gz" },
