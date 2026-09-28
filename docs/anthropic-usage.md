@@ -43,6 +43,8 @@ Barista can also drive Claude through `claude-agent-acp`, the official Agent Cli
 
 ## The important limitation
 
+Coffee Shop's capability-pack system tests use a deterministic fake Claude executable. It observes the exact run-scoped plugin projection, the real MCP `tools/list`, calls the real run-authorized tools, and records normalized outcomes without receiving provider credentials. That is evidence for Coffee Shop's integration and credential boundary only. It does not call Anthropic, measure Claude instruction following, or predict model quality on the evaluation prompts.
+
 Anthropic's Consumer Terms prohibit automated/non-human access except through an API key **or where Anthropic otherwise explicitly permits it**. The official Claude Code CLI documentation explicitly documents scripting and programmatic print mode, which is the permission this project relies on. The same terms also prohibit credential/account sharing, resale/competitive services, scraping, and bypassing protective measures.
 
 The conservative use case is therefore:

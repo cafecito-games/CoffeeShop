@@ -67,6 +67,13 @@ tasks:
     cmds:
       - go test -tags system -count=1 -timeout 5m -run '^Test(Instance|EphemeralInstance|LegacyInstanceMigration|InvalidCurrentInstanceStateFailsBeforeListen$)' ./internal/systemtest/...
 
+  system:test:capability-pack:
+    desc: Run the closed installed-pack workflow, readiness, compatibility, cleanup, and upgrade proof
+    deps: [protocol:build]
+    dir: apps/control-agent
+    cmds:
+      - go test -tags system -count=1 -timeout 10m -run '^TestCapabilityPack(NativeEvaluationMatrix|UnsupportedACPParity|EvidenceFreshnessAndConflict|ReadinessGatesInstanceWork|RunIsolationAndCleanup|CrashRecovery|UpgradeRestartAndRollback)$' ./internal/systemtest/...
+
   capability-pack:build:
     desc: Build the deterministic Coffee Shop capability pack archive
     dir: apps/control-agent

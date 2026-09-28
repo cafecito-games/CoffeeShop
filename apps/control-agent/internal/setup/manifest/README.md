@@ -148,6 +148,7 @@ It is deliberately *not* one of the other two kinds. `Manifest.Validate` require
 * `barista doctor` reports a capability pack with `harness=not-applicable`, not `harness=missing`. The pack has no provider CLI of its own, so an absent harness is not a gap to chase; `harnessApplicable` is `false` in the JSON report and presentation must read it before rendering `harnessInstalled`.
 * Authentication is not a concept for this kind: a pack carries no credential, no endpoint, and no absolute machine path, and validation rejects one that does. Skills teach workflows; the run-scoped Coffee Shop MCP server remains the only live action and authorization layer.
 * The pack tree itself lives at `capability-pack/` in this repository and is the single source of truth for workflow content. Bump this entry's `version` together with `capability-pack/pack.json` — the probe refuses an archive whose declared version differs — then re-run plan/apply/activate. The previous version's files stay installed as the rollback target until an explicit `barista setup prune`.
+* Contributor procedure, closed evaluation coverage, sealing, and the focused real-process gate are documented in [`capability-pack/README.md`](../../../../../capability-pack/README.md). `task system:test:capability-pack` consumes the installed archive and proves both native surfaces, ACP refusal, cleanup, and restart-bounded upgrade/rollback.
 
 ## Harness launch templates are empty and stay empty
 

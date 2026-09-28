@@ -83,6 +83,10 @@
   ],
   "files": [
     {
+      "path": "README.md",
+      "sha256": "4009f7b36a54fc9e8fab125a7b54c8720a97d0383959e5d7ae1fa7053f2112db"
+    },
+    {
       "path": "evaluations/coffeeshop-artifacts.json",
       "sha256": "503ef6218d28f4b7424ea0a552b00ca7882ebefff7911b615515b00b956b30fc"
     },

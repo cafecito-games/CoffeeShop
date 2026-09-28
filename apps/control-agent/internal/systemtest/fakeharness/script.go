@@ -198,12 +198,19 @@ func (engine *engine) execute(ctx context.Context, step Step) error {
 	case step.Gate != "":
 		return engine.gate(step.Gate)
 	case step.WriteFile != nil:
-		path, err := engine.localPath(step.WriteFile.Path)
+		relative, err := engine.text(step.WriteFile.Path)
+		if err != nil {
+			return err
+		}
+		path, err := engine.localPath(relative)
 		if err != nil {
 			return err
 		}
 		content, err := engine.text(step.WriteFile.Content)
 		if err != nil {
+			return err
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			return err
 		}
 		return os.WriteFile(path, []byte(content), 0o644)

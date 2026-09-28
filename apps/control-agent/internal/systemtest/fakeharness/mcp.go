@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"sync/atomic"
 	"time"
 )
@@ -20,6 +21,7 @@ type mcpClient struct {
 	token    string
 	client   *http.Client
 	nextID   atomic.Int64
+	tools    []string
 }
 
 // errNoMCP reports a script tool call in a run that was offered no Coffee Shop MCP server.
@@ -84,9 +86,54 @@ func (client *mcpClient) connect(ctx context.Context) error {
 	if _, err := client.call(ctx, "initialize", map[string]any{"protocolVersion": "2025-06-18", "capabilities": map[string]any{}, "clientInfo": map[string]string{"name": "fakeharness", "version": "1"}}); err != nil {
 		return err
 	}
-	_, err := client.call(ctx, "tools/list", map[string]any{})
-	return err
+	raw, err := client.call(ctx, "tools/list", map[string]any{})
+	if err != nil {
+		return err
+	}
+	names, err := toolNamesFromList(raw)
+	if err != nil {
+		return err
+	}
+	client.tools = names
+	if activeRecorder != nil {
+		activeRecorder.write(map[string]any{"event": "mcp-tools-list", "tools": names})
+	}
+	return nil
 }
+
+func toolNamesFromList(raw json.RawMessage) ([]string, error) {
+	var decoded struct {
+		Tools []struct {
+			Name         string          `json:"name"`
+			Title        string          `json:"title"`
+			Description  string          `json:"description"`
+			InputSchema  json.RawMessage `json:"inputSchema"`
+			OutputSchema json.RawMessage `json:"outputSchema"`
+			Annotations  json.RawMessage `json:"annotations"`
+		} `json:"tools"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&decoded); err != nil {
+		return nil, fmt.Errorf("decode tools/list result: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return nil, errors.New("tools/list result has trailing data")
+	}
+	names := make([]string, 0, len(decoded.Tools))
+	seen := map[string]bool{}
+	for _, tool := range decoded.Tools {
+		if tool.Name == "" || seen[tool.Name] {
+			return nil, errors.New("tools/list result has an empty or duplicate tool name")
+		}
+		seen[tool.Name] = true
+		names = append(names, tool.Name)
+	}
+	slices.Sort(names)
+	return names, nil
+}
+
+func (client *mcpClient) toolNames() []string { return slices.Clone(client.tools) }
 
 // toolResult is a tool call's outcome: the structured result, or the typed tool error.
 type toolResult struct {
