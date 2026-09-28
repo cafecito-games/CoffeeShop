@@ -27,6 +27,7 @@ import {
   type Run
 } from "@coffee-shop/protocol";
 import { createConfiguredAgent, markDisconnectedNodesOffline, updateConfiguredAgent } from "./agentConfiguration.js";
+import { createAgentTemplate, deleteAgentTemplate, updateAgentTemplate } from "./agentTemplateConfiguration.js";
 import { ControlConnectionRegistry, type ControlConnection } from "./controlConnections.js";
 import { applyRunLifecycle, cancelPersistedRun, coalesceAsync, failLostTaskAttempts, isReportedByOwningNode, queuedRunsForNode, retryAsync, serializeAsync } from "./lifecycle.js";
 import { CoordinationError } from "./coordination.js";
@@ -35,6 +36,7 @@ import { detachEveryAttachmentInState, postOperatorMessageInState, type Operator
 import { createHubToolHandler, hubToolError } from "./hubTools.js";
 import {
   applyInstanceLifecycle,
+  applyNodeHeartbeatInState,
   applyNodeResidencyInState,
   classifyInstanceResidentEvidence,
   classifyReportedInstanceCount,
@@ -566,6 +568,65 @@ app.post("/api/threads/:threadId/instances/:instanceId/release", async (req, res
   }
 });
 
+const templateRequestFailure = (response: express.Response, error: unknown) => {
+  const failure = error instanceof CoordinationError
+    ? error
+    : new CoordinationError("internal_error", "The template request failed", true);
+  const status = failure.code === "not_found" ? 404
+    : failure.code === "idempotency_conflict" || failure.code === "conflict" ? 409
+      : failure.code === "invalid_arguments" ? 400 : 500;
+  response.status(status).json({ error: failure.message });
+};
+
+const templateMutationBody = (body: unknown) => {
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    throw new CoordinationError("invalid_arguments", "Template request must be an object");
+  }
+  const { idempotencyKey, ...changes } = body as Record<string, unknown>;
+  if (typeof idempotencyKey !== "string" || idempotencyKey.trim().length === 0) {
+    throw new CoordinationError("invalid_arguments", "idempotencyKey is required");
+  }
+  return { idempotencyKey: idempotencyKey.trim(), changes };
+};
+
+app.get("/api/agent-templates", (_req, res) => {
+  res.json({ templates: store.snapshot().templates ?? [] });
+});
+
+app.post("/api/agent-templates", async (req, res) => {
+  try {
+    const request = templateMutationBody(req.body);
+    const result = await createAgentTemplate(store, "operator", request.idempotencyKey, request.changes);
+    if (!result.replayed) broadcast();
+    res.status(result.replayed ? 200 : 201).json(result);
+  } catch (error) {
+    templateRequestFailure(res, error);
+  }
+});
+
+app.patch("/api/agent-templates/:templateId", async (req, res) => {
+  try {
+    const request = templateMutationBody(req.body);
+    const result = await updateAgentTemplate(store, "operator", request.idempotencyKey, req.params.templateId, request.changes);
+    if (!result.replayed) broadcast();
+    res.json(result);
+  } catch (error) {
+    templateRequestFailure(res, error);
+  }
+});
+
+app.delete("/api/agent-templates/:templateId", async (req, res) => {
+  try {
+    const request = templateMutationBody(req.body);
+    if (Object.keys(request.changes).length !== 0) throw new CoordinationError("invalid_arguments", "Delete accepts only idempotencyKey");
+    const result = await deleteAgentTemplate(store, "operator", request.idempotencyKey, req.params.templateId);
+    if (!result.replayed) broadcast();
+    res.json(result);
+  } catch (error) {
+    templateRequestFailure(res, error);
+  }
+});
+
 app.get("/api/approvals", (req, res) => {
   const status = typeof req.query.status === "string" ? req.query.status : undefined;
   const runId = typeof req.query.runId === "string" ? req.query.runId : undefined;
@@ -928,7 +989,15 @@ wss.on("connection", (socket, request) => {
         console.warn(redactor.redact(`refused reported instance usage from ${nodeId}: ${reportedCount.reason}`));
       }
       const reportedInstances = reportedCount.kind === "reported" ? reportedCount.count : undefined;
-      await store.transact((state) => { const node = state.nodes.find((item) => item.id === message.nodeId); if (node) { capacityChanged = node.activeRuns !== message.activeRuns || (reportedInstances !== undefined && node.activeInstances !== reportedInstances); node.lastSeen = message.at; node.activeRuns = message.activeRuns; if (reportedInstances !== undefined) node.activeInstances = reportedInstances; node.status = message.activeRuns ? "busy" : "online"; } });
+      let refusedReportedInstances = false;
+      await store.transact((state) => {
+        ({ capacityChanged, refusedReportedInstances } = applyNodeHeartbeatInState(
+          state, message.nodeId, message.activeRuns, reportedInstances, message.at
+        ));
+      });
+      if (refusedReportedInstances) {
+        console.warn(redactor.redact(`refused reported instance usage from ${nodeId}: count exceeds registered capacity`));
+      }
       /*
        * A heartbeat carries the node's resident identities (#114), classified by the same tri-state
        * reader as the reconnect barrier's: absent infers nothing, an explicitly empty set is an

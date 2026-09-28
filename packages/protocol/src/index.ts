@@ -2858,11 +2858,15 @@ export const instanceStatuses = ["requested", "provisioning", "ready", "busy", "
 export type InstanceStatus = typeof instanceStatuses[number];
 export const allocationStatuses = ["reserved", "provisioning", "active", "lost", "released", "failed"] as const;
 export type AllocationStatus = typeof allocationStatuses[number];
+export const terminalInstanceStatuses: readonly InstanceStatus[] = ["released", "failed"];
+export const occupyingAllocationStatuses: readonly AllocationStatus[] = ["reserved", "provisioning", "active"];
 export const instanceReleaseModes = ["drain", "cancel"] as const;
 export type InstanceReleaseMode = typeof instanceReleaseModes[number];
 export const instanceCreatorKinds = ["operator", "run", "orchestrator-client"] as const;
 export const isInstanceStatus = isOneOf(instanceStatuses);
 export const isAllocationStatus = isOneOf(allocationStatuses);
+export const isTerminalInstanceStatus = isOneOf(terminalInstanceStatuses);
+export const isOccupyingAllocationStatus = isOneOf(occupyingAllocationStatuses);
 export const isInstanceReleaseMode = isOneOf(instanceReleaseModes);
 export const instanceTransitions: Readonly<Record<InstanceStatus, readonly InstanceStatus[]>> = {
   requested: ["provisioning", "draining", "failed"],

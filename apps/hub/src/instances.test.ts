@@ -17,6 +17,7 @@ import {
 import { CoordinationError } from "./coordinationError.js";
 import {
   applyInstanceLifecycle,
+  applyNodeHeartbeatInState,
   applyNodeResidencyInState,
   classifyInstanceResidentEvidence,
   classifyReportedInstanceCount,
@@ -31,6 +32,7 @@ import {
   occupyingAllocationStatuses,
   receiveInstanceLifecycleReport,
   reconcileNodeInstancesInState,
+  reportedInstanceCountFitsNode,
   reserveInstanceAllocation,
   residentInstanceUsage,
   residentInstanceUsageInState,
@@ -1344,6 +1346,24 @@ test("a reported instance count is validated before it reaches the node record",
     assert.equal(evidence.kind, "malformed", JSON.stringify(count));
   }
   assert.deepEqual(classifyReportedInstanceCount(controlFixture("heartbeat"), "4"), { kind: "absent" });
+  assert.equal(reportedInstanceCountFitsNode(computeNode({ instanceCapacity: 1 }), 1), true);
+  assert.equal(reportedInstanceCountFitsNode(computeNode({ instanceCapacity: 1 }), 2), false);
+  assert.equal(reportedInstanceCountFitsNode(computeNode({ instanceCapacity: undefined }), 65_535), true);
+});
+
+test("a heartbeat cannot make the Hub publish an invalid capacity projection", async () => {
+  const store = await hubStore((state) => seedNode(state, { instanceCapacity: 1, activeInstances: 1 }));
+  let update: ReturnType<typeof applyNodeHeartbeatInState> | undefined;
+  await store.transact((state) => {
+    update = applyNodeHeartbeatInState(state, "node-one", 2, 2, at(2));
+  });
+  assert.deepEqual(update, { capacityChanged: true, refusedReportedInstances: true });
+  const projected = store.snapshot().nodes[0];
+  assert.deepEqual(
+    [projected.activeRuns, projected.activeInstances, projected.instanceCapacity, projected.lastSeen, projected.status],
+    [2, 1, 1, at(2), "busy"]
+  );
+  assert.ok(projected.activeInstances! <= projected.instanceCapacity!);
 });
 
 test("a release the node never acted on replays after an authoritative reconnect", async () => {

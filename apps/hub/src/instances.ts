@@ -8,7 +8,9 @@ import {
   instanceLimits,
   instanceLifecycleDigestInput,
   isActiveRunStatus,
+  occupyingAllocationStatuses,
   supportsControlCapability,
+  terminalInstanceStatuses,
   validateAgentInstance,
   validateAgentTemplate,
   validateInstanceAllocation,
@@ -54,11 +56,10 @@ import { appendInitialTaskInState, applyAttemptOutcome, attemptIsRetryable, init
  * to and a delayed response from a lost allocation can never mutate its replacement.
  */
 
-/** The resident-intent statuses: an allocation in one of these holds a node slot. */
-export const occupyingAllocationStatuses: readonly AllocationStatus[] = ["reserved", "provisioning", "active"];
+/** The resident-intent statuses and terminal instance statuses are shared with snapshot consumers. */
+export { occupyingAllocationStatuses, terminalInstanceStatuses };
 /** Statuses from which an instance may still be placed, replaced, or released. */
 export const nonTerminalInstanceStatuses: readonly InstanceStatus[] = ["requested", "provisioning", "ready", "busy", "idle"];
-export const terminalInstanceStatuses: readonly InstanceStatus[] = ["released", "failed"];
 
 /** The single operator principal behind the hub's bearer-authenticated REST surface. */
 export const operatorInstanceCreator: InstanceCreator = { kind: "operator", operatorId: "operator" };
@@ -246,6 +247,39 @@ export function classifyReportedInstanceCount(frame: unknown, version: ControlPr
   if (validated.value.type !== "heartbeat") return { kind: "malformed", reason: "the frame is not a heartbeat" };
   const count = validated.value.activeInstances;
   return count === undefined ? { kind: "absent" } : { kind: "reported", count };
+}
+
+/** Keeps the persisted producer projection inside the snapshot consumer's capacity invariant. */
+export function reportedInstanceCountFitsNode(node: ComputeNode, count: number): boolean {
+  return node.instanceCapacity === undefined || count <= node.instanceCapacity;
+}
+
+export interface NodeHeartbeatUpdate {
+  capacityChanged: boolean;
+  refusedReportedInstances: boolean;
+}
+
+/** Applies the heartbeat fields that feed snapshots without ever persisting an invalid capacity pair. */
+export function applyNodeHeartbeatInState(
+  state: State,
+  nodeId: string,
+  activeRuns: number,
+  reportedInstances: number | undefined,
+  observedAt: string
+): NodeHeartbeatUpdate {
+  const node = state.nodes.find((item) => item.id === nodeId);
+  if (!node) return { capacityChanged: false, refusedReportedInstances: false };
+  const acceptedReportedInstances = reportedInstances !== undefined && reportedInstanceCountFitsNode(node, reportedInstances)
+    ? reportedInstances
+    : undefined;
+  const refusedReportedInstances = reportedInstances !== undefined && acceptedReportedInstances === undefined;
+  const capacityChanged = node.activeRuns !== activeRuns
+    || (acceptedReportedInstances !== undefined && node.activeInstances !== acceptedReportedInstances);
+  node.lastSeen = observedAt;
+  node.activeRuns = activeRuns;
+  if (acceptedReportedInstances !== undefined) node.activeInstances = acceptedReportedInstances;
+  node.status = activeRuns ? "busy" : "online";
+  return { capacityChanged, refusedReportedInstances };
 }
 
 /** The canonical principal identity of a lifecycle caller; the two namespaces never collide. */

@@ -16,6 +16,22 @@ const snapshot = (generatedAt: string): Snapshot => ({
   generatedAt
 });
 
+const v5Triplet = {
+  instances: [{
+    id: "instance-one", threadId: "thread-one", creator: { kind: "operator" as const, operatorId: "operator" },
+    purpose: { name: "Reviewer" }, delegation: { canDelegate: false }, requirements: {},
+    lease: { idleTimeoutSeconds: 1800, expiresAt: "2026-01-01T00:30:00Z" }, status: "ready" as const,
+    createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z"
+  }],
+  allocations: [{
+    id: "allocation-one", instanceId: "instance-one", nodeId: "node-one", harnessId: "codex-cli" as const,
+    model: "default", transport: "native-cli" as const, workspace: "/workspace",
+    lease: { idleTimeoutSeconds: 1800, expiresAt: "2026-01-01T00:30:00Z" }, status: "active" as const,
+    createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z"
+  }],
+  templates: [{ id: "template-reviewer", name: "Reviewer", delegation: { canDelegate: false } }]
+};
+
 class FakeSocket {
   onopen: ((event: Event) => void) | null = null;
   onmessage: ((event: MessageEvent) => void) | null = null;
@@ -167,6 +183,22 @@ describe("snapshot validation", () => {
     };
     expect(isSnapshot({ ...snapshot("2026-09-27T12:04:00.000Z"), artifacts: [artifact] })).toBe(true);
     expect(isSnapshot({ ...snapshot("2026-09-27T12:04:00.000Z"), artifacts: [{ ...artifact, kind: "preview-site" }] })).toBe(false);
+  });
+
+  it("accepts the v5 triplet only when every collection is present and every entry is valid", () => {
+    expect(isSnapshot({ ...snapshot("v5"), ...v5Triplet })).toBe(true);
+    expect(isSnapshot(snapshot("legacy"))).toBe(true);
+    for (const partial of [
+      { instances: v5Triplet.instances },
+      { allocations: v5Triplet.allocations },
+      { templates: v5Triplet.templates },
+      { instances: v5Triplet.instances, allocations: v5Triplet.allocations },
+      { instances: v5Triplet.instances, templates: v5Triplet.templates },
+      { allocations: v5Triplet.allocations, templates: v5Triplet.templates }
+    ]) expect(isSnapshot({ ...snapshot("partial"), ...partial })).toBe(false);
+    expect(isSnapshot({ ...snapshot("bad-instance"), ...v5Triplet, instances: [{ ...v5Triplet.instances[0], creator: undefined }] })).toBe(false);
+    expect(isSnapshot({ ...snapshot("bad-allocation"), ...v5Triplet, allocations: [{ ...v5Triplet.allocations[0], workspace: "relative" }] })).toBe(false);
+    expect(isSnapshot({ ...snapshot("bad-template"), ...v5Triplet, templates: [{ ...v5Triplet.templates[0], legacyAgentId: 42 }] })).toBe(false);
   });
 });
 
@@ -386,6 +418,19 @@ describe("HubConnection", () => {
     test.sockets[0].message({ type: "snapshot", data: snapshot("live") });
     test.sockets[0].message(payload);
     expect(states.at(-1)).toMatchObject({ status: "reconnecting", snapshot: { generatedAt: "live" }, canMutate: false });
+    expect(test.timers.size).toBe(1);
+  });
+
+  it("retains the last valid v5 snapshot and reconnects when a partial triplet arrives", async () => {
+    const live = { ...snapshot("live-v5"), ...v5Triplet };
+    const test = harness(async () => response(200, live));
+    const states: ConnectionView[] = [];
+    const connection = new HubConnection("secret", test.environment, (state) => states.push(state));
+    connection.start();
+    await flush();
+    test.sockets[0].message({ type: "snapshot", data: live });
+    test.sockets[0].message({ type: "snapshot", data: { ...snapshot("partial"), instances: [] } });
+    expect(states.at(-1)).toMatchObject({ status: "reconnecting", snapshot: { generatedAt: "live-v5" }, canMutate: false });
     expect(test.timers.size).toBe(1);
   });
 
