@@ -23,6 +23,7 @@ const (
 	CapabilityOrchestration      = "orchestration"
 	CapabilityInstances          = "instances"
 	CapabilityComponentInventory = "component-inventory"
+	CapabilityPackReadiness      = "capability-pack-readiness"
 )
 
 var capabilityIntroducedIn = map[string]int{
@@ -31,6 +32,7 @@ var capabilityIntroducedIn = map[string]int{
 	CapabilityOrchestration:      4,
 	CapabilityInstances:          5,
 	CapabilityComponentInventory: 5,
+	CapabilityPackReadiness:      5,
 }
 
 func IsSupportedVersion(version string) bool {
@@ -610,17 +612,18 @@ type AgentInstance struct {
 
 // Resolved identity/placement is immutable for this ID. Replacement requires a new ID.
 type InstanceAllocation struct {
-	ID         string        `json:"id"`
-	InstanceID string        `json:"instanceId"`
-	NodeID     string        `json:"nodeId"`
-	HarnessID  string        `json:"harnessId"`
-	Model      string        `json:"model"`
-	Transport  string        `json:"transport"`
-	Workspace  string        `json:"workspace"`
-	Lease      InstanceLease `json:"lease"`
-	Status     string        `json:"status"`
-	CreatedAt  string        `json:"createdAt"`
-	UpdatedAt  string        `json:"updatedAt"`
+	ID                     string                  `json:"id"`
+	InstanceID             string                  `json:"instanceId"`
+	NodeID                 string                  `json:"nodeId"`
+	HarnessID              string                  `json:"harnessId"`
+	Model                  string                  `json:"model"`
+	Transport              string                  `json:"transport"`
+	Workspace              string                  `json:"workspace"`
+	ExpectedCapabilityPack *ExpectedCapabilityPack `json:"expectedCapabilityPack,omitempty"`
+	Lease                  InstanceLease           `json:"lease"`
+	Status                 string                  `json:"status"`
+	CreatedAt              string                  `json:"createdAt"`
+	UpdatedAt              string                  `json:"updatedAt"`
 }
 type AgentTemplate struct {
 	ID           string                         `json:"id"`
@@ -856,7 +859,7 @@ var v5Instance = v5Object(map[string]v5Rule{
 var v5Allocation = v5Object(map[string]v5Rule{
 	"id": v5ID, "instanceId": v5ID, "nodeId": v5ID, "harnessId": v5Enum(HarnessIDs), "model": v5String(1, identifierBytes),
 	"transport": v5Enum(HarnessTransports), "workspace": v5Path, "lease": v5Lease, "status": v5Enum(AllocationStatuses), "createdAt": v5Time, "updatedAt": v5Time,
-}, nil)
+}, map[string]v5Rule{"expectedCapabilityPack": v5ExpectedCapabilityPack})
 var v5Template = v5Object(map[string]v5Rule{"id": v5ID, "name": v5String(1, InstanceNameBytes)}, map[string]v5Rule{
 	"purpose": v5Purpose, "glyph": v5String(1, identifierBytes), "avatarShape": v5Enum([]string{"cup", "bean", "moka", "kettle", "grinder", "pour-over"}),
 	"avatarColor": v5Enum([]string{"amber", "sage", "clay", "sky", "plum", "rose"}), "instructions": v5String(0, InstanceInstructionsBytes),
@@ -875,6 +878,7 @@ var v5Run = v5Object(map[string]v5Rule{
 		if !v5Object(map[string]v5Rule{"requestedTransport": v5Enum(HarnessTransports), "selectedTransport": v5Enum(HarnessTransports)}, map[string]v5Rule{
 			"fallbackReason": v5Enum(TransportFallbackReasons), "harnessVersion": v5NormalizedVersion,
 			"approvalPolicy": v5Enum(ApprovalPolicies), "acp": v5ACP,
+			"effectiveCapabilityPack": v5EffectiveCapabilityPack,
 			"adapter": v5Object(map[string]v5Rule{
 				"id": func(value any) bool {
 					text, ok := value.(string)
@@ -969,6 +973,18 @@ func DecodeInstanceHubMessage(data []byte, version string) (InstanceHubMessage, 
 	instance, allocation := message.Instance, message.Allocation
 	if instance.ID != allocation.InstanceID || instance.Lease != allocation.Lease {
 		return message, fmt.Errorf("instance allocation identity or lease mismatch")
+	}
+	requiredSkills := []string{}
+	if instance.Requirements.Skills != nil {
+		requiredSkills = *instance.Requirements.Skills
+	}
+	expectedSkills := []string(nil)
+	if allocation.ExpectedCapabilityPack != nil {
+		expectedSkills = allocation.ExpectedCapabilityPack.RequiredSkills
+	}
+	if (len(requiredSkills) == 0) != (allocation.ExpectedCapabilityPack == nil) ||
+		(allocation.ExpectedCapabilityPack != nil && !slices.Equal(requiredSkills, expectedSkills)) {
+		return message, fmt.Errorf("instance skill requirements and allocation capability pack expectation mismatch")
 	}
 	if message.Type == "instance.provision" {
 		if instance.Status != "provisioning" || !slices.Contains([]string{"reserved", "provisioning"}, allocation.Status) {

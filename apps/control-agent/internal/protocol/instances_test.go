@@ -123,6 +123,30 @@ func TestInstanceProducerFixtures(t *testing.T) {
 	}
 }
 
+func TestSkillBoundInstanceMessagesRequireExactPackExpectation(t *testing.T) {
+	message := instanceFixtureProducer()["provision"].(InstanceHubMessage)
+	skills := []string{"coffeeshop-preview"}
+	message.Instance.Requirements.Skills = &skills
+	encoded, err := json.Marshal(message)
+	require.NoError(t, err)
+	_, err = DecodeInstanceHubMessage(encoded, "5")
+	require.Error(t, err)
+
+	message.Allocation.ExpectedCapabilityPack = &ExpectedCapabilityPack{
+		ID: "coffeeshop-capability-pack", Version: "1.1.0", RequiredSkills: skills,
+	}
+	encoded, err = json.Marshal(message)
+	require.NoError(t, err)
+	_, err = DecodeInstanceHubMessage(encoded, "5")
+	require.NoError(t, err)
+
+	message.Instance.Requirements.Skills = nil
+	encoded, err = json.Marshal(message)
+	require.NoError(t, err)
+	_, err = DecodeInstanceHubMessage(encoded, "5")
+	require.Error(t, err)
+}
+
 func TestInstanceVocabularyAndTransitionsMatchTypeScript(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join(instanceFixtureDirectory, "vocabulary.json"))
 	require.NoError(t, err)

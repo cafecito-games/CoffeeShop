@@ -48,6 +48,7 @@ export interface InventoryInstance {
   model?: string;
   transport?: HarnessTransport;
   allocationStatus?: string;
+  capabilityPack?: { id: string; version: string; requiredSkills: string[] };
 }
 
 const compareText = (left: string, right: string) => (left < right ? -1 : left > right ? 1 : 0);
@@ -105,7 +106,14 @@ export function executionInventoryForSource(state: Readonly<State>, source: Call
           harnessId: allocation.harnessId,
           model: allocation.model,
           transport: allocation.transport,
-          allocationStatus: allocation.status
+          allocationStatus: allocation.status,
+          ...(allocation.expectedCapabilityPack === undefined ? {} : {
+            capabilityPack: {
+              id: allocation.expectedCapabilityPack.id,
+              version: allocation.expectedCapabilityPack.version,
+              requiredSkills: [...allocation.expectedCapabilityPack.requiredSkills]
+            }
+          })
         })
       };
     }),

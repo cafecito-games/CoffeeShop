@@ -218,7 +218,12 @@ func run(args []string) int {
 		assessment := setup.AssessComponents(buildContext, componentManifest, ownership, cfg.DataRoot, setup.CurrentPlatform(), activation, profiles, options)
 		return setup.ComponentInventoryReport(cfg.NodeID, time.Now().UTC().Format(time.RFC3339Nano), assessment)
 	}
-	client := controlplane.NewClient(cfg, node, runner, buildCapabilityReport).WithComponentInventory(buildComponentInventory)
+	buildCapabilityPackReadiness := func(context.Context) protocol.CapabilityPackReadinessReport {
+		return runner.CapabilityPackReadiness(cfg.NodeID, time.Now().UTC().Format(time.RFC3339Nano))
+	}
+	client := controlplane.NewClient(cfg, node, runner, buildCapabilityReport).
+		WithComponentInventory(buildComponentInventory).
+		WithCapabilityPackReadiness(buildCapabilityPackReadiness)
 	if err := client.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		log.Printf("Barista stopped: %v", err)
 		return 1

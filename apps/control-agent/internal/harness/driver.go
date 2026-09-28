@@ -54,6 +54,9 @@ type Invocation struct {
 	// ProviderSession is called at most once by the native driver with the vendor CLI's own
 	// session identity. It is reported for operator reference only and is never resumed.
 	ProviderSession func(string)
+	// ExpectedCapabilityPack is immutable allocation evidence selected by the hub. When present,
+	// Barista must prove this exact pack and required skill subset before sending the prompt.
+	ExpectedCapabilityPack *protocol.ExpectedCapabilityPack
 
 	// begin is installed by Runner.Execute; drivers call it when the prompt is about to be sent.
 	begin func(transportDetails)
@@ -82,7 +85,8 @@ type EstablishedSession struct {
 
 // transportDetails is what a driver knows about the transport it is about to start.
 type transportDetails struct {
-	capabilities *protocol.AcpAgentCapabilities
+	capabilities            *protocol.AcpAgentCapabilities
+	effectiveCapabilityPack *protocol.EffectiveCapabilityPack
 }
 
 func (invocation Invocation) announce(details transportDetails) {
@@ -455,6 +459,7 @@ func (r *Runner) beginning(invocation Invocation, selection protocol.RunTranspor
 				capabilities := *details.capabilities
 				selection.ACP = &capabilities
 			}
+			selection.EffectiveCapabilityPack = details.effectiveCapabilityPack
 			if report != nil {
 				report(selection)
 			}

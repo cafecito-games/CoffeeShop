@@ -12,6 +12,9 @@ import {
   validateInstanceHubMessage,
   type AgentInstance,
   type ComputeNode,
+  type InstanceAllocation,
+  type Run,
+  type Task,
   type InstanceLifecycleRequest
 } from "@coffee-shop/protocol";
 import { CoordinationError } from "./coordinationError.js";
@@ -31,6 +34,7 @@ import {
   nonTerminalInstanceStatuses,
   occupyingAllocationStatuses,
   receiveInstanceLifecycleReport,
+  rejectInstanceAllocationProofInState,
   reconcileNodeInstancesInState,
   reportedInstanceCountFitsNode,
   reserveInstanceAllocation,
@@ -113,6 +117,39 @@ const renewRequest = (instanceId: string, key: string, idleTimeoutSeconds?: numb
 
 const candidate = (workspace: string) => ({
   nodeId: "node-one", harnessId: "claude-cli" as const, model: "fable", transport: "native-cli" as const, workspace
+});
+
+test("a mismatched run-start pack proof retries the task and cancels the allocation", () => {
+  const instance: AgentInstance = {
+    id: "instance-pack", threadId: "thread-one", creator: operatorCaller, delegation: { canDelegate: false },
+    requirements: { skills: ["review"] }, lease: { idleTimeoutSeconds: 1800, expiresAt: at(2000) },
+    status: "busy", createdAt: at(1), updatedAt: at(2)
+  };
+  const allocation: InstanceAllocation = {
+    id: "allocation-pack", instanceId: instance.id, nodeId: "node-one", harnessId: "claude-cli", model: "fable",
+    transport: "native-cli", workspace: "/work", expectedCapabilityPack: { id: "coffee-shop-core", version: "1.0.0", requiredSkills: ["review"] },
+    lease: { ...instance.lease }, status: "active", createdAt: at(1), updatedAt: at(2)
+  };
+  const run: Run = {
+    id: "run-pack", threadId: "thread-one", instanceId: instance.id, allocationId: allocation.id,
+    nodeId: "node-one", harnessId: "claude-cli", model: "fable", transport: "native-cli", workspace: "/work",
+    prompt: "Review", status: "queued", output: "", depth: 0, taskId: "task-pack", attempt: 1, createdAt: at(3)
+  };
+  const task: Task = {
+    id: "task-pack", threadId: "thread-one", title: "Review", instructions: "Review", status: "assigned",
+    requirements: { skills: ["review"] }, dependencies: [], idempotencyKey: "pack", attemptRunIds: [run.id],
+    assignment: { runId: run.id, instanceId: instance.id, allocationId: allocation.id, nodeId: "node-one", harnessId: "claude-cli", transport: "native-cli", model: "fable", assignedAt: at(3) },
+    placementInstanceId: instance.id, createdAt: at(1), updatedAt: at(3)
+  };
+  const state: State = { agents: [], nodes: [computeNode()], runs: [run], events: [], messages: [], instances: [instance], allocations: [allocation], tasks: [task] };
+  assert.equal(rejectInstanceAllocationProofInState(state, run.id, "pack proof mismatch", at(4)), true);
+  assert.equal(run.status, "failed");
+  assert.equal(task.status, "ready");
+  assert.equal(task.assignment, undefined);
+  assert.equal(task.placementInstanceId, undefined);
+  assert.equal(instance.status, "draining");
+  assert.equal(state.instanceReleaseIntents?.[0]?.mode, "cancel");
+  assert.equal(state.instanceDeliveries?.some((entry) => entry.kind === "release"), true);
 });
 
 /**
@@ -1172,6 +1209,16 @@ test("store load rejects malformed or duplicated instance state", async () => {
   await rejects((state) => {
     state.allocations = [allocationFor({ ...baseInstance, id: "ghost" }, "allocation-one")];
   }, /unknown instance/);
+  await rejects((state) => {
+    (state.instances as AgentInstance[])[0].requirements.skills = ["coffeeshop-preview"];
+    state.allocations = [allocationFor(baseInstance, "allocation-one")];
+  }, /Skill requirements require an admitted capability pack expectation/);
+  await rejects((state) => {
+    state.allocations = [{
+      ...allocationFor(baseInstance, "allocation-one"),
+      expectedCapabilityPack: { id: "coffeeshop-capability-pack", version: "1.1.0", requiredSkills: ["coffeeshop-preview"] }
+    }];
+  }, /without skill requirements cannot carry a capability pack expectation/);
   // An explicit null is malformed persisted state, not an absent legacy collection.
   await rejects((state) => { state.instances = null; }, /Persisted instances collection is not an array/);
   await rejects((state) => { state.remoteReleaseRequests = null; }, /Persisted remoteReleaseRequests collection is not an array/);

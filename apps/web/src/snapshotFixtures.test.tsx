@@ -93,6 +93,13 @@ describe("hub snapshot fixtures", () => {
       kind: "current",
       allocation: { instanceId: active!.id, status: "active" }
     });
+    expect(activeAllocation.kind === "current" ? activeAllocation.allocation.expectedCapabilityPack : undefined).toEqual({
+      id: "coffeeshop-capability-pack", version: "1.1.0", requiredSkills: ["coffeeshop-preview"]
+    });
+    expect(snapshot.runs.find((run) => run.id === "run-instance-review")?.transportSelection?.effectiveCapabilityPack).toEqual({
+      id: "coffeeshop-capability-pack", version: "1.1.0",
+      skills: ["coffeeshop-artifacts", "coffeeshop-coordination", "coffeeshop-preview", "coffeeshop-task-reporting"]
+    });
     expect(currentAllocationFor(released!.id, snapshot.allocations!)).toEqual({ kind: "unavailable" });
     expect(currentAllocationFor(replacementPending!.id, snapshot.allocations!)).toEqual({ kind: "unavailable" });
     expect(allocationHistory(released!.id, snapshot.allocations!)).toMatchObject([{ status: "released" }]);

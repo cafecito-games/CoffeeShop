@@ -171,6 +171,9 @@ func (client *Client) provisionRejection(allocation protocol.InstanceAllocation)
 	if err := client.runner.Admit(allocation.HarnessID, allocation.Transport, ""); err != nil {
 		return fmt.Sprintf("transport %s is not available for harness %s on this Barista", allocation.Transport, allocation.HarnessID)
 	}
+	if err := client.runner.AdmitCapabilityPack(allocation.ExpectedCapabilityPack, allocation.HarnessID, allocation.Transport); err != nil {
+		return err.Error()
+	}
 	if _, err := harness.AuthorizeWorkspace(allocation.Workspace, client.config.WorkspaceRoots); err != nil {
 		return err.Error()
 	}
@@ -507,7 +510,7 @@ func (client *Client) dispatchInstance(ctx context.Context, message protocol.Ins
 	if instanceRun.FallbackTransport != nil {
 		execution.FallbackTransport = *instanceRun.FallbackTransport
 	}
-	client.dispatchRun(ctx, run, agent, execution, allocation.ID)
+	client.dispatchRun(ctx, run, agent, execution, allocation.ID, allocation.ExpectedCapabilityPack)
 }
 
 // instanceDispatchRun projects the v5 run record and its instance onto the run pipeline's run and

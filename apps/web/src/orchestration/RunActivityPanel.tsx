@@ -32,6 +32,10 @@ export function RunActivityPanel({ activity, transportSelection, sessionBinding,
             {transportSelection?.fallbackReason && <div><dt>Fallback reason</dt><dd>{transportSelection.fallbackReason}</dd></div>}
             {transportSelection?.adapter && <div><dt>Adapter</dt><dd>{transportSelection.adapter.id} {transportSelection.adapter.version} · {transportSelection.adapter.source}</dd></div>}
             {transportSelection?.harnessVersion && <div><dt>Harness version</dt><dd>{transportSelection.harnessVersion}</dd></div>}
+            {transportSelection?.effectiveCapabilityPack && <div><dt>Capability pack</dt><dd>
+              {transportSelection.effectiveCapabilityPack.id}@{transportSelection.effectiveCapabilityPack.version}
+              {` · ${transportSelection.effectiveCapabilityPack.skills.join(", ")}`}
+            </dd></div>}
             {sessionBinding && <div><dt>Session</dt><dd>{sessionBinding.status} · {sessionBinding.transport}</dd></div>}
           </dl>
         </div>

@@ -105,6 +105,45 @@ func packTestRunner(t *testing.T, harnessID, binary, dataRoot string, pack *Acti
 	return runner, lines
 }
 
+func TestCapabilityPackReadinessAndAllocationExpectationUseTheActiveVerifiedPack(t *testing.T) {
+	pack, _ := packFixture(t)
+	runner := NewRunner([]protocol.HarnessProfile{{ID: "codex-cli", Available: true, Transports: []string{TransportNative}}}).
+		WithCapabilityPack(&pack, "", PackOptional, t.TempDir())
+	report := runner.CapabilityPackReadiness("node-one", "2026-09-28T12:00:00Z")
+	require.NoError(t, report.Validate())
+	require.Equal(t, "available", report.Status)
+	require.Equal(t, pack.ID, report.Pack.ID)
+	require.Equal(t, slices.Sorted(slices.Values(pack.Manifest.SkillIDs())), report.Pack.Skills)
+	require.Equal(t, []protocol.CapabilityPackSurface{{HarnessID: "codex-cli", Transport: "native-cli"}}, report.Surfaces)
+
+	required := protocol.ExpectedCapabilityPack{ID: pack.ID, Version: pack.Version, RequiredSkills: []string{report.Pack.Skills[0]}}
+	require.NoError(t, runner.AdmitCapabilityPack(&required, "codex-cli", TransportNative))
+	wrongVersion := required
+	wrongVersion.Version = "99.0.0"
+	require.Error(t, runner.AdmitCapabilityPack(&wrongVersion, "codex-cli", TransportNative))
+	missingSkill := required
+	missingSkill.RequiredSkills = []string{"not-in-pack"}
+	require.Error(t, runner.AdmitCapabilityPack(&missingSkill, "codex-cli", TransportNative))
+	require.Error(t, runner.AdmitCapabilityPack(&required, "codex-cli", TransportACP))
+
+	proof := runner.effectiveCapabilityPack(&PackProjection{})
+	require.Equal(t, &protocol.EffectiveCapabilityPack{ID: pack.ID, Version: pack.Version, Skills: report.Pack.Skills}, proof)
+	unavailable := NewRunner(nil).WithCapabilityPack(nil, "no capability pack version is activated on this node", PackOptional, t.TempDir()).
+		CapabilityPackReadiness("node-one", "2026-09-28T12:00:00Z")
+	require.Equal(t, "not-selected", unavailable.ReasonCode)
+	drifted := pack
+	drifted.Reread = func() (capabilitypack.Tree, capabilitypack.PackManifest, string, error) {
+		return drifted.Tree, drifted.Manifest, strings.Repeat("0", 64), nil
+	}
+	driftReport := NewRunner([]protocol.HarnessProfile{{ID: "codex-cli", Available: true, Transports: []string{TransportNative}}}).
+		WithCapabilityPack(&drifted, "", PackOptional, t.TempDir()).
+		CapabilityPackReadiness("node-one", "2026-09-28T12:00:00Z")
+	require.Equal(t, "unavailable", driftReport.Status)
+	require.Equal(t, "active-unverified", driftReport.ReasonCode)
+	require.Nil(t, driftReport.Pack)
+	require.Empty(t, driftReport.Surfaces)
+}
+
 // fakeVendorHome installs a fake HOME with a $CODEX_HOME that looks like a real one, including the
 // two files Barista must never touch. No test ever reads the developer's own ~/.codex or ~/.claude.
 func fakeVendorHome(t *testing.T) (home string, codexHome string, skillsRoot string) {

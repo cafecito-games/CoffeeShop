@@ -50,6 +50,19 @@ test("instance records reject unknown fields, statuses, and unbounded input", ()
   assert.equal(protocol.validateInstanceAllocation({ ...allocation, status: "unknown" }).ok, false);
 });
 
+test("skill-bound instance messages require the exact allocation pack expectation", () => {
+  const skillInstance = { ...instance, requirements: { ...instance.requirements, skills: ["coffeeshop-preview"] } };
+  const expectedCapabilityPack = {
+    id: "coffeeshop-capability-pack", version: "1.1.0", requiredSkills: ["coffeeshop-preview"]
+  };
+  const provision = { type: "instance.provision", instance: skillInstance, allocation: { ...allocation, expectedCapabilityPack } };
+  assert.equal(protocol.validateInstanceHubMessage(provision, "5").ok, true);
+  assert.equal(protocol.validateInstanceHubMessage({ ...provision, allocation }, "5").ok, false);
+  assert.equal(protocol.validateInstanceHubMessage({
+    type: "instance.provision", instance, allocation: { ...allocation, expectedCapabilityPack }
+  }, "5").ok, false);
+});
+
 test("resident evidence distinguishes absent, empty, duplicate, and malformed data", () => {
   const value = { type: "sync.complete", nodeId: "node-one", at };
   assert.equal(protocol.validateInstanceControlMessage(value, "5").ok, true);

@@ -60,8 +60,8 @@ const node: ComputeNode = {
 
 const template: AgentTemplate = {
   id: "template-reviewer", name: "Reviewer", purpose: { title: "Reviewer", summary: "Reviews exact instance work" },
-  avatarShape: "bean", avatarColor: "sky", instructions: "Review carefully", skills: ["review"], tags: ["quality"],
-  requirements: { harnessIds: ["claude-cli"], models: ["sonnet"], transports: ["acp-v1"] },
+  avatarShape: "bean", avatarColor: "sky", instructions: "Review carefully", skills: ["coffeeshop-preview"], tags: ["quality"],
+  requirements: { harnessIds: ["claude-cli"], models: ["sonnet"], transports: ["native-cli"] },
   delegation: { canDelegate: false }
 };
 
@@ -184,11 +184,12 @@ const lifecycle = await applyInstanceLifecycle(store, fixtureOperator, {
   threadId: externalThreadId,
   idempotency: { caller: fixtureOperator, key: "fixture-instance" },
   purpose: { name: "Checkout Reviewer", title: "Reviewer", summary: "Reviews the checkout funnel", instructions: "private fixture instructions" },
-  requirements: { templateId: template.id, harnessIds: ["claude-cli"], models: ["sonnet"], transports: ["acp-v1"] },
+  requirements: { templateId: template.id, skills: ["coffeeshop-preview"], harnessIds: ["claude-cli"], models: ["sonnet"], transports: ["native-cli"] },
   idleTimeoutSeconds: 1800
 }, "2026-09-22T12:07:00.000Z");
 const reservation = await reserveInstanceAllocation(store, lifecycle.instance.id, {
-  nodeId: node.id, harnessId: "claude-cli", model: "sonnet", transport: "acp-v1", workspace: "/srv/workspaces"
+  nodeId: node.id, harnessId: "claude-cli", model: "sonnet", transport: "native-cli", workspace: "/srv/workspaces",
+  expectedCapabilityPack: { id: "coffeeshop-capability-pack", version: "1.1.0", requiredSkills: ["coffeeshop-preview"] }
 }, "2026-09-22T12:07:01.000Z");
 if (reservation.kind !== "reserved") throw new Error(`fixture instance was not reserved: ${reservation.kind}`);
 await flushPendingInstanceDeliveries(store, () => true);
@@ -216,7 +217,14 @@ await store.transact((state) => {
     threadId: externalThreadId, taskId: taskBatch.tasks[0].id, createdAt: "2026-09-22T12:07:04.000Z"
   };
   assignTaskAttempt(state, taskBatch.tasks[0].id, exactRun, "2026-09-22T12:07:04.000Z");
-  applyRunLifecycle(state, { type: "run.started", runId: exactRun.id, at: "2026-09-22T12:07:05.000Z" });
+  applyRunLifecycle(state, { type: "run.started", runId: exactRun.id, at: "2026-09-22T12:07:05.000Z", transport: {
+    requestedTransport: "native-cli", selectedTransport: "native-cli",
+    effectiveCapabilityPack: {
+      id: "coffeeshop-capability-pack",
+      version: "1.1.0",
+      skills: ["coffeeshop-artifacts", "coffeeshop-coordination", "coffeeshop-preview", "coffeeshop-task-reporting"]
+    }
+  } });
 });
 
 async function fixtureAllocation(

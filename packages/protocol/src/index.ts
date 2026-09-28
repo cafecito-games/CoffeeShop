@@ -105,6 +105,24 @@ export interface ComponentInventoryReport {
   components: ComponentInventoryEntry[];
 }
 
+export const capabilityPackReadinessStatuses = ["available", "unavailable"] as const;
+export type CapabilityPackReadinessStatus = typeof capabilityPackReadinessStatuses[number];
+export const capabilityPackReadinessReasonCodes = ["not-selected", "activation-rejected", "active-unverified", "no-supported-surface"] as const;
+export type CapabilityPackReadinessReasonCode = typeof capabilityPackReadinessReasonCodes[number];
+export const capabilityPackReadinessLimits = { skills: 64, surfaces: 16 } as const;
+export interface CapabilityPackIdentity { id: string; version: string; skills: string[] }
+export interface CapabilityPackSurface { harnessId: HarnessId; transport: HarnessTransport }
+export interface CapabilityPackReadinessReport {
+  nodeId: string;
+  observedAt: string;
+  status: CapabilityPackReadinessStatus;
+  pack?: CapabilityPackIdentity;
+  surfaces: CapabilityPackSurface[];
+  reasonCode?: CapabilityPackReadinessReasonCode;
+}
+export interface ExpectedCapabilityPack { id: string; version: string; requiredSkills: string[] }
+export interface EffectiveCapabilityPack { id: string; version: string; skills: string[] }
+
 /** Compatibility-only persisted agent. New reusable defaults use AgentTemplate. */
 export interface Agent {
   id: string;
@@ -122,7 +140,7 @@ export interface Agent {
   workspace: string;
   systemPrompt: string;
   canDelegate?: boolean;
-  /** Normalized lowercase skill identifiers the scheduler matches against task `skills` requirements. */
+  /** Normalized descriptive compatibility metadata; never runtime capability-pack evidence. */
   skills?: string[];
   unread: number;
   updatedAt: string;
@@ -520,6 +538,7 @@ export type ControlAgentToHub =
   | { type: "workspace.lease"; runId: string; lease: WorkspaceLeaseUpdate; at: string }
   | { type: "capability.report"; report: NodeCapabilityReport }
   | { type: "component.inventory"; report: ComponentInventoryReport }
+  | { type: "capability-pack.readiness"; report: CapabilityPackReadinessReport }
   | { type: "approval.undeliverable"; runId: string; approvalId: string; reason: string; at: string };
 
 /** @deprecated Use HubToControlAgent. */
@@ -538,7 +557,7 @@ export const controlProtocolVersions = ["1", "2", "3", "4", "5"] as const;
 export type ControlProtocolVersion = typeof controlProtocolVersions[number];
 export const latestControlProtocolVersion: ControlProtocolVersion = "5";
 
-export const controlProtocolCapabilities = ["replay-barrier", "hub-rpc", "orchestration", "instances", "component-inventory"] as const;
+export const controlProtocolCapabilities = ["replay-barrier", "hub-rpc", "orchestration", "instances", "component-inventory", "capability-pack-readiness"] as const;
 export type ControlProtocolCapability = typeof controlProtocolCapabilities[number];
 
 const capabilityIntroducedIn: Readonly<Record<ControlProtocolCapability, ControlProtocolVersion>> = {
@@ -546,7 +565,8 @@ const capabilityIntroducedIn: Readonly<Record<ControlProtocolCapability, Control
   "hub-rpc": "3",
   orchestration: "4",
   instances: "5",
-  "component-inventory": "5"
+  "component-inventory": "5",
+  "capability-pack-readiness": "5"
 };
 
 const isOneOf = <T extends string>(values: readonly T[]) => (value: unknown): value is T =>
@@ -599,6 +619,8 @@ export function requiredCapabilityForControlAgentMessage(message: ControlAgentTo
       return "orchestration";
     case "component.inventory":
       return "component-inventory";
+    case "capability-pack.readiness":
+      return "capability-pack-readiness";
     case "register":
       return message.node.instanceCapacity !== undefined || message.node.activeInstances !== undefined ? "instances" : undefined;
     case "heartbeat":
@@ -618,7 +640,7 @@ export function requiredCapabilityForControlAgentMessage(message: ControlAgentTo
  * forwarded on the strength of its remaining fields.
  */
 const hubToControlAgentMessageTypes = ["dispatch", "cancel", "hub.rpc.response", "approval.decision", "workspace.cleanup", "workspace.lease.confirmed", "ping"] as const;
-const controlAgentToHubMessageTypes = ["register", "sync.complete", "heartbeat", "run.started", "run.output", "run.completed", "run.failed", "run.cancelled", "hub.rpc.request", "harness.event", "session.binding", "workspace.lease", "capability.report", "component.inventory", "approval.undeliverable"] as const;
+const controlAgentToHubMessageTypes = ["register", "sync.complete", "heartbeat", "run.started", "run.output", "run.completed", "run.failed", "run.cancelled", "hub.rpc.request", "harness.event", "session.binding", "workspace.lease", "capability.report", "component.inventory", "capability-pack.readiness", "approval.undeliverable"] as const;
 const knownMessageType = (type: string, legacy: readonly string[], instance: readonly string[]) =>
   legacy.includes(type) || instance.includes(type);
 
@@ -635,6 +657,8 @@ export const canAcceptFromControlAgent = (message: ControlAgentToHub | InstanceC
   if (capability === "instances") return validateInstanceControlMessage(message, version).ok;
   if (capability === "component-inventory") return supportsControlCapability(version, capability)
     && message.type === "component.inventory" && validateComponentInventoryReport(message.report).ok;
+  if (capability === "capability-pack-readiness") return supportsControlCapability(version, capability)
+    && message.type === "capability-pack.readiness" && validateCapabilityPackReadinessReport(message.report).ok;
   return isControlProtocolVersion(version) && (capability === undefined || supportsControlCapability(version, capability));
 };
 
@@ -707,6 +731,8 @@ export interface RunTransportSelection {
   acp?: AcpAgentCapabilities;
   /** The node approval policy the run executed under; absent means `manual`. */
   approvalPolicy?: ApprovalPolicy;
+  /** Verified pack and full skill set projected and confirmed before the prompt. */
+  effectiveCapabilityPack?: EffectiveCapabilityPack;
   /** Set by the hub, never by Barista, when the run reported an approval policy this hub does not recognize. */
   approvalPolicyUnrecognized?: boolean;
 }
@@ -1684,6 +1710,44 @@ export function validateComponentInventoryReport(value: unknown): Validation<Com
   return accept(value as unknown as ComponentInventoryReport);
 }
 
+const capabilityPackSkills = (value: unknown): value is string[] => sortedUnique(
+  value, capabilityPackReadinessLimits.skills, componentString
+) && (value as string[]).length > 0;
+const capabilityPackIdentity = (value: unknown): value is CapabilityPackIdentity => isRecord(value)
+  && hasOnlyKeys(value, ["id", "version", "skills"])
+  && componentString(value.id) && componentVersion(value.version) && capabilityPackSkills(value.skills);
+export function validateExpectedCapabilityPack(value: unknown): Validation<ExpectedCapabilityPack> {
+  if (!isRecord(value) || !hasOnlyKeys(value, ["id", "version", "requiredSkills"])
+    || !componentString(value.id) || !componentVersion(value.version) || !capabilityPackSkills(value.requiredSkills)) {
+    return reject("expected capability pack is malformed");
+  }
+  return accept(value as unknown as ExpectedCapabilityPack);
+}
+export function validateEffectiveCapabilityPack(value: unknown): Validation<EffectiveCapabilityPack> {
+  if (!capabilityPackIdentity(value)) return reject("effective capability pack is malformed");
+  return accept(value);
+}
+export function validateCapabilityPackReadinessReport(value: unknown): Validation<CapabilityPackReadinessReport> {
+  if (!isRecord(value) || !hasOnlyKeys(value, ["nodeId", "observedAt", "status", "pack", "surfaces", "reasonCode"])
+    || !componentString(value.nodeId) || !isTimestamp(value.observedAt)
+    || !isOneOf(capabilityPackReadinessStatuses)(value.status) || !Array.isArray(value.surfaces)
+    || value.surfaces.length > capabilityPackReadinessLimits.surfaces) return reject("capability pack readiness report is malformed");
+  let previous = "";
+  for (const surface of value.surfaces) {
+    if (!isRecord(surface) || !hasOnlyKeys(surface, ["harnessId", "transport"])
+      || !isHarnessId(surface.harnessId) || !isHarnessTransport(surface.transport)) return reject("capability pack readiness surface is malformed");
+    const key = `${surface.harnessId}\u0000${surface.transport}`;
+    if (previous >= key) return reject("capability pack readiness surfaces must be sorted and unique");
+    previous = key;
+  }
+  if (value.status === "available") {
+    if (!capabilityPackIdentity(value.pack) || value.surfaces.length === 0 || value.reasonCode !== undefined) return reject("available capability pack readiness is incomplete");
+  } else if (value.pack !== undefined || value.surfaces.length !== 0 || !isOneOf(capabilityPackReadinessReasonCodes)(value.reasonCode)) {
+    return reject("unavailable capability pack readiness is inconsistent");
+  }
+  return accept(value as unknown as CapabilityPackReadinessReport);
+}
+
 export interface PreviewBundlePathOptions {
   /** Entrypoints are regular HTML files, never directories or extensionless aliases. */
   entrypoint?: boolean;
@@ -1910,7 +1974,7 @@ const isAdapterProvenance = (value: unknown) =>
 
 /** Validates a Barista-reported transport selection; mirrors Go `RunTransportSelection.Validate`. */
 export function validateRunTransportSelection(value: unknown): Validation<RunTransportSelection> {
-  if (!isRecord(value) || !hasOnlyKeys(value, ["requestedTransport", "selectedTransport", "fallbackReason", "harnessVersion", "adapter", "acp", "approvalPolicy"])) return reject("transport selection must contain only declared fields");
+  if (!isRecord(value) || !hasOnlyKeys(value, ["requestedTransport", "selectedTransport", "fallbackReason", "harnessVersion", "adapter", "acp", "approvalPolicy", "effectiveCapabilityPack"])) return reject("transport selection must contain only declared fields");
   if (!isHarnessTransport(value.requestedTransport) || !isHarnessTransport(value.selectedTransport)) return reject("transport selection names an unknown transport");
   if (value.selectedTransport === value.requestedTransport) {
     if (value.fallbackReason !== undefined) return reject("transport selection has a fallback reason without a fallback");
@@ -1920,6 +1984,7 @@ export function validateRunTransportSelection(value: unknown): Validation<RunTra
   if (!isOptional(value.harnessVersion, isNormalizedVersion)) return reject("transport selection harness version is not a normalized version");
   if (!isOptional(value.adapter, isAdapterProvenance)) return reject("transport selection adapter provenance is malformed");
   if (!isOptional(value.approvalPolicy, isApprovalPolicy)) return reject("transport selection names an unknown approval policy");
+  if (!isOptional(value.effectiveCapabilityPack, (item) => validateEffectiveCapabilityPack(item).ok)) return reject("transport selection capability pack proof is malformed");
   if (value.acp !== undefined && (value.selectedTransport !== "acp-v1" || !isAcpAgentCapabilities(value.acp))) return reject("transport selection ACP capabilities are malformed or belong to a native run");
   return accept(value as unknown as RunTransportSelection);
 }
@@ -3042,6 +3107,8 @@ export interface InstanceAllocation {
   readonly transport: HarnessTransport;
   /** Canonical absolute path authorized by Barista against WORKSPACE_ROOTS. */
   readonly workspace: string;
+  /** Immutable pack evidence admitted with this allocation generation. */
+  readonly expectedCapabilityPack?: ExpectedCapabilityPack;
   lease: InstanceLease;
   status: AllocationStatus;
   createdAt: string;
@@ -3216,9 +3283,10 @@ export function validateAgentInstance(value: unknown): Validation<AgentInstance>
   return accept(value as unknown as AgentInstance);
 }
 export function validateInstanceAllocation(value: unknown): Validation<InstanceAllocation> {
-  if (!isRecord(value) || !hasOnlyKeys(value, ["id", "instanceId", "nodeId", "harnessId", "model", "transport", "workspace", "lease", "status", "createdAt", "updatedAt"])
+  if (!isRecord(value) || !hasOnlyKeys(value, ["id", "instanceId", "nodeId", "harnessId", "model", "transport", "workspace", "expectedCapabilityPack", "lease", "status", "createdAt", "updatedAt"])
     || !["id", "instanceId", "nodeId"].every((key) => instanceID(value[key])) || !isHarnessId(value.harnessId)
     || !isIdentifier(value.model) || !isHarnessTransport(value.transport) || !absoluteInstancePath(value.workspace)
+    || !isOptional(value.expectedCapabilityPack, (item) => validateExpectedCapabilityPack(item).ok)
     || !instanceLease(value.lease) || !isAllocationStatus(value.status) || !isTimestamp(value.createdAt) || !isTimestamp(value.updatedAt)) return reject("invalid instance allocation");
   return accept(value as unknown as InstanceAllocation);
 }
@@ -3276,6 +3344,12 @@ export function validateInstanceHubMessage(value: unknown, version: ControlProto
   if (!instance.ok || !allocation.ok || instance.value.id !== allocation.value.instanceId
     || instance.value.lease.idleTimeoutSeconds !== allocation.value.lease.idleTimeoutSeconds
     || instance.value.lease.expiresAt !== allocation.value.lease.expiresAt) return reject("instance and allocation identity or lease mismatch");
+  const requiredSkills = [...new Set(instance.value.requirements.skills ?? [])].sort();
+  const expectedSkills = allocation.value.expectedCapabilityPack?.requiredSkills;
+  if ((requiredSkills.length === 0) !== (expectedSkills === undefined)
+    || (expectedSkills !== undefined && JSON.stringify(expectedSkills) !== JSON.stringify(requiredSkills))) {
+    return reject("instance skill requirements and allocation capability pack expectation mismatch");
+  }
   if (value.type === "instance.provision") {
     if (instance.value.status !== "provisioning" || !["reserved", "provisioning"].includes(allocation.value.status)) return reject("invalid provision state");
   } else {

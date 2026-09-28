@@ -30,7 +30,8 @@ import { createConfiguredAgent, markDisconnectedNodesOffline, updateConfiguredAg
 import { createAgentTemplate, deleteAgentTemplate, updateAgentTemplate } from "./agentTemplateConfiguration.js";
 import { ControlConnectionRegistry, type ControlConnection } from "./controlConnections.js";
 import { clearComponentInventory, receiveComponentInventory } from "./componentInventories.js";
-import { applyRunLifecycle, cancelPersistedRun, coalesceAsync, failLostTaskAttempts, isReportedByOwningNode, queuedRunsForNode, retryAsync, serializeAsync } from "./lifecycle.js";
+import { forgetCapabilityPackReadiness, getCapabilityPackReadiness, matchesCapabilityPackExpectation, receiveCapabilityPackReadiness } from "./capabilityPackReadiness.js";
+import { acceptedTransportSelection, applyRunLifecycle, cancelPersistedRun, coalesceAsync, failLostTaskAttempts, isReportedByOwningNode, queuedRunsForNode, retryAsync, serializeAsync } from "./lifecycle.js";
 import { CoordinationError } from "./coordination.js";
 import { reconsiderLegacyAgentImport } from "./agentTemplates.js";
 import { detachEveryAttachmentInState, postOperatorMessageInState, type OperatorMessage } from "./externalOrchestrators.js";
@@ -48,6 +49,7 @@ import {
   maintainInstanceLifecycle,
   operatorInstanceCreator,
   receiveInstanceLifecycleReport,
+  rejectInstanceAllocationProofInState,
   reconcileNodeInstancesInState,
   type InstanceLifecycleEvidence
 } from "./instances.js";
@@ -206,6 +208,7 @@ const scheduleReadyTasks = coalesceAsync(async () => {
     const context: SchedulingContext = {
       connection: schedulingConnection,
       capabilityReport: getNodeCapabilityReport,
+      capabilityPackReadiness: getCapabilityPackReadiness,
       projectProfile: (projectId) => state.projectProfiles?.find((profile) => profile.id === projectId),
       canDeliver: (nodeId, message) => {
         const connection = message.type === "dispatch" ? deliveryConnection(nodeId, message) : undefined;
@@ -924,6 +927,7 @@ wss.on("connection", (socket, request) => {
       // so nothing it queued is ever written to a socket the hub refused.
       sendToControlAgent(nodeId, { type: "ping" });
       forgetNodeCapabilityReport(nodeId);
+      forgetCapabilityPackReadiness(nodeId);
       await store.transact((state) => {
         const index = state.nodes.findIndex((node) => node.id === nodeId);
         const online: ComputeNode = registeredComputeNode(message.node, new Date().toISOString());
@@ -1100,6 +1104,16 @@ wss.on("connection", (socket, request) => {
       if (outcome.kind === "rejected") console.warn(`rejected component.inventory from ${nodeId}: ${outcome.reason}`);
       if (outcome.changed) broadcast();
       return;
+    } else if (message.type === "capability-pack.readiness") {
+      if (!nodeId) return;
+      const outcome = receiveCapabilityPackReadiness({
+        supportsCapability: supportsControlCapability(protocolVersion, "capability-pack-readiness"),
+        isCurrent: isCurrentSocket,
+        nodeId
+      }, message.report);
+      if (outcome.kind === "rejected") console.warn(`rejected capability-pack.readiness from ${nodeId}: ${outcome.reason}`);
+      if (outcome.changed) requestScheduling();
+      return;
     } else if (message.type === "capability.report") {
       if (!supportsControlCapability(protocolVersion, "orchestration") || !nodeId || !isCurrentSocket()) return;
       const validated = validateNodeCapabilityReport(message.report);
@@ -1115,6 +1129,29 @@ wss.on("connection", (socket, request) => {
       await retryAsync(async () => {
         accepted = false;
         await store.transact((state) => {
+          if (message.type === "run.started") {
+            const candidate = state.runs.find((item) => item.id === message.runId);
+            const allocation = candidate?.allocationId === undefined ? undefined
+              : (state.allocations ?? []).find((item) => item.id === candidate.allocationId);
+            const expected = allocation?.expectedCapabilityPack;
+            if (candidate && expected !== undefined) {
+              const matches = matchesCapabilityPackExpectation(
+                expected,
+                acceptedTransportSelection(candidate, message.transport),
+                allocation === undefined ? undefined : getCapabilityPackReadiness(allocation.nodeId),
+                allocation?.harnessId ?? ""
+              );
+              if (!matches) {
+                accepted = rejectInstanceAllocationProofInState(
+                  state,
+                  candidate.id,
+                  "Barista did not prove the allocation's expected capability pack before the prompt",
+                  message.at
+                );
+                return accepted;
+              }
+            }
+          }
           accepted = applyRunLifecycle(state, message);
           return accepted;
         });
@@ -1145,6 +1182,7 @@ wss.on("connection", (socket, request) => {
     socketClosed.abort();
     if (!nodeId) return;
     if (!controlAgents.release(socket)) return;
+    forgetCapabilityPackReadiness(nodeId);
     await store.transact((state) => { const node = state.nodes.find((item) => item.id === nodeId); if (node) { node.status = "offline"; node.activeRuns = 0; } });
     broadcast();
     requestScheduling();

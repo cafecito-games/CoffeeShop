@@ -10,6 +10,7 @@ import {
   validateInstanceRequirements,
   type AgentInstance,
   type AgentTemplate,
+  type CapabilityPackReadinessReport,
   type ComputeNode,
   type ControlProtocolVersion,
   type ExecutionRequirements,
@@ -91,6 +92,7 @@ interface Fixture {
   connections: Map<string, NodeConnection>;
   reports: Map<string, NodeCapabilityReport>;
   profiles: Map<string, ProjectProfile>;
+  packReadiness: Map<string, CapabilityPackReadinessReport>;
 }
 
 function fixture(nodes: ComputeNode[], tasks: Task[], seed: Partial<State> = {}): Fixture {
@@ -101,13 +103,15 @@ function fixture(nodes: ComputeNode[], tasks: Task[], seed: Partial<State> = {})
     },
     connections: new Map(nodes.map((item) => [item.id, { protocolVersion: "5" as ControlProtocolVersion, synced: true }])),
     reports: new Map(),
-    profiles: new Map()
+    profiles: new Map(),
+    packReadiness: new Map()
   };
 }
 
 const context = (current: Fixture): SchedulingContext => ({
   connection: (nodeId) => current.connections.get(nodeId),
   capabilityReport: (nodeId) => current.reports.get(nodeId),
+  capabilityPackReadiness: (nodeId) => current.packReadiness.get(nodeId),
   projectProfile: (projectId) => current.profiles.get(projectId),
   canDeliver: (_nodeId, message: HubToControlAgent) => message.type === "dispatch"
 });
@@ -118,6 +122,7 @@ const environment = (current: Fixture): PlacementEnvironment => ({
   runs: current.state.runs,
   connection: (nodeId) => current.connections.get(nodeId),
   capabilityReport: (nodeId) => current.reports.get(nodeId),
+  capabilityPackReadiness: (nodeId) => current.packReadiness.get(nodeId),
   projectProfile: (projectId) => current.profiles.get(projectId),
   instances: current.state.instances,
   allocations: current.state.allocations,
@@ -606,6 +611,10 @@ test("a task naming a template may be placed only through that template, and the
 
   const placed = fixture([node("node-alpha")], [task("one", { templateId: "template-reviewer", skills: ["rust"] })], { templates: [template] });
   placed.reports.set("node-alpha", report("node-alpha", [evidence("label:gpu", "true")]));
+  placed.packReadiness.set("node-alpha", {
+    nodeId: "node-alpha", observedAt: at, status: "available", pack: { id: "coffee-shop-core", version: "1.0.0", skills: ["rust"] },
+    surfaces: [{ harnessId: "claude-cli", transport: "native-cli" }]
+  });
   runSchedulingPass(placed.state, context(placed), at);
   assert.equal(allocations(placed).length, 1);
   assert.equal(instances(placed)[0].requirements.templateId, "template-reviewer");
@@ -615,6 +624,7 @@ test("a task naming a template may be placed only through that template, and the
 
   // The template's own hard requirement is not negotiable.
   const unmet = fixture([node("node-alpha")], [task("one", { templateId: "template-reviewer" })], { templates: [template] });
+  unmet.packReadiness.set("node-alpha", placed.packReadiness.get("node-alpha")!);
   runSchedulingPass(unmet.state, context(unmet), at);
   assert.equal(allocations(unmet).length, 0);
   assert.deepEqual(kinds(unmet, "one"), ["label"]);
@@ -628,19 +638,56 @@ test("a task naming a template may be placed only through that template, and the
   assert.deepEqual(kinds(wrongSkill, "one"), ["template"]);
 });
 
-test("a legacy skill requirement migrates deterministically or reports an explicit template gap", () => {
+test("bare skills use only live current-socket pack readiness and persist the exact expectation", () => {
   const rust: AgentTemplate = { id: "template-a-rust", name: "Rust", skills: ["rust"] };
   const alsoRust: AgentTemplate = { id: "template-b-rust", name: "Rust too", skills: ["rust", "go"] };
-  assert.deepEqual(resolveTaskTemplate(task("one", { skills: ["rust"] }), [alsoRust, rust]), { kind: "template", template: rust });
+  assert.deepEqual(resolveTaskTemplate(task("one", { skills: ["rust"] }), [alsoRust, rust]), { kind: "none" });
 
   const placed = fixture([node("node-alpha")], [task("one", { skills: ["rust"] })], { templates: [alsoRust, rust] });
+  placed.packReadiness.set("node-alpha", {
+    nodeId: "node-alpha", observedAt: at, status: "available",
+    pack: { id: "coffee-shop-core", version: "1.0.0", skills: ["go", "rust"] },
+    surfaces: [{ harnessId: "claude-cli", transport: "native-cli" }]
+  });
   runSchedulingPass(placed.state, context(placed), at);
-  assert.equal(instances(placed)[0].requirements.templateId, "template-a-rust");
+  assert.equal(instances(placed)[0].requirements.templateId, undefined);
+  assert.deepEqual(allocations(placed)[0].expectedCapabilityPack, {
+    id: "coffee-shop-core", version: "1.0.0", requiredSkills: ["rust"]
+  });
 
   const gap = fixture([node("node-alpha")], [task("one", { skills: ["cobol"] })], { templates: [rust] });
   runSchedulingPass(gap.state, context(gap), at);
-  assert.equal(instances(gap).length, 0, "no arbitrary candidate is chosen for an unmapped legacy skill");
-  assert.deepEqual(kinds(gap, "one"), ["template"]);
+  assert.equal(instances(gap).length, 0, "stored template or inventory metadata never substitutes for live readiness");
+  assert.deepEqual(kinds(gap, "one"), ["skill"]);
+});
+
+test("resident reuse requires the same current pack identity and a covering admitted subset", () => {
+  const resident: AgentInstance = {
+    id: "instance-pack-v1", threadId: "thread-one", creator: { kind: "operator", operatorId: "operator" },
+    delegation: { canDelegate: false }, requirements: { skills: ["rust"] },
+    lease: { idleTimeoutSeconds: 1800, expiresAt: later(1800) }, status: "idle", createdAt: at, updatedAt: at
+  };
+  const allocation: InstanceAllocation = {
+    id: "allocation-pack-v1", instanceId: resident.id, nodeId: "node-alpha", harnessId: "claude-cli", model: "fable",
+    transport: "native-cli", workspace: "/workspace", expectedCapabilityPack: { id: "coffee-shop-core", version: "1.0.0", requiredSkills: ["rust"] },
+    lease: { ...resident.lease }, status: "active", createdAt: at, updatedAt: at
+  };
+  const current = fixture([node("node-alpha")], [task("one", { skills: ["rust"] })], {
+    instances: [resident], allocations: [allocation]
+  });
+  current.packReadiness.set("node-alpha", {
+    nodeId: "node-alpha", observedAt: later(1), status: "available",
+    pack: { id: "coffee-shop-core", version: "2.0.0", skills: ["rust"] },
+    surfaces: [{ harnessId: "claude-cli", transport: "native-cli" }]
+  });
+  runSchedulingPass(current.state, context(current), later(1));
+  assert.equal(current.state.runs.length, 0, "the old resident is never dispatched after readiness rotates");
+  assert.equal(resident.status, "draining", "the stale allocation is retired instead of remaining reusable history");
+  assert.equal(current.state.instanceDeliveries?.some((entry) => entry.kind === "release" && entry.allocationId === allocation.id), true);
+  assert.equal(instances(current).length, 2, "placement requests a replacement resident");
+  assert.deepEqual(allocations(current).find((item) => item.id !== allocation.id)?.expectedCapabilityPack, {
+    id: "coffee-shop-core", version: "2.0.0", requiredSkills: ["rust"]
+  });
 });
 
 test("offerings are derived from the producer's own registration bytes", () => {

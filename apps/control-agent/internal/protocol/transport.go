@@ -68,7 +68,8 @@ type RunTransportSelection struct {
 	ACP                *AcpAgentCapabilities `json:"acp,omitempty"`
 	// ApprovalPolicy is the approval policy the run executed under. Barista omits
 	// ApprovalPolicyManual, so an absent value means manual.
-	ApprovalPolicy string `json:"approvalPolicy,omitempty"`
+	ApprovalPolicy          string                   `json:"approvalPolicy,omitempty"`
+	EffectiveCapabilityPack *EffectiveCapabilityPack `json:"effectiveCapabilityPack,omitempty"`
 }
 
 // Validate mirrors validateRunTransportSelection in the protocol source of truth.
@@ -93,6 +94,11 @@ func (selection RunTransportSelection) Validate() error {
 	}
 	if selection.ApprovalPolicy != "" && !slices.Contains(ApprovalPolicies, selection.ApprovalPolicy) {
 		return errors.New("transport selection names an unknown approval policy")
+	}
+	if selection.EffectiveCapabilityPack != nil {
+		if err := selection.EffectiveCapabilityPack.Validate(); err != nil {
+			return err
+		}
 	}
 	if selection.ACP != nil {
 		if selection.SelectedTransport != TransportACP {

@@ -489,6 +489,78 @@ func PackReadyCombinations() [][2]string {
 	return combinations
 }
 
+// CapabilityPackReadiness reports only what this running Barista can prove on this socket. It is
+// deliberately independent of the durable, informational component inventory.
+func (r *Runner) CapabilityPackReadiness(nodeID, observedAt string) protocol.CapabilityPackReadinessReport {
+	report := protocol.CapabilityPackReadinessReport{NodeID: nodeID, ObservedAt: observedAt, Status: "unavailable", Surfaces: []protocol.CapabilityPackSurface{}}
+	if r.pack == nil {
+		switch {
+		case strings.Contains(r.packUnavailable, "activation ledger"):
+			report.ReasonCode = "activation-rejected"
+		case strings.Contains(r.packUnavailable, "no capability pack version is activated"), strings.Contains(r.packUnavailable, "declares no capability pack"):
+			report.ReasonCode = "not-selected"
+		default:
+			report.ReasonCode = "active-unverified"
+		}
+		return report
+	}
+	if r.pack.Reread == nil {
+		report.ReasonCode = "active-unverified"
+		return report
+	}
+	_, manifest, digest, err := r.pack.Reread()
+	if err != nil || digest != r.pack.ArchiveDigest || manifest.ID != r.pack.ID || manifest.Version != r.pack.Version {
+		report.ReasonCode = "active-unverified"
+		return report
+	}
+	for _, combination := range PackReadyCombinations() {
+		profile, available := r.advertisedProfile(combination[0])
+		if !available || !slices.Contains(profile.Transports, combination[1]) {
+			continue
+		}
+		report.Surfaces = append(report.Surfaces, protocol.CapabilityPackSurface{HarnessID: combination[0], Transport: combination[1]})
+	}
+	if len(report.Surfaces) == 0 {
+		report.ReasonCode = "no-supported-surface"
+		return report
+	}
+	skills := slices.Sorted(slices.Values(manifest.SkillIDs()))
+	report.Status = "available"
+	report.Pack = &protocol.CapabilityPackIdentity{ID: r.pack.ID, Version: r.pack.Version, Skills: skills}
+	return report
+}
+
+// AdmitCapabilityPack verifies immutable allocation evidence against this process before a
+// resident is accepted. Activation repeats this proof immediately before the prompt.
+func (r *Runner) AdmitCapabilityPack(expected *protocol.ExpectedCapabilityPack, harnessID, transport string) error {
+	if expected == nil {
+		return nil
+	}
+	if err := expected.Validate(); err != nil {
+		return err
+	}
+	if r.pack == nil || r.pack.ID != expected.ID || r.pack.Version != expected.Version {
+		return errors.New("the expected capability pack is not the active verified pack on this Barista")
+	}
+	available := slices.Sorted(slices.Values(r.pack.Manifest.SkillIDs()))
+	for _, required := range expected.RequiredSkills {
+		if !slices.Contains(available, required) {
+			return fmt.Errorf("the expected capability pack does not provide required skill %s", required)
+		}
+	}
+	if _, supported := packAdapterFor(harnessID, transport); !supported {
+		return fmt.Errorf("the expected capability pack has no verified activation surface for %s over %s", harnessID, transport)
+	}
+	return nil
+}
+
+func (r *Runner) effectiveCapabilityPack(projection *PackProjection) *protocol.EffectiveCapabilityPack {
+	if projection == nil || r.pack == nil {
+		return nil
+	}
+	return &protocol.EffectiveCapabilityPack{ID: r.pack.ID, Version: r.pack.Version, Skills: slices.Sorted(slices.Values(r.pack.Manifest.SkillIDs()))}
+}
+
 // establishedProjections records which harnesses this daemon already wrote a managed projection for,
 // and what identity it wrote. It is what makes "never mutate an in-flight projection" structural: a
 // managed projection is written exactly once per daemon lifetime, and every later run of the same
@@ -540,6 +612,9 @@ func (r *Runner) reportPack(format string, arguments ...any) {
 func (r *Runner) activatePack(ctx context.Context, invocation Invocation, transport, binary string) (*PackProjection, error) {
 	requirement := r.CapabilityPackRequirement()
 	harnessID := invocation.Run.HarnessID
+	if err := r.AdmitCapabilityPack(invocation.ExpectedCapabilityPack, harnessID, transport); err != nil {
+		return nil, fmt.Errorf("%w: %s", ErrPackActivation, err.Error())
+	}
 	if r.pack == nil {
 		reason := r.packUnavailable
 		if reason == "" {

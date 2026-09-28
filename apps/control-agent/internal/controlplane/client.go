@@ -24,13 +24,14 @@ import (
 )
 
 type Client struct {
-	config                  config.Config
-	node                    protocol.ComputeNode
-	runner                  *harness.Runner
-	bridge                  *mcpserver.Server
-	buildCapabilityReport   func(context.Context) protocol.NodeCapabilityReport
-	buildComponentInventory func(context.Context) protocol.ComponentInventoryReport
-	workspaces              *workspace.Manager
+	config                       config.Config
+	node                         protocol.ComputeNode
+	runner                       *harness.Runner
+	bridge                       *mcpserver.Server
+	buildCapabilityReport        func(context.Context) protocol.NodeCapabilityReport
+	buildComponentInventory      func(context.Context) protocol.ComponentInventoryReport
+	buildCapabilityPackReadiness func(context.Context) protocol.CapabilityPackReadinessReport
+	workspaces                   *workspace.Manager
 	// leaseConfirmationTimeout bounds how long a leased run waits for the hub to confirm its
 	// active lease; zero means defaultLeaseConfirmationTimeout.
 	leaseConfirmationTimeout time.Duration
@@ -83,6 +84,13 @@ func NewClient(cfg config.Config, node protocol.ComputeNode, runner *harness.Run
 // of the generic outbox: attach invokes it only after this socket's registration acknowledgement.
 func (client *Client) WithComponentInventory(build func(context.Context) protocol.ComponentInventoryReport) *Client {
 	client.buildComponentInventory = build
+	return client
+}
+
+// WithCapabilityPackReadiness installs the live, connection-scoped readiness builder. It is sent
+// only after this socket's registration acknowledgement and is never persisted locally.
+func (client *Client) WithCapabilityPackReadiness(build func(context.Context) protocol.CapabilityPackReadinessReport) *Client {
+	client.buildCapabilityPackReadiness = build
 	return client
 }
 
@@ -201,6 +209,15 @@ func (client *Client) attach(ctx context.Context, connection *websocket.Conn) er
 			// when its optional operator projection exceeds the narrower remote report contract.
 			log.Printf("component inventory not reported: %v", err)
 		} else if err := write(ctx, connection, protocol.ComponentInventoryMessage{Type: "component.inventory", Report: report}); err != nil {
+			client.connection = nil
+			return err
+		}
+	}
+	if client.buildCapabilityPackReadiness != nil {
+		report := client.buildCapabilityPackReadiness(ctx)
+		if err := report.Validate(); err != nil {
+			log.Printf("capability pack readiness not reported: %v", err)
+		} else if err := write(ctx, connection, protocol.CapabilityPackReadinessMessage{Type: "capability-pack.readiness", Report: report}); err != nil {
 			client.connection = nil
 			return err
 		}
@@ -436,7 +453,7 @@ func (client *Client) admitResume() admitResume {
 }
 
 func (client *Client) dispatch(ctx context.Context, run protocol.Run, agent protocol.Agent, execution *protocol.DispatchExecution) {
-	client.dispatchRun(ctx, run, agent, execution, "")
+	client.dispatchRun(ctx, run, agent, execution, "", nil)
 }
 
 // dispatchRun admits and executes one dispatch. A non-empty allocationID also binds the run to
@@ -444,7 +461,7 @@ func (client *Client) dispatch(ctx context.Context, run protocol.Run, agent prot
 // under the resident lock in the same critical section that registers the run, so a concurrent
 // release either sees this run and waits for it, or has already closed the resident and this
 // dispatch fails. The resident lock is always taken before runsMu and never the reverse.
-func (client *Client) dispatchRun(ctx context.Context, run protocol.Run, agent protocol.Agent, execution *protocol.DispatchExecution, allocationID string) {
+func (client *Client) dispatchRun(ctx context.Context, run protocol.Run, agent protocol.Agent, execution *protocol.DispatchExecution, allocationID string, expectedCapabilityPack *protocol.ExpectedCapabilityPack) {
 	// The guard may re-verify an adapter executable's digest, so it runs before taking any lock;
 	// its verdict is applied in the same place as before, after the tombstone and duplicate
 	// checks.
@@ -554,7 +571,7 @@ func (client *Client) dispatchRun(ctx context.Context, run protocol.Run, agent p
 		// run.started is sent only when the driver is about to hand the harness its prompt, after
 		// transport selection and, for ACP, after the adapter connected to the Coffee Shop MCP
 		// server; it carries that selection. Events produced before then are held by the session.
-		invocation := harness.Invocation{Run: run, Agent: agent, Workspace: workspacePath, MCP: capability, FallbackTransport: fallbackTransport, Output: func(chunk string) {
+		invocation := harness.Invocation{Run: run, Agent: agent, Workspace: workspacePath, MCP: capability, FallbackTransport: fallbackTransport, ExpectedCapabilityPack: expectedCapabilityPack, Output: func(chunk string) {
 			if runContext.Err() != nil {
 				return
 			}

@@ -6,7 +6,7 @@ import {
   toolCallStatuses, workspaceCleanupPolicies, workspaceIsolationPolicies, workspaceLeaseStatuses,
   workspaceRetentionReasons, orchestratorAttachmentStatuses, orchestratorClientScopes, validateAgentInstance,
   validateAgentTemplate, validateArtifactPreview, validateInstanceAllocation, validateProjectProfile,
-  validateComponentInventoryReport,
+  validateComponentInventoryReport, validateEffectiveCapabilityPack,
   type ArtifactPreview, type Snapshot
 } from "@coffee-shop/protocol";
 
@@ -155,7 +155,8 @@ function isRunTransportSelection(value: unknown): boolean {
     && (value.fallbackReason === undefined || isString(value.fallbackReason))
     && isOptionalString(value.harnessVersion)
     && (value.adapter === undefined || (isObject(value.adapter) && isString(value.adapter.id) && isString(value.adapter.version) && isString(value.adapter.source)))
-    && (value.acp === undefined || isObject(value.acp));
+    && (value.acp === undefined || isObject(value.acp))
+    && (value.effectiveCapabilityPack === undefined || validateEffectiveCapabilityPack(value.effectiveCapabilityPack).ok);
 }
 
 function isRun(value: unknown): boolean {

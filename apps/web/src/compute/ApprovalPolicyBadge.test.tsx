@@ -62,6 +62,15 @@ describe("approval policy badge", () => {
     }
   });
 
+  it("shows the effective capability pack proof reported before the prompt", () => {
+    render(<RunActivityPanel approvals={[]} transportSelection={{
+      requestedTransport: "native-cli", selectedTransport: "native-cli",
+      effectiveCapabilityPack: { id: "coffee-shop-core", version: "1.0.0", skills: ["preview", "review"] }
+    }} />);
+    expect(screen.getByText("Capability pack")).toBeInTheDocument();
+    expect(screen.getByText("coffee-shop-core@1.0.0 · preview, review")).toBeInTheDocument();
+  });
+
   it("shows the approval policy row only for harnesses the policy governs", () => {
     const { rerender } = render(<HarnessFacts harness={harness("claude-cli", "Claude")} />);
     expect(screen.getByText("Approval policy")).toBeInTheDocument();

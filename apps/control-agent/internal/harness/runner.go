@@ -78,7 +78,7 @@ func (driver nativeDriver) Execute(ctx context.Context, invocation Invocation) (
 	}
 	var stderr bytes.Buffer
 	command.Stderr = &stderr
-	invocation.announce(transportDetails{})
+	invocation.announce(transportDetails{effectiveCapabilityPack: driver.runner.effectiveCapabilityPack(projection)})
 	if err := command.Start(); err != nil {
 		return "", err
 	}

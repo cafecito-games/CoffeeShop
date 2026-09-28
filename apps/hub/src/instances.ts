@@ -27,6 +27,7 @@ import {
   type HarnessId,
   type HarnessTransport,
   type InstanceAllocation,
+  type ExpectedCapabilityPack,
   type InstanceControlMessage,
   type InstanceCreator,
   type InstanceHubMessage,
@@ -652,6 +653,39 @@ export function releaseUnneededInstanceInState(state: State, instanceId: string,
   return true;
 }
 
+/**
+ * Rejects a run-start proof that does not match the allocation's immutable pack expectation. The
+ * attempt is retryable, while the resident is cancelled and made unavailable so the next scheduler
+ * pass must place against fresh current-socket evidence and a new allocation.
+ */
+export function rejectInstanceAllocationProofInState(state: State, runId: string, reason: string, at: string): boolean {
+	const run = state.runs.find((item) => item.id === runId);
+	if (!run || run.instanceId === undefined || run.allocationId === undefined || !canTransitionRun(run.status, "failed")) return false;
+	const instance = (state.instances ?? []).find((item) => item.id === run.instanceId);
+	const allocation = (state.allocations ?? []).find((item) => item.id === run.allocationId && item.instanceId === run.instanceId);
+	if (!instance || !allocation || terminalInstanceStatuses.includes(instance.status)) return false;
+	run.status = "failed";
+	run.error = reason;
+	run.finishedAt = at;
+	const task = run.taskId === undefined ? undefined : state.tasks?.find((item) => item.id === run.taskId);
+	applyAttemptOutcome(state, run.id, at, { retryable: attemptIsRetryable(task) });
+	if (task?.placementInstanceId === instance.id) delete task.placementInstanceId;
+	recordReleaseIntent(state, instance, "cancel", at);
+	if (canTransitionInstance(instance.status, "draining")) instance.status = "draining";
+	instance.updatedAt = at;
+	state.events.unshift(newEvent({
+		type: "status",
+		title: "Capability pack proof rejected",
+		detail: `Run ${run.id} could not use allocation ${allocation.id}: ${reason}`,
+		threadId: run.threadId,
+		instanceId: instance.id,
+		allocationId: allocation.id,
+		runId: run.id
+	}));
+	settleDrainingInstances(state, at);
+	return true;
+}
+
 /** Records the release intent, escalating monotonically: once cancel, always cancel. */
 function recordReleaseIntent(state: State, instance: AgentInstance, mode: InstanceReleaseMode, at: string): InstanceReleaseIntent {
   state.instanceReleaseIntents ??= [];
@@ -720,6 +754,7 @@ export interface AllocationCandidate {
   transport: HarnessTransport;
   /** Canonical absolute path; Barista re-validates it against its WORKSPACE_ROOTS. */
   workspace: string;
+  expectedCapabilityPack?: ExpectedCapabilityPack;
 }
 
 export type ReservationResult =
@@ -732,6 +767,23 @@ export type ReservationResult =
    * would roll back placements that have nothing to do with the offending record.
    */
   | { kind: "invalid"; reason: string };
+
+function capabilityPackExpectationRefusal(
+  instance: Pick<AgentInstance, "requirements">,
+  expected: ExpectedCapabilityPack | undefined
+): string | undefined {
+  const requiredSkills = [...new Set(instance.requirements.skills ?? [])].sort();
+  if (requiredSkills.length === 0 && expected !== undefined) {
+    return "An allocation without skill requirements cannot carry a capability pack expectation";
+  }
+  if (requiredSkills.length > 0) {
+    if (expected === undefined) return "Skill requirements require an admitted capability pack expectation";
+    if (JSON.stringify(expected.requiredSkills) !== JSON.stringify(requiredSkills)) {
+      return "The capability pack expectation does not exactly cover the instance skill requirements";
+    }
+  }
+  return undefined;
+}
 
 const isUnderWorkspaceRoot = (workspace: string, root: string) =>
   workspace === root || workspace.startsWith(root.endsWith("/") ? root : `${root}/`);
@@ -807,7 +859,7 @@ function allocationRefusal(state: Readonly<State>, instance: AgentInstance, cand
   if (!(node.workspaceRoots ?? []).some((root) => isUnderWorkspaceRoot(candidate.workspace, root))) {
     return `Workspace ${candidate.workspace} is outside an authorized root on ${node.id}`;
   }
-  return undefined;
+  return capabilityPackExpectationRefusal(instance, candidate.expectedCapabilityPack);
 }
 
 /**
@@ -831,6 +883,7 @@ function writeAllocationInState(
     model: candidate.model,
     transport: candidate.transport,
     workspace: candidate.workspace,
+    ...(candidate.expectedCapabilityPack === undefined ? {} : { expectedCapabilityPack: structuredClone(candidate.expectedCapabilityPack) }),
     lease: { ...instance.lease },
     status: "reserved",
     createdAt: at,
@@ -946,6 +999,7 @@ export function placeInstanceInState(state: State, seed: InstanceRequestSeed, ca
     allocation: {
       id: "probe", instanceId: instance.id, nodeId: node.id, harnessId: candidate.harnessId, model: candidate.model,
       transport: candidate.transport, workspace: candidate.workspace, lease: { ...instance.lease },
+      ...(candidate.expectedCapabilityPack === undefined ? {} : { expectedCapabilityPack: structuredClone(candidate.expectedCapabilityPack) }),
       status: "reserved", createdAt: at, updatedAt: at
     }
   };
@@ -1710,6 +1764,7 @@ export function assertPersistedInstanceState(state: State) {
     if (!threadIds.has(instance.threadId)) throw new Error(`${context} names unknown thread ${instance.threadId}`);
   }
   const instanceThreadIds = new Map((state.instances ?? []).map((instance) => [instance.id, instance.threadId]));
+  const instancesById = new Map((state.instances ?? []).map((instance) => [instance.id, instance]));
   const allocationIds = new Set<string>();
   const allocationsById = new Map<string, InstanceAllocation>();
   const occupying = new Map<string, number>();
@@ -1720,6 +1775,8 @@ export function assertPersistedInstanceState(state: State) {
     if (allocationIds.has(allocation.id)) throw new Error(`${context} repeats allocation id ${allocation.id}`);
     allocationIds.add(allocation.id);
     if (!instanceIds.has(allocation.instanceId)) throw new Error(`${context} names unknown instance ${allocation.instanceId}`);
+    const expectationRefusal = capabilityPackExpectationRefusal(instancesById.get(allocation.instanceId)!, allocation.expectedCapabilityPack);
+    if (expectationRefusal !== undefined) throw new Error(`${context} is inconsistent: ${expectationRefusal}`);
     allocationsById.set(allocation.id, allocation);
     if (occupyingAllocationStatuses.includes(allocation.status)) {
       const count = (occupying.get(allocation.instanceId) ?? 0) + 1;

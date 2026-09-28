@@ -228,6 +228,7 @@ const v5Instance: AgentInstance = {
 };
 const v5Allocation: InstanceAllocation = {
   id: "allocation-review", instanceId: v5Instance.id, nodeId: node.id, harnessId: "codex-cli", model: "gpt-5", transport: "native-cli",
+  expectedCapabilityPack: { id: "coffee-shop-core", version: "1.0.0", requiredSkills: ["review"] },
   workspace: "/workspace/review", lease: v5Instance.lease, status: "active", createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:02:00Z"
 };
 const v5Template: AgentTemplate = {
@@ -242,7 +243,8 @@ function prepareV5(status: ConnectionStatus = "connected") {
     threads: [{ ...thread, status: "active", completedAt: undefined }],
     instances: [v5Instance], allocations: [v5Allocation], templates: [v5Template],
     nodes: [{ ...node, instanceCapacity: 2, activeInstances: 0 }],
-    runs: [{ ...testRun("running"), id: "run-instance", agentId: undefined, instanceId: v5Instance.id, allocationId: v5Allocation.id, threadId: thread.id, prompt: "Review the release" }]
+    runs: [{ ...testRun("running"), id: "run-instance", agentId: undefined, instanceId: v5Instance.id, allocationId: v5Allocation.id, threadId: thread.id, prompt: "Review the release",
+      transportSelection: { requestedTransport: "native-cli", selectedTransport: "native-cli", effectiveCapabilityPack: { id: "coffee-shop-core", version: "1.0.0", skills: ["review"] } } }]
   };
 }
 
@@ -261,6 +263,7 @@ describe("version-5 instance and template operator experience", () => {
     expect(instanceRow).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByText("Desired requirements")).toBeInTheDocument();
     expect(screen.getByText("Current placement")).toBeInTheDocument();
+    expect(screen.getByText("coffee-shop-core@1.0.0")).toBeInTheDocument();
     expect(screen.getByText("0")).toBeInTheDocument();
     expect(screen.getByText("Review the release")).toBeInTheDocument();
     fireEvent.click(screen.getAllByRole("button", { name: "Templates" })[0]);

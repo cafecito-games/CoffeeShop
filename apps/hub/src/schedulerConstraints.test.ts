@@ -156,7 +156,6 @@ function constraintFixture(testCase: ConstraintCase): Fixture {
 
 test("every satisfied hard constraint assigns the task to the candidate", () => {
   const cases: Array<ConstraintCase & { expectedTransport?: HarnessTransport; expectedWorkspace?: string }> = [
-    { label: "skill matched case-insensitively", requirements: { skills: ["Rust"] }, agentOverrides: { skills: ["rust"] } },
     { label: "harness id matched", requirements: { harnessIds: ["codex-cli"] } },
     { label: "model matched", requirements: { models: ["default"] } },
     {
@@ -228,9 +227,10 @@ test("every satisfied hard constraint assigns the task to the candidate", () => 
 test("every unmet hard constraint reports its exact unsatisfied entry", () => {
   const cases: Array<ConstraintCase & { expected: UnsatisfiedRequirement[] }> = [
     {
-      label: "undeclared skill",
+      label: "configured skill metadata is not readiness authority",
       requirements: { skills: ["rust"] },
-      expected: [alphaEntry("skill", "rust", "agent does not declare this skill")]
+      agentOverrides: { skills: ["rust"] },
+      expected: [alphaEntry("skill", "rust", "configured agent metadata is not live capability pack readiness")]
     },
     {
       label: "different harness configured",
@@ -452,8 +452,9 @@ test("a combination of unmet constraints reports the full sorted deduplicated li
     unsatisfied: [
       { kind: "label", requirement: "gpu", nodeId: "node-alpha", agentId: "alpha", detail: "no worker-reported evidence" },
       { kind: "protocol-version", requirement: "control protocol version 4", nodeId: "node-alpha", agentId: "alpha", detail: "compute node registered a protocol version without task orchestration" },
-      { kind: "skill", requirement: "rust", nodeId: "node-alpha", agentId: "alpha", detail: "agent does not declare this skill" },
-      { kind: "label", requirement: "gpu", nodeId: "node-beta", agentId: "beta", detail: "no worker-reported evidence" }
+      { kind: "skill", requirement: "rust", nodeId: "node-alpha", agentId: "alpha", detail: "configured agent metadata is not live capability pack readiness" },
+      { kind: "label", requirement: "gpu", nodeId: "node-beta", agentId: "beta", detail: "no worker-reported evidence" },
+      { kind: "skill", requirement: "rust", nodeId: "node-beta", agentId: "beta", detail: "configured agent metadata is not live capability pack readiness" }
     ]
   });
 });
