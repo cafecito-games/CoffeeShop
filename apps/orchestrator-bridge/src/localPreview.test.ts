@@ -221,9 +221,12 @@ test("rejects every package numeric one-over boundary and compression-ratio bomb
   const directoryCountRoot = await mkdtemp(join(tmpdir(), "coffee-shop-local-preview-directory-count-"));
   await mkdir(join(directoryCountRoot, "site"));
   await writeFile(join(directoryCountRoot, "site", "index.html"), "ok");
-  for (let index = 0; index <= previewBundleContract.maximumRegularFiles; index += 1) {
+  for (let index = 0; index < previewBundleContract.maximumRegularFiles; index += 1) {
     await mkdir(join(directoryCountRoot, "site", `directory-${index.toString().padStart(4, "0")}`));
   }
+  const directoriesAtLimit = await captureLocalPreview(await canonicalWorkingRoot(directoryCountRoot), argumentsValue);
+  assert.equal(directoriesAtLimit.registration.kind, previewBundleContract.artifactKind);
+  await mkdir(join(directoryCountRoot, "site", "directory-overflow"));
   await assert.rejects(
     captureLocalPreview(await canonicalWorkingRoot(directoryCountRoot), argumentsValue),
     /directory-count/i

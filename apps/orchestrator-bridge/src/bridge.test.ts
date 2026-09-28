@@ -293,6 +293,9 @@ test("publish_preview local refusals happen before a Hub RPC and never reveal th
     idempotencyKey: "preview-one"
   } });
   assert.equal(result.isError, true);
+  assert.deepEqual(parseToolResult(result), {
+    error: { code: "invalid_arguments", message: "the preview source directory is unavailable" }
+  });
   assert.equal(harness.hub.receivedOfType("rpc.request").length, 0);
   assert.equal(JSON.stringify(result).includes(root), false);
 });

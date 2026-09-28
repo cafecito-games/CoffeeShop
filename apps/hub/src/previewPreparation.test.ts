@@ -403,13 +403,16 @@ test("shared path, file-count, directory-count, file-size, expanded, ratio, comp
     (error: unknown) => error instanceof ArtifactIngestionError && error.failureCode === "limit-exceeded"
   );
 
-  const directoriesOverLimit = bundle([
+  const directoryEntriesAtLimit: TarEntry[] = [
     { name: "index.html", body: Buffer.from("directory count") },
-    ...Array.from({ length: previewBundleContract.maximumRegularFiles + 1 }, (_, index) => ({
+    ...Array.from({ length: previewBundleContract.maximumRegularFiles }, (_, index) => ({
       name: `directories/${index.toString().padStart(4, "0")}`,
       type: "5"
     }))
-  ]);
+  ];
+  const directoriesAtLimit = bundle(directoryEntriesAtLimit);
+  assert.equal((await prepareBytes(directoriesAtLimit, "index.html", "preview-directory-count-limit")).manifest.files.length, 1);
+  const directoriesOverLimit = bundle([...directoryEntriesAtLimit, { name: "directories/overflow", type: "5" }]);
   await assert.rejects(
     prepareBytes(directoriesOverLimit, "index.html", "preview-directory-count-over"),
     (error: unknown) => error instanceof ArtifactIngestionError && error.failureCode === "limit-exceeded"
