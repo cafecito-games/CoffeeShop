@@ -229,13 +229,24 @@ export const isArtifactPreviewFailureCode = (value: unknown): value is ArtifactP
 export const canTransitionArtifactPreview = (from: unknown, to: unknown) =>
   isArtifactPreviewStatus(from) && isArtifactPreviewStatus(to) && artifactPreviewTransitions[from].includes(to);
 
-export const artifactKinds = ["patch", "report", "test-results", "log", "image", "other", previewBundleArtifactKind] as const;
+export const ordinaryArtifactKinds = ["patch", "report", "test-results", "log", "image", "other"] as const;
+export const artifactKinds = [...ordinaryArtifactKinds, previewBundleArtifactKind] as const;
 export type ArtifactKind = typeof artifactKinds[number];
+export type OrdinaryArtifactKind = typeof ordinaryArtifactKinds[number];
+export const artifactMaximumBytes = 10 * 1024 * 1024;
+
+export type ArtifactSource =
+  | { kind: "run"; sourceKey: string; runId: string; agentId: string }
+  | { kind: "run"; sourceKey: string; runId: string; instanceId: string; allocationId: string }
+  | { kind: "external"; sourceKey: string; clientId: string };
 
 export interface Artifact {
   id: string;
   threadId?: string;
-  runId: string;
+  /** Present only for a hub-hosted producer. Older records derive their source key from this id. */
+  runId?: string;
+  /** Stable producer identity. Required for external artifacts; optional only for legacy run state. */
+  sourceKey?: string;
   /** Compatibility attribution: the configured agent that produced it. Absent on an instance run. */
   agentId?: string;
   /** Version-5: the resident instance that produced it, and the allocation it ran under. */
@@ -1653,6 +1664,77 @@ const isDiagnostic = (value: unknown) => isBoundedString(value, harnessEventLimi
 const accept = <T>(value: T): Validation<T> => ({ ok: true, value });
 const reject = <T>(reason: string): Validation<T> => ({ ok: false, reason });
 
+const artifactKeys = [
+  "id", "threadId", "runId", "sourceKey", "agentId", "instanceId", "allocationId", "relativePath", "title", "kind",
+  "mediaType", "summary", "size", "sha256", "downloadPath", "uploaded", "idempotencyKey", "createdAt"
+] as const;
+
+/** Resolves and validates the one producer identity every artifact must carry. */
+export function artifactSource(value: unknown): Validation<ArtifactSource> {
+  if (!isRecord(value)) return reject("artifact source must be an object");
+  const runId = value.runId;
+  const sourceKey = value.sourceKey;
+  const agentId = value.agentId;
+  const instanceId = value.instanceId;
+  const allocationId = value.allocationId;
+  if (runId !== undefined) {
+    if (!isIdentifier(runId)) return reject("run artifact has an invalid run id");
+    const canonical = runSourceKey(runId);
+    if (sourceKey !== undefined && sourceKey !== canonical) return reject("run artifact has a conflicting source key");
+    const agentActor = isIdentifier(agentId) && instanceId === undefined && allocationId === undefined;
+    const instanceActor = agentId === undefined && isIdentifier(instanceId) && isIdentifier(allocationId);
+    if (agentActor === instanceActor) return reject("run artifact has an invalid or ambiguous actor");
+    return agentActor
+      ? accept({ kind: "run", sourceKey: canonical, runId, agentId })
+      : accept({ kind: "run", sourceKey: canonical, runId, instanceId: instanceId as string, allocationId: allocationId as string });
+  }
+  if (agentId !== undefined || instanceId !== undefined || allocationId !== undefined) {
+    return reject("external artifact carries run actor attribution");
+  }
+  if (typeof sourceKey !== "string" || !sourceKey.startsWith("orchestrator-client:")) {
+    return reject("external artifact has no canonical orchestrator source key");
+  }
+  const clientId = sourceKey.slice("orchestrator-client:".length);
+  if (!isIdentifier(clientId) || clientId.includes(":")) return reject("external artifact has a malformed client identity");
+  return accept({ kind: "external", sourceKey, clientId });
+}
+
+/** Returns a canonical source key only when the complete producer identity is valid. */
+export const artifactSourceKey = (value: unknown): string | undefined => {
+  const source = artifactSource(value);
+  return source.ok ? source.value.sourceKey : undefined;
+};
+
+/** Strict validator shared by persisted state and public snapshot consumers. */
+export function validateArtifact(value: unknown): Validation<Artifact> {
+  if (!isRecord(value) || !hasOnlyKeys(value, artifactKeys)) return reject("artifact contains undeclared fields");
+  if (!isIdentifier(value.id) || (value.threadId !== undefined && !isIdentifier(value.threadId))) {
+    return reject("artifact is missing identity");
+  }
+  const source = artifactSource(value);
+  if (!source.ok) return reject(source.reason);
+  if (source.value.kind === "external" && !isIdentifier(value.threadId)) return reject("external artifact has no thread");
+  if (source.value.kind === "external" && value.kind === previewBundleArtifactKind) {
+    return reject("external preview artifacts require dedicated lifecycle authority");
+  }
+  if (!isBoundedString(value.relativePath, 1_024) || value.relativePath.length === 0
+    || value.relativePath.startsWith("/") || /^[A-Za-z]:/.test(value.relativePath) || value.relativePath.includes("\\")
+    || /[\u0000-\u001f\u007f]/.test(value.relativePath)
+    || value.relativePath.split("/").some((segment) => segment === "" || segment === "." || segment === "..")) {
+    return reject("artifact has an invalid relative path");
+  }
+  if (!isBoundedString(value.title, 256) || value.title.length === 0
+    || !isBoundedString(value.mediaType, 128) || value.mediaType.length === 0
+    || !isBoundedString(value.summary, 2_000)) return reject("artifact display metadata is invalid");
+  if (!(artifactKinds as readonly unknown[]).includes(value.kind)) return reject("artifact has an unknown kind");
+  if (!isNonNegativeInteger(value.size) || value.size > artifactMaximumBytes) return reject("artifact size is invalid");
+  if (typeof value.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(value.sha256)) return reject("artifact digest is invalid");
+  if (value.downloadPath !== `/api/artifacts/${encodeURIComponent(value.id)}/content`) return reject("artifact download path is invalid");
+  if (typeof value.uploaded !== "boolean" || !isBoundedString(value.idempotencyKey, 128) || value.idempotencyKey.length === 0
+    || !isTimestamp(value.createdAt)) return reject("artifact lifecycle metadata is invalid");
+  return accept(value as unknown as Artifact);
+}
+
 const componentIdentifierPattern = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const componentString = (value: unknown): value is string => typeof value === "string"
   && byteLength(value) <= componentInventoryLimits.identifierBytes && componentIdentifierPattern.test(value);
@@ -2860,6 +2942,7 @@ export const externalOrchestratorToolNames = [
   "submit_tasks",
   "update_task",
   "send_task_message",
+  "post_artifact",
   "update_thread",
   "get_execution_inventory",
   "spawn_instance",

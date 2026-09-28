@@ -332,6 +332,8 @@ test("guards every api route but health, and only when the hub runs in productio
   app.use(operatorCredentialGuard("operator-token"));
   app.get("/api/health", (_request, response) => { response.json({ ok: true }); });
   app.get("/api/secrets", (_request, response) => { response.json({ ok: true }); });
+  app.put("/api/artifacts/:id/content", (_request, response) => { response.status(204).end(); });
+  app.get("/api/artifacts/:id/content", (_request, response) => { response.json({ ok: true }); });
   app.get("/public", (_request, response) => { response.json({ ok: true }); });
   const server = app.listen(0, "127.0.0.1");
   await once(server, "listening");
@@ -344,6 +346,14 @@ test("guards every api route but health, and only when the hub runs in productio
     assert.equal(await status("/api/secrets"), 401);
     assert.equal(await status("/api/secrets", { authorization: "Bearer operator-token" }), 200);
     assert.equal(await status("/api/secrets?token=operator-token"), 200, "the query token stays supported");
+    assert.equal(await status("/api/artifacts/artifact-one/content", { authorization: "Bearer one-time-grant" }), 401,
+      "a grant never authorizes artifact reads");
+    assert.equal((await fetch(`http://127.0.0.1:${port}/api/artifacts/artifact-one/content`, {
+      method: "PUT", headers: { authorization: "Bearer one-time-grant" }
+    })).status, 204, "only the exact upload route delegates bearer authorization to its handler");
+    assert.equal((await fetch(`http://127.0.0.1:${port}/api/artifacts/artifact-one/content?token=one-time-grant`, {
+      method: "PUT"
+    })).status, 401, "an upload grant in the query is refused before the route");
     process.env.NODE_ENV = "development";
     assert.equal(await status("/api/secrets"), 200, "development keeps working without a token");
   } finally {

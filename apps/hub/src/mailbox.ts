@@ -471,7 +471,8 @@ const sameMessage = (message: TaskMessage, normalized: NormalizedMessage, source
 export function assertVisibleArtifacts(state: Readonly<State>, threadId: string, artifactIds: readonly string[], ownRunIds?: ReadonlySet<string>) {
   for (const artifactId of artifactIds) {
     const artifact = state.artifacts?.find((item) => item.id === artifactId);
-    if (!artifact || !artifact.uploaded || artifact.threadId !== threadId || (ownRunIds && !ownRunIds.has(artifact.runId))) {
+    if (!artifact || !artifact.uploaded || artifact.threadId !== threadId
+      || (ownRunIds && (artifact.runId === undefined || !ownRunIds.has(artifact.runId)))) {
       throw new CoordinationError("invalid_artifact", "Every attached artifact must be uploaded and visible in this thread");
     }
   }

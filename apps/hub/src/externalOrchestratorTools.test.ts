@@ -448,6 +448,11 @@ test("every tool the hub serves is reachable with a well-formed call", async () 
     ["release_instance", { threadId, instanceId, idempotencyKey: "coverage-release", mode: "cancel" }],
     ["submit_tasks", { threadId, idempotencyKey: "batch-1", tasks: [oneTask("one")] }],
     ["send_task_message", { threadId, idempotencyKey: "message-1", recipient: { type: "task", taskId }, kind: "note", body: "hello" }],
+    ["post_artifact", {
+      threadId, relativePath: "reports/coverage.txt", title: "Coverage artifact", kind: "report", mediaType: "text/plain",
+      summary: "", size: 0, sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      idempotencyKey: "coverage-artifact"
+    }],
     ["update_task", { threadId, taskId, idempotencyKey: "update-1", progress: "halfway" }],
     ["update_thread", { threadId, title: "Renamed" }],
     ["detach_thread", { threadId }]

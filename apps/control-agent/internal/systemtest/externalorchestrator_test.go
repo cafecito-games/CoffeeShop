@@ -3,8 +3,11 @@
 package systemtest
 
 import (
+	"bytes"
+	"encoding/json"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -125,12 +128,20 @@ func TestExternalClaudeCodeOrchestration(t *testing.T) {
 	})
 
 	clientID, secret := cluster.mintOrchestratorClient("Operator laptop", "orchestrate", "resolve-approvals")
-	session := cluster.startBridge("primary", clientID, secret)
+	operatorRoot := filepath.Join(cluster.root, "operator-working-root")
+	if err := os.MkdirAll(filepath.Join(operatorRoot, "reports"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	externalBytes := []byte("published from the operator machine\n")
+	if err := os.WriteFile(filepath.Join(operatorRoot, "reports", "external-result.txt"), externalBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	session := cluster.startBridgeAt("primary", clientID, secret, operatorRoot)
 
 	// The approval tools are offered only once the hub's welcome proved the credential's scopes,
 	// and the bridge announces that change so Claude Code re-lists.
 	session.awaitTools("create_thread", "attach_thread", "get_thread_events", "submit_tasks",
-		"get_execution_inventory", "update_thread", "list_approvals", "resolve_approval")
+		"get_execution_inventory", "post_artifact", "update_thread", "list_approvals", "resolve_approval")
 	if session.observedToolListChanges() == 0 {
 		t.Fatal("the bridge never announced that the scoped tools became available")
 	}
@@ -142,6 +153,49 @@ func TestExternalClaudeCodeOrchestration(t *testing.T) {
 	threadID := text(object(created, "thread"), "id")
 	if threadID == "" {
 		t.Fatalf("create_thread returned no thread id: %v", created)
+	}
+
+	artifactArguments := map[string]any{
+		"threadId": threadID, "relativePath": "reports/external-result.txt", "title": "External result",
+		"kind": "report", "mediaType": "text/plain", "summary": "Produced on the operator machine",
+		"idempotencyKey": "operator-external-result",
+	}
+	published := session.mustCallTool("post_artifact", artifactArguments)
+	externalArtifactID := text(published, "id")
+	if externalArtifactID == "" || published["uploaded"] != true ||
+		text(published, "sourceKey") != "orchestrator-client:"+clientID {
+		t.Fatalf("post_artifact did not return the uploaded external artifact: %v", published)
+	}
+	for _, forbidden := range []string{"runId", "agentId", "instanceId", "allocationId", "uploadGrant"} {
+		if _, present := published[forbidden]; present {
+			t.Fatalf("external artifact exposed forbidden %s: %v", forbidden, published)
+		}
+	}
+	if replay := session.mustCallTool("post_artifact", artifactArguments); text(replay, "id") != externalArtifactID || replay["uploaded"] != true {
+		t.Fatalf("the same-session artifact retry did not converge: %v", replay)
+	}
+	uploaded := cluster.eventually("the external artifact to be published", func(current snapshot) (bool, string) {
+		for _, item := range current.Artifacts {
+			if item.ID == externalArtifactID {
+				return item.Uploaded && item.SourceKey == "orchestrator-client:"+clientID && item.RunID == "", "artifact identity or upload state is wrong"
+			}
+		}
+		return false, "artifact missing"
+	})
+	artifactCount := len(uploaded.Artifacts)
+	if status, content := cluster.hub.rawGet(text(published, "downloadPath")); status != http.StatusOK || string(content) != string(externalBytes) {
+		t.Fatalf("the immutable artifact download was %d %q", status, content)
+	}
+	refused := session.callTool("post_artifact", map[string]any{
+		"threadId": threadID, "relativePath": "../private.txt", "title": "Private", "kind": "report",
+		"mediaType": "text/plain", "idempotencyKey": "operator-path-escape",
+	})
+	if refused.errorCode() != "invalid_arguments" {
+		t.Fatalf("the bridge did not reject a local path escape: %+v", refused)
+	}
+	encodedRefusal, _ := json.Marshal(refused)
+	if strings.Contains(string(encodedRefusal), operatorRoot) || len(cluster.hub.snapshot().Artifacts) != artifactCount {
+		t.Fatalf("the path refusal leaked its private root or mutated artifacts: %s", encodedRefusal)
 	}
 
 	// The fleet the orchestrator plans against is the hub's own inventory, not anything the model
@@ -160,10 +214,11 @@ func TestExternalClaudeCodeOrchestration(t *testing.T) {
 	}
 
 	alpha := script(t,
+		step{Call: "get_task_context", As: "context"},
 		step{Gate: "fan-out"},
 		step{Gate: "alpha-permission"},
 		step{Permission: &permission{ToolCallID: "alpha-edit", Title: "Write alpha.txt", Kind: "edit", Options: allowOrReject, As: "approval"}},
-		step{Message: "alpha permission={{approval.outcome.optionId}}"},
+		step{Message: "alpha permission={{approval.outcome.optionId}} externalArtifact={{context.artifacts.*.id}}"},
 	)
 	beta := script(t,
 		step{Gate: "fan-out"},
@@ -185,6 +240,21 @@ func TestExternalClaudeCodeOrchestration(t *testing.T) {
 	if submitted["created"] != true {
 		t.Fatalf("submit_tasks did not create the graph: %v", submitted)
 	}
+	alphaTaskID := text(object(submitted, "taskIdsByKey"), "alpha")
+	attachedMessage := session.mustCallTool("send_task_message", map[string]any{
+		"threadId": threadID, "idempotencyKey": "external-artifact-instructions",
+		"recipient": map[string]any{"type": "task", "taskId": alphaTaskID}, "kind": "note",
+		"body": "Use the operator-published result from task context.", "artifactIds": []string{externalArtifactID},
+	})
+	attachedMessageID := text(attachedMessage, "messageId")
+	cluster.eventually("the external artifact reference to reach the worker mailbox", func(current snapshot) (bool, string) {
+		for _, message := range current.TaskMessages {
+			if message.ID == attachedMessageID {
+				return len(message.ArtifactIDs) == 1 && message.ArtifactIDs[0] == externalArtifactID, "message lost its artifact reference"
+			}
+		}
+		return false, "message missing"
+	})
 
 	// The two independent tasks run at the same time on different nodes; the dependent one has no
 	// attempt at all until both finish.
@@ -281,6 +351,9 @@ func TestExternalClaudeCodeOrchestration(t *testing.T) {
 	if outputField(t, alphaAttempt.Output, "permission") != "allow" {
 		t.Fatalf("the orchestrator's approval did not reach the worker's callback: %q", alphaAttempt.Output)
 	}
+	if outputField(t, alphaAttempt.Output, "externalArtifact") != externalArtifactID {
+		t.Fatalf("the worker did not discover the external artifact through task context: %q", alphaAttempt.Output)
+	}
 	if runs := orphaned.hubHostedOrchestratorRuns(threadID); len(runs) != 0 {
 		t.Fatalf("the hub started an orchestrator run for an externally orchestrated thread: %+v", runs)
 	}
@@ -289,8 +362,11 @@ func TestExternalClaudeCodeOrchestration(t *testing.T) {
 	}
 
 	// A new session attaches the same thread and is rung for the whole backlog at once.
-	resumed := cluster.startBridge("resumed", clientID, secret)
+	resumed := cluster.startBridgeAt("resumed", clientID, secret, operatorRoot)
 	resumed.mustCallTool("attach_thread", map[string]any{"threadId": threadID})
+	if replay := resumed.mustCallTool("post_artifact", artifactArguments); text(replay, "id") != externalArtifactID || replay["uploaded"] != true {
+		t.Fatalf("the reconnect artifact retry did not converge: %v", replay)
+	}
 	backlog := resumed.awaitChannelEvent("the backlog doorbell", func(event channelEvent) bool {
 		return event.Meta["thread_id"] == threadID && event.pending() >= 1
 	})
@@ -382,7 +458,16 @@ func TestExternalClaudeCodeOrchestration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read the hub state: %v", err)
 	}
+	// SQLite may retain the current state in its live WAL. Search both byte-for-byte: a persisted
+	// plaintext bearer would appear as a JSON `token` field, whereas the intended digest does not.
+	if wal, walError := os.ReadFile(cluster.hub.dataPath + "-wal"); walError == nil {
+		persisted = append(persisted, wal...)
+	}
+	if bytes.Contains(persisted, []byte(`"token":`)) {
+		t.Fatal("a plaintext artifact upload grant reached persisted state")
+	}
 	for source, content := range map[string]string{
+		"the primary session's output": session.output(),
 		"the resumed session's output": resumed.output(),
 		"the taking session's output":  taker.output(),
 		"the hub log":                  cluster.hub.logs.String(),
@@ -390,6 +475,12 @@ func TestExternalClaudeCodeOrchestration(t *testing.T) {
 	} {
 		if strings.Contains(content, secret) {
 			t.Errorf("the orchestrator client secret leaked into %s", source)
+		}
+		if strings.Contains(content, operatorRoot) {
+			t.Errorf("the bridge's private working root leaked into %s", source)
+		}
+		if source != "the hub state file" && strings.Contains(content, `"uploadGrant"`) {
+			t.Errorf("artifact upload authority leaked past the bridge into %s", source)
 		}
 	}
 	cluster.assertNoCredentialLeak()

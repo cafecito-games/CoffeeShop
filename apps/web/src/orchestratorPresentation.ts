@@ -1,5 +1,5 @@
 import {
-  threadOrchestrator, type Agent, type AgentInstance, type ApprovalResolvedBy, type OrchestratorAttachment,
+  artifactSource, threadOrchestrator, type Agent, type AgentInstance, type ApprovalResolvedBy, type Artifact, type OrchestratorAttachment,
   type OrchestratorClient, type OrchestratorClientScope, type Thread
 } from "@coffee-shop/protocol";
 
@@ -16,6 +16,20 @@ export const resolveApprovalsWarning =
   "This lets the Claude Code session approve or reject what your workers ask to do — file writes, "
   + "commands, network calls — without asking you first. Grant it only to a session you are running "
   + "yourself and watching.";
+
+const boundedIdentity = (value: string, maximum = 32) => {
+  const characters = [...value];
+  return characters.length <= maximum ? value : `${characters.slice(0, maximum - 1).join("")}…`;
+};
+
+/** Names the credential that published an external artifact without treating display data as authority. */
+export function externalArtifactProducerLabel(artifact: Artifact, clients: OrchestratorClient[]): string | undefined {
+  const source = artifactSource(artifact);
+  if (!source.ok || source.value.kind !== "external") return undefined;
+  const clientId = source.value.clientId;
+  return clients.find((client) => client.id === clientId)?.name
+    ?? `Unknown orchestrator ${boundedIdentity(clientId)}`;
+}
 
 /** A short "how long ago" phrase for prose such as "Detached since 12m ago". */
 export function sinceLabel(timestamp: string, now: number = Date.now()): string {

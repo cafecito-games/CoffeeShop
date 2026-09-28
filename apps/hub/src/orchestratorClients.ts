@@ -8,6 +8,7 @@ import {
   type OrchestratorClientScope,
   type Validation
 } from "@coffee-shop/protocol";
+import { revokeArtifactUploadGrantsForClientInState } from "./artifactUploadGrants.js";
 import { publicOrchestratorClient, type State, type Store, type StoredOrchestratorClient } from "./store.js";
 
 /*
@@ -179,6 +180,7 @@ export function revokeOrchestratorClient(state: State, clientId: string, at: str
   if (client === undefined) return { kind: "not-found" };
   if (client.revokedAt !== undefined) return { kind: "already-revoked", client: publicOrchestratorClient(client) };
   client.revokedAt = at;
+  revokeArtifactUploadGrantsForClientInState(state, clientId, at);
   return { kind: "revoked", client: publicOrchestratorClient(client) };
 }
 
@@ -235,7 +237,12 @@ export function createOrchestratorClientRevocations(): OrchestratorClientRevocat
 export function operatorCredentialGuard(token: string | undefined): RequestHandler {
   return (request, response, next) => {
     if (!request.path.startsWith("/api/") || request.path === "/api/health" || process.env.NODE_ENV !== "production") return next();
-    const supplied = request.header("authorization")?.replace(/^Bearer\s+/i, "") ?? request.query.token;
+    const authorization = request.header("authorization");
+    const bearer = authorization?.match(/^Bearer\s+([^\s]+)$/i)?.[1];
+    // The artifact route performs its own one-time capability check. A grant is header-only and is
+    // never accepted by another route; malformed headers and query-string grants stay rejected here.
+    if (request.method === "PUT" && /^\/api\/artifacts\/[^/]+\/content$/.test(request.path) && bearer !== undefined && bearer !== token) return next();
+    const supplied = bearer ?? request.query.token;
     if (!token || supplied !== token) {
       response.status(401).json({ error: "Unauthorized" });
       return;

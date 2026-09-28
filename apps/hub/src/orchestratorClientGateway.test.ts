@@ -236,6 +236,81 @@ test("creates an external thread, attaches it, and queues no run", async () => {
   assert.equal(snapshot.orchestratorAttachments!.length, 1);
 });
 
+test("registers external artifacts with source-scoped replay and fresh bridge-only grants", async () => {
+  const context = await harness();
+  const first = await welcomed(context);
+  const threadId = resultOf(await call(first.connection, first.transport, "create_thread", { objective: "Publish it" })).thread.id;
+  const argumentsValue = {
+    threadId,
+    relativePath: "reports/result.txt",
+    title: "Result",
+    kind: "report",
+    mediaType: "text/plain",
+    summary: "Ready",
+    size: 5,
+    sha256: "a".repeat(64),
+    idempotencyKey: "external-result"
+  };
+
+  const created = resultOf(await call(first.connection, first.transport, "post_artifact", argumentsValue));
+  assert.equal(created.artifact.sourceKey, `orchestrator-client:${context.clientId}`);
+  assert.equal(created.artifact.runId, undefined);
+  assert.equal(created.artifact.agentId, undefined);
+  assert.equal(created.artifact.instanceId, undefined);
+  assert.equal(created.artifact.allocationId, undefined);
+  assert.equal(created.artifact.uploaded, false);
+  assert.equal(created.uploadGrant.path, created.artifact.downloadPath);
+  assert.match(created.uploadGrant.token, /^[A-Za-z0-9_-]{43}$/);
+  assert.equal(JSON.stringify(context.store.snapshot()).includes(created.uploadGrant.token), false);
+
+  const replay = resultOf(await call(first.connection, first.transport, "post_artifact", argumentsValue));
+  assert.equal(replay.artifact.id, created.artifact.id);
+  assert.notEqual(replay.uploadGrant.token, created.uploadGrant.token);
+  assert.equal(context.store.snapshot().artifacts?.length, 1);
+
+  const second = await welcomed(context);
+  await call(second.connection, second.transport, "attach_thread", { threadId });
+  const reconnectReplay = resultOf(await call(second.connection, second.transport, "post_artifact", argumentsValue));
+  assert.equal(reconnectReplay.artifact.id, created.artifact.id);
+  assert.notEqual(reconnectReplay.uploadGrant.token, replay.uploadGrant.token);
+
+  const beforeConflict = context.store.read((state) => JSON.stringify([state.artifacts, state.artifactUploadGrants, state.events]));
+  assert.equal(errorOf(await call(second.connection, second.transport, "post_artifact", {
+    ...argumentsValue, summary: "Changed"
+  })).code, "conflict");
+  assert.equal(context.store.read((state) => JSON.stringify([state.artifacts, state.artifactUploadGrants, state.events])), beforeConflict);
+});
+
+test("external artifact registration re-resolves the live attachment and validates every field", async () => {
+  const context = await harness();
+  const first = await welcomed(context);
+  const threadId = resultOf(await call(first.connection, first.transport, "create_thread", { objective: "Publish it" })).thread.id;
+  const valid = {
+    threadId, relativePath: "result.txt", title: "Result", kind: "report", mediaType: "text/plain",
+    size: 0, sha256: "a".repeat(64), idempotencyKey: "result"
+  };
+  const second = await welcomed(context);
+  await call(second.connection, second.transport, "attach_thread", { threadId });
+  assert.equal(errorOf(await call(first.connection, first.transport, "post_artifact", valid)).code, "not_attached");
+  assert.equal(context.store.snapshot().artifacts?.length, 0);
+
+  const rejected = [
+    { ...valid, kind: "preview-bundle" },
+    { ...valid, relativePath: "../secret" },
+    { ...valid, relativePath: "C:secret" },
+    { ...valid, relativePath: "result\0.txt" },
+    { ...valid, size: 10 * 1024 * 1024 + 1 },
+    { ...valid, summary: "é".repeat(1_001) },
+    { ...valid, sha256: "A".repeat(64) },
+    { ...valid, idempotencyKey: "" },
+    { ...valid, extra: true }
+  ];
+  for (const value of rejected) {
+    assert.equal(errorOf(await call(second.connection, second.transport, "post_artifact", value)).code, "invalid_arguments");
+  }
+  assert.equal(context.store.snapshot().artifacts?.length, 0);
+});
+
 test("lists only this client's threads", async () => {
   const context = await harness();
   const other = await harness();

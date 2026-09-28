@@ -357,13 +357,16 @@ test("attached artifacts must be uploaded within the caller's thread, indistingu
   const hub = fixtureHandler(store);
   const taskId = await submitSingleTask(hub.call, rootRunId, "artifacts", "artifacts-1");
   await seedArtifact(store, "artifact-ready");
+  await seedArtifact(store, "artifact-external", {
+    runId: undefined, agentId: undefined, sourceKey: "orchestrator-client:orchestrator-client-one"
+  });
   await seedArtifact(store, "artifact-draft", { uploaded: false });
   await seedArtifact(store, "artifact-elsewhere", { threadId: "thread-two", runId: foreignRunId, agentId: "foreign-owner" });
   const sent = await hub.call("send_task_message", rootRunId, {
-    ...messageToTask("artifacts-ok", taskId, "with artifacts"), artifactIds: ["artifact-ready"]
+    ...messageToTask("artifacts-ok", taskId, "with artifacts"), artifactIds: ["artifact-ready", "artifact-external"]
   }) as { messageId: string };
   const stored = store.read((state) => state.taskMessages!.find((message) => message.id === sent.messageId));
-  assert.deepEqual(stored?.artifactIds, ["artifact-ready"]);
+  assert.deepEqual(stored?.artifactIds, ["artifact-ready", "artifact-external"]);
   const rejections: Array<{ id: string; error: CoordinationError }> = [];
   for (const artifactId of ["artifact-draft", "artifact-elsewhere", "artifact_missing"]) {
     const error = await coordinationError(hub.call("send_task_message", rootRunId, {

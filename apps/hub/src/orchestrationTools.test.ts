@@ -488,7 +488,10 @@ test("completion artifacts must be uploaded by one of the task's attempts", asyn
   const { taskId, runId } = await taskWithRunningAttempt(store, hub.call, "update-artifacts", "update-artifacts-1");
   const foreignArtifactId = await seedArtifact(store, "artifact-foreign-run");
   const draftArtifactId = await seedArtifact(store, "artifact-attempt-draft", { runId, agentId: "worker-b", uploaded: false });
-  for (const artifactId of [foreignArtifactId, draftArtifactId]) {
+  const externalArtifactId = await seedArtifact(store, "artifact-external", {
+    runId: undefined, agentId: undefined, sourceKey: "orchestrator-client:orchestrator-client-one"
+  });
+  for (const artifactId of [foreignArtifactId, draftArtifactId, externalArtifactId]) {
     await assert.rejects(hub.call("update_task", runId, {
       idempotencyKey: `update-artifact-${artifactId}`, completion: { summary: "Done", artifactIds: [artifactId] }
     }), isCode("invalid_artifact"));

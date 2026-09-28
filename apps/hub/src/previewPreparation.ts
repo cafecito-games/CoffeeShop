@@ -4,6 +4,7 @@ import { chmod, lstat, mkdir, open, type FileHandle } from "node:fs/promises";
 import { join } from "node:path";
 import { createInflateRaw } from "node:zlib";
 import {
+  artifactSourceKey,
   previewBundleArtifactKind,
   previewBundleAllowedEntryTypes,
   previewBundleContract,
@@ -624,7 +625,8 @@ async function markUploaded(store: Store, expected: Artifact) {
     const artifact = state.artifacts?.find((item) => item.id === expected.id);
     if (!artifact || artifact.size !== expected.size || artifact.sha256 !== expected.sha256
       || artifact.kind !== expected.kind || artifact.mediaType !== expected.mediaType
-      || artifact.threadId !== expected.threadId || artifact.runId !== expected.runId || !sameActor(artifact, expected)
+      || artifact.threadId !== expected.threadId || artifact.runId !== expected.runId
+      || artifactSourceKey(artifact) !== artifactSourceKey(expected) || !sameActor(artifact, expected)
       || artifact.relativePath !== expected.relativePath || artifact.title !== expected.title
       || artifact.summary !== expected.summary || artifact.downloadPath !== expected.downloadPath
       || artifact.idempotencyKey !== expected.idempotencyKey || artifact.createdAt !== expected.createdAt) {

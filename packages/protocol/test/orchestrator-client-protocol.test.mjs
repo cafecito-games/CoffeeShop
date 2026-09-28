@@ -78,7 +78,7 @@ test("every orchestrator vocabulary has exactly one definition and a guard that 
 test("every external orchestrator tool is named once and maps to exactly one required scope", () => {
   assert.deepEqual([...externalOrchestratorToolNames], [
     "create_thread", "list_threads", "attach_thread", "detach_thread", "get_thread_context", "get_thread_events",
-    "submit_tasks", "update_task", "send_task_message", "update_thread", "get_execution_inventory",
+    "submit_tasks", "update_task", "send_task_message", "post_artifact", "update_thread", "get_execution_inventory",
     "spawn_instance", "get_instance", "renew_instance", "release_instance",
     "list_approvals", "resolve_approval"
   ]);
@@ -88,7 +88,7 @@ test("every external orchestrator tool is named once and maps to exactly one req
     const expected = tool === "list_approvals" || tool === "resolve_approval" ? "resolve-approvals" : "orchestrate";
     assert.equal(scope, expected, tool);
   }
-  for (const absent of ["post_artifact", "delegate_task", "get_task_context"]) {
+  for (const absent of ["delegate_task", "get_task_context"]) {
     assert.equal(isExternalOrchestratorToolName(absent), false, `${absent} is not offered in version 1`);
   }
 });
@@ -156,7 +156,6 @@ test("bridge-to-hub messages are rejected field by field, never partially accept
     { ...clientMessages["client.hello"], scopes: ["orchestrate"] },
     { type: "client.hello", clientId: "client-one", secret: "shhh" },
     { type: "client.heartbeat", at: "2026-09-22T12:00:00Z" },
-    { ...clientMessages["rpc.request"], tool: "post_artifact" },
     { ...clientMessages["rpc.request"], tool: "unknown_tool" },
     { ...clientMessages["rpc.request"], requestId: "" },
     { ...clientMessages["rpc.request"], arguments: undefined },

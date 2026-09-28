@@ -2,6 +2,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { BridgeServer } from "./bridgeServer.js";
 import { bridgeEnvironmentVariableNames, createSecretRedactor, readBridgeConfiguration } from "./configuration.js";
 import { HubConnection } from "./hubConnection.js";
+import { canonicalWorkingRoot, createArtifactHttpUploader, LocalArtifactService } from "./localArtifact.js";
 
 const version = "0.1.0";
 
@@ -26,6 +27,17 @@ async function main(): Promise<void> {
     process.stderr.write(`${redact(message)}\n`);
   };
 
+  let workingRoot: string;
+  try {
+    // Captured once: no tool argument or environment override can widen local file authority.
+    workingRoot = await canonicalWorkingRoot(process.cwd());
+  } catch {
+    logError("coffeeshop orchestrator bridge cannot establish its working root");
+    process.exitCode = 1;
+    return;
+  }
+  const localArtifacts = new LocalArtifactService(workingRoot, createArtifactHttpUploader(hubUrl));
+
   let bridge: BridgeServer | undefined;
 
   const hub = new HubConnection({
@@ -40,7 +52,7 @@ async function main(): Promise<void> {
     onReattachFailed: (threadId, error) => logError(`could not re-attach thread ${threadId} after reconnecting: ${error.code} ${error.message}`)
   });
 
-  bridge = new BridgeServer({ hub, serverVersion: version, logError });
+  bridge = new BridgeServer({ hub, serverVersion: version, logError, localArtifacts });
   const server = bridge.server;
 
   const shutdown = () => {
