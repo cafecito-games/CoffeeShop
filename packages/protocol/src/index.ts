@@ -271,7 +271,10 @@ export interface ArtifactPreviewRecord {
   readonly artifactId: string;
   readonly artifactSha256: string;
   readonly threadId: string;
-  readonly runId: string;
+  /** Present only for a hub-hosted producer. Older records derive their source key from this id. */
+  readonly runId?: string;
+  /** Stable producer identity. Required for external previews; optional only for legacy run state. */
+  readonly sourceKey?: string;
   /** Compatibility attribution; mutually exclusive with the instance/allocation pair. */
   readonly agentId?: string;
   readonly instanceId?: string;
@@ -1706,6 +1709,22 @@ export const artifactSourceKey = (value: unknown): string | undefined => {
   return source.ok ? source.value.sourceKey : undefined;
 };
 
+/** Exact producer comparison shared by artifact/preview persistence and every read authority. */
+export const sameArtifactSource = (left: unknown, right: unknown): boolean => {
+  const leftSource = artifactSource(left);
+  const rightSource = artifactSource(right);
+  if (!leftSource.ok || !rightSource.ok || leftSource.value.kind !== rightSource.value.kind
+    || leftSource.value.sourceKey !== rightSource.value.sourceKey) return false;
+  if (leftSource.value.kind === "external" || rightSource.value.kind === "external") return true;
+  if (leftSource.value.runId !== rightSource.value.runId) return false;
+  if ("agentId" in leftSource.value) {
+    return "agentId" in rightSource.value && leftSource.value.agentId === rightSource.value.agentId;
+  }
+  return !("agentId" in rightSource.value)
+    && leftSource.value.instanceId === rightSource.value.instanceId
+    && leftSource.value.allocationId === rightSource.value.allocationId;
+};
+
 /** Strict validator shared by persisted state and public snapshot consumers. */
 export function validateArtifact(value: unknown): Validation<Artifact> {
   if (!isRecord(value) || !hasOnlyKeys(value, artifactKeys)) return reject("artifact contains undeclared fields");
@@ -1715,9 +1734,6 @@ export function validateArtifact(value: unknown): Validation<Artifact> {
   const source = artifactSource(value);
   if (!source.ok) return reject(source.reason);
   if (source.value.kind === "external" && !isIdentifier(value.threadId)) return reject("external artifact has no thread");
-  if (source.value.kind === "external" && value.kind === previewBundleArtifactKind) {
-    return reject("external preview artifacts require dedicated lifecycle authority");
-  }
   const external = source.value.kind === "external";
   const bounded = (candidate: unknown, limit: number) =>
     external ? isBoundedString(candidate, limit) : isCharacterBoundedString(candidate, limit);
@@ -1874,7 +1890,7 @@ export const artifactPreviewAccessState = (
   : "unavailable";
 
 const artifactPreviewRecordKeys = [
-  "id", "artifactId", "artifactSha256", "threadId", "runId", "agentId", "instanceId", "allocationId",
+  "id", "artifactId", "artifactSha256", "threadId", "runId", "sourceKey", "agentId", "instanceId", "allocationId",
   "entrypoint", "status", "processingGeneration", "createdAt", "updatedAt", "expiresAt", "readyAt",
   "failedAt", "failureCode", "expiredAt"
 ] as const;
@@ -1882,15 +1898,14 @@ const artifactPreviewRecordKeys = [
 /** Strict validator shared by persistence and public snapshot guards. */
 export function validateArtifactPreviewRecord(value: unknown): Validation<ArtifactPreviewRecord> {
   if (!isRecord(value) || !hasOnlyKeys(value, artifactPreviewRecordKeys)) return reject("artifact preview contains undeclared fields");
-  if (!["id", "artifactId", "threadId", "runId"].every((key) => isIdentifier(value[key]))) {
+  if (!["id", "artifactId", "threadId"].every((key) => isIdentifier(value[key]))) {
     return reject("artifact preview is missing identity");
   }
   if (typeof value.artifactSha256 !== "string" || !/^[a-f0-9]{64}$/.test(value.artifactSha256)) {
     return reject("artifact preview has an invalid artifact digest");
   }
-  const agentActor = isIdentifier(value.agentId) && value.instanceId === undefined && value.allocationId === undefined;
-  const instanceActor = value.agentId === undefined && isIdentifier(value.instanceId) && isIdentifier(value.allocationId);
-  if (agentActor === instanceActor) return reject("artifact preview has an invalid or ambiguous actor");
+  const source = artifactSource(value);
+  if (!source.ok) return reject(source.reason);
   if (!validatePreviewBundlePath(value.entrypoint, { entrypoint: true }).ok) return reject("artifact preview has an invalid entrypoint");
   if (!isArtifactPreviewStatus(value.status)) return reject("artifact preview has an unknown status");
   if (!isNonNegativeInteger(value.processingGeneration)) return reject("artifact preview has an invalid processing generation");
@@ -2953,6 +2968,7 @@ export const externalOrchestratorToolNames = [
   "update_task",
   "send_task_message",
   "post_artifact",
+  "publish_preview",
   "update_thread",
   "get_execution_inventory",
   "spawn_instance",

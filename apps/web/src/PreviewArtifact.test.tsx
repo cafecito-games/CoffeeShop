@@ -64,6 +64,25 @@ describe("PreviewArtifact", () => {
     expect(screen.queryByText("Agent publisher")).not.toBeInTheDocument();
   });
 
+  it("labels an external preview by its current client name and a bounded historical fallback", () => {
+    const sourceKey = "orchestrator-client:client-one";
+    const externalArtifact = { ...artifact, runId: undefined, agentId: undefined, sourceKey };
+    const externalPreview = preview({ runId: undefined, agentId: undefined, sourceKey });
+    const { rerender } = render(<PreviewArtifact artifact={externalArtifact} preview={externalPreview}
+      orchestratorClients={[{ id: "client-one", name: "Christian's laptop", scopes: ["orchestrate"], createdAt }]}
+      canMutate apiFetch={vi.fn()} />);
+    expect(screen.getByText("Christian's laptop")).toBeInTheDocument();
+    expect(screen.getByText("External orchestrator")).toBeInTheDocument();
+    expect(screen.queryByText("Agent undefined")).not.toBeInTheDocument();
+
+    const historicalId = "x".repeat(80);
+    rerender(<PreviewArtifact
+      artifact={{ ...externalArtifact, sourceKey: `orchestrator-client:${historicalId}` }}
+      preview={{ ...externalPreview, sourceKey: `orchestrator-client:${historicalId}` }}
+      orchestratorClients={[]} canMutate apiFetch={vi.fn()} />);
+    expect(screen.getByText(/^Unknown orchestrator x+…$/)).toBeInTheDocument();
+  });
+
   it("exposes only a validated isolated access URL and clears it on identity and freshness changes", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-09-27T12:04:00.000Z"));

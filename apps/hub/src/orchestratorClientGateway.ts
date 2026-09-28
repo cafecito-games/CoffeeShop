@@ -25,6 +25,7 @@ import {
 } from "./approvals.js";
 import { CoordinationError } from "./coordinationError.js";
 import { createArtifactForSource, submitTasksForSource, updateTaskForSource } from "./coordination.js";
+import { registerPreviewForSource } from "./artifactPreviews.js";
 import { deliverApprovalResolution, type ControlAgentSender } from "./harnessGateway.js";
 import { executionInventoryForSource, type InventoryEnvironment } from "./executionInventory.js";
 import { applyInstanceToolForSource, getInstanceForSource, type InstanceToolName } from "./instanceTools.js";
@@ -546,6 +547,20 @@ export function createOrchestratorClientGateway({
         };
       });
 
+      const publishPreview = threadScoped(async (threadId, rest) => {
+        const registered = await registerPreviewForSource(store, externalSource(connectionId!, threadId), rest, now());
+        // Creation and grant rotation are both committed changes visible to other Hub consumers.
+        if (registered.created || registered.uploadGrant !== undefined) broadcast();
+        return {
+          result: {
+            artifact: structuredClone(registered.artifact),
+            preview: structuredClone(registered.preview),
+            created: registered.created,
+            ...(registered.uploadGrant === undefined ? {} : { uploadGrant: { ...registered.uploadGrant } })
+          }
+        };
+      });
+
       const updateThread = threadScoped(async (threadId, rest) => {
         const thread = await updateThreadForExternalOrchestrator(store, connectionId!, threadId, rest, now());
         broadcast();
@@ -635,6 +650,7 @@ export function createOrchestratorClientGateway({
         update_task: updateTask,
         send_task_message: sendTaskMessage,
         post_artifact: postArtifact,
+        publish_preview: publishPreview,
         update_thread: updateThread,
         get_execution_inventory: getExecutionInventory,
         spawn_instance: spawnInstance,
@@ -797,6 +813,7 @@ export const servedExternalOrchestratorTools: readonly ExternalOrchestratorToolN
   "update_task",
   "send_task_message",
   "post_artifact",
+  "publish_preview",
   "update_thread",
   "get_execution_inventory",
   "spawn_instance",

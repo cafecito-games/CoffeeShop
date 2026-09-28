@@ -4,7 +4,7 @@ import { chmod, lstat, mkdir, open, type FileHandle } from "node:fs/promises";
 import { join } from "node:path";
 import { createInflateRaw } from "node:zlib";
 import {
-  artifactSourceKey,
+  sameArtifactSource,
   previewBundleArtifactKind,
   previewBundleAllowedEntryTypes,
   previewBundleContract,
@@ -584,10 +584,6 @@ export async function preparePreviewBundle(storage: PreviewStorage, input: Prepa
   }
 }
 
-function sameActor(left: Artifact | ArtifactPreviewRecord, right: Artifact | ArtifactPreviewRecord) {
-  return left.agentId === right.agentId && left.instanceId === right.instanceId && left.allocationId === right.allocationId;
-}
-
 function resolveUpload(store: Store, artifactId: string) {
   return store.read((state) => {
     const artifacts = (state.artifacts ?? []).filter((item) => item.id === artifactId);
@@ -601,7 +597,7 @@ function resolveUpload(store: Store, artifactId: string) {
     const preview = linked[0];
     if (linked.length !== 1 || preview === undefined || artifact.mediaType !== previewBundleMediaType
       || preview.artifactSha256 !== artifact.sha256 || preview.threadId !== artifact.threadId
-      || preview.runId !== artifact.runId || !sameActor(preview, artifact)) {
+      || !sameArtifactSource(preview, artifact)) {
       throw new ArtifactIngestionError("storage-conflict", "storage-conflict", fixedFailureMessage["storage-conflict"]);
     }
     return { artifact, preview: structuredClone(preview) };
@@ -625,8 +621,7 @@ async function markUploaded(store: Store, expected: Artifact) {
     const artifact = state.artifacts?.find((item) => item.id === expected.id);
     if (!artifact || artifact.size !== expected.size || artifact.sha256 !== expected.sha256
       || artifact.kind !== expected.kind || artifact.mediaType !== expected.mediaType
-      || artifact.threadId !== expected.threadId || artifact.runId !== expected.runId
-      || artifactSourceKey(artifact) !== artifactSourceKey(expected) || !sameActor(artifact, expected)
+      || artifact.threadId !== expected.threadId || !sameArtifactSource(artifact, expected)
       || artifact.relativePath !== expected.relativePath || artifact.title !== expected.title
       || artifact.summary !== expected.summary || artifact.downloadPath !== expected.downloadPath
       || artifact.idempotencyKey !== expected.idempotencyKey || artifact.createdAt !== expected.createdAt) {
@@ -729,7 +724,7 @@ function resolvePreviewRetry(store: Store, previewId: string) {
     if (linkedPreviews.length !== 1 || artifacts.length !== 1 || artifact === undefined
       || !artifact.uploaded || artifact.kind !== previewBundleArtifactKind || artifact.mediaType !== previewBundleMediaType
       || artifact.sha256 !== preview.artifactSha256 || artifact.threadId !== preview.threadId
-      || artifact.runId !== preview.runId || !sameActor(artifact, preview)) {
+      || !sameArtifactSource(artifact, preview)) {
       throw new CoordinationError("artifact_mismatch", "The preview artifact is unavailable");
     }
     if (preview.status !== "failed" && preview.status !== "processing") {

@@ -9,9 +9,16 @@ import {
   type Result
 } from "@modelcontextprotocol/sdk/types.js";
 import {
+  artifactPreviewAccessStates,
+  artifactPreviewTtlPolicy,
   isExternalOrchestratorToolName,
+  orchestratorClientSourceKey,
+  sameArtifactSource,
   requiredScopeForExternalOrchestratorTool,
   validateArtifact,
+  validateArtifactPreviewRecord,
+  type Artifact,
+  type ArtifactPreview,
   type ExternalOrchestratorToolName,
   type OrchestratorClientError,
   type OrchestratorClientScope
@@ -25,6 +32,7 @@ import {
   type CapturedLocalArtifact,
   type LocalArtifactGateway
 } from "./localArtifact.js";
+import type { CapturedLocalPreview } from "./localPreview.js";
 
 export const channelSourceName = "coffeeshop";
 export const channelNotificationMethod = "notifications/claude/channel";
@@ -58,6 +66,7 @@ export interface HubGateway {
 
 export interface BridgeServerOptions {
   hub: HubGateway;
+  orchestratorClientId: string;
   serverVersion: string;
   logError: (message: string) => void;
   localArtifacts?: LocalArtifactGateway;
@@ -112,6 +121,31 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+interface PreviewRegistrationResult {
+  artifact: Artifact;
+  preview: ArtifactPreview;
+  created: boolean;
+  uploadGrant?: NonNullable<ReturnType<typeof parseArtifactRegistrationResult>>["uploadGrant"];
+}
+
+function parsePreviewRegistrationResult(value: unknown): PreviewRegistrationResult | undefined {
+  if (!isPlainObject(value)
+    || Object.keys(value).some((key) => !["artifact", "preview", "created", "uploadGrant"].includes(key))
+    || typeof value.created !== "boolean" || !isPlainObject(value.preview)) return undefined;
+  const artifactResult = parseArtifactRegistrationResult({ artifact: value.artifact, ...(value.uploadGrant === undefined ? {} : { uploadGrant: value.uploadGrant }) });
+  if (artifactResult === undefined || !validateArtifact(artifactResult.artifact).ok) return undefined;
+  const { accessState, ...previewRecord } = value.preview;
+  const preview = validateArtifactPreviewRecord(previewRecord);
+  if (!preview.ok || !(artifactPreviewAccessStates as readonly unknown[]).includes(accessState)
+    || (preview.value.status !== "ready" && accessState !== "unavailable")) return undefined;
+  return {
+    artifact: artifactResult.artifact,
+    preview: { ...preview.value, accessState: accessState as ArtifactPreview["accessState"] },
+    created: value.created,
+    ...(artifactResult.uploadGrant === undefined ? {} : { uploadGrant: artifactResult.uploadGrant })
+  };
+}
+
 /** A non-negative integer long-poll wait, or zero when the caller did not ask for one. */
 function requestedWaitMilliseconds(toolArguments: Record<string, unknown>): number {
   const wait = toolArguments.waitMilliseconds;
@@ -155,6 +189,7 @@ const threadIdArgument = (toolArguments: Record<string, unknown>): string | unde
 export class BridgeServer {
   readonly server: Server<Request, ChannelNotification, Result>;
   private readonly hub: HubGateway;
+  private readonly orchestratorClientId: string;
   private readonly logError: (message: string) => void;
   private readonly localArtifacts: LocalArtifactGateway | undefined;
   private channelDeliveryObserved = false;
@@ -162,6 +197,7 @@ export class BridgeServer {
 
   constructor(options: BridgeServerOptions) {
     this.hub = options.hub;
+    this.orchestratorClientId = options.orchestratorClientId;
     this.logError = options.logError;
     this.localArtifacts = options.localArtifacts;
     const serverInfo = { name: channelSourceName, version: options.serverVersion };
@@ -274,6 +310,7 @@ export class BridgeServer {
     }
 
     if (name === "post_artifact") return await this.postArtifact(toolArguments);
+    if (name === "publish_preview") return await this.publishPreview(toolArguments);
 
     const extraWait = name === "get_thread_events" ? requestedWaitMilliseconds(toolArguments) : 0;
     const outcome = await this.hub.call(name, toolArguments, extraWait);
@@ -327,6 +364,72 @@ export class BridgeServer {
       return toolError({ code: "hub_unavailable", message: "the Hub did not confirm the uploaded artifact" });
     }
     return toolSuccess(final.artifact);
+  }
+
+  /** Local package + shared lifecycle registration + one-time upload + authoritative confirmation. */
+  private async publishPreview(toolArguments: Record<string, unknown>): Promise<CallToolResult> {
+    if (this.localArtifacts?.capturePreview === undefined) {
+      return toolError({ code: "hub_unavailable", message: "local preview publication is unavailable" });
+    }
+    let captured: CapturedLocalPreview;
+    try {
+      captured = await this.localArtifacts.capturePreview(toolArguments);
+    } catch (error) {
+      const message = error instanceof LocalArtifactError ? error.message : "the local preview could not be packaged";
+      return toolError({ code: "invalid_arguments", message });
+    }
+    const registered = await this.hub.call("publish_preview", { ...captured.registration });
+    if (!registered.ok) return toolError(registered.error);
+    const first = parsePreviewRegistrationResult(registered.result);
+    if (!first || !this.previewRegistrationMatches(first, captured)) {
+      return toolError({ code: "hub_unavailable", message: "the Hub returned an invalid preview registration" });
+    }
+    if (first.artifact.uploaded) {
+      return !first.created && first.uploadGrant === undefined
+        ? toolSuccess({ artifact: first.artifact, preview: first.preview, created: first.created })
+        : toolError({ code: "hub_unavailable", message: "the Hub returned inconsistent preview upload authority" });
+    }
+    if (first.uploadGrant === undefined || first.uploadGrant.path !== first.artifact.downloadPath) {
+      return toolError({ code: "hub_unavailable", message: "the Hub returned no preview upload authority" });
+    }
+    try {
+      await this.localArtifacts.upload(first.uploadGrant, captured.bytes);
+    } catch {
+      // A transport may include its bearer or local implementation details in the thrown message.
+      return toolError({ code: "hub_unavailable", message: "the preview upload failed" });
+    }
+    const replayed = await this.hub.call("publish_preview", { ...captured.registration });
+    if (!replayed.ok) return toolError(replayed.error);
+    const final = parsePreviewRegistrationResult(replayed.result);
+    if (!final || final.uploadGrant !== undefined || !final.artifact.uploaded || final.created
+      || final.artifact.id !== first.artifact.id || final.preview.id !== first.preview.id
+      || !this.previewRegistrationMatches(final, captured)) {
+      return toolError({ code: "hub_unavailable", message: "the Hub did not confirm the uploaded preview" });
+    }
+    return toolSuccess({ artifact: final.artifact, preview: final.preview, created: first.created });
+  }
+
+  private previewRegistrationMatches(result: PreviewRegistrationResult, captured: CapturedLocalPreview) {
+    const { artifact, preview } = result;
+    const request = captured.registration;
+    const sourceKey = orchestratorClientSourceKey(this.orchestratorClientId);
+    const created = Date.parse(artifact.createdAt);
+    const initialExpiry = created + request.ttlSeconds * 1_000;
+    const maximumExpiry = created + artifactPreviewTtlPolicy.maximumLifetimeSeconds * 1_000;
+    const expires = Date.parse(preview.expiresAt);
+    return artifact.sourceKey === sourceKey && preview.sourceKey === sourceKey
+      && sameArtifactSource(artifact, preview)
+      && artifact.threadId === request.threadId && preview.threadId === request.threadId
+      && artifact.relativePath === request.relativePath
+      && artifact.title === request.title
+      && artifact.kind === request.kind && artifact.mediaType === request.mediaType
+      && artifact.summary === request.summary && artifact.size === request.size && artifact.sha256 === request.sha256
+      && artifact.idempotencyKey === request.idempotencyKey
+      && artifact.downloadPath === `/api/artifacts/${encodeURIComponent(artifact.id)}/content`
+      && preview.artifactId === artifact.id && preview.artifactSha256 === artifact.sha256
+      && preview.entrypoint === request.entrypoint && preview.createdAt === artifact.createdAt
+      && Number.isFinite(created) && expires <= maximumExpiry
+      && (result.created ? expires === initialExpiry : expires >= initialExpiry);
   }
 
   private registrationMatches(artifact: unknown, captured: CapturedLocalArtifact): artifact is Record<string, unknown> {

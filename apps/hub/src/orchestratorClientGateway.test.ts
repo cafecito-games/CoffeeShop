@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
   externalOrchestratorToolNames,
+  orchestratorClientSourceKey,
   orchestratorClientHeartbeatSeconds,
   orchestratorClientLimits,
   orchestratorClientProtocolVersion,
@@ -90,6 +91,7 @@ class ManualTimers implements OrchestratorClientTimers {
 
 interface Harness {
   store: Store;
+  statePath: string;
   gateway: OrchestratorClientGateway;
   timers: ManualTimers;
   broadcasts: { count: number };
@@ -99,7 +101,8 @@ interface Harness {
 
 async function harness(scopes: Parameters<typeof mintOrchestratorClient>[1]["scopes"] = ["orchestrate"]): Promise<Harness> {
   const directory = await mkdtemp(join(tmpdir(), "coffee-shop-orchestrator-gateway-"));
-  const store = new Store(join(directory, "state.json"));
+  const statePath = join(directory, "state.json");
+  const store = new Store(statePath);
   await store.load();
   let secret = "";
   let clientId = "";
@@ -111,7 +114,7 @@ async function harness(scopes: Parameters<typeof mintOrchestratorClient>[1]["sco
   const broadcasts = { count: 0 };
   const timers = new ManualTimers();
   const gateway = createOrchestratorClientGateway({ store, broadcast: () => { broadcasts.count += 1; }, now: () => new Date().toISOString(), timers });
-  return { store, gateway, timers, broadcasts, secret, clientId };
+  return { store, statePath, gateway, timers, broadcasts, secret, clientId };
 }
 
 /** Accepts a connection and drives it through the hello handshake. */
@@ -281,6 +284,100 @@ test("registers external artifacts with source-scoped replay and fresh bridge-on
     ...argumentsValue, summary: "Changed"
   })).code, "conflict");
   assert.equal(context.store.read((state) => JSON.stringify([state.artifacts, state.artifactUploadGrants, state.events])), beforeConflict);
+});
+
+test("publishes an externally attributed preview lifecycle with convergent replay authority", async () => {
+  const context = await harness();
+  const first = await welcomed(context);
+  const threadId = resultOf(await call(first.connection, first.transport, "create_thread", { objective: "Preview it" })).thread.id;
+  const argumentsValue = {
+    threadId,
+    relativePath: "dist",
+    title: "External preview",
+    kind: "preview-bundle",
+    mediaType: "application/vnd.coffee-shop.preview-bundle+tar+gzip",
+    summary: "Review the current build",
+    size: 512,
+    sha256: "b".repeat(64),
+    entrypoint: "index.html",
+    ttlSeconds: 3_600,
+    idempotencyKey: "external-preview"
+  };
+
+  const created = resultOf(await call(first.connection, first.transport, "publish_preview", argumentsValue));
+  const sourceKey = orchestratorClientSourceKey(context.clientId);
+  assert.equal(created.created, true);
+  assert.equal(created.artifact.sourceKey, sourceKey);
+  assert.equal(created.preview.sourceKey, sourceKey);
+  assert.equal(created.artifact.runId, undefined);
+  assert.equal(created.preview.runId, undefined);
+  assert.equal(created.preview.artifactId, created.artifact.id);
+  assert.equal(created.preview.artifactSha256, created.artifact.sha256);
+  assert.equal(created.preview.status, "upload-pending");
+  assert.equal(created.preview.accessState, "unavailable");
+  assert.equal(created.uploadGrant.path, created.artifact.downloadPath);
+  assert.match(created.uploadGrant.token, /^[A-Za-z0-9_-]{43}$/);
+  assert.equal(JSON.stringify(context.store.snapshot()).includes(created.uploadGrant.token), false);
+
+  const replay = resultOf(await call(first.connection, first.transport, "publish_preview", argumentsValue));
+  assert.equal(replay.created, false);
+  assert.equal(replay.artifact.id, created.artifact.id);
+  assert.equal(replay.preview.id, created.preview.id);
+  assert.notEqual(replay.uploadGrant.token, created.uploadGrant.token);
+  assert.equal(context.store.snapshot().artifacts?.length, 1);
+  assert.equal(context.store.snapshot().artifactPreviews?.length, 1);
+  assert.equal(context.store.read((state) => state.previewRegistrationReceipts?.length), 1);
+  assert.equal(context.store.read((state) => state.artifactUploadGrants?.length), 1);
+
+  const restarted = new Store(context.statePath);
+  await restarted.load();
+  const persisted = restarted.snapshot();
+  assert.equal(persisted.artifacts?.[0].sourceKey, sourceKey);
+  assert.equal(persisted.artifactPreviews?.[0].sourceKey, sourceKey);
+  assert.equal(restarted.read((state) => state.previewRegistrationReceipts?.length), 1);
+  const malformedPath = `${context.statePath}.mismatched-source`;
+  const malformed = JSON.parse(await readFile(context.statePath, "utf8"));
+  malformed.artifactPreviews[0].sourceKey = "orchestrator-client:another-client";
+  await writeFile(malformedPath, JSON.stringify(malformed));
+  await assert.rejects(new Store(malformedPath).load(), /disagrees with its artifact source/);
+  assert.equal(restarted.snapshot().artifactPreviews?.[0].sourceKey, sourceKey, "a rejected persisted mismatch changes nothing");
+  const foreignThreadPath = `${context.statePath}.foreign-thread-source`;
+  const foreignThread = JSON.parse(await readFile(context.statePath, "utf8"));
+  foreignThread.threads[0].orchestrator.clientId = "another-client";
+  await writeFile(foreignThreadPath, JSON.stringify(foreignThread));
+  await assert.rejects(new Store(foreignThreadPath).load(), /disagrees with its thread orchestrator/);
+
+  const second = await welcomed(context);
+  await call(second.connection, second.transport, "attach_thread", { threadId });
+  const reconnect = resultOf(await call(second.connection, second.transport, "publish_preview", argumentsValue));
+  assert.equal(reconnect.artifact.id, created.artifact.id);
+  assert.equal(reconnect.preview.id, created.preview.id);
+  assert.notEqual(reconnect.uploadGrant.token, replay.uploadGrant.token);
+  assert.equal(context.store.read((state) => state.artifactUploadGrants?.length), 1);
+
+  const beforeConflict = context.store.read((state) => JSON.stringify([
+    state.artifacts, state.artifactPreviews, state.previewRegistrationReceipts, state.artifactUploadGrants, state.events
+  ]));
+  assert.equal(errorOf(await call(second.connection, second.transport, "publish_preview", {
+    ...argumentsValue, entrypoint: "other.html"
+  })).code, "conflict");
+  assert.equal(context.store.read((state) => JSON.stringify([
+    state.artifacts, state.artifactPreviews, state.previewRegistrationReceipts, state.artifactUploadGrants, state.events
+  ])), beforeConflict);
+
+  for (const invalid of [
+    { ...argumentsValue, sourceKey },
+    { ...argumentsValue, runId: "run-invented", agentId: "agent-invented" },
+    { ...argumentsValue, kind: "report" },
+    { ...argumentsValue, entrypoint: "../index.html" },
+    { ...argumentsValue, ttlSeconds: 299 },
+    { ...argumentsValue, title: "界".repeat(100), idempotencyKey: "too-wide-title" },
+    { ...argumentsValue, summary: "界".repeat(667), idempotencyKey: "too-wide-summary" },
+    { ...argumentsValue, idempotencyKey: "界".repeat(43) },
+    { ...argumentsValue, extra: true }
+  ]) {
+    assert.equal(errorOf(await call(second.connection, second.transport, "publish_preview", invalid)).code, "invalid_arguments");
+  }
 });
 
 test("external artifact registration re-resolves the live attachment and validates every field", async () => {

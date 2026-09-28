@@ -17,9 +17,13 @@ import {
   type ArtifactPreviewFailureCode,
   type Run
 } from "@coffee-shop/protocol";
-import { beginProcessing, registerPreview } from "./artifactPreviews.js";
+import { beginProcessing, registerPreview, registerPreviewForSource } from "./artifactPreviews.js";
+import { claimArtifactUploadGrant } from "./artifactUploadGrants.js";
 import { templateFromLegacyAgent } from "./agentTemplates.js";
 import { createArtifact } from "./coordination.js";
+import { createExternalThreadInState } from "./externalOrchestrators.js";
+import { externalSource } from "./mailbox.js";
+import { mintOrchestratorClient } from "./orchestratorClients.js";
 import {
   ArtifactIngestionError,
   ingestArtifactContent,
@@ -35,6 +39,8 @@ const at = "2026-09-27T12:00:00.000Z";
 const after = (seconds: number) => new Date(Date.parse(at) + seconds * 1_000).toISOString();
 const sha256 = (value: Uint8Array) => createHash("sha256").update(value).digest("hex");
 const execFile = promisify(execFileCallback);
+const bridgeBundleUrl = new URL("../test-fixtures/preview-v1/bridge-bundle.tar.gz", import.meta.url);
+const bridgeRegistrationUrl = new URL("../test-fixtures/preview-v1/bridge-registration.json", import.meta.url);
 
 interface TarEntry {
   name: string;
@@ -192,6 +198,72 @@ test("independently validates USTAR, extracts fixed-permission files, and replay
   const replay = await preparePreviewBundle(storage, { ...input, processingGeneration: 2 });
   assert.equal(replay.replayed, true);
   assert.deepEqual(replay.manifest, first.manifest);
+});
+
+test("ingests immutable bytes from the real external Bridge producer through shared source lifecycle authority", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "coffee-shop-external-preview-producer-"));
+  const statePath = join(directory, "state.json");
+  const store = new Store(statePath);
+  const storage = new PreviewStorage(directory);
+  await store.load();
+  const connectionId = "connection-external-preview";
+  let clientId = "";
+  let threadId = "";
+  await store.transact((state) => {
+    const minted = mintOrchestratorClient(state, { name: "Fixture bridge", scopes: ["orchestrate"] }, at);
+    clientId = minted.client.id;
+    const creation = createExternalThreadInState(state, {
+      clientId, connectionId, title: "External preview", objective: "Load Bridge-produced bytes"
+    }, at);
+    threadId = creation.thread.id;
+  });
+
+  const bytes = await readFile(bridgeBundleUrl);
+  const registration = JSON.parse(await readFile(bridgeRegistrationUrl, "utf8")) as Record<string, unknown>;
+  const { threadId: _fixtureThreadId, ...request } = registration;
+  const registered = await registerPreviewForSource(
+    store,
+    externalSource(connectionId, threadId),
+    request,
+    at
+  );
+  assert.equal(registered.artifact.sourceKey, `orchestrator-client:${clientId}`);
+  assert.equal(registered.preview.sourceKey, `orchestrator-client:${clientId}`);
+  assert.ok(registered.uploadGrant);
+  assert.equal(await claimArtifactUploadGrant(store, registered.artifact.id, registered.uploadGrant.token, after(1)), true);
+
+  const times = [after(2), after(3)];
+  const ingested = await ingestArtifactContent(store, storage, {
+    artifactId: registered.artifact.id,
+    contentType: "application/octet-stream",
+    body: Readable.from([bytes]),
+    now: () => times.shift() ?? after(3)
+  });
+  assert.equal(ingested.kind, "preview");
+  const final = store.snapshot(after(4));
+  assert.equal(final.artifacts?.[0].uploaded, true);
+  assert.equal(final.artifactPreviews?.[0].status, "ready");
+  assert.equal(final.artifactPreviews?.[0].sourceKey, `orchestrator-client:${clientId}`);
+  assert.deepEqual(
+    await readFile(join(directory, "prepared-previews", registered.preview.id, registered.artifact.sha256, "content", "index.html")),
+    await readFile(new URL("../test-fixtures/preview-v1/content/site/index.html", import.meta.url))
+  );
+
+  const replayed = await registerPreviewForSource(
+    store,
+    externalSource(connectionId, threadId),
+    request,
+    after(4)
+  );
+  assert.equal(replayed.created, false);
+  assert.equal(replayed.artifact.id, registered.artifact.id);
+  assert.equal(replayed.preview.id, registered.preview.id);
+  assert.equal(replayed.preview.status, "ready");
+  assert.equal(replayed.uploadGrant, undefined, "an immutable uploaded artifact never widens authority again");
+
+  const restarted = new Store(statePath);
+  await restarted.load();
+  assert.equal(restarted.snapshot(after(4)).artifactPreviews?.[0].sourceKey, `orchestrator-client:${clientId}`);
 });
 
 test("accepts only local PAX path metadata needed by the Go archive/tar producer", async () => {

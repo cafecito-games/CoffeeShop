@@ -1,13 +1,17 @@
 import { ArrowSquareOut, DownloadSimple } from "@phosphor-icons/react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  artifactSource,
   artifactPreviewTtlPolicy,
   isTimestamp,
+  sameArtifactSource,
   validateArtifactPreview,
   type Artifact,
   type ArtifactPreview,
-  type ArtifactPreviewFailureCode
+  type ArtifactPreviewFailureCode,
+  type OrchestratorClient
 } from "@coffee-shop/protocol";
+import { externalArtifactProducerLabel } from "./orchestratorPresentation.js";
 
 export type AuthenticatedFetch = (path: string, init?: RequestInit) => Promise<Response>;
 
@@ -39,7 +43,8 @@ export function renewalTtlSeconds(preview: ArtifactPreview, nowMilliseconds: num
 
 function identityOf(artifact: Artifact, preview: ArtifactPreview) {
   return JSON.stringify([preview.id, artifact.id, artifact.sha256, artifact.uploaded,
-    preview.artifactSha256, preview.threadId, preview.runId,
+    preview.artifactSha256, preview.threadId, preview.runId ?? "", preview.sourceKey ?? "",
+    artifact.runId ?? "", artifact.sourceKey ?? "",
     preview.agentId ?? "", preview.instanceId ?? "", preview.allocationId ?? "",
     preview.entrypoint, preview.processingGeneration, preview.status, preview.accessState,
     preview.createdAt, preview.updatedAt, preview.expiresAt, preview.readyAt ?? "",
@@ -67,8 +72,7 @@ function validAccess(value: unknown, preview: ArtifactPreview, nowMilliseconds: 
 function samePreviewIdentity(value: ArtifactPreview, preview: ArtifactPreview) {
   return value.id === preview.id && value.artifactId === preview.artifactId
     && value.artifactSha256 === preview.artifactSha256 && value.threadId === preview.threadId
-    && value.runId === preview.runId && value.agentId === preview.agentId
-    && value.instanceId === preview.instanceId && value.allocationId === preview.allocationId;
+    && sameArtifactSource(value, preview);
 }
 
 function actorName(preview: ArtifactPreview) {
@@ -87,13 +91,21 @@ function statusCopy(preview: ArtifactPreview, lifecycleLive: boolean) {
   }
 }
 
-export function PreviewArtifact({ artifact, preview, canMutate, apiFetch, compact = false }: {
+export function PreviewArtifact({ artifact, preview, orchestratorClients = [], canMutate, apiFetch, compact = false }: {
   artifact: Artifact;
   preview: ArtifactPreview;
+  orchestratorClients?: OrchestratorClient[];
   canMutate: boolean;
   apiFetch: AuthenticatedFetch;
   compact?: boolean;
 }) {
+  const source = artifactSource(preview);
+  const sourceLabel = source.ok
+    ? (source.value.kind === "run" ? source.value.runId : "External orchestrator")
+    : "Unavailable";
+  const producerLabel = source.ok && source.value.kind === "external"
+    ? externalArtifactProducerLabel(artifact, orchestratorClients) ?? "Unknown orchestrator"
+    : actorName(preview);
   const identity = identityOf(artifact, preview);
   const [grant, setGrant] = useState<{ url: string; expiresAt: string }>();
   const [pending, setPending] = useState<"access" | "renew" | "retry" | "download">();
@@ -206,8 +218,8 @@ export function PreviewArtifact({ artifact, preview, canMutate, apiFetch, compac
     <header><div><span className="preview-kicker">Isolated preview</span><h4>{artifact.title}</h4></div><span className="preview-state">{statusCopy(preview, lifecycleLive)}</span></header>
     {artifact.summary && <p>{artifact.summary}</p>}
     <dl>
-      <div><dt>Source</dt><dd>{preview.runId}</dd></div>
-      <div><dt>Producer</dt><dd>{actorName(preview)}</dd></div>
+      <div><dt>Source</dt><dd>{sourceLabel}</dd></div>
+      <div><dt>Producer</dt><dd>{producerLabel}</dd></div>
       <div><dt>Generation</dt><dd>{preview.processingGeneration}</dd></div>
       {preview.status === "ready" && <><div><dt>Entrypoint</dt><dd>{preview.entrypoint}</dd></div><div><dt>Ready</dt><dd>{preview.readyAt}</dd></div></>}
       {preview.status === "failed" && <div><dt>Failed</dt><dd>{preview.failedAt}</dd></div>}

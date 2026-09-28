@@ -273,6 +273,28 @@ describe("snapshot validation", () => {
     expect(isSnapshot({ ...value, artifacts: [instanceArtifact], artifactPreviews: [instancePreview] })).toBe(true);
   });
 
+  it("accepts one exact external preview source and rejects cross-client or mixed attribution", () => {
+    const generatedAt = "2026-09-27T12:04:00.000Z";
+    const sourceKey = "orchestrator-client:client-one";
+    const artifact = {
+      id: "artifact-external", threadId: "thread-external", sourceKey,
+      relativePath: "dist", title: "External preview", kind: "preview-bundle",
+      mediaType: "application/vnd.coffee-shop.preview-bundle+tar+gzip", summary: "", size: 512,
+      sha256: "c".repeat(64), downloadPath: "/api/artifacts/artifact-external/content", uploaded: true,
+      idempotencyKey: "external-preview", createdAt: "2026-09-27T12:00:00.000Z"
+    };
+    const preview = {
+      id: "preview-external", artifactId: artifact.id, artifactSha256: artifact.sha256,
+      threadId: artifact.threadId, sourceKey, entrypoint: "index.html", status: "ready",
+      processingGeneration: 1, createdAt: artifact.createdAt, updatedAt: "2026-09-27T12:02:00.000Z",
+      expiresAt: "2026-09-28T12:00:00.000Z", readyAt: "2026-09-27T12:02:00.000Z", accessState: "eligible"
+    };
+    const value = { ...snapshot(generatedAt), artifacts: [artifact], artifactPreviews: [preview] };
+    expect(isSnapshot(value)).toBe(true);
+    expect(isSnapshot({ ...value, artifactPreviews: [{ ...preview, sourceKey: "orchestrator-client:client-two" }] })).toBe(false);
+    expect(isSnapshot({ ...value, artifactPreviews: [{ ...preview, runId: "run-one", agentId: "agent-one" }] })).toBe(false);
+  });
+
   it("accepts preview-bundle artifact metadata in the shared artifact vocabulary", () => {
     const artifact = {
       id: "artifact-one", threadId: "thread-one", runId: "run-one", agentId: "agent-one",

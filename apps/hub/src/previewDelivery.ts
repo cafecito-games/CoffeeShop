@@ -10,6 +10,7 @@ import express, {
 import {
   previewBundleArtifactKind,
   previewBundleMediaType,
+  sameArtifactSource,
   validatePreviewBundlePath,
   type Artifact,
   type ArtifactPreviewRecord
@@ -296,10 +297,6 @@ function fixedResponse(request: Request, response: Response, status: number, bod
   else response.end(body);
 }
 
-function exactActor(left: Artifact | ArtifactPreviewRecord, right: Artifact | ArtifactPreviewRecord) {
-  return left.agentId === right.agentId && left.instanceId === right.instanceId && left.allocationId === right.allocationId;
-}
-
 interface ResolvedPreviewAccess {
   readonly preview: ArtifactPreviewRecord;
   readonly artifact: Artifact;
@@ -329,7 +326,7 @@ function resolvePreviewAccessInState(state: State, previewId: string, nowMillise
     || !/^[a-f0-9]{64}$/.test(preview.artifactSha256)
     || !validatePreviewBundlePath(preview.entrypoint, { entrypoint: true }).ok
     || artifact.sha256 !== preview.artifactSha256 || artifact.threadId !== preview.threadId
-    || artifact.runId !== preview.runId || !exactActor(artifact, preview)) return { kind: "unavailable" };
+    || !sameArtifactSource(artifact, preview)) return { kind: "unavailable" };
   return {
     kind: "ready",
     preview: structuredClone(preview),
@@ -359,8 +356,9 @@ function sameResolution(left: ResolvedPreviewAccess, right: ResolvedPreviewAcces
     && left.artifact.sha256 === right.artifact.sha256
     && left.artifact.size === right.artifact.size
     && left.artifact.kind === right.artifact.kind && left.artifact.mediaType === right.artifact.mediaType
-    && left.preview.threadId === right.preview.threadId && left.preview.runId === right.preview.runId
-    && exactActor(left.preview, right.preview) && exactActor(left.artifact, right.artifact)
+    && left.preview.threadId === right.preview.threadId
+    && sameArtifactSource(left.preview, right.preview)
+    && sameArtifactSource(left.artifact, right.artifact)
     && left.preview.entrypoint === right.preview.entrypoint
     && left.preview.processingGeneration === right.preview.processingGeneration
     && left.preview.expiresAt === right.preview.expiresAt;

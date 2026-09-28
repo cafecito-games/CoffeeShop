@@ -72,6 +72,7 @@ async function startHarness(hubOptions: HarnessOptions = { scopes: ["orchestrate
   });
   bridge = new BridgeServer({
     hub: connection,
+    orchestratorClientId: "client-alpha",
     serverVersion: "0.0.0-test",
     logError: (message) => errors.push(message),
     localArtifacts
@@ -134,6 +135,7 @@ test("negotiates a protocol revision Claude Code will register as a channel", as
       rememberAttachment: () => {},
       forgetAttachment: () => {}
     },
+    orchestratorClientId: "client-alpha",
     serverVersion: "0.0.0-test",
     logError: () => {}
   });
@@ -271,6 +273,325 @@ test("post_artifact local refusals happen before a Hub RPC and never reveal the 
   assert.equal(result.isError, true);
   assert.equal(harness.hub.receivedOfType("rpc.request").length, 0);
   assert.equal(JSON.stringify(result).includes(root), false);
+});
+
+test("publish_preview packages locally, uploads once, confirms lifecycle truth, and strips the grant", async (t) => {
+  const bytes = Buffer.from("preview bundle bytes");
+  const digest = "b".repeat(64);
+  const uploadToken = "p".repeat(43);
+  const registration = {
+    threadId: "thread-one", relativePath: "dist", entrypoint: "index.html", title: "Launch preview",
+    kind: "preview-bundle" as const, mediaType: "application/vnd.coffee-shop.preview-bundle+tar+gzip" as const,
+    summary: "Review it", ttlSeconds: 3_600, idempotencyKey: "external-preview-one",
+    size: bytes.length, sha256: digest
+  };
+  const artifact = {
+    id: "artifact-preview", threadId: "thread-one", sourceKey: "orchestrator-client:client-alpha",
+    relativePath: "dist", title: "Launch preview", kind: registration.kind, mediaType: registration.mediaType,
+    summary: "Review it", size: bytes.length, sha256: digest,
+    downloadPath: "/api/artifacts/artifact-preview/content", uploaded: false,
+    idempotencyKey: registration.idempotencyKey, createdAt: "2026-09-28T12:00:00.000Z"
+  };
+  const preview = {
+    id: "preview-one", artifactId: artifact.id, artifactSha256: digest, threadId: "thread-one",
+    sourceKey: "orchestrator-client:client-alpha", entrypoint: "index.html", status: "upload-pending" as const,
+    processingGeneration: 0, createdAt: artifact.createdAt, updatedAt: artifact.createdAt,
+    expiresAt: "2026-09-28T13:00:00.000Z", accessState: "unavailable" as const
+  };
+  const uploads: Array<{ token: string; bytes: Buffer }> = [];
+  let registrations = 0;
+  const localArtifacts: LocalArtifactGateway = {
+    capture: async () => assert.fail("ordinary capture must not run"),
+    capturePreview: async () => ({ bytes, registration }),
+    upload: async (grant, uploaded) => { uploads.push({ token: grant.token, bytes: Buffer.from(uploaded) }); }
+  };
+  const harness = await startHarness({
+    scopes: ["orchestrate"],
+    localArtifacts,
+    handle: (request) => {
+      assert.equal(request.tool, "publish_preview");
+      registrations += 1;
+      return registrations === 1
+        ? { artifact, preview, created: true, uploadGrant: {
+          path: artifact.downloadPath, token: uploadToken, expiresAt: "2026-09-28T12:05:00.000Z"
+        } }
+        : {
+          artifact: { ...artifact, uploaded: true }, created: false,
+          preview: {
+            ...preview, status: "ready", processingGeneration: 1, updatedAt: "2026-09-28T12:01:00.000Z",
+            readyAt: "2026-09-28T12:01:00.000Z", accessState: "eligible"
+          }
+        };
+    }
+  });
+  t.after(() => harness.close());
+
+  const result = await harness.client.callTool({ name: "publish_preview", arguments: {
+    threadId: "thread-one", relativePath: "dist", entrypoint: "index.html", title: "Launch preview",
+    summary: "Review it", ttlSeconds: 3_600, idempotencyKey: "external-preview-one"
+  } });
+  assert.equal(result.isError, undefined);
+  const payload = parseToolResult(result);
+  assert.equal((payload.artifact as { uploaded: boolean }).uploaded, true);
+  assert.equal((payload.preview as { status: string }).status, "ready");
+  assert.equal(payload.created, true);
+  assert.deepEqual(uploads, [{ token: uploadToken, bytes }]);
+  assert.equal(JSON.stringify(result).includes(uploadToken), false);
+  assert.equal(JSON.stringify(result).includes(bytes.toString()), false);
+  assert.equal(harness.hub.receivedOfType("rpc.request").filter((request) => request.tool === "publish_preview").length, 2);
+});
+
+test("publish_preview returns each non-ready lifecycle the Hub commits after upload", async () => {
+  const variants = [
+    { status: "upload-pending" as const, processingGeneration: 0, updatedAt: "2026-09-28T12:00:00.000Z" },
+    { status: "processing" as const, processingGeneration: 1, updatedAt: "2026-09-28T12:01:00.000Z" },
+    {
+      status: "failed" as const, processingGeneration: 1, updatedAt: "2026-09-28T12:01:00.000Z",
+      failedAt: "2026-09-28T12:01:00.000Z", failureCode: "bundle-invalid" as const
+    },
+    {
+      status: "expired" as const, processingGeneration: 1, updatedAt: "2026-09-28T13:00:00.000Z",
+      expiredAt: "2026-09-28T13:00:00.000Z"
+    }
+  ];
+  for (const variant of variants) {
+    const bytes = Buffer.from("preview bundle bytes");
+    const digest = "b".repeat(64);
+    const registration = {
+      threadId: "thread-one", relativePath: "dist", entrypoint: "index.html", title: "Preview",
+      kind: "preview-bundle" as const, mediaType: "application/vnd.coffee-shop.preview-bundle+tar+gzip" as const,
+      summary: "", ttlSeconds: 3_600, idempotencyKey: `preview-${variant.status}`, size: bytes.length, sha256: digest
+    };
+    const artifact = {
+      id: `artifact-${variant.status}`, threadId: "thread-one", sourceKey: "orchestrator-client:client-alpha",
+      relativePath: "dist", title: "Preview", kind: registration.kind, mediaType: registration.mediaType,
+      summary: "", size: bytes.length, sha256: digest,
+      downloadPath: `/api/artifacts/artifact-${variant.status}/content`, uploaded: false,
+      idempotencyKey: registration.idempotencyKey, createdAt: "2026-09-28T12:00:00.000Z"
+    };
+    const initialPreview = {
+      id: `preview-${variant.status}`, artifactId: artifact.id, artifactSha256: digest, threadId: "thread-one",
+      sourceKey: "orchestrator-client:client-alpha", entrypoint: "index.html", status: "upload-pending" as const,
+      processingGeneration: 0, createdAt: artifact.createdAt, updatedAt: artifact.createdAt,
+      expiresAt: "2026-09-28T13:00:00.000Z", accessState: "unavailable" as const
+    };
+    let calls = 0;
+    let uploads = 0;
+    const harness = await startHarness({
+      scopes: ["orchestrate"],
+      localArtifacts: {
+        capture: async () => assert.fail("ordinary capture must not run"),
+        capturePreview: async () => ({ bytes, registration }),
+        upload: async () => { uploads += 1; }
+      },
+      handle: () => {
+        calls += 1;
+        if (calls === 1) return {
+          artifact, preview: initialPreview, created: true,
+          uploadGrant: {
+            path: artifact.downloadPath, token: "p".repeat(43), expiresAt: "2026-09-28T12:05:00.000Z"
+          }
+        };
+        return {
+          artifact: { ...artifact, uploaded: true },
+          preview: { ...initialPreview, ...variant },
+          created: false
+        };
+      }
+    });
+    try {
+      const result = await harness.client.callTool({ name: "publish_preview", arguments: {
+        threadId: "thread-one", relativePath: "dist", entrypoint: "index.html", title: "Preview",
+        idempotencyKey: registration.idempotencyKey
+      } });
+      assert.equal(result.isError, undefined, variant.status);
+      assert.equal((parseToolResult(result).preview as { status: string }).status, variant.status);
+      assert.equal(uploads, 1, variant.status);
+    } finally {
+      harness.close();
+    }
+  }
+});
+
+test("publish_preview rejects mismatched Hub source metadata before PUT", async (t) => {
+  const bytes = Buffer.from("preview bundle bytes");
+  let uploads = 0;
+  const localArtifacts: LocalArtifactGateway = {
+    capture: async () => assert.fail("ordinary capture must not run"),
+    capturePreview: async () => ({
+      bytes,
+      registration: {
+        threadId: "thread-one", relativePath: "dist", entrypoint: "index.html", title: "Preview",
+        kind: "preview-bundle", mediaType: "application/vnd.coffee-shop.preview-bundle+tar+gzip",
+        summary: "", ttlSeconds: 3_600, idempotencyKey: "preview-one", size: bytes.length, sha256: "b".repeat(64)
+      }
+    }),
+    upload: async () => { uploads += 1; }
+  };
+  const harness = await startHarness({
+    scopes: ["orchestrate"],
+    localArtifacts,
+    handle: () => ({
+      artifact: {
+        id: "artifact-one", threadId: "thread-one", sourceKey: "orchestrator-client:another-client",
+        relativePath: "dist", title: "Preview", kind: "preview-bundle",
+        mediaType: "application/vnd.coffee-shop.preview-bundle+tar+gzip", summary: "", size: bytes.length,
+        sha256: "b".repeat(64), downloadPath: "/api/artifacts/artifact-one/content", uploaded: false,
+        idempotencyKey: "preview-one", createdAt: "2026-09-28T12:00:00.000Z"
+      },
+      preview: {
+        id: "preview-one", artifactId: "artifact-one", artifactSha256: "b".repeat(64), threadId: "thread-one",
+        sourceKey: "orchestrator-client:another-client", entrypoint: "index.html", status: "upload-pending",
+        processingGeneration: 0, createdAt: "2026-09-28T12:00:00.000Z", updatedAt: "2026-09-28T12:00:00.000Z",
+        expiresAt: "2026-09-28T13:00:00.000Z", accessState: "unavailable"
+      },
+      created: true,
+      uploadGrant: { path: "/api/artifacts/artifact-one/content", token: "p".repeat(43), expiresAt: "2026-09-28T12:05:00.000Z" }
+    })
+  });
+  t.after(() => harness.close());
+  const result = await harness.client.callTool({ name: "publish_preview", arguments: {
+    threadId: "thread-one", relativePath: "dist", entrypoint: "index.html", title: "Preview", idempotencyKey: "preview-one"
+  } });
+  assert.equal(result.isError, true);
+  assert.equal((parseToolResult(result) as { error: { code: string } }).error.code, "hub_unavailable");
+  assert.equal(uploads, 0, "mismatched registration must not upload");
+});
+
+test("publish_preview returns an already-uploaded authoritative replay without minting or using upload authority", async (t) => {
+  const bytes = Buffer.from("preview bundle bytes");
+  const digest = "b".repeat(64);
+  const registration = {
+    threadId: "thread-one", relativePath: "dist", entrypoint: "index.html", title: "Preview",
+    kind: "preview-bundle" as const, mediaType: "application/vnd.coffee-shop.preview-bundle+tar+gzip" as const,
+    summary: "", ttlSeconds: 3_600, idempotencyKey: "preview-one", size: bytes.length, sha256: digest
+  };
+  let calls = 0;
+  const harness = await startHarness({
+    scopes: ["orchestrate"],
+    localArtifacts: {
+      capture: async () => assert.fail("ordinary capture must not run"),
+      capturePreview: async () => ({ bytes, registration }),
+      upload: async () => assert.fail("an uploaded replay must not PUT")
+    },
+    handle: () => {
+      calls += 1;
+      return {
+        artifact: {
+          id: "artifact-one", threadId: "thread-one", sourceKey: "orchestrator-client:client-alpha",
+          relativePath: "dist", title: "Preview", kind: registration.kind, mediaType: registration.mediaType,
+          summary: "", size: bytes.length, sha256: digest, downloadPath: "/api/artifacts/artifact-one/content",
+          uploaded: true, idempotencyKey: "preview-one", createdAt: "2026-09-28T12:00:00.000Z"
+        },
+        preview: {
+          id: "preview-one", artifactId: "artifact-one", artifactSha256: digest, threadId: "thread-one",
+          sourceKey: "orchestrator-client:client-alpha", entrypoint: "index.html", status: "ready",
+          processingGeneration: 1, createdAt: "2026-09-28T12:00:00.000Z", updatedAt: "2026-09-28T12:01:00.000Z",
+          expiresAt: "2026-09-28T13:00:00.000Z", readyAt: "2026-09-28T12:01:00.000Z", accessState: "eligible"
+        },
+        created: calls > 1
+      };
+    }
+  });
+  t.after(() => harness.close());
+  const result = await harness.client.callTool({ name: "publish_preview", arguments: {
+    threadId: "thread-one", relativePath: "dist", entrypoint: "index.html", title: "Preview", idempotencyKey: "preview-one"
+  } });
+  assert.equal(result.isError, undefined);
+  assert.equal(calls, 1);
+  assert.equal((parseToolResult(result).preview as { status: string }).status, "ready");
+  const impossibleCreation = await harness.client.callTool({ name: "publish_preview", arguments: {
+    threadId: "thread-one", relativePath: "dist", entrypoint: "index.html", title: "Preview", idempotencyKey: "preview-one"
+  } });
+  assert.equal(impossibleCreation.isError, true, "a newly created record cannot already hold uploaded bytes");
+});
+
+test("publish_preview rejects internally inconsistent lifecycle projection before PUT", async (t) => {
+  const bytes = Buffer.from("preview bundle bytes");
+  const digest = "b".repeat(64);
+  const registration = {
+    threadId: "thread-one", relativePath: "dist", entrypoint: "index.html", title: "Preview",
+    kind: "preview-bundle" as const, mediaType: "application/vnd.coffee-shop.preview-bundle+tar+gzip" as const,
+    summary: "", ttlSeconds: 3_600, idempotencyKey: "preview-one", size: bytes.length, sha256: digest
+  };
+  const artifact = {
+    id: "artifact-one", threadId: "thread-one", sourceKey: "orchestrator-client:client-alpha",
+    relativePath: "dist", title: "Preview", kind: registration.kind, mediaType: registration.mediaType,
+    summary: "", size: bytes.length, sha256: digest, downloadPath: "/api/artifacts/artifact-one/content",
+    uploaded: false, idempotencyKey: "preview-one", createdAt: "2026-09-28T12:00:00.000Z"
+  };
+  const secret = "p".repeat(43);
+  let uploads = 0;
+  const harness = await startHarness({
+    scopes: ["orchestrate"],
+    localArtifacts: {
+      capture: async () => assert.fail("ordinary capture must not run"),
+      capturePreview: async () => ({ bytes, registration }),
+      upload: async () => { uploads += 1; }
+    },
+    handle: () => ({
+      artifact,
+      preview: {
+        id: "preview-one", artifactId: artifact.id, artifactSha256: digest, threadId: "thread-one",
+        sourceKey: "orchestrator-client:client-alpha", entrypoint: "index.html", status: "upload-pending",
+        processingGeneration: 0, createdAt: artifact.createdAt, updatedAt: artifact.createdAt,
+        expiresAt: "2026-09-28T13:00:00.000Z", accessState: "eligible"
+      },
+      created: true,
+      uploadGrant: { path: artifact.downloadPath, token: secret, expiresAt: "2026-09-28T12:05:00.000Z" }
+    })
+  });
+  t.after(() => harness.close());
+  const result = await harness.client.callTool({ name: "publish_preview", arguments: {
+    threadId: "thread-one", relativePath: "dist", entrypoint: "index.html", title: "Preview", idempotencyKey: "preview-one"
+  } });
+  assert.equal(result.isError, true);
+  assert.equal(JSON.stringify(result).includes(secret), false);
+  assert.equal(uploads, 0, "invalid lifecycle metadata must not PUT");
+});
+
+test("publish_preview rejects a newly created lifecycle whose expiry does not equal its requested TTL", async (t) => {
+  const bytes = Buffer.from("preview bundle bytes");
+  const digest = "b".repeat(64);
+  const registration = {
+    threadId: "thread-one", relativePath: "dist", entrypoint: "index.html", title: "Preview",
+    kind: "preview-bundle" as const, mediaType: "application/vnd.coffee-shop.preview-bundle+tar+gzip" as const,
+    summary: "", ttlSeconds: 3_600, idempotencyKey: "preview-one", size: bytes.length, sha256: digest
+  };
+  const artifact = {
+    id: "artifact-one", threadId: "thread-one", sourceKey: "orchestrator-client:client-alpha",
+    relativePath: "dist", title: "Preview", kind: registration.kind, mediaType: registration.mediaType,
+    summary: "", size: bytes.length, sha256: digest, downloadPath: "/api/artifacts/artifact-one/content",
+    uploaded: false, idempotencyKey: "preview-one", createdAt: "2026-09-28T12:00:00.000Z"
+  };
+  let uploads = 0;
+  const harness = await startHarness({
+    scopes: ["orchestrate"],
+    localArtifacts: {
+      capture: async () => assert.fail("ordinary capture must not run"),
+      capturePreview: async () => ({ bytes, registration }),
+      upload: async () => { uploads += 1; }
+    },
+    handle: () => ({
+      artifact,
+      preview: {
+        id: "preview-one", artifactId: artifact.id, artifactSha256: digest, threadId: "thread-one",
+        sourceKey: "orchestrator-client:client-alpha", entrypoint: "index.html", status: "upload-pending",
+        processingGeneration: 0, createdAt: artifact.createdAt, updatedAt: artifact.createdAt,
+        expiresAt: "2026-09-28T14:00:00.000Z", accessState: "unavailable"
+      },
+      created: true,
+      uploadGrant: {
+        path: artifact.downloadPath, token: "p".repeat(43), expiresAt: "2026-09-28T12:05:00.000Z"
+      }
+    })
+  });
+  t.after(() => harness.close());
+  const result = await harness.client.callTool({ name: "publish_preview", arguments: {
+    threadId: "thread-one", relativePath: "dist", entrypoint: "index.html", title: "Preview", idempotencyKey: "preview-one"
+  } });
+  assert.equal(result.isError, true);
+  assert.equal(uploads, 0, "TTL-mismatched registration must not upload");
 });
 
 for (const code of orchestratorClientErrorCodes) {

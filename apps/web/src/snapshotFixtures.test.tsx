@@ -25,6 +25,8 @@ const current = readFixture("hubSnapshot.json");
 const legacy = readFixture("legacyHubSnapshot.json");
 // Produced by apps/hub/test-fixtures/generate-artifact-preview-fixtures.mts through Store.snapshot().
 const preview = readFixture("hubPreviewSnapshot.json");
+// Produced from the Bridge packager through external Hub registration, upload claim and preparation.
+const externalPreview = readFixture("hubExternalPreviewSnapshot.json");
 
 afterEach(() => vi.useRealTimers());
 
@@ -67,7 +69,7 @@ function renderViews(snapshot: Snapshot) {
 }
 
 describe("hub snapshot fixtures", () => {
-  it.each([["current", current], ["legacy", legacy], ["preview", preview]])("accepts the %s hub snapshot byte-for-byte", (_name, snapshot) => {
+  it.each([["current", current], ["legacy", legacy], ["preview", preview], ["external preview", externalPreview]])("accepts the %s hub snapshot byte-for-byte", (_name, snapshot) => {
     expect(isSnapshot(snapshot)).toBe(true);
   });
 
@@ -77,6 +79,7 @@ describe("hub snapshot fixtures", () => {
     expect(JSON.stringify(preview)).not.toContain("previewRegistrationReceipts");
     expect(JSON.stringify(preview)).not.toContain("previewProcessingReceipts");
     expect(JSON.stringify(preview)).not.toMatch(/signedUrl|bearer|token/i);
+    expect(JSON.stringify(externalPreview)).not.toMatch(/secretHash|csoc_|signedUrl|bearer|token/i);
   });
 
   it("carries the Hub producer's exact v5 instance triplet and inert template defaults", () => {
@@ -150,6 +153,21 @@ describe("hub snapshot fixtures", () => {
     renderViews(snapshot);
     expect(screen.getByText("Ready for isolated access")).toBeInTheDocument();
     expect(screen.getByText("Site preview")).toBeInTheDocument();
+  });
+
+  it("renders externally attributed preview metadata from the real Bridge-to-Hub producer chain", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-27T12:04:00.000Z"));
+    const snapshot = externalPreview as Snapshot;
+    expect(snapshot.artifactPreviews?.[0]).toMatchObject({
+      status: "ready",
+      accessState: "eligible",
+      sourceKey: expect.stringMatching(/^orchestrator-client:/)
+    });
+    renderViews(snapshot);
+    expect(screen.getByText("Ready for isolated access")).toBeInTheDocument();
+    expect(screen.getAllByText("Christian's laptop").length).toBeGreaterThan(0);
+    expect(screen.queryByText("Agent undefined")).not.toBeInTheDocument();
   });
 
   it("renders external orchestration from a snapshot the hub produced", () => {

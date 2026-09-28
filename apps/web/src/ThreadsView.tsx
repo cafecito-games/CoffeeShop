@@ -111,7 +111,8 @@ export function ThreadsView({ threads, runs, artifacts, artifactPreviews, agents
           {threadRuns.length > 0 && <div className="thread-runs">{threadRuns.slice(0, 5).map((run) => <button key={run.id} onClick={() => onInspectRun(run.id)}><TerminalWindow size={14} /><span>{actorLabel(run, agents)}</span><small>{run.status}</small></button>)}</div>}
           {threadArtifacts.some((artifact) => previewByArtifact.has(artifact.id)) && <section className="thread-previews" aria-label={`Previews for ${thread.title}`}>{threadArtifacts.map((artifact) => {
             const preview = previewByArtifact.get(artifact.id);
-            return preview ? <PreviewArtifact key={artifact.id} artifact={artifact} preview={preview} canMutate={canMutate} apiFetch={apiFetch} compact /> : null;
+            return preview ? <PreviewArtifact key={artifact.id} artifact={artifact} preview={preview}
+              orchestratorClients={orchestratorClients} canMutate={canMutate} apiFetch={apiFetch} compact /> : null;
           })}</section>}
           {externalArtifacts.length > 0 && <section className="thread-artifacts" aria-label={`External artifacts for ${thread.title}`}>
             {externalArtifacts.map((artifact) => <article key={artifact.id} className="external-artifact">

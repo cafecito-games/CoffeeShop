@@ -453,6 +453,12 @@ test("every tool the hub serves is reachable with a well-formed call", async () 
       summary: "", size: 0, sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
       idempotencyKey: "coverage-artifact"
     }],
+    ["publish_preview", {
+      threadId, relativePath: "dist", title: "Coverage preview", kind: "preview-bundle",
+      mediaType: "application/vnd.coffee-shop.preview-bundle+tar+gzip", summary: "", size: 1,
+      sha256: "b".repeat(64), entrypoint: "index.html", ttlSeconds: 3_600,
+      idempotencyKey: "coverage-preview"
+    }],
     ["update_task", { threadId, taskId, idempotencyKey: "update-1", progress: "halfway" }],
     ["update_thread", { threadId, title: "Renamed" }],
     ["detach_thread", { threadId }]

@@ -6,7 +6,7 @@ import {
   toolCallStatuses, workspaceCleanupPolicies, workspaceIsolationPolicies, workspaceLeaseStatuses,
   workspaceRetentionReasons, orchestratorAttachmentStatuses, orchestratorClientScopes, validateAgentInstance,
   validateAgentTemplate, validateArtifact, validateArtifactPreview, validateInstanceAllocation, validateProjectProfile,
-  validateComponentInventoryReport, validateEffectiveCapabilityPack,
+  validateComponentInventoryReport, validateEffectiveCapabilityPack, sameArtifactSource,
   type ArtifactPreview, type Snapshot
 } from "@coffee-shop/protocol";
 
@@ -545,15 +545,12 @@ function previewCollectionCorrelates(value: Record<string, unknown>) {
     const artifacts = value.artifacts.filter((candidate) => isObject(candidate) && candidate.id === preview.artifactId);
     if (artifacts.length !== 1) return false;
     const artifact = artifacts[0]!;
-    const sameActor = artifact.agentId === preview.agentId
-      && artifact.instanceId === preview.instanceId
-      && artifact.allocationId === preview.allocationId;
     const permitsUnuploadedArtifact = preview.processingGeneration === 0
       && (preview.status === "upload-pending" || preview.status === "failed" || preview.status === "expired");
     if ((artifact.uploaded !== true && !permitsUnuploadedArtifact) || artifact.kind !== "preview-bundle"
       || artifact.mediaType !== "application/vnd.coffee-shop.preview-bundle+tar+gzip"
       || artifact.sha256 !== preview.artifactSha256 || artifact.threadId !== preview.threadId
-      || artifact.runId !== preview.runId || !sameActor) return false;
+      || !sameArtifactSource(artifact, preview)) return false;
   }
   return true;
 }
