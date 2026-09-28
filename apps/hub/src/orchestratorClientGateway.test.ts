@@ -358,8 +358,15 @@ test("external lifecycle calls reject detached, cross-thread, malformed, and aut
   const firstThread = resultOf(await call(active.connection, active.transport, "create_thread", { objective: "First" })).thread.id;
   const secondThread = resultOf(await call(active.connection, active.transport, "create_thread", { objective: "Second" })).thread.id;
   await call(active.connection, active.transport, "attach_thread", { threadId: firstThread });
+  const firstInstance = resultOf(await call(active.connection, active.transport, "spawn_instance", {
+    threadId: firstThread, idempotencyKey: "first-instance", requirements: {}
+  })).instance.id;
+  assert.equal(errorOf(await call(active.connection, active.transport, "get_instance", {
+    threadId: secondThread, instanceId: firstInstance
+  })).code, "not_found", "a valid attachment cannot use another thread to observe an instance");
   const before = context.store.read((state) => JSON.stringify([
-    state.instances, state.tasks, state.instanceLifecycleReceipts, state.events
+    state.instances, state.allocations, state.tasks, state.taskSubmissions,
+    state.instanceLifecycleReceipts, state.instanceReleaseIntents, state.instanceDeliveries, state.events
   ]));
 
   await call(active.connection, active.transport, "detach_thread", { threadId: secondThread });
@@ -373,7 +380,8 @@ test("external lifecycle calls reject detached, cross-thread, malformed, and aut
     { threadId: firstThread, idempotencyKey: "timeout", requirements: {}, idleTimeoutSeconds: 59 }
   ]) assert.equal(errorOf(await call(active.connection, active.transport, "spawn_instance", argumentsValue)).code, "invalid_arguments");
   assert.equal(context.store.read((state) => JSON.stringify([
-    state.instances, state.tasks, state.instanceLifecycleReceipts, state.events
+    state.instances, state.allocations, state.tasks, state.taskSubmissions,
+    state.instanceLifecycleReceipts, state.instanceReleaseIntents, state.instanceDeliveries, state.events
   ])), before);
 });
 

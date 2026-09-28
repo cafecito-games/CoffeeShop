@@ -156,6 +156,14 @@ test("a live delegating instance run owns idempotent lifecycle mutations and rec
   }) as { replayed: boolean };
   assert.equal(releaseReplay.replayed, true);
   assert.deepEqual([hub.broadcasts, hub.schedulingRequests], [3, 2]);
+
+  const draining = await hub.call("release_instance", sourceRunId, {
+    instanceId: "instance-caller", idempotencyKey: "release-caller", mode: "drain"
+  }) as { instance: { status: string }; allocation?: { workspace?: string }; replayed: boolean };
+  assert.deepEqual([draining.instance.status, draining.replayed], ["draining", false],
+    "an active resident remains draining until its live run settles");
+  assert.equal(draining.allocation?.workspace, undefined);
+  assert.deepEqual(outputViolations("release_instance", draining), []);
 });
 
 test("lifecycle tools reject legacy, nondelegating, authority-bearing, malformed, and foreign calls without writes", async () => {
@@ -190,14 +198,23 @@ test("lifecycle tools reject legacy, nondelegating, authority-bearing, malformed
   assert.ok(missing instanceof CoordinationError && foreign instanceof CoordinationError);
   assert.deepEqual([foreign.code, foreign.message], [missing.code, missing.message]);
 
+  const beforeInvalid = store.read((state) => JSON.stringify([
+    state.instances, state.allocations, state.tasks, state.taskSubmissions,
+    state.instanceLifecycleReceipts, state.instanceReleaseIntents, state.instanceDeliveries, state.events
+  ]));
   for (const invalid of [
     { idempotencyKey: "authority", requirements: {}, creator: { kind: "operator", operatorId: "operator" } },
     { idempotencyKey: "delegation", requirements: {}, canDelegate: true },
     { idempotencyKey: "policy", requirements: {}, policy: { canDelegate: true } },
     { idempotencyKey: "task-extra", requirements: {}, initialTask: { title: "Task", instructions: "Do it", taskId: "chosen" } },
-    { idempotencyKey: "timeout", requirements: {}, idleTimeoutSeconds: 59 }
+    { idempotencyKey: "timeout", requirements: {}, idleTimeoutSeconds: 59 },
+    { idempotencyKey: "x".repeat(129), requirements: {} },
+    { idempotencyKey: "purpose-too-large", requirements: {}, purpose: { name: "x".repeat(257) } }
   ]) await assert.rejects(hub.call("spawn_instance", sourceRunId, invalid), isCode("invalid_arguments"));
-  assert.equal(store.read((state) => state.instanceLifecycleReceipts?.length ?? 0), 0);
+  assert.equal(store.read((state) => JSON.stringify([
+    state.instances, state.allocations, state.tasks, state.taskSubmissions,
+    state.instanceLifecycleReceipts, state.instanceReleaseIntents, state.instanceDeliveries, state.events
+  ])), beforeInvalid, "every rejected request is transactionally side-effect free");
 });
 
 test("a worker question wakes a waiting orchestrator and the answer wakes the worker", async () => {
