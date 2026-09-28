@@ -1,0 +1,13 @@
+{
+  "threadId": "thread-external-preview",
+  "relativePath": "site",
+  "entrypoint": "index.html",
+  "title": "External preview",
+  "kind": "preview-bundle",
+  "mediaType": "application/vnd.coffee-shop.preview-bundle+tar+gzip",
+  "summary": "Packaged by the local orchestrator bridge",
+  "ttlSeconds": 3600,
+  "idempotencyKey": "external-preview-fixture",
+  "size": 228,
+  "sha256": "e55ba9894d84c36761bea53fa870390bcfbf931e85206269e34076b8c6f8d6ff"
+}

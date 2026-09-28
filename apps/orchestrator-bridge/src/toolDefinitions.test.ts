@@ -61,6 +61,19 @@ test("instance lifecycle definitions expose only intent and the existing orchest
   }
 });
 
+test("publish_preview exposes only caller intent and keeps archive/upload authority implementation-owned", () => {
+  const schema = toolDefinitions.publish_preview.inputSchema;
+  assert.equal(schema.additionalProperties, false);
+  assert.deepEqual(schema.required, ["threadId", "relativePath", "entrypoint", "title", "idempotencyKey"]);
+  assert.deepEqual(Object.keys(schema.properties).sort(), [
+    "entrypoint", "idempotencyKey", "relativePath", "summary", "threadId", "title", "ttlSeconds"
+  ]);
+  for (const forbidden of ["kind", "mediaType", "size", "sha256", "uploadGrant", "workingRoot"]) {
+    assert.equal(Object.hasOwn(schema.properties, forbidden), false);
+  }
+  assert.equal(requiredScopeForExternalOrchestratorTool("publish_preview"), "orchestrate");
+});
+
 test("every tool schema stays far inside the hub's argument bound", () => {
   for (const definition of orderedToolDefinitions) {
     const encoded = JSON.stringify(definition.inputSchema);

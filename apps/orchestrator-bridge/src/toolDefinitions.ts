@@ -151,6 +151,20 @@ export const toolDefinitions: Readonly<Record<ExternalOrchestratorToolName, Tool
       idempotencyKey: { type: "string", description: "Stable identity for safe retries and reconnects." }
     }, ["threadId", "relativePath", "title", "kind", "mediaType", "idempotencyKey"])
   },
+  publish_preview: {
+    name: "publish_preview",
+    title: "Publish preview",
+    description: "Packages and publishes one static directory beneath this bridge session's startup working directory as an isolated Coffee Shop preview.",
+    inputSchema: closedSchema({
+      threadId: threadIdProperty,
+      relativePath: { type: "string", description: "Directory beneath the bridge startup working directory." },
+      entrypoint: { type: "string", description: "HTML entrypoint relative to the published directory." },
+      title: { type: "string", description: "Short operator-facing title." },
+      summary: { type: "string", description: "Optional bounded summary." },
+      ttlSeconds: { type: "integer", description: "Optional lifecycle duration in seconds." },
+      idempotencyKey: { type: "string", description: "Stable identity for safe retries and reconnects." }
+    }, ["threadId", "relativePath", "entrypoint", "title", "idempotencyKey"])
+  },
   update_thread: {
     name: "update_thread",
     title: "Update thread",

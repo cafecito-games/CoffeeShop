@@ -35,6 +35,13 @@ const baseRecord = {
   expiresAt
 };
 
+const externalRecord = {
+  ...baseRecord,
+  runId: undefined,
+  agentId: undefined,
+  sourceKey: "orchestrator-client:client-one"
+};
+
 const recordFor = (status) => {
   switch (status) {
     case "upload-pending": return { ...baseRecord, status, processingGeneration: 0 };
@@ -144,4 +151,34 @@ test("every preview status validates only its status-specific generation and fie
   const ready = recordFor("ready");
   assert.equal(validateArtifactPreview({ ...ready, accessState: "unavailable" }, readyAt).ok, false, "derived access cannot lie");
   assert.equal(validateArtifactPreview({ ...ready, accessState: "eligible", token: "secret" }, readyAt).ok, false, "public records reject undeclared authority");
+});
+
+test("preview lifecycle records reuse the exact run-or-external source invariant", () => {
+  assert.equal(validateArtifactPreviewRecord({
+    ...externalRecord,
+    status: "upload-pending",
+    processingGeneration: 0
+  }).ok, true);
+  assert.equal(validateArtifactPreview({
+    ...externalRecord,
+    status: "upload-pending",
+    processingGeneration: 0,
+    accessState: "unavailable"
+  }, readyAt).ok, true);
+
+  const rejected = [
+    { ...externalRecord, sourceKey: undefined },
+    { ...externalRecord, runId: "run-one" },
+    { ...externalRecord, agentId: "agent-one" },
+    { ...baseRecord, sourceKey: "orchestrator-client:client-one" },
+    { ...baseRecord, sourceKey: "run:another-run" },
+    { ...externalRecord, sourceKey: "orchestrator-client:client:one" }
+  ];
+  for (const record of rejected) {
+    assert.equal(validateArtifactPreviewRecord({
+      ...record,
+      status: "upload-pending",
+      processingGeneration: 0
+    }).ok, false, JSON.stringify(record));
+  }
 });

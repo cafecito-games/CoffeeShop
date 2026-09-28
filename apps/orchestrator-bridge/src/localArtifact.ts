@@ -8,6 +8,7 @@ import {
   type Artifact,
   type OrdinaryArtifactKind
 } from "@coffee-shop/protocol";
+import { captureLocalPreview, type CapturedLocalPreview } from "./localPreview.js";
 
 export interface ExternalPostArtifactArguments {
   threadId: string;
@@ -40,6 +41,7 @@ export interface ArtifactUploadGrant {
 /** The dependency BridgeServer needs; tests inject it without exposing local roots to the Hub. */
 export interface LocalArtifactGateway {
   capture(value: unknown): Promise<CapturedLocalArtifact>;
+  capturePreview?(value: unknown): Promise<CapturedLocalPreview>;
   upload(grant: ArtifactUploadGrant, bytes: Buffer): Promise<void>;
 }
 
@@ -216,6 +218,10 @@ export class LocalArtifactService implements LocalArtifactGateway {
 
   capture(value: unknown) {
     return captureLocalArtifact(this.workingRoot, value);
+  }
+
+  capturePreview(value: unknown) {
+    return captureLocalPreview(this.workingRoot, value);
   }
 
   upload(grant: ArtifactUploadGrant, bytes: Buffer) {

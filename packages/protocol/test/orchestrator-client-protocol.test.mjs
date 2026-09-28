@@ -78,7 +78,7 @@ test("every orchestrator vocabulary has exactly one definition and a guard that 
 test("every external orchestrator tool is named once and maps to exactly one required scope", () => {
   assert.deepEqual([...externalOrchestratorToolNames], [
     "create_thread", "list_threads", "attach_thread", "detach_thread", "get_thread_context", "get_thread_events",
-    "submit_tasks", "update_task", "send_task_message", "post_artifact", "update_thread", "get_execution_inventory",
+    "submit_tasks", "update_task", "send_task_message", "post_artifact", "publish_preview", "update_thread", "get_execution_inventory",
     "spawn_instance", "get_instance", "renew_instance", "release_instance",
     "list_approvals", "resolve_approval"
   ]);

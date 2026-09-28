@@ -1,0 +1,112 @@
+{
+  "agents": [],
+  "nodes": [],
+  "runs": [],
+  "events": [
+    {
+      "id": "evt_mujrnuo0_01jzje",
+      "type": "status",
+      "title": "Preview registered",
+      "detail": "External preview · 228 bytes",
+      "threadId": "thread_mujrnuo0_00rzrp",
+      "createdAt": "2026-09-27T12:00:00.000Z"
+    },
+    {
+      "type": "status",
+      "title": "Thread created",
+      "detail": "External preview",
+      "threadId": "thread_mujrnuo0_00rzrp",
+      "id": "evt_mujrnuo0_00wnqb",
+      "createdAt": "2026-09-27T12:00:00.000Z"
+    }
+  ],
+  "messages": [],
+  "threads": [
+    {
+      "id": "thread_mujrnuo0_00rzrp",
+      "title": "External preview",
+      "objective": "Review a preview published by an external orchestrator",
+      "summary": "",
+      "status": "active",
+      "orchestrator": {
+        "kind": "external",
+        "clientId": "orchestrator-client-external-preview-fixture"
+      },
+      "createdBy": "agent",
+      "createdAt": "2026-09-27T12:00:00.000Z",
+      "updatedAt": "2026-09-27T12:00:00.000Z"
+    }
+  ],
+  "delegations": [],
+  "artifacts": [
+    {
+      "id": "artifact_mujrnuo0_015znk",
+      "threadId": "thread_mujrnuo0_00rzrp",
+      "sourceKey": "orchestrator-client:orchestrator-client-external-preview-fixture",
+      "relativePath": "site",
+      "title": "External preview",
+      "kind": "preview-bundle",
+      "mediaType": "application/vnd.coffee-shop.preview-bundle+tar+gzip",
+      "summary": "Packaged by the local orchestrator bridge",
+      "size": 228,
+      "sha256": "e55ba9894d84c36761bea53fa870390bcfbf931e85206269e34076b8c6f8d6ff",
+      "downloadPath": "/api/artifacts/artifact_mujrnuo0_015znk/content",
+      "uploaded": true,
+      "idempotencyKey": "external-preview-fixture",
+      "createdAt": "2026-09-27T12:00:00.000Z"
+    }
+  ],
+  "instances": [],
+  "allocations": [],
+  "templates": [],
+  "legacyTemplateImports": [],
+  "runActivity": [],
+  "orchestratorInboxes": [],
+  "orchestratorAttachments": [
+    {
+      "id": "attachment_mujrnuo0_011box",
+      "threadId": "thread_mujrnuo0_00rzrp",
+      "clientId": "orchestrator-client-external-preview-fixture",
+      "connectionId": "connection-external-preview-fixture",
+      "attachedAt": "2026-09-27T12:00:00.000Z",
+      "lastHeartbeatAt": "2026-09-27T12:00:00.000Z",
+      "status": "attached"
+    }
+  ],
+  "projectProfiles": [],
+  "componentInventories": [],
+  "tasks": [],
+  "taskMessages": [],
+  "taskMessageAcknowledgements": [],
+  "sessionBindings": [],
+  "approvals": [],
+  "workspaceLeases": [],
+  "orchestratorClients": [
+    {
+      "id": "orchestrator-client-external-preview-fixture",
+      "name": "Christian's laptop",
+      "scopes": [
+        "orchestrate"
+      ],
+      "createdAt": "2026-09-27T12:00:00.000Z"
+    }
+  ],
+  "artifactPreviews": [
+    {
+      "id": "preview_mujrnuo0_01anm6",
+      "artifactId": "artifact_mujrnuo0_015znk",
+      "artifactSha256": "e55ba9894d84c36761bea53fa870390bcfbf931e85206269e34076b8c6f8d6ff",
+      "threadId": "thread_mujrnuo0_00rzrp",
+      "sourceKey": "orchestrator-client:orchestrator-client-external-preview-fixture",
+      "entrypoint": "index.html",
+      "status": "ready",
+      "processingGeneration": 1,
+      "createdAt": "2026-09-27T12:00:00.000Z",
+      "updatedAt": "2026-09-27T12:02:00.000Z",
+      "expiresAt": "2026-09-27T13:00:00.000Z",
+      "readyAt": "2026-09-27T12:02:00.000Z",
+      "accessState": "eligible"
+    }
+  ],
+  "generatedAt": "2026-09-27T12:04:00.000Z"
+}

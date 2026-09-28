@@ -7,6 +7,8 @@ import { fileURLToPath } from "node:url";
 import {
   agentAvatarColors,
   agentAvatarShapes,
+  artifactSource,
+  artifactSourceKey,
   artifactPreviewAccessState,
   artifactPreviewTtlPolicy,
   canTransitionSessionBinding,
@@ -27,6 +29,7 @@ import {
   previewBundleLimits,
   previewBundleMediaType,
   runSourceKey,
+  sameArtifactSource,
   validateArtifact,
   validateArtifactPreviewRecord,
   validateComponentInventoryReport,
@@ -142,7 +145,8 @@ export interface PreviewProcessingReceipt {
 export interface PreviewRegistrationDigestInput {
   sourceKey: string;
   threadId: string;
-  runId: string;
+  /** Present only for the existing run-scoped digest domain. */
+  runId?: string;
   agentId?: string;
   instanceId?: string;
   allocationId?: string;
@@ -172,11 +176,18 @@ const previewActorDigest = (input: { agentId?: string; instanceId?: string; allo
   input.agentId !== undefined ? ["agent", input.agentId] : ["instance", input.instanceId, input.allocationId];
 
 /** Canonical digest for one source-scoped registration; generated ids and timestamps are excluded. */
-export const previewRegistrationDigest = (input: PreviewRegistrationDigestInput) => semanticDigest([
-  "preview-registration-v1", input.sourceKey, input.threadId, input.runId, previewActorDigest(input), input.idempotencyKey,
-  [input.relativePath, input.title, input.kind, input.mediaType, input.summary, input.size, input.sha256],
-  [input.entrypoint, input.ttlSeconds]
-]);
+export const previewRegistrationDigest = (input: PreviewRegistrationDigestInput) => input.runId === undefined
+  ? semanticDigest([
+    "preview-registration-external-v1", input.sourceKey, input.threadId, input.idempotencyKey,
+    [input.relativePath, input.title, input.kind, input.mediaType, input.summary, input.size, input.sha256],
+    [input.entrypoint, input.ttlSeconds]
+  ])
+  : semanticDigest([
+    // Preserve the deployed run producer's byte-for-byte digest domain.
+    "preview-registration-v1", input.sourceKey, input.threadId, input.runId, previewActorDigest(input), input.idempotencyKey,
+    [input.relativePath, input.title, input.kind, input.mediaType, input.summary, input.size, input.sha256],
+    [input.entrypoint, input.ttlSeconds]
+  ]);
 
 /** Canonical semantic settlement digest; the producer timestamp never changes replay identity. */
 export const previewProcessingDigest = (input: PreviewProcessingDigestInput) => semanticDigest([
@@ -665,11 +676,6 @@ const processingReceiptKeys = [
   "expiresAt"
 ] as const;
 
-const sameActor = (
-  left: { agentId?: string; instanceId?: string; allocationId?: string },
-  right: { agentId?: string; instanceId?: string; allocationId?: string }
-) => left.agentId === right.agentId && left.instanceId === right.instanceId && left.allocationId === right.allocationId;
-
 /** Every persisted/public artifact uses the shared exact run-or-external producer invariant. */
 export function assertPersistedArtifactState(state: State) {
   if (!Array.isArray(state.artifacts)) throw new Error("Persisted artifact collection is malformed");
@@ -704,8 +710,9 @@ export function assertPersistedArtifactPreviewState(state: State) {
     const artifacts = (state.artifacts ?? []).filter((artifact) => artifact.id === preview.artifactId);
     if (artifacts.length !== 1) throw new Error(`Persisted artifact preview ${index} names missing or duplicated artifact ${preview.artifactId}`);
     const artifact = artifacts[0];
+    const artifactSourceIdentity = artifactSource(artifact);
     if (!isRecord(artifact) || !hasOnlyStoredKeys(artifact, previewArtifactKeys)
-      || !isNonEmptyString(artifact.id) || !isNonEmptyString(artifact.threadId) || !isNonEmptyString(artifact.runId)
+      || !isNonEmptyString(artifact.id) || !isNonEmptyString(artifact.threadId) || !artifactSourceIdentity.ok
       || !isNonEmptyString(artifact.relativePath) || !isNonEmptyString(artifact.title) || typeof artifact.summary !== "string"
       || typeof artifact.size !== "number" || !Number.isSafeInteger(artifact.size) || artifact.size <= 0
       || artifact.size > previewBundleLimits.maximumCompressedBytes || !isDigest(artifact.sha256)
@@ -717,8 +724,12 @@ export function assertPersistedArtifactPreviewState(state: State) {
     if (artifact.mediaType !== previewBundleMediaType) throw new Error(`Persisted artifact preview ${index} artifact has the wrong preview media type`);
     if (artifact.sha256 !== preview.artifactSha256) throw new Error(`Persisted artifact preview ${index} disagrees with its artifact digest`);
     if (artifact.threadId !== preview.threadId) throw new Error(`Persisted artifact preview ${index} disagrees with its artifact thread`);
-    if (artifact.runId !== preview.runId) throw new Error(`Persisted artifact preview ${index} disagrees with its artifact run`);
-    if (!sameActor(preview, artifact)) throw new Error(`Persisted artifact preview ${index} disagrees with its artifact actor`);
+    if (!sameArtifactSource(preview, artifact)) {
+      const previewSource = artifactSource(preview);
+      throw new Error(previewSource.ok && previewSource.value.kind === "run"
+        ? `Persisted artifact preview ${index} disagrees with its artifact actor`
+        : `Persisted artifact preview ${index} disagrees with its artifact source`);
+    }
     if (artifact.createdAt !== preview.createdAt) throw new Error(`Persisted artifact preview ${index} disagrees with its artifact creation time`);
     if (artifact.downloadPath !== `/api/artifacts/${encodeURIComponent(artifact.id)}/content`) {
       throw new Error(`Persisted artifact preview ${index} has an unexpected artifact download path`);
@@ -726,11 +737,26 @@ export function assertPersistedArtifactPreviewState(state: State) {
 
     const threads = (state.threads ?? []).filter((thread) => thread.id === preview.threadId);
     if (threads.length !== 1) throw new Error(`Persisted artifact preview ${index} names missing or duplicated thread ${preview.threadId}`);
-    const runs = state.runs.filter((run) => run.id === preview.runId);
-    if (runs.length !== 1 || runs[0].threadId !== preview.threadId) {
-      throw new Error(`Persisted artifact preview ${index} names a missing, duplicated, or foreign run`);
+    const thread = threads[0]!;
+    const source = artifactSource(preview);
+    if (!source.ok) throw new Error(`Persisted artifact preview ${index} has an invalid source`);
+    if (source.value.kind === "run") {
+      const sourceRunId = source.value.runId;
+      const runs = state.runs.filter((run) => run.id === sourceRunId);
+      if (runs.length !== 1 || runs[0].threadId !== preview.threadId) {
+        throw new Error(`Persisted artifact preview ${index} names a missing, duplicated, or foreign run`);
+      }
+      const persistedRun = runs[0]!;
+      if (!sameArtifactSource(preview, {
+        runId: persistedRun.id,
+        agentId: persistedRun.agentId,
+        instanceId: persistedRun.instanceId,
+        allocationId: persistedRun.allocationId
+      })) throw new Error(`Persisted artifact preview ${index} disagrees with its run actor`);
+    } else if (thread.orchestrator?.kind !== "external"
+      || thread.orchestrator.clientId !== source.value.clientId) {
+      throw new Error(`Persisted artifact preview ${index} disagrees with its thread orchestrator`);
     }
-    if (!sameActor(preview, runs[0])) throw new Error(`Persisted artifact preview ${index} disagrees with its run actor`);
   }
 
   for (const [index, artifact] of (state.artifacts ?? []).entries()) {
@@ -760,7 +786,7 @@ export function assertPersistedArtifactPreviewState(state: State) {
     const preview = previews.find((item) => item.id === receipt.previewId);
     if (!preview) throw new Error(`Persisted preview registration receipt ${index} names an unknown preview`);
     if (receipt.artifactId !== preview.artifactId) throw new Error(`Persisted preview registration receipt ${index} disagrees with its preview artifact`);
-    if (receipt.sourceKey !== runSourceKey(preview.runId)) throw new Error(`Persisted preview registration receipt ${index} disagrees with its preview source`);
+    if (receipt.sourceKey !== artifactSourceKey(preview)) throw new Error(`Persisted preview registration receipt ${index} disagrees with its preview source`);
     const artifact = (state.artifacts ?? []).find((item) => item.id === receipt.artifactId)!;
     if (receipt.idempotencyKey !== artifact.idempotencyKey) throw new Error(`Persisted preview registration receipt ${index} disagrees with its artifact key`);
     if (receipt.createdAt !== preview.createdAt) throw new Error(`Persisted preview registration receipt ${index} disagrees with its preview creation time`);

@@ -1,19 +1,27 @@
 import {
   artifactPreviewAccessState,
   artifactPreviewTtlPolicy,
+  artifactSourceKey,
   isArtifactPreviewFailureCode,
   isTimestamp,
   previewBundleArtifactKind,
   previewBundleLimits,
   previewBundleMediaType,
+  sameArtifactSource,
   validatePreviewBundlePath,
   type Artifact,
   type ArtifactPreview,
   type ArtifactPreviewFailureCode,
   type ArtifactPreviewRecord
 } from "@coffee-shop/protocol";
+import { issueArtifactUploadGrantInState, type ArtifactUploadGrant } from "./artifactUploadGrants.js";
 import { CoordinationError } from "./coordinationError.js";
-import { callerAttribution, requireCallerRun, resolveCaller } from "./mailbox.js";
+import {
+  callerAttribution,
+  resolveCallerFor,
+  runSource,
+  type CallerSource
+} from "./mailbox.js";
 import {
   newId,
   previewProcessingDigest,
@@ -67,11 +75,13 @@ function onlyKeys(value: Record<string, unknown>, keys: readonly string[], conte
   }
 }
 
-function boundedString(value: unknown, key: string, maximum: number, trim = true) {
+function boundedString(value: unknown, key: string, maximum: number, trim = true, byteBounded = false) {
   if (typeof value !== "string") throw new CoordinationError("invalid_arguments", `${key} is required`);
   const normalized = trim ? value.trim() : value;
   if (normalized.length === 0) throw new CoordinationError("invalid_arguments", `${key} is required`);
-  if (normalized.length > maximum) throw new CoordinationError("invalid_arguments", `${key} exceeds its limit`);
+  if ((byteBounded ? Buffer.byteLength(normalized) : normalized.length) > maximum) {
+    throw new CoordinationError("invalid_arguments", `${key} exceeds its limit`);
+  }
   return normalized;
 }
 
@@ -89,7 +99,7 @@ function requestedTtl(value: unknown, allowDefault: boolean) {
   return value;
 }
 
-function normalizeRegistration(value: unknown): NormalizedPreviewRegistration {
+function normalizeRegistration(value: unknown, external: boolean): NormalizedPreviewRegistration {
   const input = record(value, "preview registration");
   onlyKeys(input, registrationKeys, "preview registration");
   const relativePath = boundedString(input.relativePath, "relativePath", previewBundleLimits.maximumPathBytes, false);
@@ -116,17 +126,21 @@ function normalizeRegistration(value: unknown): NormalizedPreviewRegistration {
   if (input.summary !== undefined && typeof input.summary !== "string") {
     throw new CoordinationError("invalid_arguments", "summary must be a string");
   }
+  const summary = typeof input.summary === "string" ? input.summary.trim() : "";
+  if (external && Buffer.byteLength(summary) > 2_000) {
+    throw new CoordinationError("invalid_arguments", "summary exceeds its limit");
+  }
   return {
     relativePath,
-    title: boundedString(input.title, "title", 256),
+    title: boundedString(input.title, "title", 256, true, external),
     kind: previewBundleArtifactKind,
     mediaType: previewBundleMediaType,
-    summary: typeof input.summary === "string" ? input.summary.trim().slice(0, 2_000) : "",
+    summary: external ? summary : summary.slice(0, 2_000),
     size: input.size,
     sha256: input.sha256,
     entrypoint,
     ttlSeconds: requestedTtl(input.ttlSeconds, true),
-    idempotencyKey: boundedString(input.idempotencyKey, "idempotencyKey", 128)
+    idempotencyKey: boundedString(input.idempotencyKey, "idempotencyKey", 128, true, external)
   };
 }
 
@@ -175,7 +189,7 @@ function settledPreview(
     artifactId: preview.artifactId,
     artifactSha256: preview.artifactSha256,
     threadId: preview.threadId,
-    runId: preview.runId,
+    ...(preview.runId === undefined ? { sourceKey: preview.sourceKey! } : { runId: preview.runId }),
     ...(preview.agentId === undefined ? {} : { agentId: preview.agentId }),
     ...(preview.instanceId === undefined ? {} : { instanceId: preview.instanceId }),
     ...(preview.allocationId === undefined ? {} : { allocationId: preview.allocationId }),
@@ -201,8 +215,8 @@ function previewIn(state: State, previewId: string) {
 function artifactFor(state: State, preview: ArtifactPreviewRecord) {
   const artifact = state.artifacts?.find((item) => item.id === preview.artifactId);
   if (!artifact || artifact.kind !== previewBundleArtifactKind || artifact.mediaType !== previewBundleMediaType
-    || artifact.sha256 !== preview.artifactSha256 || artifact.threadId !== preview.threadId || artifact.runId !== preview.runId
-    || artifact.agentId !== preview.agentId || artifact.instanceId !== preview.instanceId || artifact.allocationId !== preview.allocationId) {
+    || artifact.sha256 !== preview.artifactSha256 || artifact.threadId !== preview.threadId
+    || !sameArtifactSource(artifact, preview)) {
     throw new CoordinationError("inconsistent_state", "The preview artifact identity is unavailable", true);
   }
   return artifact;
@@ -229,29 +243,44 @@ function expirePreviewInState(preview: ArtifactPreviewRecord, atValue: string) {
  * The only creation authority for preview-bundle artifacts. Artifact, lifecycle record, audit
  * event, and source-scoped receipt commit in one Store transaction.
  */
-export async function registerPreview(
+export async function registerPreviewForSource(
   store: Store,
-  sourceRunId: string,
+  source: CallerSource,
   argumentsValue: unknown,
   atValue = new Date().toISOString()
 ) {
-  const input = normalizeRegistration(argumentsValue);
+  const input = normalizeRegistration(argumentsValue, source.kind === "external");
   const at = operationTime(atValue);
-  let result: { artifact: Artifact; preview: ArtifactPreview; uploadPath: string; created: boolean } | undefined;
+  let result: {
+    artifact: Artifact;
+    preview: ArtifactPreview;
+    uploadPath: string;
+    created: boolean;
+    uploadGrant?: ArtifactUploadGrant;
+  } | undefined;
   await store.transact((state) => {
     state.artifacts ??= [];
     state.artifactPreviews ??= [];
     state.previewRegistrationReceipts ??= [];
     state.previewProcessingReceipts ??= [];
-    const caller = resolveCaller(state, sourceRunId);
-    const { run } = requireCallerRun(caller, "Preview registration is served only to a hub-hosted run");
+    const caller = resolveCallerFor(state, source);
     if (caller.thread.status !== "active") throw new CoordinationError("thread_inactive", "Previews require an active thread");
-    if (Date.parse(at) < Date.parse(run.createdAt)) {
+    if (Date.parse(at) < Date.parse(caller.thread.createdAt)) {
+      throw new CoordinationError("invalid_arguments", "The registration timestamp predates its thread");
+    }
+    const run = caller.principal.kind === "run" ? caller.principal.run : undefined;
+    if (run !== undefined && Date.parse(at) < Date.parse(run.createdAt)) {
       throw new CoordinationError("invalid_arguments", "The registration timestamp predates its source run");
+    }
+    if (caller.principal.kind === "external"
+      && (Date.parse(at) < Date.parse(caller.principal.client.createdAt)
+        || Date.parse(at) < Date.parse(caller.principal.attachment.attachedAt)
+        || Date.parse(at) < Date.parse(caller.principal.attachment.lastHeartbeatAt))) {
+      throw new CoordinationError("invalid_arguments", "The registration timestamp predates its external caller authority");
     }
     const attribution = callerAttribution(caller);
     const digest = previewRegistrationDigest({
-      sourceKey: caller.sourceKey, threadId: caller.thread.id, runId: run.id, ...attribution,
+      sourceKey: caller.sourceKey, threadId: caller.thread.id, ...(run === undefined ? {} : { runId: run.id, ...attribution }),
       idempotencyKey: input.idempotencyKey, relativePath: input.relativePath, title: input.title,
       kind: input.kind, mediaType: input.mediaType, summary: input.summary, size: input.size,
       sha256: input.sha256, entrypoint: input.entrypoint, ttlSeconds: input.ttlSeconds
@@ -267,15 +296,23 @@ export async function registerPreview(
         throw new CoordinationError("inconsistent_state", "The prior preview registration is unavailable", true);
       }
       const artifact = artifactFor(state, preview);
-      result = { artifact: structuredClone(artifact), preview: publicPreview(preview, at), uploadPath: artifact.downloadPath, created: false };
-      return false;
+      const uploadGrant = caller.principal.kind === "external" && !artifact.uploaded
+        ? issueArtifactUploadGrantInState(state, artifact, caller.principal.client.id, at)
+        : undefined;
+      result = {
+        artifact: structuredClone(artifact), preview: publicPreview(preview, at), uploadPath: artifact.downloadPath, created: false,
+        ...(uploadGrant === undefined ? {} : { uploadGrant })
+      };
+      return uploadGrant !== undefined;
     }
-    if (state.artifacts.some((artifact) => artifact.runId === run.id && artifact.idempotencyKey === input.idempotencyKey)) {
+    if (state.artifacts.some((artifact) => artifactSourceKey(artifact) === caller.sourceKey
+      && artifact.idempotencyKey === input.idempotencyKey)) {
       throw new CoordinationError("idempotency_conflict", "The idempotency key was already used by another artifact registration");
     }
 
     const artifact: Artifact = {
-      id: newId("artifact"), threadId: caller.thread.id, runId: run.id, ...attribution,
+      id: newId("artifact"), threadId: caller.thread.id,
+      ...(run === undefined ? { sourceKey: caller.sourceKey } : { runId: run.id, ...attribution }),
       relativePath: input.relativePath, title: input.title, kind: previewBundleArtifactKind,
       mediaType: previewBundleMediaType, summary: input.summary, size: input.size, sha256: input.sha256,
       downloadPath: "", uploaded: false, idempotencyKey: input.idempotencyKey, createdAt: at
@@ -283,7 +320,9 @@ export async function registerPreview(
     artifact.downloadPath = `/api/artifacts/${encodeURIComponent(artifact.id)}/content`;
     const preview: ArtifactPreviewRecord = {
       id: newId("preview"), artifactId: artifact.id, artifactSha256: artifact.sha256,
-      threadId: caller.thread.id, runId: run.id, ...attribution, entrypoint: input.entrypoint,
+      threadId: caller.thread.id,
+      ...(run === undefined ? { sourceKey: caller.sourceKey } : { runId: run.id, ...attribution }),
+      entrypoint: input.entrypoint,
       status: "upload-pending", processingGeneration: 0, createdAt: at, updatedAt: at,
       expiresAt: new Date(Date.parse(at) + input.ttlSeconds * 1_000).toISOString()
     };
@@ -296,16 +335,32 @@ export async function registerPreview(
     // the projection-only accessState that Store.snapshot() derives.
     state.artifactPreviews.unshift(preview as ArtifactPreview);
     state.previewRegistrationReceipts.push(receipt);
+    const uploadGrant = caller.principal.kind === "external"
+      ? issueArtifactUploadGrantInState(state, artifact, caller.principal.client.id, at)
+      : undefined;
     caller.thread.updatedAt = at;
     state.events.unshift({
       id: newId("evt"), type: "status", title: "Preview registered",
       detail: `${input.title} · ${input.size} bytes`, threadId: caller.thread.id,
-      ...attribution, runId: run.id, createdAt: at
+      ...(run === undefined ? {} : { ...attribution, runId: run.id }), createdAt: at
     });
-    result = { artifact: structuredClone(artifact), preview: publicPreview(preview, at), uploadPath: artifact.downloadPath, created: true };
+    result = {
+      artifact: structuredClone(artifact), preview: publicPreview(preview, at), uploadPath: artifact.downloadPath, created: true,
+      ...(uploadGrant === undefined ? {} : { uploadGrant })
+    };
   });
   if (!result) throw new CoordinationError("persistence_failed", "The preview was not registered", true);
   return result;
+}
+
+/** Run-scoped compatibility wrapper; its digest and public result remain byte-for-byte unchanged. */
+export async function registerPreview(
+  store: Store,
+  sourceRunId: string,
+  argumentsValue: unknown,
+  atValue = new Date().toISOString()
+) {
+  return await registerPreviewForSource(store, runSource(sourceRunId), argumentsValue, atValue);
 }
 
 /** Starts generation one or explicitly retries a failed preview with a fresh generation. */

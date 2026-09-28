@@ -12,8 +12,11 @@ import {
   type Agent,
   type Run
 } from "@coffee-shop/protocol";
-import { beginProcessing, expireDuePreviews, registerPreview, settleProcessing } from "../src/artifactPreviews.js";
+import { beginProcessing, expireDuePreviews, registerPreview, registerPreviewForSource, settleProcessing } from "../src/artifactPreviews.js";
+import { claimArtifactUploadGrant } from "../src/artifactUploadGrants.js";
 import { templateFromLegacyAgent } from "../src/agentTemplates.js";
+import { createExternalThreadInState } from "../src/externalOrchestrators.js";
+import { externalSource } from "../src/mailbox.js";
 import { ingestArtifactContent } from "../src/previewPreparation.js";
 import { PreviewStorage } from "../src/previewStorage.js";
 import { Store } from "../src/store.js";
@@ -22,7 +25,10 @@ const at = "2026-09-27T12:00:00.000Z";
 const after = (seconds: number) => new Date(Date.parse(at) + seconds * 1_000).toISOString();
 const stateUrl = new URL("./state-with-artifact-preview.json", import.meta.url);
 const snapshotUrl = new URL("../../web/src/test/fixtures/hubPreviewSnapshot.json", import.meta.url);
+const externalSnapshotUrl = new URL("../../web/src/test/fixtures/hubExternalPreviewSnapshot.json", import.meta.url);
 const bundleUrl = new URL("./preview-v1/bundle.tar.gz", import.meta.url);
+const bridgeBundleUrl = new URL("./preview-v1/bridge-bundle.tar.gz", import.meta.url);
+const bridgeRegistrationUrl = new URL("./preview-v1/bridge-registration.json", import.meta.url);
 const paxBundleUrl = new URL("./preview-v1/pax-bundle.tar.gz", import.meta.url);
 const manifestUrl = new URL("./preview-v1/manifest.json", import.meta.url);
 const indexUrl = new URL("./preview-v1/content/site/index.html", import.meta.url);
@@ -162,6 +168,70 @@ async function generate() {
     await sameBytes(manifestUrl, await readFile(join(preparedRoot, "manifest.json")));
     await sameBytes(indexUrl, await readFile(join(preparedRoot, "content", "site", "index.html")));
     await sameBytes(scriptUrl, await readFile(join(preparedRoot, "content", "site", "app.js")));
+
+    // Producer provenance: orchestrator-bridge/src/generateLocalPreviewFixture.ts invokes the real
+    // local packager, then these exact bytes traverse external registration, #60 grant claim,
+    // immutable ingestion, preparation, persistence reload, and Store.snapshot().
+    const externalRoot = join(directory, "external-preview");
+    const externalStatePath = join(externalRoot, "state.json");
+    const externalStore = new Store(externalStatePath);
+    const externalStorage = new PreviewStorage(externalRoot);
+    await externalStore.load();
+    const connectionId = "connection-external-preview-fixture";
+    const externalClientId = "orchestrator-client-external-preview-fixture";
+    let externalThreadId = "";
+    await externalStore.transact((state) => {
+      // Credential minting has its own cryptographic producer fixtures. This fixed valid stored
+      // principal keeps this preview fixture deterministic while registration still resolves it
+      // through the same live external CallerSource authority as production.
+      state.orchestratorClients = [{
+        id: externalClientId,
+        name: "Christian's laptop",
+        scopes: ["orchestrate"],
+        secretHash: `sha256:${"0".repeat(64)}`,
+        createdAt: at
+      }];
+      const creation = createExternalThreadInState(state, {
+        clientId: externalClientId,
+        connectionId,
+        title: "External preview",
+        objective: "Review a preview published by an external orchestrator"
+      }, at);
+      externalThreadId = creation.thread.id;
+      // `newEvent` reads the wall clock rather than this producer's injected operation clock.
+      // Pin that display-only field so the checked fixture remains reproducible.
+      const creationEvent = state.events.find((event) => event.threadId === externalThreadId && event.title === "Thread created");
+      assert.ok(creationEvent);
+      creationEvent.createdAt = at;
+    });
+    const bridgeBundle = await readFile(bridgeBundleUrl);
+    const bridgeRegistration = JSON.parse(await readFile(bridgeRegistrationUrl, "utf8")) as Record<string, unknown>;
+    const { threadId: _fixtureThreadId, ...externalRequest } = bridgeRegistration;
+    const externalRegistered = await registerPreviewForSource(
+      externalStore,
+      externalSource(connectionId, externalThreadId),
+      externalRequest,
+      at
+    );
+    assert.ok(externalRegistered.uploadGrant);
+    assert.equal(await claimArtifactUploadGrant(
+      externalStore,
+      externalRegistered.artifact.id,
+      externalRegistered.uploadGrant.token,
+      after(1)
+    ), true);
+    const externalTimes = [after(60), after(120)];
+    await ingestArtifactContent(externalStore, externalStorage, {
+      artifactId: externalRegistered.artifact.id,
+      contentType: "application/octet-stream",
+      body: Readable.from([bridgeBundle]),
+      now: () => externalTimes.shift() ?? after(120)
+    });
+    const externalRestarted = new Store(externalStatePath);
+    await externalRestarted.load();
+    const externalSnapshot = externalRestarted.snapshot(after(240));
+    assert.equal(externalSnapshot.artifactPreviews?.[0].sourceKey, `orchestrator-client:${externalClientId}`);
+    await sameBytes(externalSnapshotUrl, Buffer.from(`${JSON.stringify(externalSnapshot, null, 2)}\n`));
   } finally {
     Date.now = originalNow;
     Math.random = originalRandom;

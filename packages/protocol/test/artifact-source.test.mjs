@@ -69,10 +69,14 @@ test("artifact producer identity fails closed for every missing, mixed, or malfo
   }
 });
 
-test("the shared artifact validator accepts both producer classes and rejects undeclared or preview-external records", () => {
+test("the shared artifact validator accepts both producer classes, including lifecycle-owned external preview artifacts", () => {
   assert.equal(validateArtifact(runArtifact).ok, true);
   assert.equal(validateArtifact(externalArtifact).ok, true);
-  assert.equal(validateArtifact({ ...externalArtifact, kind: "preview-bundle" }).ok, false);
+  assert.equal(validateArtifact({
+    ...externalArtifact,
+    kind: "preview-bundle",
+    mediaType: "application/vnd.coffee-shop.preview-bundle+tar+gzip"
+  }).ok, true);
   assert.equal(validateArtifact({ ...externalArtifact, extra: true }).ok, false);
   assert.equal(validateArtifact({ ...externalArtifact, size: artifactMaximumBytes + 1 }).ok, false);
   assert.equal(validateArtifact({ ...externalArtifact, sha256: "A".repeat(64) }).ok, false);

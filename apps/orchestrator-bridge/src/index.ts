@@ -52,7 +52,7 @@ async function main(): Promise<void> {
     onReattachFailed: (threadId, error) => logError(`could not re-attach thread ${threadId} after reconnecting: ${error.code} ${error.message}`)
   });
 
-  bridge = new BridgeServer({ hub, serverVersion: version, logError, localArtifacts });
+  bridge = new BridgeServer({ hub, orchestratorClientId: clientId, serverVersion: version, logError, localArtifacts });
   const server = bridge.server;
 
   const shutdown = () => {
