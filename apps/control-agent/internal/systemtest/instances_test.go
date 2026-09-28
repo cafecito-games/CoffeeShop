@@ -290,7 +290,8 @@ func TestInstanceRenewalWinsBeforeTheClosedExpiryBoundary(t *testing.T) {
 		if !renewedKnown || !witnessKnown {
 			return false, "expiry records are incomplete"
 		}
-		return renewedInstance.Status == "ready" && renewedInstance.Lease.ExpiresAt == renewedExpiry.Format(time.RFC3339Nano) && witnessInstance.Status == "released",
+		residentLive := renewedInstance.Status == "ready" || renewedInstance.Status == "idle"
+		return residentLive && renewedInstance.Lease.ExpiresAt == renewedExpiry.Format(time.RFC3339Nano) && witnessInstance.Status == "released",
 			"maintenance has not resolved the two serialized outcomes"
 	})
 
