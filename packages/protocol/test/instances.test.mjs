@@ -61,8 +61,8 @@ test("skill-bound instance messages require a covering normalized allocation pac
   assert.equal(protocol.validateInstanceHubMessage({ ...provision, allocation: { ...allocation, expectedCapabilityPack: {
     ...expectedCapabilityPack, requiredSkills: ["coffeeshop-preview"]
   } } }, "5").ok, false);
-  assert.equal(protocol.validateInstanceHubMessage({ type: "instance.provision", instance, allocation: { ...allocation, expectedCapabilityPack } }, "5").ok, true,
-    "wire validation permits template-derived effective requirements that are not repeated in the raw instance request");
+  assert.equal(protocol.validateInstanceHubMessage({ type: "instance.provision", instance, allocation: { ...allocation, expectedCapabilityPack } }, "5").ok, false,
+    "a truly no-skill allocation cannot carry an expectation");
 });
 
 test("resident evidence distinguishes absent, empty, duplicate, and malformed data", () => {

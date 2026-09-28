@@ -167,7 +167,7 @@ func TestSkillBoundInstanceMessagesRequireCoveringPackExpectation(t *testing.T) 
 	encoded, err = json.Marshal(message)
 	require.NoError(t, err)
 	_, err = DecodeInstanceHubMessage(encoded, "5")
-	require.NoError(t, err, "a template-derived effective requirement need not be duplicated in the raw request")
+	require.Error(t, err, "a truly no-skill allocation cannot carry an expectation")
 }
 
 func TestInstanceVocabularyAndTransitionsMatchTypeScript(t *testing.T) {

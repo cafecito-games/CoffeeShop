@@ -3348,7 +3348,7 @@ export function validateInstanceHubMessage(value: unknown, version: ControlProto
     || instance.value.lease.expiresAt !== allocation.value.lease.expiresAt) return reject("instance and allocation identity or lease mismatch");
   const requiredSkills = [...new Set(instance.value.requirements.skills ?? [])].sort();
   const expectedSkills = allocation.value.expectedCapabilityPack?.requiredSkills;
-  if ((requiredSkills.length > 0 && expectedSkills === undefined)
+  if ((requiredSkills.length === 0) !== (expectedSkills === undefined)
     || (expectedSkills !== undefined && requiredSkills.some((skill) => !expectedSkills.includes(skill)))) {
     return reject("instance skill requirements and allocation capability pack expectation mismatch");
   }

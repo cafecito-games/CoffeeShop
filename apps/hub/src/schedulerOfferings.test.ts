@@ -455,6 +455,12 @@ test("a standalone requested instance persists an actionable placement refusal",
   const refusal = current.state.events.find((event) => event.instanceId === requested.id && event.title === "Instance placement waiting");
   assert.match(refusal?.detail ?? "", /not-offered|different model/);
   assert.equal(runSchedulingPass(current.state, context(current), later(1)).changed, false, "the same refusal is persisted once, not appended every pass");
+  current.connections.delete("node-alpha");
+  assert.equal(runSchedulingPass(current.state, context(current), later(2)).changed, true);
+  current.connections.set("node-alpha", { protocolVersion: "5", synced: true });
+  assert.equal(runSchedulingPass(current.state, context(current), later(3)).changed, true);
+  assert.equal(current.state.events.filter((event) => event.instanceId === requested.id && event.title === "Instance placement waiting").length, 1,
+    "alternating refusal details update one bounded projected diagnostic");
 });
 
 test("a requested template instance reserves from effective hard skills and carries their expectation", () => {
@@ -463,7 +469,7 @@ test("a requested template instance reserves from effective hard skills and carr
   };
   const requested: AgentInstance = {
     id: "instance-requested", threadId: "thread-one", creator: { kind: "operator", operatorId: "operator" },
-    delegation: { canDelegate: false }, requirements: { templateId: template.id },
+    delegation: { canDelegate: false }, requirements: { templateId: template.id, skills: ["review"] },
     lease: { idleTimeoutSeconds: 1800, expiresAt: later(1800) }, status: "requested", createdAt: at, updatedAt: at
   };
   const current = fixture([node("node-alpha")], [], { instances: [requested], templates: [template] });
@@ -480,6 +486,45 @@ test("a requested template instance reserves from effective hard skills and carr
   assert.equal(allocations(current).length, 2, "the lost generation is retained beside its replacement");
   assert.deepEqual(allocations(current).find((item) => item.status === "reserved")?.expectedCapabilityPack,
     { id: "coffee-shop-core", version: "1.0.0", requiredSkills: ["review"] });
+});
+
+test("lost-allocation re-reservation unions the task and instance hard skills", () => {
+  const requested: AgentInstance = {
+    id: "instance-requested", threadId: "thread-one", creator: { kind: "operator", operatorId: "operator" },
+    delegation: { canDelegate: false }, requirements: { skills: ["review"] },
+    lease: { idleTimeoutSeconds: 1800, expiresAt: later(1800) }, status: "requested", createdAt: at, updatedAt: at
+  };
+  const pinned = task("one", { skills: ["PREVIEW"] }, {
+    placementInstanceId: requested.id,
+    placementOverride: { instanceId: requested.id, authorizedBy: "policy" }
+  });
+  const current = fixture([node("node-alpha")], [pinned], {
+    instances: [requested], allocations: [{
+      id: "allocation-lost", instanceId: requested.id, nodeId: "node-alpha", harnessId: "claude-cli", model: "fable",
+      transport: "native-cli", workspace: "/workspace", lease: { ...requested.lease }, status: "lost", createdAt: at, updatedAt: at
+    }]
+  });
+  current.packReadiness.set("node-alpha", {
+    nodeId: "node-alpha", observedAt: at, status: "available", pack: { id: "coffee-shop-core", version: "1.0.0", skills: ["preview", "review"] },
+    surfaces: [{ harnessId: "claude-cli", transport: "native-cli" }]
+  });
+  runSchedulingPass(current.state, context(current), at);
+  assert.deepEqual(allocations(current).find((item) => item.status === "reserved")?.expectedCapabilityPack,
+    { id: "coffee-shop-core", version: "1.0.0", requiredSkills: ["preview", "review"] });
+
+  const missing = fixture([node("node-alpha")], [structuredClone(pinned)], {
+    instances: [{ ...structuredClone(requested), status: "requested" }],
+    allocations: current.state.allocations!.filter((item) => item.status === "lost").map((item) => structuredClone(item))
+  });
+  missing.packReadiness.set("node-alpha", {
+    nodeId: "node-alpha", observedAt: at, status: "available", pack: { id: "coffee-shop-core", version: "1.0.0", skills: ["preview"] },
+    surfaces: [{ harnessId: "claude-cli", transport: "native-cli" }]
+  });
+  runSchedulingPass(missing.state, context(missing), at);
+  assert.equal(allocations(missing).some((item) => item.status === "reserved"), false);
+  assert.equal(taskById(missing, "one").placement?.unsatisfied.some((entry) => entry.kind === "skill" && entry.requirement.includes("review")), true);
+  assert.equal(missing.state.events.filter((event) => event.instanceId === requested.id && event.title === "Instance placement waiting").length, 1);
+  assert.equal(runSchedulingPass(missing.state, context(missing), later(1)).changed, false);
 });
 
 test("a failed or draining allocation releases the placement and the retry gets fresh identities", () => {

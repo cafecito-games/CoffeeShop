@@ -995,7 +995,7 @@ func DecodeInstanceHubMessage(data []byte, version string) (InstanceHubMessage, 
 			}
 		}
 	}
-	if (len(requiredSkills) > 0 && allocation.ExpectedCapabilityPack == nil) ||
+	if (len(requiredSkills) == 0) != (allocation.ExpectedCapabilityPack == nil) ||
 		(allocation.ExpectedCapabilityPack != nil && !covered) {
 		return message, fmt.Errorf("instance skill requirements and allocation capability pack expectation mismatch")
 	}

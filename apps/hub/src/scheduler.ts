@@ -35,6 +35,7 @@ import {
   type WorkspaceLease
 } from "@coffee-shop/protocol";
 import { isWorkspaceWithinRoot } from "./agentConfiguration.js";
+import { normalizeSkillIdentifiers, requirementsThroughTemplate } from "./instanceRequirements.js";
 import {
   acceptInstanceWorkInState,
   appendInstanceDispatchInState,
@@ -672,9 +673,6 @@ export type TemplateResolution =
   | { kind: "template"; template: AgentTemplate }
   | { kind: "unsatisfied"; unsatisfied: UnsatisfiedRequirement };
 
-const normalizeSkillIdentifiers = (skills: readonly string[] | undefined): string[] =>
-  [...new Set((skills ?? []).map((skill) => skill.trim().toLowerCase()).filter(Boolean))].sort(compareText);
-
 const templateSkills = (template: AgentTemplate) => new Set(normalizeSkillIdentifiers(template.skills));
 
 /**
@@ -699,17 +697,6 @@ export function resolveTaskTemplate(task: Task, templates: readonly AgentTemplat
   return { kind: "none" };
 }
 
-const intersect = (left: readonly string[] | undefined, right: readonly string[] | undefined): string[] | undefined => {
-  if (left === undefined) return right === undefined ? undefined : [...right];
-  if (right === undefined) return [...left];
-  return left.filter((value) => right.includes(value));
-};
-
-const union = (left: readonly string[] | undefined, right: readonly string[] | undefined): string[] | undefined => {
-  if (left === undefined && right === undefined) return undefined;
-  return [...new Set([...(left ?? []), ...(right ?? [])])];
-};
-
 /**
  * The hard requirements a task placed through a template must satisfy: the task's own, tightened by
  * the template's. A template can only narrow — accepted sets intersect, required label sets unite,
@@ -717,41 +704,7 @@ const union = (left: readonly string[] | undefined, right: readonly string[] | u
  * Preferences merge field by field with the task's ranking winning, because a template's preference
  * is a default and the task's is a request.
  */
-export function requirementsThroughTemplate(requirements: ExecutionRequirements, template: AgentTemplate | undefined): ExecutionRequirements {
-  const normalizedRequirements: ExecutionRequirements = { ...requirements };
-  const ownSkills = normalizeSkillIdentifiers(requirements.skills);
-  if (ownSkills.length === 0) delete normalizedRequirements.skills;
-  else normalizedRequirements.skills = ownSkills;
-  if (!template) return normalizedRequirements;
-  const extra = template.requirements ?? {};
-  const merged: ExecutionRequirements = { ...normalizedRequirements };
-  const narrow = <K extends "harnessIds" | "models" | "transports" | "operatingSystems" | "architectures">(key: K) => {
-    const value = intersect(requirements[key], extra[key]);
-    if (value === undefined) delete merged[key];
-    else merged[key] = value as ExecutionRequirements[K];
-  };
-  narrow("harnessIds");
-  narrow("models");
-  narrow("transports");
-  narrow("operatingSystems");
-  narrow("architectures");
-  const labels = union(requirements.labels, extra.labels);
-  if (labels === undefined) delete merged.labels;
-  else merged.labels = labels;
-  const skills = normalizeSkillIdentifiers(union(normalizedRequirements.skills, extra.skills));
-  if (skills.length === 0) delete merged.skills;
-  else merged.skills = skills;
-  for (const key of ["minimumConcurrency", "minimumMemoryMegabytes"] as const) {
-    const values = [requirements[key], extra[key]].filter((value): value is number => value !== undefined);
-    if (values.length) merged[key] = Math.max(...values);
-  }
-  if (merged.projectProfileId === undefined && extra.projectProfileId !== undefined) merged.projectProfileId = extra.projectProfileId;
-  if (merged.workspace === undefined && extra.workspace !== undefined) merged.workspace = { ...extra.workspace };
-  const preferences = { ...(template.preferences ?? {}), ...(extra.preferences ?? {}), ...(requirements.preferences ?? {}) };
-  if (Object.keys(preferences).length) merged.preferences = preferences;
-  merged.templateId = template.id;
-  return merged;
-}
+export { requirementsThroughTemplate } from "./instanceRequirements.js";
 
 /* ---------------------------------------------------------------------------------------------
  * Instances: reuse and explicit pins.
@@ -1007,6 +960,16 @@ export function placeTask(task: Task, environment: PlacementEnvironment): Placem
     && !(environment.allocations ?? []).some((item) => item.instanceId === owned.id && occupyingAllocation(item.status))
     ? owned
     : undefined);
+  const offeringTask = replacing === undefined ? effective : (() => {
+    const combinedSkills = normalizeSkillIdentifiers([
+      ...(effective.requirements.skills ?? []),
+      ...(replacing.requirements.skills ?? [])
+    ]);
+    const combinedRequirements: ExecutionRequirements = { ...effective.requirements };
+    if (combinedSkills.length === 0) delete combinedRequirements.skills;
+    else combinedRequirements.skills = combinedSkills;
+    return { ...effective, requirements: combinedRequirements };
+  })();
   const reusable = replacing !== undefined || pinnedAgentId !== undefined
     ? []
     : reusableInstances(effective, environment, profile, requiredNodeId);
@@ -1060,7 +1023,7 @@ export function placeTask(task: Task, environment: PlacementEnvironment): Placem
         silentNodes.push({ kind: "offering", requirement: "available harness", nodeId: node.id, detail: "the compute node publishes no available harness offering" });
       }
     }
-    return published.map((offering) => evaluateOffering(effective, offering, node, profile, environment));
+    return published.map((offering) => evaluateOffering(offeringTask, offering, node, profile, environment));
   });
   const eligibleOfferings = offeringEvaluations.filter((evaluation) => evaluation.offering !== undefined).sort(compareOfferings);
   if (eligibleOfferings.length) {
@@ -1249,8 +1212,12 @@ function recordPlacement(task: Task, diagnostic: PlacementDiagnostic) {
 /** Persists the current refusal for a lifecycle-requested instance that has no task record of its own. */
 function recordInstancePlacementRefusal(state: State, instance: AgentInstance, detail: string) {
   const bounded = detail.slice(0, 512);
-  const current = state.events.find((event) => event.instanceId === instance.id && event.title === "Instance placement waiting");
-  if (current?.detail === bounded) return false;
+  const isCurrentDiagnostic = (event: State["events"][number]) =>
+    event.instanceId === instance.id && event.title === "Instance placement waiting";
+  const current = state.events.find(isCurrentDiagnostic);
+  const count = state.events.filter(isCurrentDiagnostic).length;
+  if (current?.detail === bounded && count === 1) return false;
+  state.events = state.events.filter((event) => !isCurrentDiagnostic(event));
   state.events.unshift(newEvent({
     type: "status",
     title: "Instance placement waiting",
@@ -1374,13 +1341,20 @@ export function runSchedulingPass(state: State, context: SchedulingContext, at: 
       || (state.allocations ?? []).some((item) => item.instanceId === instance.id && occupyingAllocation(item.status))) continue;
     const thread = state.threads?.find((item) => item.id === instance.threadId);
     if (thread?.status !== "active") continue;
-    const intent: Task = {
+    const owningTask = [...readyTasks(state)].find((task) =>
+      task.placementInstanceId === instance.id || task.placementOverride?.instanceId === instance.id);
+    const syntheticRequirements = structuredClone(instance.requirements);
+    if (syntheticRequirements.templateId !== undefined
+      && (state.templates ?? []).some((template) => template.id === syntheticRequirements.templateId)) {
+      delete syntheticRequirements.templateId;
+    }
+    const intent: Task = owningTask ?? {
       id: `instance-placement:${instance.id}`,
       threadId: instance.threadId,
       title: instance.purpose?.name ?? instance.id,
       instructions: "",
       status: "ready",
-      requirements: structuredClone(instance.requirements),
+      requirements: syntheticRequirements,
       dependencies: [],
       idempotencyKey: `instance-placement:${instance.id}`,
       attemptRunIds: [],
@@ -1390,10 +1364,11 @@ export function runSchedulingPass(state: State, context: SchedulingContext, at: 
     };
     const decision = placeTask(intent, environmentFor());
     if (decision.kind !== "offering") {
-      const refusal = decision.diagnostic.unsatisfied[0];
-      const detail = refusal === undefined
+      const detail = decision.diagnostic.unsatisfied.length === 0
         ? "no live offering currently satisfies this instance request"
-        : `${refusal.kind} ${refusal.requirement}: ${refusal.detail}`;
+        : decision.diagnostic.unsatisfied
+          .map((refusal) => `${refusal.kind} ${refusal.requirement}: ${refusal.detail}`)
+          .join("; ");
       changed = recordInstancePlacementRefusal(state, instance, detail) || changed;
       continue;
     }

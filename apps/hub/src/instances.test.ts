@@ -208,6 +208,35 @@ test("an exact create replay returns the original instance without new writes", 
   });
 });
 
+test("create normalizes skill identity before storage and idempotency comparison", async () => {
+  const store = await hubStore((state) => { seedThread(state); });
+  const first = await applyInstanceLifecycle(store, operatorCaller, createRequest("thread-one", {
+    requirements: { skills: [" Review ", "preview", "REVIEW"] }
+  }), at(1));
+  assert.deepEqual(first.instance.requirements.skills, ["preview", "review"]);
+  const replay = await applyInstanceLifecycle(store, operatorCaller, createRequest("thread-one", {
+    requirements: { skills: ["review", "PREVIEW"] }
+  }), at(2));
+  assert.equal(replay.replayed, true);
+  await assert.rejects(applyInstanceLifecycle(store, operatorCaller, createRequest("thread-one", {
+    requirements: { skills: ["review", "build"] }
+  }), at(3)), /idempotency key was already used/);
+});
+
+test("create stores template-effective hard skills while descriptive skills remain metadata", async () => {
+  const store = await hubStore((state) => {
+    seedThread(state);
+    state.templates = [{
+      id: "template-review", name: "Review", skills: ["descriptive-only"], requirements: { skills: ["Review", "preview"] }
+    }];
+  });
+  const created = await applyInstanceLifecycle(store, operatorCaller, createRequest("thread-one", {
+    requirements: { templateId: "template-review", skills: ["PREVIEW"] }
+  }), at(1));
+  assert.deepEqual(created.instance.requirements.skills, ["preview", "review"]);
+  assert.equal(created.instance.requirements.skills?.includes("descriptive-only"), false);
+});
+
 test("a different digest under the same caller and key conflicts and preserves the original", async () => {
   const store = await hubStore((state) => { seedThread(state); });
   const first = await applyInstanceLifecycle(store, operatorCaller, createRequest(), at(1));
@@ -1213,14 +1242,13 @@ test("store load rejects malformed or duplicated instance state", async () => {
     (state.instances as AgentInstance[])[0].requirements.skills = ["coffeeshop-preview"];
     state.allocations = [allocationFor(baseInstance, "allocation-one")];
   }, /Skill requirements require an admitted capability pack expectation/);
-  const templateDerived = structuredClone(goodState) as Record<string, unknown>;
-  (templateDerived.instances as AgentInstance[])[0].status = "provisioning";
-  templateDerived.allocations = [{
-    ...allocationFor(baseInstance, "allocation-one"),
-    expectedCapabilityPack: { id: "coffeeshop-capability-pack", version: "1.1.0", requiredSkills: ["coffeeshop-preview"] }
-  }];
-  await writeFile(path, JSON.stringify(templateDerived));
-  await new Store(path).load();
+  await rejects((state) => {
+    (state.instances as AgentInstance[])[0].status = "provisioning";
+    state.allocations = [{
+      ...allocationFor(baseInstance, "allocation-one"),
+      expectedCapabilityPack: { id: "coffeeshop-capability-pack", version: "1.1.0", requiredSkills: ["coffeeshop-preview"] }
+    }];
+  }, /without skill requirements cannot carry a capability pack expectation/);
   // An explicit null is malformed persisted state, not an absent legacy collection.
   await rejects((state) => { state.instances = null; }, /Persisted instances collection is not an array/);
   await rejects((state) => { state.remoteReleaseRequests = null; }, /Persisted remoteReleaseRequests collection is not an array/);

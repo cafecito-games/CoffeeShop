@@ -41,6 +41,7 @@ import {
   type Run
 } from "@coffee-shop/protocol";
 import { CoordinationError } from "./coordinationError.js";
+import { effectiveInstanceRequirements, normalizeInstanceRequirements } from "./instanceRequirements.js";
 import { cancelRunInState } from "./lifecycle.js";
 import { newEvent, newId, type State, type Store } from "./store.js";
 import { appendInitialTaskInState, applyAttemptOutcome, attemptIsRetryable, initialTaskOrigin } from "./tasks.js";
@@ -498,16 +499,19 @@ export async function applyInstanceLifecycle(
 ): Promise<InstanceLifecycleResult> {
   const validated = validateInstanceLifecycleRequest(request);
   if (!validated.ok) throw new CoordinationError("invalid_arguments", validated.reason);
-  const digest = instanceRequestDigest(validated.value);
+  const normalizedRequest: InstanceLifecycleRequest = validated.value.operation === "create"
+    ? { ...validated.value, requirements: normalizeInstanceRequirements(validated.value.requirements) }
+    : validated.value;
+  const digest = instanceRequestDigest(normalizedRequest);
   const sourceKey = instanceCreatorSourceKey(caller);
-  if (JSON.stringify(request.idempotency.caller) !== JSON.stringify(caller)) {
+  if (JSON.stringify(normalizedRequest.idempotency.caller) !== JSON.stringify(caller)) {
     throw new CoordinationError("forbidden", "The idempotency caller does not match the authenticated principal");
   }
   let result: InstanceLifecycleResult | undefined;
   await store.transact((state) => {
     options.assertAuthorized?.(state);
-    const thread = authorizeInstanceThread(state, caller, request.threadId);
-    const prior = (state.instanceLifecycleReceipts ?? []).find((receipt) => receiptKeyMatches(receipt, request.threadId, sourceKey, request.idempotency.key));
+    const thread = authorizeInstanceThread(state, caller, normalizedRequest.threadId);
+    const prior = (state.instanceLifecycleReceipts ?? []).find((receipt) => receiptKeyMatches(receipt, normalizedRequest.threadId, sourceKey, normalizedRequest.idempotency.key));
     if (prior) {
       if (prior.digest !== digest) {
         throw new CoordinationError("idempotency_conflict", "The idempotency key was already used with a different instance request");
@@ -515,30 +519,31 @@ export async function applyInstanceLifecycle(
       result = replayResult(state, prior);
       return false;
     }
-    if (request.operation === "create") {
+    if (normalizedRequest.operation === "create") {
       if (thread.status !== "active") throw new CoordinationError("thread_inactive", "Instance creation requires an active thread");
+      const requirements = effectiveInstanceRequirements(normalizedRequest.requirements, state.templates ?? []);
       const instance: AgentInstance = {
         id: newId("instance"),
         threadId: thread.id,
         creator: { ...caller },
-        ...(request.purpose ? { purpose: structuredClone(request.purpose) } : {}),
+        ...(normalizedRequest.purpose ? { purpose: structuredClone(normalizedRequest.purpose) } : {}),
         delegation: { canDelegate: false },
-        requirements: structuredClone(request.requirements),
+        requirements: structuredClone(requirements),
         lease: {
-          idleTimeoutSeconds: request.idleTimeoutSeconds ?? defaultInstanceIdleTimeoutSeconds,
-          expiresAt: leaseExpiry(at, request.idleTimeoutSeconds ?? defaultInstanceIdleTimeoutSeconds)
+          idleTimeoutSeconds: normalizedRequest.idleTimeoutSeconds ?? defaultInstanceIdleTimeoutSeconds,
+          expiresAt: leaseExpiry(at, normalizedRequest.idleTimeoutSeconds ?? defaultInstanceIdleTimeoutSeconds)
         },
         status: "requested",
         createdAt: at,
         updatedAt: at
       };
       let initialTaskId: string | undefined;
-      if (request.initialTask) {
+      if (normalizedRequest.initialTask) {
         initialTaskId = appendInitialTaskInState(state, thread.id, {
-          title: request.initialTask.title,
-          instructions: request.initialTask.instructions,
-          requirements: structuredClone(request.requirements),
-          idempotencyKey: initialTaskIdempotencyKey(sourceKey, thread.id, request.idempotency.key),
+          title: normalizedRequest.initialTask.title,
+          instructions: normalizedRequest.initialTask.instructions,
+          requirements: structuredClone(requirements),
+          idempotencyKey: initialTaskIdempotencyKey(sourceKey, thread.id, normalizedRequest.idempotency.key),
           sourceKey,
           instanceId: instance.id
         }, at).id;
@@ -550,7 +555,7 @@ export async function applyInstanceLifecycle(
         id: newId("instreceipt"),
         threadId: thread.id,
         sourceKey,
-        idempotencyKey: request.idempotency.key,
+        idempotencyKey: normalizedRequest.idempotency.key,
         operation: "create",
         digest,
         instanceId: instance.id,
@@ -569,7 +574,7 @@ export async function applyInstanceLifecycle(
         replayed: false
       };
     } else {
-      const instance = (state.instances ?? []).find((item) => item.id === request.instanceId && item.threadId === request.threadId);
+      const instance = (state.instances ?? []).find((item) => item.id === normalizedRequest.instanceId && item.threadId === normalizedRequest.threadId);
       if (!instance) throw new CoordinationError("not_found", "Instance not found");
       /*
        * Scope before anything observable. The receipt budget is a property of the named instance, so
@@ -577,20 +582,20 @@ export async function applyInstanceLifecycle(
        * foreign instance: one at its budget would conflict while one below it stayed hidden behind the
        * not-found answer, which is how a caller could probe another thread's instances.
        */
-      assertReceiptBudget(state, instance.id, request.operation);
-      if (request.operation === "renew") {
+      assertReceiptBudget(state, instance.id, normalizedRequest.operation);
+      if (normalizedRequest.operation === "renew") {
         if (instance.status === "released" || instance.status === "failed") {
           throw new CoordinationError("conflict", `A ${instance.status} instance cannot be renewed`);
         }
         if (instance.status === "draining") throw new CoordinationError("conflict", "A draining instance cannot be renewed");
-        const idleTimeoutSeconds = request.idleTimeoutSeconds ?? instance.lease.idleTimeoutSeconds;
+        const idleTimeoutSeconds = normalizedRequest.idleTimeoutSeconds ?? instance.lease.idleTimeoutSeconds;
         instance.lease = { idleTimeoutSeconds, expiresAt: leaseExpiry(at, idleTimeoutSeconds) };
         instance.updatedAt = at;
         const allocation = currentAllocationInState(state, instance.id);
         if (allocation) allocation.lease = { ...instance.lease };
         state.instanceLifecycleReceipts ??= [];
         state.instanceLifecycleReceipts.push({
-          id: newId("instreceipt"), threadId: thread.id, sourceKey, idempotencyKey: request.idempotency.key,
+          id: newId("instreceipt"), threadId: thread.id, sourceKey, idempotencyKey: normalizedRequest.idempotency.key,
           operation: "renew", digest, instanceId: instance.id, createdAt: at
         });
         result = { instance: structuredClone(instance), replayed: false };
@@ -598,14 +603,14 @@ export async function applyInstanceLifecycle(
         if (terminalInstanceStatuses.includes(instance.status)) {
           throw new CoordinationError("conflict", `The instance is already ${instance.status}`);
         }
-        const intent = recordReleaseIntent(state, instance, request.mode, at);
+        const intent = recordReleaseIntent(state, instance, normalizedRequest.mode, at);
         if (canTransitionInstance(instance.status, "draining")) {
           instance.status = "draining";
           instance.updatedAt = at;
         }
         state.instanceLifecycleReceipts ??= [];
         state.instanceLifecycleReceipts.push({
-          id: newId("instreceipt"), threadId: thread.id, sourceKey, idempotencyKey: request.idempotency.key,
+          id: newId("instreceipt"), threadId: thread.id, sourceKey, idempotencyKey: normalizedRequest.idempotency.key,
           operation: "release", digest, instanceId: instance.id, createdAt: at
         });
         state.events.unshift(newEvent({
@@ -773,6 +778,9 @@ function capabilityPackExpectationRefusal(
   expected: ExpectedCapabilityPack | undefined
 ): string | undefined {
   const requiredSkills = [...new Set(instance.requirements.skills ?? [])].sort();
+  if (requiredSkills.length === 0 && expected !== undefined) {
+    return "An allocation without skill requirements cannot carry a capability pack expectation";
+  }
   if (requiredSkills.length > 0) {
     if (expected === undefined) return "Skill requirements require an admitted capability pack expectation";
     if (requiredSkills.some((skill) => !expected.requiredSkills.includes(skill))) {
@@ -920,7 +928,7 @@ export interface InstanceRequestSeed {
 }
 
 /** Builds and wire-validates a `requested` instance record without writing it. */
-function buildRequestedInstance(threadId: string, seed: InstanceRequestSeed, at: string): { ok: true; instance: AgentInstance } | { ok: false; reason: string } {
+function buildRequestedInstance(state: Readonly<State>, threadId: string, seed: InstanceRequestSeed, at: string): { ok: true; instance: AgentInstance } | { ok: false; reason: string } {
   const idleTimeoutSeconds = seed.idleTimeoutSeconds ?? defaultInstanceIdleTimeoutSeconds;
   const instance: AgentInstance = {
     id: newId("instance"),
@@ -928,7 +936,7 @@ function buildRequestedInstance(threadId: string, seed: InstanceRequestSeed, at:
     creator: seed.creator ? { ...seed.creator } : { ...operatorInstanceCreator },
     ...(seed.purpose ? { purpose: structuredClone(seed.purpose) } : {}),
     delegation: { canDelegate: seed.delegation?.canDelegate === true },
-    requirements: structuredClone(seed.requirements),
+    requirements: effectiveInstanceRequirements(seed.requirements, state.templates ?? []),
     lease: { idleTimeoutSeconds, expiresAt: leaseExpiry(at, idleTimeoutSeconds) },
     status: "requested",
     createdAt: at,
@@ -949,7 +957,7 @@ export function requestInstanceInState(state: State, seed: InstanceRequestSeed, 
   const thread = (state.threads ?? []).find((item) => item.id === seed.threadId);
   if (!thread) throw new CoordinationError("not_found", "Thread not found");
   if (thread.status !== "active") throw new CoordinationError("thread_inactive", "Instance creation requires an active thread");
-  const built = buildRequestedInstance(thread.id, seed, at);
+  const built = buildRequestedInstance(state, thread.id, seed, at);
   if (!built.ok) throw new CoordinationError("invalid_arguments", `The instance request is not valid: ${built.reason}`);
   const instance = built.instance;
   state.instances ??= [];
@@ -980,7 +988,7 @@ export function placeInstanceInState(state: State, seed: InstanceRequestSeed, ca
   const thread = (state.threads ?? []).find((item) => item.id === seed.threadId);
   if (!thread) throw new CoordinationError("not_found", "Thread not found");
   if (thread.status !== "active") throw new CoordinationError("thread_inactive", "Instance creation requires an active thread");
-  const built = buildRequestedInstance(thread.id, seed, at);
+  const built = buildRequestedInstance(state, thread.id, seed, at);
   if (!built.ok) return { kind: "invalid", reason: built.reason };
   const instance = built.instance;
   const refusal = allocationRefusal(state, instance, candidate);
