@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
@@ -56,6 +55,8 @@ import { createOrchestratorClientRevocations, operatorCredentialGuard, registerO
 import { createOrchestratorClientGateway, orchestratorClientCloseCode } from "./orchestratorClientGateway.js";
 import { loadProjectProfilesFromFile } from "./projectProfiles.js";
 import { computeNodeProjectReadiness } from "./projectReadiness.js";
+import { ArtifactIngestionError, ingestArtifactContent, recoverPreviewPreparation } from "./previewPreparation.js";
+import { PreviewStorage } from "./previewStorage.js";
 import { retainedHarnessEvents } from "./harnessEvents.js";
 import { expireDueApprovals, receiveApprovalUndeliverable, receiveHarnessEvent, reconcileApprovals, resolveApproval } from "./harnessGateway.js";
 import { createRedactor } from "./redaction.js";
@@ -73,6 +74,7 @@ const controlKeepaliveMilliseconds = 15_000;
 const liveControlAgents = { has: (nodeId: string) => controlAgents.has(nodeId) };
 const clients = new Set<WebSocket>();
 const store = new Store();
+const artifactStorage = new PreviewStorage(store.storageRootDirectory());
 const token = process.env.COFFEE_SHOP_TOKEN;
 const port = Number(process.env.PORT ?? 8787);
 const redactor = createRedactor([token]);
@@ -582,28 +584,43 @@ app.get("/api/runs/:id/events", (req, res) => {
   res.json({ events: events.map((record) => record.event), activity: store.snapshot().runActivity?.find((item) => item.runId === req.params.id) });
 });
 
-app.put("/api/artifacts/:id/content", express.raw({ type: "application/octet-stream", limit: "10mb" }), async (req, res) => {
-  const artifact = store.snapshot().artifacts?.find((item) => item.id === req.params.id);
-  if (!artifact) return res.status(404).json({ error: "Artifact not found" });
-  if (!Buffer.isBuffer(req.body)) return res.status(400).json({ error: "Artifact content must be application/octet-stream" });
-  if (req.body.length !== artifact.size || createHash("sha256").update(req.body).digest("hex") !== artifact.sha256) {
-    return res.status(422).json({ error: "Artifact content does not match its registered size and digest" });
+app.put("/api/artifacts/:id/content", async (req, res) => {
+  try {
+    await ingestArtifactContent(store, artifactStorage, {
+      artifactId: req.params.id,
+      contentType: req.headers["content-type"],
+      body: req,
+      complete: () => req.complete
+    });
+    broadcast();
+    res.status(204).end();
+  } catch (error) {
+    if (!(error instanceof ArtifactIngestionError)) {
+      console.error("artifact ingestion failed", { artifactId: req.params.id, code: "unexpected" });
+      return res.status(500).json({ error: "Artifact ingestion failed" });
+    }
+    if (error.httpStatus >= 500) {
+      console.error("artifact ingestion failed", { artifactId: req.params.id, code: error.code });
+    }
+    if (error.code !== "not-found") broadcast();
+    const message = error.code === "not-found"
+      ? "Artifact not found"
+      : error.code === "invalid-type"
+        ? "Artifact content must be application/octet-stream"
+        : error.code === "storage-conflict"
+          ? "Artifact content conflicts with immutable storage"
+          : error.code === "processing-failed"
+            ? "Artifact processing failed"
+            : "Artifact content or preview bundle was rejected";
+    res.status(error.httpStatus).json({ error: message });
   }
-  await store.writeArtifactContent(artifact.id, req.body);
-  await store.transact((state) => {
-    const current = state.artifacts?.find((item) => item.id === artifact.id);
-    if (!current || current.uploaded) return false;
-    current.uploaded = true;
-  });
-  broadcast();
-  res.status(204).end();
 });
 
 app.get("/api/artifacts/:id/content", async (req, res) => {
   const artifact = store.snapshot().artifacts?.find((item) => item.id === req.params.id && item.uploaded);
   if (!artifact) return res.status(404).json({ error: "Artifact not found" });
   try {
-    res.type(artifact.mediaType).send(await store.readArtifactContent(artifact.id));
+    res.type(artifact.mediaType).send(await artifactStorage.readArtifact(artifact.id));
   } catch {
     res.status(404).json({ error: "Artifact content not found" });
   }
@@ -1026,6 +1043,7 @@ wss.on("connection", (socket, request) => {
 });
 
 await store.load();
+await recoverPreviewPreparation(store, artifactStorage);
 // Compatibility bridge: import the old file exactly once, then manage profiles in SQLite/UI.
 if (store.read((state) => !state.projectProfilesImported && (state.projectProfiles ?? []).length === 0)) {
   const defaultProjectProfilesPath = fileURLToPath(new URL("../../../config/project-profiles.json", import.meta.url));
