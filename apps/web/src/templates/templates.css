@@ -1,0 +1,81 @@
+.template-list { margin-top: 5px; min-height: 0; overflow-y: auto; }
+.template-list > button { width: 100%; min-height: 56px; padding: 8px; border: 0; border-radius: 8px; display: grid; grid-template-columns: auto minmax(0,1fr) auto; align-items: center; gap: 9px; color: var(--secondary); background: transparent; text-align: left; cursor: pointer; }
+.template-list > button:hover, .template-list > button.selected { color: var(--text); background: var(--surface-2); }
+.template-list > button.selected { box-shadow: inset 2px 0 var(--accent); }
+.template-list > button > span { min-width: 0; display: grid; gap: 3px; }
+.template-list strong, .template-list small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.template-list strong { font-size: var(--font-size-10); }
+.template-list small { color: var(--muted); font-size: var(--font-size-8); }
+.template-detail { height: 100%; padding: 0 30px 60px; overflow-y: auto; }
+.template-welcome { display: grid; place-items: center; }
+.template-welcome > div { max-width: 480px; padding: 40px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-2); }
+.template-welcome small, .template-detail-header small { color: var(--accent); font: var(--font-size-8) "DM Mono",monospace; letter-spacing: .08em; text-transform: uppercase; }
+.template-welcome h1 { margin: 9px 0; font-size: 28px; }
+.template-welcome p { margin: 0; color: var(--muted); line-height: 1.7; }
+.template-detail-header { min-height: 126px; padding: 30px 0 24px; border-bottom: 1px solid var(--line); display: flex; align-items: end; justify-content: space-between; gap: 20px; }
+.template-title { display: flex; align-items: center; gap: 14px; }
+.mobile-template-index { display: none; }
+.template-title h1 { margin: 4px 0; font-size: 28px; font-weight: 560; letter-spacing: -.035em; }
+.template-title code { color: var(--muted); font-size: var(--font-size-8); }
+.template-actions { display: flex; gap: 8px; }
+.template-actions button, .template-dialog footer button { min-height: 38px; padding: 0 13px; border: 1px solid var(--line); border-radius: 7px; color: var(--secondary); background: var(--surface-2); cursor: pointer; }
+.imported-banner { margin-top: 18px; padding: 12px 14px; border: 1px solid rgba(126,165,138,.24); border-radius: 8px; display: flex; align-items: center; gap: 10px; color: var(--success); background: rgba(126,165,138,.06); }
+.imported-banner span { display: grid; gap: 3px; color: var(--secondary); font-size: var(--font-size-8); }
+.imported-banner strong { color: var(--success); }
+.template-grid { padding-top: 18px; display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; }
+.template-grid section { min-width: 0; min-height: 190px; padding: 18px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-2); }
+.template-grid h2 { margin: 12px 0 6px; font-size: var(--font-size-14); }
+.template-grid p { margin: 0 0 14px; color: var(--muted); font-size: var(--font-size-9); line-height: 1.6; }
+.template-grid pre { max-height: 240px; margin: 10px 0 0; overflow: auto; color: var(--secondary); font-size: var(--font-size-8); line-height: 1.65; white-space: pre-wrap; }
+.template-grid dl { display: grid; gap: 10px; }
+.template-grid dl div { display: grid; grid-template-columns: 100px 1fr; gap: 8px; }
+.template-grid dt { color: var(--muted); font-size: var(--font-size-8); }
+.template-grid dd { margin: 0; color: var(--secondary); font-size: var(--font-size-9); }
+.template-dialog { width: min(720px,calc(100vw - 30px)); max-height: min(88dvh,820px); border: 1px solid var(--line-strong); border-radius: 12px; overflow: hidden; background: var(--surface-2); box-shadow: 0 24px 80px rgba(0,0,0,.45); }
+.template-dialog form { max-height: inherit; display: grid; grid-template-rows: auto minmax(0,1fr) auto; }
+.template-dialog header { min-height: 66px; padding: 14px 18px; border-bottom: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; }
+.template-dialog header small { color: var(--accent); font: var(--font-size-7) "DM Mono",monospace; text-transform: uppercase; }
+.template-dialog h2 { margin: 3px 0 0; font-size: var(--font-size-17); }
+.template-form-scroll { padding: 18px; overflow-y: auto; overscroll-behavior: contain; }
+.template-dialog fieldset { margin: 0 0 20px; padding: 0; border: 0; }
+.template-dialog legend { margin-bottom: 9px; color: var(--muted); font: var(--font-size-8) "DM Mono",monospace; text-transform: uppercase; }
+.template-form-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 9px; }
+.template-field { margin-bottom: 9px; display: grid; gap: 5px; color: var(--muted); font-size: var(--font-size-8); }
+.template-field input, .template-field textarea { min-height: 42px; padding: 9px 10px; border: 1px solid var(--line); border-radius: 7px; outline: none; color: var(--text); background: var(--surface); resize: vertical; }
+.template-field input:focus, .template-field textarea:focus { border-color: rgba(223,163,76,.55); }
+.avatar-choice { padding: 12px; border: 1px solid var(--line); border-radius: 8px; display: grid; grid-template-columns: auto 1fr; gap: 10px 16px; background: var(--surface); }
+.avatar-choice > .coffee-avatar { grid-row: 1 / 3; align-self: center; }
+.avatar-choice > div { display: flex; flex-wrap: wrap; gap: 5px; }
+.avatar-choice > div > span { width: 46px; align-self: center; color: var(--muted); font-size: var(--font-size-8); }
+.avatar-choice button { min-height: 30px; padding: 0 7px; border: 1px solid var(--line); border-radius: 5px; color: var(--muted); background: transparent; font-size: var(--font-size-7); cursor: pointer; text-transform: capitalize; }
+.avatar-choice button.selected { border-color: rgba(223,163,76,.5); color: var(--accent); background: var(--accent-soft); }
+.template-check { min-height: 52px; padding: 10px; border: 1px solid var(--line); border-radius: 7px; display: flex; align-items: center; gap: 10px; background: var(--surface); }
+.template-check input { width: 18px; height: 18px; accent-color: var(--accent); }
+.template-check span { display: grid; gap: 3px; }
+.template-check strong { font-size: var(--font-size-9); }
+.template-check small { color: var(--muted); font-size: var(--font-size-8); }
+.template-dialog footer { padding: 12px 18px; border-top: 1px solid var(--line); display: flex; justify-content: flex-end; gap: 8px; }
+.template-dialog footer .primary-action { border-color: var(--accent); color: #171209; background: var(--accent); font-weight: 700; }
+.template-error { margin: 0 18px 14px; color: var(--danger); font-size: var(--font-size-9); }
+.delete-template-dialog { width: min(480px,calc(100vw - 30px)); }
+.delete-template-dialog form > p { margin: 18px; color: var(--secondary); font-size: var(--font-size-10); line-height: 1.6; }
+.delete-template-dialog form > .import-note { margin-top: -8px; color: var(--muted); font-size: var(--font-size-8); }
+
+@media (max-width:720px) {
+  .mobile-template-index + .template-welcome { display: none; }
+  .mobile-template-index { height: 100%; padding: env(safe-area-inset-top) 18px 82px; display: block; overflow-y: auto; }
+  .mobile-template-index > header { min-height: 104px; display: flex; align-items: center; justify-content: space-between; }
+  .mobile-template-index h1 { margin: 5px 0; font-size: 24px; }
+  .mobile-template-index header small { color: var(--accent); font: 11px "DM Mono",monospace; text-transform: uppercase; }
+  .mobile-template-index header button { width: 44px; height: 44px; border: 1px solid var(--line); border-radius: 8px; color: var(--accent); background: var(--surface-2); }
+  .mobile-template-index > div > button { width: 100%; min-height: 68px; padding: 12px 0; border: 0; border-bottom: 1px solid var(--line); display: grid; grid-template-columns: auto minmax(0,1fr) auto; align-items: center; gap: 12px; color: var(--secondary); background: transparent; text-align: left; }
+  .mobile-template-index > div > button > span { display: grid; gap: 4px; }
+  .mobile-template-index small { color: var(--muted); }
+  .template-detail { padding: env(safe-area-inset-top) 16px 82px; }
+  .template-detail-header { align-items: start; }
+  .template-title h1 { font-size: 23px; }
+  .template-actions { flex-direction: column; }
+  .template-actions button, .template-dialog button { min-height: 44px; }
+  .template-grid, .template-form-grid { grid-template-columns: 1fr; }
+  .template-dialog { width: 100%; max-height: 88dvh; }
+}

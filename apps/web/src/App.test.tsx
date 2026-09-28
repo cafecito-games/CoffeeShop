@@ -1,5 +1,5 @@
-import type { Agent, ComputeNode, Run, RunStatus, Snapshot, Thread } from "@coffee-shop/protocol";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import type { Agent, AgentInstance, AgentTemplate, ComputeNode, InstanceAllocation, Run, RunStatus, Snapshot, Thread } from "@coffee-shop/protocol";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConnectionStatus } from "./hubConnection.js";
@@ -101,7 +101,7 @@ const thread: Thread = {
 describe("durable threads", () => {
   beforeEach(() => prepareBrowser());
 
-  it("shows linked runs and artifacts and continues with the inherited thread id", async () => {
+  it("shows linked runs and artifacts while legacy continuation stays read-only", async () => {
     currentSnapshot.threads = [thread];
     currentSnapshot.runs = [{ ...testRun("completed"), threadId: thread.id, parentRunId: undefined }];
     currentSnapshot.artifacts = [{
@@ -115,7 +115,6 @@ describe("durable threads", () => {
       kind: "message", runId: "run-one", createdAt: "2026-01-01T00:02:00Z"
     }];
     const fetchMock = vi.mocked(fetch);
-    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ ...testRun("queued", "run-follow-up"), threadId: thread.id }), { status: 202, headers: { "content-type": "application/json" } }));
     const { default: App } = await import("./App.js");
     render(<App />);
     fireEvent.click(screen.getAllByRole("button", { name: "Threads" })[0]);
@@ -124,10 +123,9 @@ describe("durable threads", () => {
     fireEvent.click(screen.getByRole("button", { name: "Continue thread" }));
     expect(screen.getByLabelText("Send to")).toHaveValue(thread.id);
     expect(screen.getByText("Initial work complete")).toBeInTheDocument();
-    fireEvent.change(screen.getByPlaceholderText("Message Milo"), { target: { value: "Add consent text" } });
-    fireEvent.click(screen.getByRole("button", { name: "Send" }));
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
-    expect(JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body))).toEqual({ body: "Add consent text", threadId: thread.id });
+    expect(screen.getByPlaceholderText("Reconnect to message Milo")).toBeDisabled();
+    expect(screen.getByText("Read-only legacy agents")).toBeInTheDocument();
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("keeps the chat filter in step with the send target and drops a filter whose thread was archived", async () => {
@@ -171,7 +169,7 @@ describe("connection freshness UI", () => {
     const { default: App } = await import("./App.js");
     render(<App />);
 
-    expect(screen.getByRole("status")).toHaveTextContent("Disconnected");
+    expect(screen.getAllByRole("status")[0]).toHaveTextContent("Disconnected");
     fireEvent.click(screen.getByRole("button", { name: "Retry connection" }));
     expect(mocks.retry).toHaveBeenCalledOnce();
     expect(screen.getAllByRole("button", { name: "Create agent" })).toSatisfy((buttons: HTMLElement[]) => buttons.every((button) => button.hasAttribute("disabled")));
@@ -193,22 +191,12 @@ describe("connection freshness UI", () => {
     expect(document.querySelector(".ok-label")).toBeNull();
   });
 
-  it("disables an open creation dialog when the connection becomes stale", async () => {
+  it("keeps the fully absent v5 compatibility view explicitly read-only even while connected", async () => {
     mocks.status = "connected";
     const { default: App } = await import("./App.js");
-    const rendered = render(<App />);
-    fireEvent.click(screen.getAllByRole("button", { name: "Create agent" })[0]);
-    const dialog = screen.getByRole("dialog");
-    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Scout" } });
-    fireEvent.change(screen.getByLabelText("Title"), { target: { value: "Researcher" } });
-    fireEvent.change(screen.getByLabelText("System prompt"), { target: { value: "Research carefully." } });
-    expect(dialog.querySelector(".save-configuration")).toBeEnabled();
-
-    mocks.status = "reconnecting";
-    rendered.rerender(<App />);
-    expect(dialog.querySelector(".save-configuration")).toBeDisabled();
-    expect(screen.getByLabelText("Name")).toBeDisabled();
-    expect(dialog).toHaveTextContent("Reconnect before saving");
+    render(<App />);
+    expect(screen.getByText("Read-only legacy agents")).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "Create agent" })).toSatisfy((buttons: HTMLElement[]) => buttons.every((button) => button.hasAttribute("disabled")));
   });
 });
 
@@ -232,104 +220,129 @@ describe("install prompt integration", () => {
   });
 });
 
-describe("agent configuration experience", () => {
-  beforeEach(() => prepareBrowser());
+const v5Instance: AgentInstance = {
+  id: "instance-review", threadId: thread.id, creator: { kind: "operator", operatorId: "operator" },
+  purpose: { name: "Reviewer", title: "Quality review", summary: "Checks the release" }, delegation: { canDelegate: false },
+  requirements: { templateId: "template-review", skills: ["review"] }, lease: { idleTimeoutSeconds: 1800, expiresAt: "2026-01-01T01:00:00Z" },
+  status: "busy", createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:02:00Z"
+};
+const v5Allocation: InstanceAllocation = {
+  id: "allocation-review", instanceId: v5Instance.id, nodeId: node.id, harnessId: "codex-cli", model: "gpt-5", transport: "native-cli",
+  workspace: "/workspace/review", lease: v5Instance.lease, status: "active", createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:02:00Z"
+};
+const v5Template: AgentTemplate = {
+  id: "template-review", name: "Review", purpose: { title: "Quality reviewer", summary: "Finds release risks" },
+  avatarShape: "cup", avatarColor: "sage", skills: ["review"], requirements: { models: ["gpt-5"] }, delegation: { canDelegate: false }, legacyAgentId: agent.id
+};
 
-  it.each([
-    [1440, "close"],
-    [900, "escape"],
-    [390, "outside"]
-  ] as const)("opens and closes Context accessibly at %ipx", async (width, closeMethod) => {
-    Object.defineProperty(window, "innerWidth", { configurable: true, value: width });
+function prepareV5(status: ConnectionStatus = "connected") {
+  prepareBrowser(status);
+  currentSnapshot = {
+    ...currentSnapshot,
+    threads: [{ ...thread, status: "active", completedAt: undefined }],
+    instances: [v5Instance], allocations: [v5Allocation], templates: [v5Template],
+    nodes: [{ ...node, instanceCapacity: 2, activeInstances: 0 }],
+    runs: [{ ...testRun("running"), id: "run-instance", agentId: undefined, instanceId: v5Instance.id, allocationId: v5Allocation.id, threadId: thread.id, prompt: "Review the release" }]
+  };
+}
+
+describe("version-5 instance and template operator experience", () => {
+  beforeEach(() => prepareV5());
+
+  it("opens on instances, keeps desired constraints separate, and shows exact capacity/work", async () => {
     const { default: App } = await import("./App.js");
     render(<App />);
-    fireEvent.click(screen.getAllByRole("button", { name: /Milo/ })[0]);
-    const trigger = screen.getByRole("button", { name: "Context" });
-    trigger.focus();
-    fireEvent.click(trigger);
-    const dialog = screen.getByRole("dialog", { name: "Agent context" });
-    const close = screen.getByRole("button", { name: "Close agent context" });
-    const edit = screen.getByRole("button", { name: "Edit" });
-    expect(trigger).toHaveAttribute("aria-expanded", "true");
-    expect(close).toHaveFocus();
-    edit.focus();
-    await userEvent.tab({ shift: true });
-    expect(close).toHaveFocus();
-
-    if (closeMethod === "close") fireEvent.click(close);
-    if (closeMethod === "escape") fireEvent.keyDown(document, { key: "Escape" });
-    if (closeMethod === "outside") fireEvent.mouseDown(dialog);
-    expect(screen.queryByRole("dialog", { name: "Agent context" })).not.toBeInTheDocument();
-    expect(trigger).toHaveFocus();
+    expect(screen.queryByRole("button", { name: "Agents" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getAllByRole("button", { name: /Reviewer/ })[0]);
+    expect(screen.getByText("Desired requirements")).toBeInTheDocument();
+    expect(screen.getByText("Current placement")).toBeInTheDocument();
+    expect(screen.getByText("0")).toBeInTheDocument();
+    expect(screen.getByText("Review the release")).toBeInTheDocument();
+    fireEvent.click(screen.getAllByRole("button", { name: "Templates" })[0]);
+    fireEvent.click(screen.getAllByRole("button", { name: /Review/ })[0]);
+    expect(screen.getByText("Imported template")).toBeInTheDocument();
+    expect(screen.getByText("defaults only")).toBeInTheDocument();
   });
 
-  it("edits all configuration through PATCH, discards cancelled drafts, and accepts the confirmed glyph", async () => {
+  it("calls the shared renew and release routes without accepting creator authority", async () => {
     const fetchMock = vi.mocked(fetch);
-    const renamed = { ...agent, name: "Nova", title: "Operator", summary: "Coordinates", glyph: "N", systemPrompt: "Coordinate carefully.", updatedAt: "later" };
-    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify(renamed), { status: 200, headers: { "content-type": "application/json" } }));
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({ instance: v5Instance, allocation: v5Allocation, replayed: false }), { status: 200, headers: { "content-type": "application/json" } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ instance: { ...v5Instance, status: "draining" }, allocation: v5Allocation, replayed: false }), { status: 202, headers: { "content-type": "application/json" } }));
+    const { default: App } = await import("./App.js");
+    render(<App />);
+    fireEvent.click(screen.getAllByRole("button", { name: /Reviewer/ })[0]);
+    fireEvent.click(screen.getByRole("button", { name: "Renew lease" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("button", { name: "Release" }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm drain" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    expect(fetchMock.mock.calls.map((call) => call[0])).toEqual([
+      "/api/threads/thread-one/instances/instance-review/renew",
+      "/api/threads/thread-one/instances/instance-review/release"
+    ]);
+    for (const call of fetchMock.mock.calls) {
+      const body = JSON.parse(String((call[1] as RequestInit).body));
+      expect(body.idempotencyKey).toMatch(/^web-/);
+      expect(body.creator).toBeUndefined();
+    }
+  });
+
+  it("reuses the create idempotency key after an uncertain transport failure", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockRejectedValueOnce(new TypeError("network uncertain")).mockResolvedValueOnce(new Response(JSON.stringify({ instance: { ...v5Instance, id: "instance-new" }, replayed: true }), { status: 200, headers: { "content-type": "application/json" } }));
+    const { default: App } = await import("./App.js");
+    render(<App />);
+    fireEvent.click(screen.getAllByRole("button", { name: "Start instance" })[0]);
+    const dialog = screen.getByRole("dialog", { name: "Start an instance" });
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Fresh worker" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Start instance" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("network uncertain");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Start instance" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    const bodies = fetchMock.mock.calls.map((call) => JSON.parse(String((call[1] as RequestInit).body)));
+    expect(bodies[0].idempotencyKey).toBe(bodies[1].idempotencyKey);
+    expect(bodies[0].creator).toBeUndefined();
+  });
+
+  it("creates, updates, and reference-safely deletes templates through dedicated routes", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({ template: { ...v5Template, id: "template-new", name: "Builder" }, replayed: false }), { status: 201, headers: { "content-type": "application/json" } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ template: { ...v5Template, name: "Review revised" }, replayed: false }), { status: 200, headers: { "content-type": "application/json" } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ template: v5Template, replayed: false }), { status: 200, headers: { "content-type": "application/json" } }));
     const { default: App } = await import("./App.js");
     const rendered = render(<App />);
-    fireEvent.click(screen.getAllByRole("button", { name: /Milo/ })[0]);
-    fireEvent.click(screen.getByRole("button", { name: "Context" }));
-    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
-    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Discarded" } });
-    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-    expect(screen.getAllByRole("heading", { name: "Milo" }).length).toBeGreaterThan(0);
-
-    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
-    expect(screen.getByLabelText("Name")).toHaveValue("Milo");
-    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Nova" } });
-    fireEvent.change(screen.getByLabelText("Title"), { target: { value: "Operator" } });
-    fireEvent.change(screen.getByLabelText("Summary (optional)"), { target: { value: "Coordinates" } });
-    fireEvent.change(screen.getByLabelText("System prompt"), { target: { value: "Coordinate carefully." } });
-    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
-    const request = fetchMock.mock.calls[0];
-    expect(request[0]).toBe("/api/agents/agent-one");
-    expect(JSON.parse(String((request[1] as RequestInit).body))).toMatchObject({ name: "Nova", title: "Operator", harnessId: "codex-cli", model: "gpt-5" });
-
-    currentSnapshot = { ...currentSnapshot, agents: [renamed] };
+    fireEvent.click(screen.getAllByRole("button", { name: "Templates" })[0]);
+    fireEvent.click(screen.getAllByRole("button", { name: "Create template" })[0]);
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Builder" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save template" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    currentSnapshot = { ...currentSnapshot, templates: [v5Template] };
     rendered.rerender(<App />);
-    expect(screen.getAllByText("Nova").length).toBeGreaterThan(0);
-    expect(currentSnapshot.agents[0].glyph).toBe("N");
-  });
-
-  it("shows failed saves, restores confirmed state, and requests a latest-snapshot reconciliation", async () => {
-    vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify({ error: "Selected node is stale" }), { status: 400, headers: { "content-type": "application/json" } }));
-    const { default: App } = await import("./App.js");
-    render(<App />);
-    fireEvent.click(screen.getAllByRole("button", { name: /Milo/ })[0]);
-    fireEvent.click(screen.getByRole("button", { name: "Context" }));
+    fireEvent.click(screen.getAllByRole("button", { name: /Review/ })[0]);
     fireEvent.click(screen.getByRole("button", { name: "Edit" }));
-    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Optimistic name" } });
-    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("Selected node is stale");
-    expect(screen.getByLabelText("Name")).toHaveValue("Milo");
-    expect(mocks.retry).toHaveBeenCalledOnce();
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Review revised" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save template" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    fireEvent.click(screen.getByRole("button", { name: "Delete template" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+    expect(fetchMock.mock.calls.map((call) => [call[0], (call[1] as RequestInit).method])).toEqual([
+      ["/api/agent-templates", "POST"], ["/api/agent-templates/template-review", "PATCH"], ["/api/agent-templates/template-review", "DELETE"]
+    ]);
   });
 
-  it("creates with node-derived runtime fields and the complete required contract", async () => {
-    const created = { ...agent, id: "scout", name: "Scout", title: "Researcher", summary: "", glyph: "S", systemPrompt: "Research carefully." };
-    const fetchMock = vi.mocked(fetch);
-    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify(created), { status: 201, headers: { "content-type": "application/json" } }));
+  it("disables every v5 mutation while stale", async () => {
+    prepareV5("reconnecting");
     const { default: App } = await import("./App.js");
     render(<App />);
-    fireEvent.click(screen.getAllByRole("button", { name: "Create agent" })[0]);
-    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Scout" } });
-    fireEvent.change(screen.getByLabelText("Title"), { target: { value: "Researcher" } });
-    fireEvent.change(screen.getByLabelText("System prompt"), { target: { value: "Research carefully." } });
-    fireEvent.click(screen.getByRole("dialog").querySelector(".save-configuration")!);
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
-    expect(JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body))).toMatchObject({
-      name: "Scout",
-      title: "Researcher",
-      systemPrompt: "Research carefully.",
-      computeNodeId: "node-one",
-      harnessId: "codex-cli",
-      model: "gpt-5",
-      workspace: "/workspace"
-    });
-    await waitFor(() => expect(screen.queryByRole("heading", { name: "Create an agent" })).not.toBeInTheDocument());
+    expect(screen.getAllByRole("button", { name: "Start instance" })).toSatisfy((buttons: HTMLElement[]) => buttons.every((button) => button.hasAttribute("disabled")));
+    fireEvent.click(screen.getAllByRole("button", { name: /Reviewer/ })[0]);
+    expect(screen.getByRole("button", { name: "Renew lease" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Release" })).toBeDisabled();
+    fireEvent.click(screen.getAllByRole("button", { name: "Templates" })[0]);
+    expect(screen.getAllByRole("button", { name: "Create template" })).toSatisfy((buttons: HTMLElement[]) => buttons.every((button) => button.hasAttribute("disabled")));
   });
 });
 

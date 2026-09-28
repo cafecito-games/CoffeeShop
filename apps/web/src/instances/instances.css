@@ -1,0 +1,106 @@
+.instance-roster { gap: 8px; }
+.instance-filter { max-height: 94px; padding: 0 4px; display: flex; flex-wrap: wrap; gap: 5px; overflow-y: auto; }
+.instance-filter button, .history-toggle { min-height: 26px; padding: 0 8px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); background: transparent; font-size: var(--font-size-8); cursor: pointer; text-transform: capitalize; }
+.instance-filter button[aria-pressed="true"] { border-color: rgba(223,163,76,.45); color: var(--accent); background: var(--accent-soft); }
+.history-toggle { margin: 2px 4px 8px; border-radius: 6px; display: flex; align-items: center; gap: 6px; }
+.instance-list { min-height: 0; overflow-y: auto; }
+.instance-list section + section { margin-top: 12px; }
+.instance-row { width: 100%; min-height: 52px; padding: 8px; border: 0; border-radius: 7px; display: grid; grid-template-columns: 8px minmax(0,1fr) auto; align-items: center; gap: 10px; color: var(--secondary); background: transparent; text-align: left; cursor: pointer; }
+.instance-row:hover, .instance-row.selected { color: var(--text); background: var(--surface-2); }
+.instance-row.selected { box-shadow: inset 2px 0 var(--accent); }
+.instance-row > span:nth-child(2) { min-width: 0; display: grid; gap: 3px; }
+.instance-row strong, .instance-row small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.instance-row strong { font-size: var(--font-size-10); }
+.instance-row small { color: var(--muted); font: var(--font-size-7) "DM Mono",monospace; }
+.instance-state { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); }
+.instance-state-ready, .instance-state-idle, .instance-state-active { background: var(--success); }
+.instance-state-busy, .instance-state-provisioning, .instance-state-reserved { background: var(--accent); }
+.instance-state-failed, .instance-state-lost { background: var(--danger); }
+.instance-empty { padding: 24px 8px; color: var(--muted); font-size: var(--font-size-9); text-align: center; }
+.instance-detail { height: 100%; padding: 0 30px 60px; overflow-y: auto; background: var(--surface); }
+.instance-welcome { display: grid; place-items: center; }
+.instance-welcome > div { max-width: 480px; padding: 40px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-2); }
+.instance-welcome small, .instance-detail-header small { color: var(--accent); font: var(--font-size-8) "DM Mono",monospace; letter-spacing: .08em; text-transform: uppercase; }
+.instance-welcome h1 { margin: 9px 0; font-size: 28px; }
+.instance-welcome p { margin: 0; color: var(--muted); line-height: 1.7; }
+.instance-detail-header { min-height: 126px; padding: 32px 0 24px; border-bottom: 1px solid var(--line); display: flex; align-items: end; justify-content: space-between; gap: 20px; }
+.instance-heading { display: flex; align-items: center; gap: 10px; }
+.mobile-detail-back, .mobile-instance-index { display: none; }
+.instance-detail-header h1 { margin: 7px 0 6px; font-size: 28px; font-weight: 560; letter-spacing: -.035em; }
+.instance-detail-header code { color: var(--muted); font-size: var(--font-size-9); }
+.instance-actions { display: flex; gap: 8px; }
+.instance-actions button, .instance-dialog footer button { min-height: 38px; padding: 0 13px; border: 1px solid var(--line); border-radius: 7px; color: var(--secondary); background: var(--surface-2); cursor: pointer; }
+.instance-notice { margin: 12px 0 0; color: var(--secondary); font-size: var(--font-size-9); }
+.instance-detail-grid { padding-top: 22px; display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; }
+.instance-panel { min-width: 0; padding: 18px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-2); }
+.instance-span { grid-column: 1 / -1; }
+.instance-facts { margin: 10px 0 0; display: grid; gap: 9px; }
+.instance-facts > div { display: grid; grid-template-columns: 112px minmax(0,1fr); gap: 10px; }
+.instance-facts dt { color: var(--muted); font-size: var(--font-size-8); }
+.instance-facts dd { min-width: 0; margin: 0; overflow-wrap: anywhere; color: var(--secondary); font-size: var(--font-size-9); }
+.requirements-view { max-height: 220px; margin: 10px 0 0; overflow: auto; color: var(--secondary); font-size: var(--font-size-8); line-height: 1.6; white-space: pre-wrap; }
+.instance-callout { margin: 12px 0 0; display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: var(--font-size-9); line-height: 1.5; }
+.instance-callout.danger { color: var(--danger); }
+.capacity-reading { margin: 10px 0 0; display: grid; grid-template-columns: auto 1fr; align-items: baseline; gap: 4px 8px; }
+.capacity-reading strong { color: var(--accent); font: 28px "DM Mono",monospace; }
+.capacity-reading span { color: var(--secondary); font-size: var(--font-size-10); }
+.capacity-reading small { grid-column: 1 / -1; color: var(--muted); font-size: var(--font-size-8); }
+.work-list { display: grid; gap: 6px; }
+.work-list button, .task-evidence { min-height: 46px; padding: 9px 10px; border: 1px solid var(--line); border-radius: 7px; display: flex; align-items: center; justify-content: space-between; gap: 10px; color: var(--secondary); background: var(--surface); text-align: left; }
+.work-list button { width: 100%; cursor: pointer; }
+.work-list button > span, .task-evidence { display: grid; }
+.work-list strong, .task-evidence strong { font-size: var(--font-size-9); }
+.work-list small, .task-evidence small { color: var(--muted); font-size: var(--font-size-8); }
+.task-evidence { margin-top: 6px; }
+.allocation-history { display: grid; gap: 6px; }
+.allocation-history > div { min-height: 38px; display: grid; grid-template-columns: 8px minmax(120px,auto) minmax(90px,1fr) auto; align-items: center; gap: 9px; color: var(--secondary); font-size: var(--font-size-8); }
+.allocation-history small { color: var(--muted); }
+.instance-dialog { width: min(720px,calc(100vw - 30px)); max-height: min(88dvh,820px); border: 1px solid var(--line-strong); border-radius: 12px; overflow: hidden; background: var(--surface-2); box-shadow: 0 24px 80px rgba(0,0,0,.45); }
+.instance-dialog form { max-height: inherit; display: grid; grid-template-rows: auto minmax(0,1fr) auto; }
+.instance-dialog header { min-height: 66px; padding: 14px 18px; border-bottom: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; }
+.instance-dialog header small { color: var(--accent); font: var(--font-size-7) "DM Mono",monospace; text-transform: uppercase; }
+.instance-dialog h2 { margin: 3px 0 0; font-size: var(--font-size-17); }
+.instance-form-scroll { padding: 18px; overflow-y: auto; overscroll-behavior: contain; }
+.instance-dialog fieldset { margin: 0 0 18px; padding: 0; border: 0; }
+.instance-dialog legend { margin-bottom: 9px; color: var(--muted); font: var(--font-size-8) "DM Mono",monospace; text-transform: uppercase; }
+.form-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 9px; }
+.instance-field { margin-bottom: 9px; display: grid; gap: 5px; color: var(--muted); font-size: var(--font-size-8); }
+.instance-field input, .instance-field textarea { min-height: 42px; padding: 9px 10px; border: 1px solid var(--line); border-radius: 7px; outline: none; color: var(--text); background: var(--surface); resize: vertical; }
+.instance-field input:focus, .instance-field textarea:focus { border-color: rgba(223,163,76,.55); }
+.choice-grid { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 7px; }
+.choice-grid button, .release-choices button { min-height: 44px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 7px; color: var(--muted); background: var(--surface); cursor: pointer; }
+.choice-grid button.selected, .release-choices button.selected { border-color: rgba(223,163,76,.5); color: var(--accent); background: var(--accent-soft); }
+.instance-dialog footer { padding: 12px 18px; border-top: 1px solid var(--line); display: flex; justify-content: flex-end; gap: 8px; }
+.instance-dialog footer .primary-action { border-color: var(--accent); color: #171209; background: var(--accent); font-weight: 700; }
+.form-error { color: var(--danger); font-size: var(--font-size-9); }
+.release-dialog { width: min(480px,calc(100vw - 30px)); }
+.release-dialog form > p { margin: 18px 18px 4px; color: var(--secondary); font-size: var(--font-size-10); line-height: 1.6; }
+.release-choices { padding: 14px 18px 20px; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.release-choices button { display: grid; gap: 4px; text-align: left; }
+.release-choices button small { color: var(--muted); }
+.release-choices button.danger.selected { border-color: rgba(200,121,110,.5); color: var(--danger); background: rgba(200,121,110,.08); }
+
+@media (max-width:720px) {
+  .mobile-instance-index + .instance-welcome { display: none; }
+  .mobile-instance-index { height: 100%; padding: env(safe-area-inset-top) 18px 82px; display: block; overflow-y: auto; }
+  .mobile-instance-index > header { min-height: 104px; display: flex; align-items: center; justify-content: space-between; }
+  .mobile-instance-index h1 { margin: 5px 0; font-size: 24px; }
+  .mobile-instance-index header small { color: var(--accent); font: 11px "DM Mono",monospace; text-transform: uppercase; }
+  .mobile-instance-index header button { width: 44px; height: 44px; border: 1px solid var(--line); border-radius: 8px; color: var(--accent); background: var(--surface-2); }
+  .mobile-instance-index > div > button { width: 100%; min-height: 68px; padding: 12px 0; border: 0; border-bottom: 1px solid var(--line); display: grid; grid-template-columns: 8px minmax(0,1fr) auto; align-items: center; gap: 12px; color: var(--secondary); background: transparent; text-align: left; }
+  .mobile-instance-index > div > button > span:nth-child(2) { display: grid; gap: 4px; }
+  .mobile-instance-index small { color: var(--muted); }
+  .mobile-detail-back { width: 44px; height: 44px; border: 0; display: grid; place-items: center; color: var(--secondary); background: transparent; }
+  .instance-detail { padding: env(safe-area-inset-top) 16px 82px; }
+  .instance-detail-header { min-height: 116px; padding-top: 24px; align-items: start; }
+  .instance-detail-header h1 { font-size: 23px; }
+  .instance-detail-grid { grid-template-columns: 1fr; }
+  .instance-span { grid-column: auto; }
+  .instance-actions { flex-direction: column; }
+  .instance-actions button { min-height: 44px; }
+  .form-grid, .choice-grid { grid-template-columns: 1fr; }
+  .instance-dialog { width: 100%; max-height: 88dvh; }
+  .instance-dialog button { min-height: 44px; }
+  .allocation-history > div { grid-template-columns: 8px minmax(0,1fr); }
+  .allocation-history span:nth-child(3), .allocation-history small { grid-column: 2; }
+}

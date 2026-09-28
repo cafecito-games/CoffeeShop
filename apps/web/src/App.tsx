@@ -2,16 +2,16 @@ import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import {
   Pulse as Activity, ArrowLeft, ArrowRight, Broadcast, Check, CircleNotch, Command,
   Coffee, Cpu, FolderOpen, Gear, GitBranch, MagnifyingGlass, PaperPlaneTilt, Plus, ShieldWarning,
-  Robot, SlidersHorizontal, TerminalWindow, UsersThree, WarningCircle, X, LockKey
+  Robot, SlidersHorizontal, TerminalWindow, UsersThree, WarningCircle, X, LockKey, Stack, Copy
 } from "@phosphor-icons/react";
 import {
   isActiveRunStatus, threadOwnerAgentId, type Agent, type AgentState, type ApprovalRequest, type Artifact, type ChatMessage,
-  type ComputeNode, type HarnessSessionBinding, type Run, type RunActivity, type RunStatus, type Thread, type ThreadStatus
+  type ComputeNode, type HarnessSessionBinding, type Run, type RunActivity, type RunStatus, type Snapshot, type Thread, type ThreadStatus
 } from "@coffee-shop/protocol";
 import { AccessibleDialog } from "./AccessibleDialog.js";
 import { useViewportMetrics } from "./useViewportMetrics.js";
 import { ActivityView } from "./ActivityView.js";
-import { AgentConfigurationForm, CreateAgentDialog, type AgentConfigurationPayload } from "./AgentConfiguration.js";
+import { AgentConfigurationForm, type AgentConfigurationPayload } from "./AgentConfiguration.js";
 import { CoffeeAvatar } from "./CoffeeAvatar.js";
 import { ComputeView } from "./compute/ComputeView.js";
 import { ExternalThreadDialog } from "./ExternalThreadDialog.js";
@@ -26,8 +26,17 @@ import { SettingsView } from "./settings/SettingsView.js";
 import { ProjectsView } from "./ProjectsView.js";
 import { ThreadsView } from "./ThreadsView.js";
 import { PwaInstallProvider } from "./settings/PwaInstall.js";
+import {
+  CreateInstanceDialog, InstanceDetail, InstanceSidebar, MobileInstanceIndex, ReleaseInstanceDialog,
+  type CreateInstancePayload
+} from "./instances/InstancesView.js";
+import {
+  DeleteTemplateDialog, MobileTemplateIndex, TemplateDetail, TemplateEditorDialog, TemplateSidebar,
+  type TemplateChanges
+} from "./templates/TemplatesView.js";
+import { StableActions, type StableActionResponse } from "./stableActions.js";
 
-type View = "agents" | "threads" | "activity" | "orchestration" | "projects" | "compute" | "settings";
+type View = "instances" | "templates" | "agents" | "threads" | "activity" | "orchestration" | "projects" | "compute" | "settings";
 
 const statusLabels: Record<AgentState, string> = { idle: "Idle", thinking: "Thinking", working: "Working", waiting: "Waiting", blocked: "Blocked", done: "Done" };
 const connectionLabels: Record<ConnectionStatus, string> = {
@@ -348,10 +357,13 @@ function FreshnessNotice({ connection, onRetry }: { connection: ConnectionStatus
   return <div className="freshness-notice" role="status"><WarningCircle size={15} /><span><strong>{connectionLabels[connection]}</strong>{waiting ? "Waiting for a validated live snapshot." : "Showing last known data. Changes are disabled until the live snapshot is restored."}</span>{!waiting && <button onClick={onRetry} aria-label="Retry connection">Retry</button>}</div>;
 }
 
-function BottomNav({ view, onView, pendingApprovalCount }: { view: View; onView: (view: View) => void; pendingApprovalCount: number }) {
-  const items: [View, typeof Robot, string][] = [
-    ["agents", Robot, "Agents"], ["threads", FolderOpen, "Threads"], ["activity", Activity, "Activity"],
+function BottomNav({ view, onView, pendingApprovalCount, legacy }: { view: View; onView: (view: View) => void; pendingApprovalCount: number; legacy: boolean }) {
+  const items: [View, typeof Robot, string][] = legacy ? [
+    ["agents", Robot, "Legacy"], ["threads", FolderOpen, "Threads"], ["activity", Activity, "Activity"],
     ["orchestration", ShieldWarning, "Orchestrate"], ["projects", GitBranch, "Projects"], ["compute", Cpu, "Compute"], ["settings", Gear, "Settings"]
+  ] : [
+    ["instances", Stack, "Instances"], ["templates", Copy, "Templates"], ["threads", FolderOpen, "Threads"],
+    ["activity", Activity, "Activity"], ["orchestration", ShieldWarning, "Orchestrate"], ["projects", GitBranch, "Projects"], ["compute", Cpu, "Compute"], ["settings", Gear, "Settings"]
   ];
   return <nav className="bottom-nav">{items.map(([key, Icon, label]) => (
     <button key={key} className={view === key ? "active" : ""} onClick={() => onView(key)}>
@@ -362,6 +374,10 @@ function BottomNav({ view, onView, pendingApprovalCount }: { view: View; onView:
   ))}</nav>;
 }
 
+function ControlSidebar({ connection, canMutate }: { connection: ConnectionStatus; canMutate: boolean }) {
+  return <aside className="roster control-sidebar"><div className="brand-row"><strong>Control plane</strong></div><div className="control-sidebar-copy"><Coffee size={24} /><h2>Coffee Shop</h2><p>Instances carry live identity. Templates stay inert until the Hub places one.</p></div><div className="roster-foot"><span><i className={canMutate ? "online-dot" : "offline-dot"} />{connectionLabels[connection]}</span></div></aside>;
+}
+
 function LockScreen() {
   const [value, setValue] = useState("");
   return <main className="lock-screen"><div className="brand-mark"><span /><span /></div><LockKey size={20} /><h1>Connect to your control plane</h1><p>Enter the hub token configured on this deployment. It stays in this browser.</p><form onSubmit={(event) => { event.preventDefault(); if (!value.trim()) return; localStorage.setItem("coffee-shop-token", value.trim()); location.reload(); }}><input type="password" value={value} onChange={(event) => setValue(event.target.value)} placeholder="Hub access token" autoFocus /><button>Connect</button></form></main>;
@@ -370,15 +386,27 @@ function LockScreen() {
 function CoffeeShopApp() {
   useViewportMetrics();
   const { snapshot, status: connection, canMutate, retry } = useHubConnection(accessToken);
-  const [view, setView] = useState<View>("agents");
+  const legacySnapshot = snapshot.instances === undefined;
+  const [view, setView] = useState<View>("instances");
   const [selectedId, setSelectedId] = useState<string>();
+  const [selectedInstanceId, setSelectedInstanceId] = useState<string>();
+  const [selectedTemplateId, setSelectedTemplateId] = useState<string>();
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [selectedRunId, setSelectedRunId] = useState<string>();
   const [selectedThreadId, setSelectedThreadId] = useState("");
   const [threadFilter, setThreadFilter] = useState("");
   const [sending, setSending] = useState(false);
-  const [creating, setCreating] = useState(false);
+  const [creatingInstance, setCreatingInstance] = useState(false);
+  const [editingTemplate, setEditingTemplate] = useState<"create" | "edit">();
+  const [deletingTemplate, setDeletingTemplate] = useState(false);
+  const [releasingInstanceId, setReleasingInstanceId] = useState<string>();
+  const [instanceMutationBusy, setInstanceMutationBusy] = useState(false);
+  const stableActions = useRef(new StableActions());
+  const snapshotSettlements = useRef(new Map<string, (snapshot: Snapshot) => boolean>());
+  const effectiveView: View = legacySnapshot && (view === "instances" || view === "templates") ? "agents" : view;
   const selected = snapshot.agents.find((agent) => agent.id === selectedId);
+  const selectedInstance = snapshot.instances?.find((instance) => instance.id === selectedInstanceId);
+  const selectedTemplate = snapshot.templates?.find((template) => template.id === selectedTemplateId);
   const [reviewingApprovalId, setReviewingApprovalId] = useState<string>();
   const [externalThreadId, setExternalThreadId] = useState<string>();
   const orchestratorClients = useMemo(() => snapshot.orchestratorClients ?? [], [snapshot.orchestratorClients]);
@@ -421,6 +449,17 @@ function CoffeeShopApp() {
   }
   const pendingApprovalCount = useMemo(() => (snapshot.approvals ?? []).filter((approval) => approval.status === "pending").length, [snapshot.approvals]);
 
+  async function mutationResponse<T>(response: Response): Promise<StableActionResponse<T>> {
+    const body = await response.json().catch(() => ({})) as T & { error?: string };
+    return { ok: response.ok, status: response.status, ...(response.ok ? { value: body } : { error: body.error ?? `Request failed (${response.status})` }) };
+  }
+
+  async function performMutation<T>(action: string, argumentsValue: unknown, request: (key: string) => Promise<Response>) {
+    const result = await stableActions.current.submit(action, argumentsValue, async (key) => mutationResponse<T>(await request(key)));
+    if (!result.ok) throw new Error(result.error ?? `Request failed (${result.status})`);
+    return result.value as T;
+  }
+
   async function send(body: string) {
     if (!selected || !canMutate) return;
     setSending(true);
@@ -462,6 +501,10 @@ function CoffeeShopApp() {
       setExternalThreadId(thread.id);
       return;
     }
+    if (!legacySnapshot) {
+      setView("orchestration");
+      return;
+    }
     setSelectedId(threadOwnerAgentId(thread));
     setSelectedThreadId(thread.id);
     setThreadFilter(thread.id);
@@ -469,30 +512,110 @@ function CoffeeShopApp() {
     setInspectorOpen(false);
   }
   function switchView(next: View) { setView(next); if (next !== "agents") setSelectedId(undefined); }
-  async function createAgent(fields: AgentConfigurationPayload) {
-    if (!canMutate) throw new Error("Reconnect before creating an agent");
-    const response = await apiFetch("/api/agents", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(fields) });
-    if (!response.ok) {
-      const body = await response.json().catch(() => ({})) as { error?: string };
-      throw new Error(body.error ?? `Could not create agent (${response.status})`);
+  async function createInstance(payload: CreateInstancePayload) {
+    setInstanceMutationBusy(true);
+    try {
+      const { threadId, ...argumentsValue } = payload;
+      const action = `instance:create:${threadId}`;
+      const before = new Set((snapshot.instances ?? []).map((instance) => instance.id));
+      snapshotSettlements.current.set(action, (next) => (next.instances ?? []).some((instance) => !before.has(instance.id)
+        && instance.threadId === threadId && instance.creator.kind === "operator"
+        && instance.requirements.templateId === argumentsValue.requirements.templateId
+        && instance.purpose?.name === argumentsValue.purpose?.name));
+      const result = await performMutation<{ instance: { id: string } }>(action, argumentsValue, (idempotencyKey) => apiFetch(`/api/threads/${encodeURIComponent(threadId)}/instances`, {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...argumentsValue, idempotencyKey })
+      }));
+      setSelectedInstanceId(result.instance.id);
+    } finally {
+      if (!stableActions.current.pendingKey(`instance:create:${payload.threadId}`)) snapshotSettlements.current.delete(`instance:create:${payload.threadId}`);
+      setInstanceMutationBusy(false);
     }
-    const agent = await response.json() as Agent;
-    setSelectedId(agent.id); setView("agents");
-    return agent;
   }
+
+  async function renewInstance(instance: NonNullable<typeof selectedInstance>) {
+    setInstanceMutationBusy(true);
+    const argumentsValue = { idleTimeoutSeconds: instance.lease.idleTimeoutSeconds };
+    const action = `instance:renew:${instance.id}`;
+    snapshotSettlements.current.set(action, (next) => next.instances?.some((candidate) => candidate.id === instance.id && candidate.lease.expiresAt !== instance.lease.expiresAt) ?? false);
+    try {
+      await performMutation(action, argumentsValue, (idempotencyKey) => apiFetch(`/api/threads/${encodeURIComponent(instance.threadId)}/instances/${encodeURIComponent(instance.id)}/renew`, {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...argumentsValue, idempotencyKey })
+      }));
+    } finally { if (!stableActions.current.pendingKey(action)) snapshotSettlements.current.delete(action); setInstanceMutationBusy(false); }
+  }
+
+  async function releaseInstance(instance: NonNullable<typeof selectedInstance>, mode: "drain" | "cancel") {
+    setInstanceMutationBusy(true);
+    const action = `instance:release:${instance.id}`;
+    snapshotSettlements.current.set(action, (next) => next.instances?.some((candidate) => candidate.id === instance.id && ["draining", "released", "failed"].includes(candidate.status)) ?? false);
+    try {
+      await performMutation(action, { mode }, (idempotencyKey) => apiFetch(`/api/threads/${encodeURIComponent(instance.threadId)}/instances/${encodeURIComponent(instance.id)}/release`, {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ mode, idempotencyKey })
+      }));
+    } finally { if (!stableActions.current.pendingKey(action)) snapshotSettlements.current.delete(action); setInstanceMutationBusy(false); }
+  }
+
+  async function saveTemplate(changes: TemplateChanges) {
+    const target = editingTemplate === "edit" ? selectedTemplate : undefined;
+    const action = target ? `template:update:${target.id}` : "template:create";
+    const path = target ? `/api/agent-templates/${encodeURIComponent(target.id)}` : "/api/agent-templates";
+    const before = new Set((snapshot.templates ?? []).map((template) => template.id));
+    snapshotSettlements.current.set(action, (next) => (next.templates ?? []).some((template) =>
+      (target ? template.id === target.id : !before.has(template.id))
+      && template.name === changes.name
+      && Object.entries(changes).every(([key, value]) => JSON.stringify(template[key as keyof typeof template]) === JSON.stringify(value))));
+    try {
+      const result = await performMutation<{ template: { id: string } }>(action, changes, (idempotencyKey) => apiFetch(path, {
+        method: target ? "PATCH" : "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...changes, idempotencyKey })
+      }));
+      setSelectedTemplateId(result.template.id);
+    } finally { if (!stableActions.current.pendingKey(action)) snapshotSettlements.current.delete(action); }
+  }
+
+  async function deleteTemplate() {
+    if (!selectedTemplate) return;
+    const action = `template:delete:${selectedTemplate.id}`;
+    snapshotSettlements.current.set(action, (next) => !(next.templates ?? []).some((template) => template.id === selectedTemplate.id));
+    try {
+      await performMutation(action, {}, (idempotencyKey) => apiFetch(`/api/agent-templates/${encodeURIComponent(selectedTemplate.id)}`, {
+        method: "DELETE", headers: { "content-type": "application/json" }, body: JSON.stringify({ idempotencyKey })
+      }));
+      setSelectedTemplateId(undefined);
+    } finally { if (!stableActions.current.pendingKey(action)) snapshotSettlements.current.delete(action); }
+  }
+
+  useEffect(() => {
+    for (const [action, settled] of snapshotSettlements.current) {
+      if (settled(snapshot)) {
+        stableActions.current.settle(action);
+        snapshotSettlements.current.delete(action);
+      }
+    }
+  }, [snapshot]);
 
   if (connection === "authentication-required") return <LockScreen />;
 
   return (
     <div className="app-shell">
-      <Roster agents={snapshot.agents} selectedId={selectedId} onSelect={selectAgent} onCreate={() => { if (canMutate) setCreating(true); }} connection={connection} canMutate={canMutate} />
+      {legacySnapshot
+        ? <Roster agents={snapshot.agents} selectedId={selectedId} onSelect={selectAgent} onCreate={() => undefined} connection={connection} canMutate={false} />
+        : effectiveView === "instances"
+          ? <InstanceSidebar instances={snapshot.instances ?? []} threads={snapshot.threads ?? []} selectedId={selectedInstanceId} connectionLabel={connectionLabels[connection]} canMutate={canMutate} onSelect={setSelectedInstanceId} onCreate={() => setCreatingInstance(true)} />
+          : effectiveView === "templates"
+            ? <TemplateSidebar templates={snapshot.templates ?? []} selectedId={selectedTemplateId} canMutate={canMutate} connectionLabel={connectionLabels[connection]} onSelect={setSelectedTemplateId} onCreate={() => setEditingTemplate("create")} />
+            : <ControlSidebar connection={connection} canMutate={canMutate} />}
       <div className="workspace">
         <FreshnessNotice connection={connection} onRetry={retry} />
-        {view === "agents" && !selected && <EmptyAgents agents={snapshot.agents} onSelect={selectAgent} onCreate={() => { if (canMutate) setCreating(true); }} canMutate={canMutate} />}
-        {view === "agents" && selected && <Chat agent={selected} nodes={snapshot.nodes} threads={selectedThreads} viewableThreads={viewableThreads} threadFilter={effectiveThreadFilter} orchestratorName={orchestratorName} selectedThreadId={selectedThreadId} timeline={selectedTimeline} sending={sending} inspectorOpen={inspectorOpen} onBack={() => setSelectedId(undefined)} onSend={send} onThreadChange={chooseSendTarget} onThreadFilterChange={chooseThreadFilter} onInspector={() => setInspectorOpen((open) => !open)} onInspectRun={setSelectedRunId} onReviewApproval={setReviewingApprovalId} canMutate={canMutate} />}
-        {view === "threads" && <ThreadsView threads={snapshot.threads ?? []} runs={snapshot.runs} artifacts={snapshot.artifacts ?? []} agents={snapshot.agents} orchestratorClients={orchestratorClients} orchestratorAttachments={orchestratorAttachments} canMutate={canMutate} onContinue={continueThread} onInspectRun={setSelectedRunId} onSetStatus={setThreadStatus} />}
-        {view === "activity" && <ActivityView events={snapshot.events} agents={snapshot.agents} onInspectRun={setSelectedRunId} />}
-        {view === "orchestration" && (
+        {legacySnapshot && <div className="legacy-agent-notice" role="status"><WarningCircle size={15} /><span><strong>Read-only legacy agents</strong>This Hub has not published the complete instance, allocation, and template contract.</span></div>}
+        {effectiveView === "agents" && !selected && <EmptyAgents agents={snapshot.agents} onSelect={selectAgent} onCreate={() => undefined} canMutate={false} />}
+        {effectiveView === "agents" && selected && <Chat agent={selected} nodes={snapshot.nodes} threads={selectedThreads} viewableThreads={viewableThreads} threadFilter={effectiveThreadFilter} orchestratorName={orchestratorName} selectedThreadId={selectedThreadId} timeline={selectedTimeline} sending={sending} inspectorOpen={inspectorOpen} onBack={() => setSelectedId(undefined)} onSend={send} onThreadChange={chooseSendTarget} onThreadFilterChange={chooseThreadFilter} onInspector={() => setInspectorOpen((open) => !open)} onInspectRun={setSelectedRunId} onReviewApproval={setReviewingApprovalId} canMutate={false} />}
+        {effectiveView === "instances" && !selectedInstance && <MobileInstanceIndex instances={snapshot.instances ?? []} threads={snapshot.threads ?? []} canMutate={canMutate} onSelect={setSelectedInstanceId} onCreate={() => setCreatingInstance(true)} />}
+        {effectiveView === "instances" && <InstanceDetail instance={selectedInstance} allocations={snapshot.allocations ?? []} nodes={snapshot.nodes} runs={snapshot.runs} tasks={snapshot.tasks ?? []} threads={snapshot.threads ?? []} canMutate={canMutate} busy={instanceMutationBusy} onRenew={renewInstance} onRelease={(instance) => setReleasingInstanceId(instance.id)} onInspectRun={setSelectedRunId} onBack={() => setSelectedInstanceId(undefined)} />}
+        {effectiveView === "templates" && !selectedTemplate && <MobileTemplateIndex templates={snapshot.templates ?? []} canMutate={canMutate} onSelect={setSelectedTemplateId} onCreate={() => setEditingTemplate("create")} />}
+        {effectiveView === "templates" && <TemplateDetail template={selectedTemplate} canMutate={canMutate} onEdit={() => setEditingTemplate("edit")} onDelete={() => setDeletingTemplate(true)} onBack={() => setSelectedTemplateId(undefined)} />}
+        {effectiveView === "threads" && <ThreadsView threads={snapshot.threads ?? []} runs={snapshot.runs} artifacts={snapshot.artifacts ?? []} agents={snapshot.agents} orchestratorClients={orchestratorClients} orchestratorAttachments={orchestratorAttachments} canMutate={canMutate} onContinue={continueThread} onInspectRun={setSelectedRunId} onSetStatus={setThreadStatus} />}
+        {effectiveView === "activity" && <ActivityView events={snapshot.events} agents={snapshot.agents} onInspectRun={setSelectedRunId} />}
+        {effectiveView === "orchestration" && (
           <OrchestrationView
             threads={snapshot.threads ?? []}
             tasks={snapshot.tasks ?? []}
@@ -509,27 +632,32 @@ function CoffeeShopApp() {
             onInspectRun={setSelectedRunId}
           />
         )}
-        {view === "compute" && <ComputeView nodes={snapshot.nodes} />}
-        {view === "projects" && <ProjectsView profiles={snapshot.projectProfiles ?? []} canMutate={canMutate} apiFetch={apiFetch} />}
-        {view === "settings" && <SettingsView connection={connection} nodes={snapshot.nodes} generatedAt={snapshot.generatedAt} orchestratorClients={orchestratorClients} canMutate={canMutate} apiFetch={apiFetch} />}
+        {effectiveView === "compute" && <ComputeView nodes={snapshot.nodes} />}
+        {effectiveView === "projects" && <ProjectsView profiles={snapshot.projectProfiles ?? []} canMutate={canMutate} apiFetch={apiFetch} />}
+        {effectiveView === "settings" && <SettingsView connection={connection} nodes={snapshot.nodes} generatedAt={snapshot.generatedAt} orchestratorClients={orchestratorClients} canMutate={canMutate} apiFetch={apiFetch} />}
       </div>
-      {selected && inspectorOpen && <Inspector agent={selected} nodes={snapshot.nodes} sessions={providerSessionsForAgent(selected.id, snapshot.runs, snapshot.sessionBindings ?? [])} onClose={() => setInspectorOpen(false)} onSave={updateAgent} onReconcile={retry} canMutate={canMutate} />}
+      {legacySnapshot && selected && inspectorOpen && <Inspector agent={selected} nodes={snapshot.nodes} sessions={providerSessionsForAgent(selected.id, snapshot.runs, snapshot.sessionBindings ?? [])} onClose={() => setInspectorOpen(false)} onSave={updateAgent} onReconcile={retry} canMutate={false} />}
       {externalThread && <ExternalThreadDialog thread={externalThread} description={describeThreadOrchestrator(externalThread, { agents: snapshot.agents, clients: orchestratorClients, attachments: orchestratorAttachments })} taskMessages={snapshot.taskMessages ?? []} canMutate={canMutate} apiFetch={apiFetch} onClose={() => setExternalThreadId(undefined)} />}
       {reviewingApproval && <ApprovalDialog approval={reviewingApproval} agents={snapshot.agents} nodes={snapshot.nodes} runs={snapshot.runs} tasks={snapshot.tasks ?? []} orchestratorClients={orchestratorClients} canMutate={canMutate} onClose={() => setReviewingApprovalId(undefined)} apiFetch={apiFetch} />}
       {selectedRunId && <RunInspector selectedRunId={selectedRunId} run={snapshot.runs.find((run) => run.id === selectedRunId)} runs={snapshot.runs} threads={snapshot.threads ?? []} artifacts={snapshot.artifacts ?? []} agents={snapshot.agents} nodes={snapshot.nodes} runActivity={snapshot.runActivity ?? []} approvals={snapshot.approvals ?? []} sessionBindings={snapshot.sessionBindings ?? []} onClose={() => setSelectedRunId(undefined)} onInspectRun={setSelectedRunId} canMutate={canMutate} />}
       <nav className="desktop-nav" aria-label="Primary">
         <div className="rail-brand" aria-label="Coffee Shop"><Coffee size={21} /></div>
-        <button aria-label="Agents" className={view === "agents" ? "active" : ""} onClick={() => switchView("agents")}><Robot size={18} /><span>Agents</span></button>
-        <button aria-label="Threads" className={view === "threads" ? "active" : ""} onClick={() => switchView("threads")}><FolderOpen size={18} /><span>Threads</span></button>
-        <button aria-label="Activity" className={view === "activity" ? "active" : ""} onClick={() => switchView("activity")}><Activity size={18} /><span>Activity</span></button>
-        <button aria-label="Orchestration" className={view === "orchestration" ? "active" : ""} onClick={() => switchView("orchestration")}><ShieldWarning size={18} /><span>Orchestrate</span>{pendingApprovalCount > 0 && <span className="unread">{pendingApprovalCount}</span>}</button>
-        <button aria-label="Compute" className={view === "compute" ? "active" : ""} onClick={() => switchView("compute")}><Cpu size={18} /><span>Compute</span></button>
-        <button aria-label="Projects" className={view === "projects" ? "active" : ""} onClick={() => switchView("projects")}><GitBranch size={18} /><span>Projects</span></button>
-        <button aria-label="Settings" className={view === "settings" ? "active" : ""} onClick={() => switchView("settings")}><Gear size={18} /><span>Settings</span></button>
+        {legacySnapshot
+          ? <button aria-label="Legacy agents" className={effectiveView === "agents" ? "active" : ""} onClick={() => switchView("agents")}><Robot size={18} /><span>Legacy agents</span></button>
+          : <><button aria-label="Instances" className={effectiveView === "instances" ? "active" : ""} onClick={() => switchView("instances")}><Stack size={18} /><span>Instances</span></button><button aria-label="Templates" className={effectiveView === "templates" ? "active" : ""} onClick={() => switchView("templates")}><Copy size={18} /><span>Templates</span></button></>}
+        <button aria-label="Threads" className={effectiveView === "threads" ? "active" : ""} onClick={() => switchView("threads")}><FolderOpen size={18} /><span>Threads</span></button>
+        <button aria-label="Activity" className={effectiveView === "activity" ? "active" : ""} onClick={() => switchView("activity")}><Activity size={18} /><span>Activity</span></button>
+        <button aria-label="Orchestration" className={effectiveView === "orchestration" ? "active" : ""} onClick={() => switchView("orchestration")}><ShieldWarning size={18} /><span>Orchestrate</span>{pendingApprovalCount > 0 && <span className="unread">{pendingApprovalCount}</span>}</button>
+        <button aria-label="Compute" className={effectiveView === "compute" ? "active" : ""} onClick={() => switchView("compute")}><Cpu size={18} /><span>Compute</span></button>
+        <button aria-label="Projects" className={effectiveView === "projects" ? "active" : ""} onClick={() => switchView("projects")}><GitBranch size={18} /><span>Projects</span></button>
+        <button aria-label="Settings" className={effectiveView === "settings" ? "active" : ""} onClick={() => switchView("settings")}><Gear size={18} /><span>Settings</span></button>
         <div className="rail-user">CS</div>
       </nav>
-      <BottomNav view={view} onView={switchView} pendingApprovalCount={pendingApprovalCount} />
-      {creating && <CreateAgentDialog nodes={snapshot.nodes} onClose={() => setCreating(false)} onSave={createAgent} onReconcile={retry} canMutate={canMutate} />}
+      <BottomNav view={effectiveView} onView={switchView} pendingApprovalCount={pendingApprovalCount} legacy={legacySnapshot} />
+      {creatingInstance && <CreateInstanceDialog threads={snapshot.threads ?? []} templates={snapshot.templates ?? []} canMutate={canMutate} onClose={() => setCreatingInstance(false)} onCreate={createInstance} />}
+      {releasingInstanceId && selectedInstance?.id === releasingInstanceId && <ReleaseInstanceDialog instance={selectedInstance} canMutate={canMutate} onClose={() => setReleasingInstanceId(undefined)} onRelease={(mode) => releaseInstance(selectedInstance, mode)} />}
+      {editingTemplate && <TemplateEditorDialog template={editingTemplate === "edit" ? selectedTemplate : undefined} canMutate={canMutate} onClose={() => setEditingTemplate(undefined)} onSave={saveTemplate} />}
+      {deletingTemplate && selectedTemplate && <DeleteTemplateDialog template={selectedTemplate} canMutate={canMutate} onClose={() => setDeletingTemplate(false)} onDelete={deleteTemplate} />}
     </div>
   );
 }

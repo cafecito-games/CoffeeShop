@@ -88,6 +88,12 @@ button:disabled, textarea:disabled, fieldset:disabled button { cursor: not-allow
 .roster-foot { min-height: 40px; margin-top: auto; padding: 12px 8px 0; border-top: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; color: var(--muted); font-size: var(--font-size-9); }
 .roster-foot span { display: flex; align-items: center; gap: 7px; }
 .roster-foot small { color: var(--faint); font: var(--font-size-8) "DM Mono", monospace; }
+.control-sidebar-copy { margin: auto 8px; padding: 18px; border: 1px solid var(--line); border-radius: 9px; color: var(--accent); background: var(--surface-2); }
+.control-sidebar-copy h2 { margin: 12px 0 7px; color: var(--text); font-size: var(--font-size-15); }
+.control-sidebar-copy p { margin: 0; color: var(--muted); font-size: var(--font-size-9); line-height: 1.65; }
+.legacy-agent-notice { position: absolute; z-index: 11; top: 10px; left: 50%; width: min(620px,calc(100% - 24px)); min-height: 44px; padding: 8px 11px; border: 1px solid rgba(223,163,76,.28); border-radius: 8px; display: flex; align-items: center; gap: 9px; color: var(--accent); background: rgba(24,20,13,.94); transform: translateX(-50%); }
+.legacy-agent-notice span { display: grid; color: var(--secondary); font-size: var(--font-size-8); }
+.legacy-agent-notice strong { color: var(--accent); }
 .online-dot, .offline-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--success); box-shadow: 0 0 0 3px rgba(126,165,138,.10); }
 .offline-dot { background: var(--faint); box-shadow: none; }
 
@@ -849,7 +855,7 @@ button:disabled, textarea:disabled, fieldset:disabled button { cursor: not-allow
   .roster, .desktop-nav { display: none; }
   /* Anchored to the shell, whose height is the measured viewport, rather than to the layout
      viewport, which iOS can report shorter than the region it paints. */
-  .bottom-nav { position: absolute; z-index: 30; left: 0; right: 0; bottom: 0; height: calc(64px + env(safe-area-inset-bottom)); padding: 5px 6px env(safe-area-inset-bottom); border-top: 1px solid var(--line); display: grid; grid-template-columns: repeat(7,1fr); background: rgba(9,11,10,.96); backdrop-filter: blur(18px); }
+  .bottom-nav { position: absolute; z-index: 30; left: 0; right: 0; bottom: 0; height: calc(64px + env(safe-area-inset-bottom)); padding: 5px 6px env(safe-area-inset-bottom); border-top: 1px solid var(--line); display: grid; grid-template-columns: repeat(auto-fit,minmax(38px,1fr)); background: rgba(9,11,10,.96); backdrop-filter: blur(18px); }
   .bottom-nav button { position: relative; min-height: 44px; border: 0; border-radius: 7px; display: grid; place-content: center; justify-items: center; gap: 3px; color: var(--faint); background: transparent; font-size: var(--font-size-7); }
   .bottom-nav button.active { color: var(--accent); }
   .bottom-nav button .unread { position: absolute; top: 2px; right: calc(50% - 22px); }
