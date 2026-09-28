@@ -4,6 +4,8 @@ package systemtest
 
 import (
 	"net/http"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -20,6 +22,52 @@ func exactClaudeInstanceRequirements(label string) map[string]any {
 		"transports":       []string{"acp-v1"},
 		"operatingSystems": []string{runtime.GOOS},
 		"labels":           []string{label},
+	}
+}
+
+// TestInstanceProtocolV4Exclusion uses a bounded version-4 control peer, not a downgraded current
+// Barista. It proves the Hub accepts the rolling peer and exposes its precise exclusion while never
+// sending it a v5 provision or dispatch.
+func TestInstanceProtocolV4Exclusion(t *testing.T) {
+	t.Parallel()
+	cluster := newEnvironment(t, environmentOptions{})
+	workspace := filepath.Join(cluster.root, "v4-workspace")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	peer := startCompatibilityBarista(t, cluster.hub.port, workspace, "instance-v4", "4")
+	cluster.eventually("the exact version-4 peer to pass its barrier", func(current snapshot) (bool, string) {
+		node, found := nodeByID(current, "instance-v4")
+		return found && node.Status != "offline" && node.Version == "0.0.4-compatibility", "version-4 peer is not synchronized"
+	})
+
+	clientID, secret := cluster.mintOrchestratorClient("v4 exclusion", "orchestrate")
+	bridge := cluster.startBridge("instance-v4-exclusion", clientID, secret)
+	created := bridge.mustCallTool("create_thread", map[string]any{"title": "v4 exclusion", "objective": "Never weaken instance placement."})
+	threadID := text(object(created, "thread"), "id")
+	spawned := bridge.mustCallTool("spawn_instance", map[string]any{
+		"threadId": threadID, "idempotencyKey": "v4-instance", "requirements": map[string]any{
+			"harnessIds": []string{"codex-cli"}, "models": []string{"default"}, "transports": []string{"native-cli"},
+		},
+		"initialTask": map[string]any{"title": "v4-refused", "instructions": "Must remain queued."},
+	})
+	instanceID := text(object(spawned, "instance"), "id")
+	taskID := text(spawned, "initialTaskId")
+	refused := cluster.eventually("version-4 exclusion to be explicit", func(current snapshot) (bool, string) {
+		item, found := current.task(taskID)
+		if !found || item.Placement == nil {
+			return false, "initial task has no placement diagnostic"
+		}
+		for _, unsatisfied := range item.Placement.Unsatisfied {
+			if unsatisfied.Kind == "protocol-version" && unsatisfied.NodeID == "instance-v4" {
+				return true, ""
+			}
+		}
+		return false, "protocol-version exclusion is absent"
+	})
+	instance, _ := instanceByID(refused, instanceID)
+	if instance.Status != "requested" || len(refused.Allocations) != 0 || len(refused.Runs) != 0 || len(peer.recordedDispatches()) != 0 {
+		t.Fatalf("version-4 peer received or caused instance work: instance=%+v allocations=%d runs=%d", instance, len(refused.Allocations), len(refused.Runs))
 	}
 }
 
@@ -53,6 +101,97 @@ func allocationFor(current snapshot, instanceID string) (instanceAllocation, boo
 func taskByTitle(current snapshot, threadID, title string) (task, bool) {
 	item, found := current.threadTasks(threadID)[title]
 	return item, found
+}
+
+func hasPlacementKind(item task, kind string) bool {
+	if item.Placement == nil {
+		return false
+	}
+	for _, unsatisfied := range item.Placement.Unsatisfied {
+		if unsatisfied.Kind == kind {
+			return true
+		}
+	}
+	return false
+}
+
+// TestInstanceCapacitiesStayIndependent proves that the resident pool and active-run slots are
+// separately accounted through the public bridge and producer snapshot. It also keeps a hard model
+// mismatch explicit instead of weakening the request or falling back.
+func TestInstanceCapacitiesStayIndependent(t *testing.T) {
+	t.Parallel()
+	cluster := newEnvironment(t, environmentOptions{})
+	cluster.startNode(nodeOptions{
+		id: "capacity-node", claudeAuthMode: "api", labels: []string{"capacity-e2e"},
+		concurrency: 1, instanceCapacity: integer(1),
+	})
+	clientID, secret := cluster.mintOrchestratorClient("capacity operator", "orchestrate")
+	bridge := cluster.startBridge("instance-capacity", clientID, secret)
+	created := bridge.mustCallTool("create_thread", map[string]any{"title": "Independent capacities", "objective": "Keep residents and runs separate."})
+	threadID := text(object(created, "thread"), "id")
+	requirements := exactClaudeInstanceRequirements("capacity-e2e")
+
+	first := bridge.mustCallTool("spawn_instance", map[string]any{
+		"threadId": threadID, "idempotencyKey": "capacity-first", "requirements": requirements,
+		"initialTask": map[string]any{"title": "capacity-running", "instructions": script(t, step{Gate: "capacity-first"})},
+	})
+	firstInstanceID := text(object(first, "instance"), "id")
+	cluster.eventually("one run and one resident to occupy their independent limits", func(current snapshot) (bool, string) {
+		item, found := taskByTitle(current, threadID, "capacity-running")
+		node, nodeFound := nodeByID(current, "capacity-node")
+		if !found || !nodeFound || len(item.AttemptRunIDs) != 1 || node.ActiveInstances == nil {
+			return false, "capacity evidence is incomplete"
+		}
+		attempt, found := current.latestAttempt(item)
+		return found && attempt.Status == "running" && node.ActiveRuns == 1 && *node.ActiveInstances == 1,
+			"run/resident counters are not both occupied"
+	})
+
+	second := bridge.mustCallTool("spawn_instance", map[string]any{
+		"threadId": threadID, "idempotencyKey": "capacity-second", "requirements": requirements,
+		"initialTask": map[string]any{"title": "resident-blocked", "instructions": "Wait for a resident slot."},
+	})
+	secondTaskID := text(second, "initialTaskId")
+	bridge.mustCallTool("submit_tasks", map[string]any{
+		"threadId": threadID, "idempotencyKey": "run-capacity-second",
+		"tasks": []taskSpecification{{
+			Key: "same-resident", Title: "run-blocked", Instructions: script(t, step{Message: "run slot done"}), Requirements: requirements,
+			Pin: map[string]any{"instanceId": firstInstanceID},
+		}},
+	})
+
+	mismatchRequirements := exactClaudeInstanceRequirements("capacity-e2e")
+	mismatchRequirements["models"] = []string{"model-that-is-not-advertised"}
+	mismatch := bridge.mustCallTool("spawn_instance", map[string]any{
+		"threadId": threadID, "idempotencyKey": "capacity-mismatch", "requirements": mismatchRequirements,
+		"initialTask": map[string]any{"title": "model-refused", "instructions": "Never weaken this model."},
+	})
+	mismatchTaskID := text(mismatch, "initialTaskId")
+
+	blocked := cluster.eventually("resident, run, and model exclusions to stay distinct", func(current snapshot) (bool, string) {
+		residentTask, residentFound := current.task(secondTaskID)
+		runTask, runFound := taskByTitle(current, threadID, "run-blocked")
+		modelTask, modelFound := current.task(mismatchTaskID)
+		if !residentFound || !runFound || !modelFound {
+			return false, "one blocked task is absent"
+		}
+		return hasPlacementKind(residentTask, "resident-capacity") && hasPlacementKind(runTask, "capacity") && hasPlacementKind(modelTask, "model"),
+			"the distinct placement diagnostics are not present"
+	})
+	if len(blocked.Allocations) != 1 || len(blocked.Instances) != 3 {
+		t.Fatalf("capacity refusal mutated resident allocation counts: instances=%d allocations=%d", len(blocked.Instances), len(blocked.Allocations))
+	}
+
+	cluster.openGate("capacity-first")
+	completed := cluster.eventually("the queued exact pin to use the freed run slot", func(current snapshot) (bool, string) {
+		item, found := taskByTitle(current, threadID, "run-blocked")
+		return found && item.Status == "completed", "the exact pinned task is not completed"
+	})
+	pinnedTask, _ := taskByTitle(completed, threadID, "run-blocked")
+	pinnedRun, _ := completed.latestAttempt(pinnedTask)
+	if pinnedRun.InstanceID != firstInstanceID || len(completed.Allocations) != 1 {
+		t.Fatalf("free run capacity weakened the resident identity: run=%+v allocations=%d", pinnedRun, len(completed.Allocations))
+	}
 }
 
 // TestEphemeralInstanceLifecycle crosses the real external bridge, Hub WebSocket gateway, scheduler,

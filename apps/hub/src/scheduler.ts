@@ -983,12 +983,12 @@ export function placeTask(task: Task, environment: PlacementEnvironment): Placem
   }
 
   /*
-   * Live offerings, the primary candidate set. A node the override names restricts them exactly as it
-   * restricts agents; an agent pin excludes them entirely, because no offering is the agent the
-   * operator named.
+   * Live offerings are the primary candidate set. Nodes that cannot publish a v5 resident still
+   * pass through evaluation so their protocol/capacity exclusion stays operator-visible; they can
+   * never become eligible. A node override restricts the set exactly as it restricts agents, while
+   * an agent pin excludes it entirely because no offering is the named agent.
    */
   const offeringNodes = pinnedAgentId !== undefined ? [] : [...environment.nodes]
-    .filter((node) => offersInstances(node))
     .filter((node) => requiredNodeId === undefined || node.id === requiredNodeId)
     .sort((left, right) => compareText(left.id, right.id));
   /*

@@ -418,12 +418,20 @@ const legacyNodeID = "node-legacy"
 type legacyBarista struct {
 	connection   *websocket.Conn
 	lifetime     context.Context
+	nodeID       string
+	version      string
 	dispatches   chan json.RawMessage
 	synchronized bool
 }
 
 // startLegacyBarista connects a version-3 Barista to the hub and serves it until the scenario ends.
 func startLegacyBarista(t *testing.T, hubPort int, workspaceRoot string) *legacyBarista {
+	return startCompatibilityBarista(t, hubPort, workspaceRoot, legacyNodeID, "3")
+}
+
+// startCompatibilityBarista is the bounded control-socket peer used only to prove rolling-version
+// exclusion. It implements the advertised version's barrier and legacy dispatch, never v5 residency.
+func startCompatibilityBarista(t *testing.T, hubPort int, workspaceRoot, nodeID, version string) *legacyBarista {
 	t.Helper()
 	lifetime, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -431,22 +439,26 @@ func startLegacyBarista(t *testing.T, hubPort int, workspaceRoot string) *legacy
 		HTTPHeader: http.Header{"Authorization": []string{"Bearer " + enrollmentToken}},
 	})
 	if err != nil {
-		t.Fatalf("dial the hub as a version-3 Barista: %v", err)
+		t.Fatalf("dial the hub as a version-%s Barista: %v", version, err)
 	}
 	// Registered after the environment's own teardown, so this runs first and the connection closes
 	// before the hub does.
 	t.Cleanup(func() { connection.Close(websocket.StatusNormalClosure, "scenario finished") })
-	barista := &legacyBarista{connection: connection, lifetime: lifetime, dispatches: make(chan json.RawMessage, 16)}
+	barista := &legacyBarista{connection: connection, lifetime: lifetime, nodeID: nodeID, version: version, dispatches: make(chan json.RawMessage, 16)}
+	reportedVersion := "0.0." + version + "-compatibility"
+	if version == "3" {
+		reportedVersion = "0.0.3-legacy"
+	}
 	if err := barista.send(protocol.Outbound{
-		Type: "register", ProtocolVersion: "3",
+		Type: "register", ProtocolVersion: version,
 		Node: &protocol.ComputeNode{
-			ID: legacyNodeID, Name: "Legacy node", Kind: "local", Platform: "linux-amd64", Status: "online",
+			ID: nodeID, Name: "Compatibility node", Kind: "local", Platform: "linux-amd64", Status: "online",
 			LastSeen: legacyTimestamp(), Concurrency: 2, WorkspaceRoots: []string{workspaceRoot},
 			Harnesses: []protocol.HarnessProfile{{
 				ID: "codex-cli", Label: "Codex", Description: "codex-cli 0.40.0", Binary: "codex",
 				Available: true, AuthMode: "local-account", Models: []string{},
 			}},
-			Version: "0.0.3-legacy",
+			Version: reportedVersion,
 		},
 	}); err != nil {
 		t.Fatal(err)
@@ -487,9 +499,15 @@ func (barista *legacyBarista) readLoop() {
 			// The first ping acknowledges the registration and is followed by the reconnect barrier;
 			// later ones are answered as heartbeats.
 			if barista.synchronized {
-				_ = barista.send(protocol.Outbound{Type: "heartbeat", NodeID: legacyNodeID, At: legacyTimestamp()})
+				activeRuns := 0
+				_ = barista.send(protocol.Outbound{Type: "heartbeat", NodeID: barista.nodeID, ActiveRuns: &activeRuns, At: legacyTimestamp()})
 			} else {
-				_ = barista.send(protocol.Outbound{Type: "sync.complete", NodeID: legacyNodeID, At: legacyTimestamp()})
+				barrier := protocol.Outbound{Type: "sync.complete", NodeID: barista.nodeID, At: legacyTimestamp()}
+				if barista.version == "4" {
+					empty := []string{}
+					barrier.ActiveRunIDs = &empty
+				}
+				_ = barista.send(barrier)
 				barista.synchronized = true
 			}
 		case "dispatch":

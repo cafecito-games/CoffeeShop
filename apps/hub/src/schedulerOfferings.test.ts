@@ -506,6 +506,12 @@ test("a disconnected, unsynchronized, version-4, or stale node publishes no elig
     assert.deepEqual(kinds(current, "one"), testCase.expected, testCase.label);
   }
 
+  const realV4Shape = fixture([node("node-alpha", { instanceCapacity: undefined, activeInstances: undefined })], [task("one")]);
+  realV4Shape.connections.set("node-alpha", { protocolVersion: "4", synced: true });
+  runSchedulingPass(realV4Shape.state, context(realV4Shape), at);
+  assert.equal(allocations(realV4Shape).length, 0);
+  assert.ok(kinds(realV4Shape, "one").includes("protocol-version"), "an exact v4 node remains visible as an explicit exclusion");
+
   const stale = fixture([node("node-alpha")], [task("one", { operatingSystems: ["darwin"] })]);
   stale.reports.set("node-alpha", report("node-alpha", [evidence("os", "darwin", { observedAt: "2026-09-20T12:00:00.000Z" })]));
   runSchedulingPass(stale.state, context(stale), at);
