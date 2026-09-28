@@ -282,6 +282,65 @@ func TestComponentInventoryIsRebuiltForEveryAcknowledgedReconnect(t *testing.T) 
 	require.EqualValues(t, 2, builds.Load())
 }
 
+func TestInvalidLocalComponentInventoryDoesNotTakeDownTheRegisteredNode(t *testing.T) {
+	validEntry := protocol.ComponentInventoryEntry{
+		Kind: "harness", ID: "codex-cli", HarnessID: "codex-cli", DeclaredVersion: "1.2.3",
+		InstalledVersions: []string{}, Provenance: "external", Readiness: "ready", DiagnosticCodes: []string{},
+	}
+	for _, testCase := range []struct {
+		name       string
+		nodeID     string
+		components []protocol.ComponentInventoryEntry
+	}{
+		{name: "too many components", nodeID: "node-one", components: make([]protocol.ComponentInventoryEntry, protocol.ComponentInventoryLimit+1)},
+		{name: "oversized component id", nodeID: "node-one", components: []protocol.ComponentInventoryEntry{{
+			Kind: "harness", ID: strings.Repeat("a", 129), HarnessID: validEntry.HarnessID, DeclaredVersion: validEntry.DeclaredVersion,
+			InstalledVersions: []string{}, Provenance: validEntry.Provenance, Readiness: validEntry.Readiness, DiagnosticCodes: []string{},
+		}}},
+		{name: "registration-compatible long node id", nodeID: strings.Repeat("n", 129), components: []protocol.ComponentInventoryEntry{}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			types := make(chan []string, 1)
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				connection, err := websocket.Accept(writer, request, nil)
+				require.NoError(t, err)
+				defer connection.Close(websocket.StatusNormalClosure, "test complete")
+				got := []string{}
+				for {
+					_, data, readErr := connection.Read(request.Context())
+					if readErr != nil {
+						types <- got
+						return
+					}
+					var envelope struct {
+						Type string `json:"type"`
+					}
+					require.NoError(t, json.Unmarshal(data, &envelope))
+					got = append(got, envelope.Type)
+					if envelope.Type == "register" {
+						acknowledgeRegistration(t, request.Context(), connection)
+					}
+					if envelope.Type == "sync.complete" {
+						types <- got
+						return
+					}
+				}
+			}))
+			defer server.Close()
+
+			client := NewClient(config.Config{ControlEndpoint: strings.Replace(server.URL, "http://", "ws://", 1), Concurrency: 1},
+				protocol.ComputeNode{ID: testCase.nodeID}, nil, emptyCapabilityReport).WithComponentInventory(func(context.Context) protocol.ComponentInventoryReport {
+				return protocol.ComponentInventoryReport{NodeID: testCase.nodeID, ObservedAt: "2026-09-28T12:00:00Z", Components: testCase.components}
+			})
+			client.send(protocol.Outbound{Type: "run.completed", RunID: "run-one", Output: "done", At: now()})
+			connected, err := client.runOnce(context.Background())
+			require.Error(t, err)
+			require.True(t, connected)
+			require.Equal(t, []string{"register", "run.completed", "sync.complete"}, <-types)
+		})
+	}
+}
+
 func TestCancelBeforeDispatchCreatesTombstoneAndAcknowledgesDuplicates(t *testing.T) {
 	client := NewClient(config.Config{Concurrency: 1}, protocol.ComputeNode{ID: "node-one"}, nil, emptyCapabilityReport)
 	client.handle(context.Background(), protocol.Inbound{Type: "cancel", RunID: "run-one"})

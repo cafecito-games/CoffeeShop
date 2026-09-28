@@ -197,10 +197,10 @@ func (client *Client) attach(ctx context.Context, connection *websocket.Conn) er
 	if client.buildComponentInventory != nil {
 		report := client.buildComponentInventory(ctx)
 		if err := report.Validate(); err != nil {
-			client.connection = nil
-			return fmt.Errorf("build component inventory: %w", err)
-		}
-		if err := write(ctx, connection, protocol.ComponentInventoryMessage{Type: "component.inventory", Report: report}); err != nil {
+			// Inventory is informational. A locally valid registration must keep serving work even
+			// when its optional operator projection exceeds the narrower remote report contract.
+			log.Printf("component inventory not reported: %v", err)
+		} else if err := write(ctx, connection, protocol.ComponentInventoryMessage{Type: "component.inventory", Report: report}); err != nil {
 			client.connection = nil
 			return err
 		}

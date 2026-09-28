@@ -41,6 +41,8 @@ test("inventory replacement is transactional, monotonic, conflict-safe, and repl
   assert.equal((await apply(report())).kind, "accepted");
   assert.equal(commits, 1);
   assert.equal((await apply(report())).kind, "replayed");
+  const reordered = JSON.parse(`{"components":[{"diagnosticCodes":[],"rollbackAvailable":false,"readiness":"ready","provenance":"external","installedVersions":[],"declaredVersion":"1.2.3","harnessId":"codex-cli","id":"codex-cli","kind":"harness"}],"observedAt":"2026-09-28T12:00:00Z","nodeId":"node-one"}`) as ComponentInventoryReport;
+  assert.equal((await apply(reordered)).kind, "replayed", "JSON member order is not semantic");
   assert.equal((await apply(report("2026-09-28T14:00:00+02:00"))).kind, "replayed",
     "an equivalent timestamp offset normalizes to the accepted instant");
   assert.equal((await apply(report("2026-09-28T11:59:59Z"))).kind, "older");
@@ -78,10 +80,10 @@ test("gateway accepts only the current capability-bearing matching connection", 
   const { store } = await fixture();
   let commits = 0;
   store.onCommit(() => { commits += 1; });
-  const connection = { supportsCapability: true, current: true, nodeId: node.id };
+  const connection = { supportsCapability: true, isCurrent: () => true, nodeId: node.id };
   for (const refused of [
     { ...connection, supportsCapability: false },
-    { ...connection, current: false },
+    { ...connection, isCurrent: () => false },
     { ...connection, nodeId: "" }
   ]) assert.equal((await receiveComponentInventory(store, refused, report())).kind, "ignored");
   assert.equal((await receiveComponentInventory(store, connection, { ...report(), nodeId: "other-node" })).kind, "rejected");
@@ -93,6 +95,26 @@ test("gateway accepts only the current capability-bearing matching connection", 
   assert.equal(commits, 1);
   assert.equal((await receiveComponentInventory(store, connection, report())).kind, "replayed");
   assert.equal(commits, 1, "current-socket replay persists and broadcasts nothing");
+});
+
+test("a socket superseded after the gateway precheck cannot restore cleared inventory", async () => {
+  const { store } = await fixture();
+  await store.transact((state) => { assert.equal(applyComponentInventory(state, report()).changed, true); });
+
+  let current = true;
+  const supersede = store.transact((state) => {
+    current = false;
+    return clearComponentInventory(state, node.id);
+  });
+  const stale = receiveComponentInventory(store, {
+    supportsCapability: true,
+    isCurrent: () => current,
+    nodeId: node.id
+  }, report("2026-09-28T12:00:01Z"));
+
+  await supersede;
+  assert.equal((await stale).kind, "ignored");
+  assert.deepEqual(store.snapshot().componentInventories, [], "stale evidence stays cleared");
 });
 
 test("store load defaults legacy absence and rejects malformed persisted inventories without rewriting", async () => {

@@ -1095,7 +1095,7 @@ wss.on("connection", (socket, request) => {
     } else if (message.type === "component.inventory") {
       const outcome = await receiveComponentInventory(store, {
         supportsCapability: supportsControlCapability(protocolVersion, "component-inventory"),
-        current: isCurrentSocket(), nodeId
+        isCurrent: isCurrentSocket, nodeId
       }, message.report);
       if (outcome.kind === "rejected") console.warn(`rejected component.inventory from ${nodeId}: ${outcome.reason}`);
       if (outcome.changed) broadcast();
