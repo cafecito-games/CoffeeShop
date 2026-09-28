@@ -31,4 +31,8 @@ func TestHubToolVocabularyMatchesSharedFixture(t *testing.T) {
 	require.False(t, IsHubToolName("unknown_tool"))
 	require.True(t, IsHubToolName("publish_preview"))
 	require.False(t, IsDelegationHubToolName("publish_preview"))
+	for _, name := range []string{"spawn_instance", "get_instance", "renew_instance", "release_instance"} {
+		require.True(t, IsHubToolName(name), name)
+		require.True(t, IsDelegationHubToolName(name), name)
+	}
 }

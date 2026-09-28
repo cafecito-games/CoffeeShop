@@ -42,6 +42,25 @@ test("only the approval tools are gated behind the resolve-approvals scope", () 
   assert.deepEqual([...gated].sort(), ["list_approvals", "resolve_approval"]);
 });
 
+test("instance lifecycle definitions expose only intent and the existing orchestrate scope", () => {
+  const spawn = toolDefinitions.spawn_instance.inputSchema;
+  assert.equal(spawn.additionalProperties, false);
+  assert.deepEqual(spawn.required, ["threadId", "idempotencyKey", "requirements"]);
+  assert.deepEqual(Object.keys(spawn.properties).sort(), [
+    "idempotencyKey", "idleTimeoutSeconds", "initialTask", "purpose", "requirements", "threadId"
+  ]);
+  for (const forbidden of ["caller", "creator", "canDelegate", "policy", "connectionId"]) {
+    assert.equal(Object.hasOwn(spawn.properties, forbidden), false);
+  }
+  assert.deepEqual(toolDefinitions.get_instance.inputSchema.required, ["threadId", "instanceId"]);
+  assert.deepEqual(toolDefinitions.renew_instance.inputSchema.required, ["threadId", "instanceId", "idempotencyKey"]);
+  assert.deepEqual(toolDefinitions.release_instance.inputSchema.required, ["threadId", "instanceId", "idempotencyKey", "mode"]);
+  for (const name of ["spawn_instance", "get_instance", "renew_instance", "release_instance"] as const) {
+    assert.equal(toolDefinitions[name].inputSchema.additionalProperties, false, name);
+    assert.equal(requiredScopeForExternalOrchestratorTool(name), "orchestrate", name);
+  }
+});
+
 test("every tool schema stays far inside the hub's argument bound", () => {
   for (const definition of orderedToolDefinitions) {
     const encoded = JSON.stringify(definition.inputSchema);

@@ -12,6 +12,10 @@
     "publish_preview",
     "update_thread",
     "get_execution_inventory",
+    "spawn_instance",
+    "get_instance",
+    "renew_instance",
+    "release_instance",
     "submit_tasks",
     "send_task_message",
     "wait_for_task_events",
@@ -20,6 +24,10 @@
   "delegationToolVocabulary": [
     "delegate_task",
     "get_execution_inventory",
+    "spawn_instance",
+    "get_instance",
+    "renew_instance",
+    "release_instance",
     "submit_tasks"
   ],
   "skills": [
@@ -35,6 +43,10 @@
       "delegationTools": [
         "delegate_task",
         "get_execution_inventory",
+        "get_instance",
+        "release_instance",
+        "renew_instance",
+        "spawn_instance",
         "submit_tasks"
       ]
     },
@@ -66,7 +78,7 @@
     },
     {
       "path": "evaluations/coffeeshop-coordination.json",
-      "sha256": "56643027152492f9b7d985e0a05b1c0aed172d39bf5ab4e89928e6d789296a21"
+      "sha256": "7a6d6a7b091087094592b21ec062c8da7671239775c51c9d7c0a0cf6f2c3dbfe"
     },
     {
       "path": "evaluations/coffeeshop-task-reporting.json",
@@ -78,7 +90,7 @@
     },
     {
       "path": "references/hub-tools.md",
-      "sha256": "b6b6b55ea0c8118ff270591ffd7a6bfeefda448ec7be126fba65b6a73a1eb28f"
+      "sha256": "fb33fef05bb801ecac51d0f93000f26219204510198af4a013b38e1efa9d8aca"
     },
     {
       "path": "skills/coffeeshop-artifacts/SKILL.md",
@@ -86,7 +98,7 @@
     },
     {
       "path": "skills/coffeeshop-coordination/SKILL.md",
-      "sha256": "7ae679f59b2ce2eadbf63b9e1177b8c3611dd0984dfff48e06ad5ea40cb3f3c5"
+      "sha256": "6104ee9471d79a7a2dddf1281848ccbb5ab01183cf5c4866fa6a5f9e70c8eb2b"
     },
     {
       "path": "skills/coffeeshop-task-reporting/SKILL.md",

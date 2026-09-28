@@ -388,13 +388,25 @@ export const hubToolNames = [
   "publish_preview",
   "update_thread",
   "get_execution_inventory",
+  "spawn_instance",
+  "get_instance",
+  "renew_instance",
+  "release_instance",
   "submit_tasks",
   "send_task_message",
   "wait_for_task_events",
   "update_task"
 ] as const;
 export type HubToolName = typeof hubToolNames[number];
-export const delegationHubToolNames: readonly HubToolName[] = ["delegate_task", "get_execution_inventory", "submit_tasks"];
+export const delegationHubToolNames: readonly HubToolName[] = [
+  "delegate_task",
+  "get_execution_inventory",
+  "spawn_instance",
+  "get_instance",
+  "renew_instance",
+  "release_instance",
+  "submit_tasks"
+];
 export const isHubToolName = (value: unknown): value is HubToolName => typeof value === "string" && (hubToolNames as readonly string[]).includes(value);
 
 /**
@@ -2676,6 +2688,10 @@ export const externalOrchestratorToolNames = [
   "send_task_message",
   "update_thread",
   "get_execution_inventory",
+  "spawn_instance",
+  "get_instance",
+  "renew_instance",
+  "release_instance",
   "list_approvals",
   "resolve_approval"
 ] as const;
@@ -3005,6 +3021,35 @@ export interface ListInstancesRequest { threadId: string; includeTerminal?: bool
 export interface ListInstancesResult { instances: AgentInstance[]; allocations: InstanceAllocation[] }
 export interface GetInstanceRequest { threadId: string; instanceId: string }
 
+/** Closed public arguments accepted by the run-scoped and external instance-tool adapters. */
+export interface SpawnInstanceArguments {
+  idempotencyKey: string;
+  requirements: ExecutionRequirements;
+  purpose?: InstancePurpose;
+  idleTimeoutSeconds?: number;
+  initialTask?: InstanceInitialTask;
+}
+export interface GetInstanceArguments { instanceId: string }
+export interface RenewInstanceArguments { instanceId: string; idempotencyKey: string; idleTimeoutSeconds?: number }
+export interface ReleaseInstanceArguments { instanceId: string; idempotencyKey: string; mode: InstanceReleaseMode }
+export type InstanceToolArguments =
+  | SpawnInstanceArguments
+  | GetInstanceArguments
+  | RenewInstanceArguments
+  | ReleaseInstanceArguments;
+
+/** Public lifecycle views omit authority, workspace, provider-session, and historical allocation data. */
+export type ToolSafeInstance = Omit<AgentInstance, "creator" | "purpose"> & {
+  purpose?: Omit<InstancePurpose, "instructions">;
+};
+export type ToolSafeInstanceAllocation = Omit<InstanceAllocation, "workspace">;
+export interface InstanceToolResult {
+  instance: ToolSafeInstance;
+  allocation?: ToolSafeInstanceAllocation;
+  initialTaskId?: string;
+  replayed?: boolean;
+}
+
 const instanceID = (value: unknown): value is string =>
   isBoundedString(value, instanceLimits.identifierBytes) && /^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(value);
 const instanceCount = (value: unknown): value is number => isNonNegativeInteger(value) && value <= instanceLimits.count;
@@ -3174,6 +3219,11 @@ export function validateInstanceLifecycleRequest(value: unknown): Validation<Ins
     if (!hasOnlyKeys(value, ["operation", "threadId", "instanceId", "idempotency", "idleTimeoutSeconds"]) || !instanceID(value.instanceId) || !isOptional(value.idleTimeoutSeconds, idleTimeout)) return reject("invalid renew instance request");
   } else return reject("unknown instance lifecycle operation");
   return accept(value as unknown as InstanceLifecycleRequest);
+}
+export function validateGetInstanceRequest(value: unknown): Validation<GetInstanceRequest> {
+  if (!isRecord(value) || !hasOnlyKeys(value, ["threadId", "instanceId"])
+    || !instanceID(value.threadId) || !instanceID(value.instanceId)) return reject("invalid get instance request");
+  return accept(value as unknown as GetInstanceRequest);
 }
 /** Stable semantic digest input; caller and target identities participate, timestamps do not.
  * Requirement arrays are sets; preference arrays preserve ranking. Hashing/storage belongs to hub.

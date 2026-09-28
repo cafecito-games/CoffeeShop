@@ -276,10 +276,10 @@ export interface TaskBatchOptions {
   /** Source runs at or beyond this depth cannot submit. */
   maximumSourceDepth?: number;
   /**
-   * Extra policy checked against the authoritative state before a new batch is created; never for a
-   * replay. It names the submitting run, so it is only available to a hub-hosted submitter.
+   * Extra policy checked against the authoritative source and state before a new batch is created;
+   * never for a replay. External sources have no run but still carry their authorized thread.
    */
-  assertAcceptable?: (state: Readonly<State>, sourceRunId: string) => void;
+  assertAcceptable?: (state: Readonly<State>, source: { threadId: string; run?: Run }) => void;
 }
 
 function findLocalCycle(batch: NormalizedTaskBatch) {
@@ -374,8 +374,7 @@ function planTaskBatch(state: Readonly<State>, callerSource: CallerSource, batch
     if (prior + batch.tasks.length > options.maximumSourceTasks) throw new CoordinationError("fanout_limit", "The task delegation limit has been reached");
   }
   if (options.assertAcceptable !== undefined) {
-    if (source.run === undefined) throw new CoordinationError("forbidden", "This submission path requires a hub-hosted source run");
-    options.assertAcceptable(state, source.run.id);
+    options.assertAcceptable(state, { threadId: source.threadId, ...(source.run === undefined ? {} : { run: source.run }) });
   }
   const keys = new Set(batch.tasks.map((task) => task.key));
   for (const [key, override] of Object.entries(options.placementOverrides ?? {})) {

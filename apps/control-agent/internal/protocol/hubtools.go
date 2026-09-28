@@ -12,6 +12,10 @@ var HubToolNames = []string{
 	"publish_preview",
 	"update_thread",
 	"get_execution_inventory",
+	"spawn_instance",
+	"get_instance",
+	"renew_instance",
+	"release_instance",
 	"submit_tasks",
 	"send_task_message",
 	"wait_for_task_events",
@@ -19,7 +23,15 @@ var HubToolNames = []string{
 }
 
 // DelegationHubToolNames are listed and served only to agents allowed to delegate.
-var DelegationHubToolNames = []string{"delegate_task", "get_execution_inventory", "submit_tasks"}
+var DelegationHubToolNames = []string{
+	"delegate_task",
+	"get_execution_inventory",
+	"spawn_instance",
+	"get_instance",
+	"renew_instance",
+	"release_instance",
+	"submit_tasks",
+}
 
 // TaskMessageKinds mirrors taskMessageKinds.
 var TaskMessageKinds = []string{"question", "answer", "instruction", "progress", "result", "note"}

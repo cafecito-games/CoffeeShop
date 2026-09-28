@@ -3,7 +3,9 @@ import { registerPreview } from "./artifactPreviews.js";
 import { createArtifact, delegateTask, submitTasks, taskContext, updateTask } from "./coordination.js";
 import { CoordinationError } from "./coordinationError.js";
 import { executionInventory, type InventoryEnvironment } from "./executionInventory.js";
-import { sendTaskMessage, TaskEventWaiters } from "./mailbox.js";
+import { applyInstanceToolForSource, getInstanceForSource } from "./instanceTools.js";
+import { maintainInstanceLifecycle } from "./instances.js";
+import { runSource, sendTaskMessage, TaskEventWaiters } from "./mailbox.js";
 import { orchestratorCursorAdvances, persistOrchestratorCursor } from "./orchestratorInbox.js";
 import type { State, Store } from "./store.js";
 import { updateThreadForRun } from "./threads.js";
@@ -66,6 +68,31 @@ export function createHubToolHandler(environment: HubToolEnvironment) {
         return store.read((state) => structuredClone(taskContext(state, sourceRunId, values)));
       case "get_execution_inventory":
         return store.read((state) => structuredClone(executionInventory(state, sourceRunId, values, { ...environment.inventory(), now: new Date().toISOString() })));
+      case "get_instance":
+        return getInstanceForSource(store, runSource(sourceRunId), values);
+      case "spawn_instance": {
+        const result = await applyInstanceToolForSource(store, runSource(sourceRunId), operation, values, environment.now?.() ?? new Date().toISOString());
+        if (result.replayed === false) {
+          environment.broadcast();
+          await settleScheduling();
+        }
+        return result;
+      }
+      case "renew_instance": {
+        const result = await applyInstanceToolForSource(store, runSource(sourceRunId), operation, values, environment.now?.() ?? new Date().toISOString());
+        if (result.replayed === false) environment.broadcast();
+        return result;
+      }
+      case "release_instance": {
+        const at = environment.now?.() ?? new Date().toISOString();
+        const result = await applyInstanceToolForSource(store, runSource(sourceRunId), operation, values, at);
+        if (result.replayed === false) {
+          await maintainInstanceLifecycle(store, at);
+          environment.broadcast();
+          await settleScheduling();
+        }
+        return result;
+      }
       case "submit_tasks": {
         const result = await submitTasks(store, sourceRunId, values);
         if (result.created) {

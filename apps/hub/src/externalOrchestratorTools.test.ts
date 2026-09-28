@@ -432,6 +432,8 @@ test("every tool the hub serves is reachable with a well-formed call", async () 
   const { peer, threadId } = await attached(context);
   const submitted = resultOf(await call(peer, "submit_tasks", { threadId, idempotencyKey: "batch-0", tasks: [oneTask("seed")] }));
   const taskId = submitted.taskIdsByKey.seed as string;
+  const spawnArguments = { threadId, idempotencyKey: "coverage-spawn", requirements: {} };
+  const instanceId = resultOf(await call(peer, "spawn_instance", spawnArguments)).instance.id as string;
   // `detach_thread` is called last: once it runs, every thread-scoped tool answers `not_attached`.
   const calls: Array<[ExternalOrchestratorToolName, Record<string, unknown>]> = [
     ["create_thread", { objective: "Another thread" }],
@@ -440,6 +442,10 @@ test("every tool the hub serves is reachable with a well-formed call", async () 
     ["get_thread_context", { threadId }],
     ["get_thread_events", { threadId }],
     ["get_execution_inventory", {}],
+    ["spawn_instance", spawnArguments],
+    ["get_instance", { threadId, instanceId }],
+    ["renew_instance", { threadId, instanceId, idempotencyKey: "coverage-renew" }],
+    ["release_instance", { threadId, instanceId, idempotencyKey: "coverage-release", mode: "cancel" }],
     ["submit_tasks", { threadId, idempotencyKey: "batch-1", tasks: [oneTask("one")] }],
     ["send_task_message", { threadId, idempotencyKey: "message-1", recipient: { type: "task", taskId }, kind: "note", body: "hello" }],
     ["update_task", { threadId, taskId, idempotencyKey: "update-1", progress: "halfway" }],

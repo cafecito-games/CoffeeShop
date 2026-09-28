@@ -456,7 +456,8 @@ export async function applyInstanceLifecycle(
   store: Store,
   caller: InstanceCreator,
   request: InstanceLifecycleRequest,
-  at = new Date().toISOString()
+  at = new Date().toISOString(),
+  options: { assertAuthorized?: (state: Readonly<State>) => void } = {}
 ): Promise<InstanceLifecycleResult> {
   const validated = validateInstanceLifecycleRequest(request);
   if (!validated.ok) throw new CoordinationError("invalid_arguments", validated.reason);
@@ -467,6 +468,7 @@ export async function applyInstanceLifecycle(
   }
   let result: InstanceLifecycleResult | undefined;
   await store.transact((state) => {
+    options.assertAuthorized?.(state);
     const thread = authorizeInstanceThread(state, caller, request.threadId);
     const prior = (state.instanceLifecycleReceipts ?? []).find((receipt) => receiptKeyMatches(receipt, request.threadId, sourceKey, request.idempotency.key));
     if (prior) {

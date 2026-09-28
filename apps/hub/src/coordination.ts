@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import {
   artifactKinds,
+  instanceLimits,
   isTerminalTaskStatus,
   orchestrationToolLimits,
   previewBundleArtifactKind,
@@ -11,7 +12,7 @@ import {
   type TaskProgress
 } from "@coffee-shop/protocol";
 import { CoordinationError } from "./coordinationError.js";
-import { listThreadInstances } from "./instances.js";
+import { listThreadInstances, nonTerminalInstanceStatuses } from "./instances.js";
 import {
   assertVisibleArtifacts,
   callerAgent,
@@ -36,6 +37,14 @@ export { CoordinationError } from "./coordinationError.js";
 
 export const maxDelegationDepth = 3;
 export const maxChildrenPerRun = 4;
+
+function configuredAgentDirectory(state: Readonly<State>, caller: ReturnType<typeof resolveCaller>) {
+  const callingAgent = callerAgent(caller);
+  if (!callerCanDelegate(caller) || callingAgent === undefined) return [];
+  return state.agents
+    .filter((agent) => agent.id !== callingAgent.id)
+    .map((agent) => ({ id: agent.id, title: agent.title, state: agent.state }));
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -119,7 +128,6 @@ export function taskContext(state: Readonly<State>, sourceRunId: string, argumen
   const caller = resolveCaller(state, sourceRunId);
   const { run: callingRun } = requireCallerRun(caller, "get_task_context is served only to a hub-hosted run");
   const callerDelegates = callerCanDelegate(caller);
-  const callingAgent = callerAgent(caller);
   const callingInstance = callerInstance(caller);
   const visibility = taskVisibility(state, caller);
   const runs = new Map(state.runs.map((run) => [run.id, run]));
@@ -203,9 +211,7 @@ export function taskContext(state: Readonly<State>, sourceRunId: string, argumen
      * principals it may actually coordinate with — and never the global configured roster. A legacy
      * agent caller keeps seeing the configured roster it has always seen.
      */
-    availableAgents: callerDelegates && callingAgent !== undefined ? state.agents
-      .filter((agent) => agent.id !== callingAgent.id)
-      .map((agent) => ({ id: agent.id, title: agent.title, state: agent.state })) : [],
+    availableAgents: configuredAgentDirectory(state, caller),
     availableInstances: callerDelegates && callingInstance !== undefined
       ? listThreadInstances(state, caller.thread.id, false).instances
         .filter((instance) => instance.id !== callingInstance.instance.id)
@@ -228,12 +234,33 @@ export function taskContext(state: Readonly<State>, sourceRunId: string, argumen
 
 function normalizePin(value: unknown, context: string): PlacementOverride {
   if (!isRecord(value)) throw new CoordinationError("invalid_arguments", `${context} must be an object`);
-  onlyKeys(value, ["agentId", "nodeId"], context);
+  onlyKeys(value, ["instanceId", "agentId", "nodeId"], context);
   const pin: PlacementOverride = { authorizedBy: "policy" };
+  if (value.instanceId !== undefined) pin.instanceId = requiredString(value, "instanceId", instanceLimits.identifierBytes);
   if (value.agentId !== undefined) pin.agentId = requiredString(value, "agentId", orchestrationToolLimits.idempotencyKeyLength);
   if (value.nodeId !== undefined) pin.nodeId = requiredString(value, "nodeId", orchestrationToolLimits.idempotencyKeyLength);
-  if (pin.agentId === undefined && pin.nodeId === undefined) throw new CoordinationError("invalid_arguments", `${context} must name an agentId or nodeId`);
+  if (pin.instanceId === undefined && pin.agentId === undefined && pin.nodeId === undefined) {
+    throw new CoordinationError("invalid_arguments", `${context} must name an instanceId, agentId, or nodeId`);
+  }
+  if (pin.instanceId !== undefined && (pin.agentId !== undefined || pin.nodeId !== undefined)) {
+    throw new CoordinationError("invalid_arguments", `${context} cannot combine an instanceId with an agentId or nodeId`);
+  }
   return pin;
+}
+
+const unavailablePinnedInstance = () => new CoordinationError("invalid_target", "The pinned instance is not available in this thread");
+
+function assertAcceptablePins(
+  state: Readonly<State>,
+  source: { threadId: string },
+  placementOverrides: Readonly<Record<string, PlacementOverride>>
+) {
+  for (const override of Object.values(placementOverrides)) {
+    if (override.instanceId === undefined) continue;
+    const instance = (state.instances ?? []).find((item) =>
+      item.id === override.instanceId && item.threadId === source.threadId);
+    if (instance === undefined || !nonTerminalInstanceStatuses.includes(instance.status)) throw unavailablePinnedInstance();
+  }
 }
 
 /**
@@ -269,6 +296,7 @@ export async function submitTasksForSource(store: Store, source: CallerSource, a
   }
   return submitTaskBatchForSource(store, source, batch, at, {
     placementOverrides,
+    assertAcceptable: (state, submissionSource) => assertAcceptablePins(state, submissionSource, placementOverrides),
     ...(source.kind === "run" ? { maximumSourceTasks: orchestrationToolLimits.tasksPerSourceRun, maximumSourceDepth: maxDelegationDepth } : {})
   });
 }
@@ -289,6 +317,8 @@ const ineligibleTarget = () => new CoordinationError("target_ineligible", "The t
  * A target that is only offline, busy, or awaiting fresh evidence stays eligible and is queued.
  */
 function assertEligibleTarget(state: Readonly<State>, sourceRunId: string, targetAgentId: string, probe: Task) {
+  const caller = resolveCaller(state, sourceRunId);
+  if (!configuredAgentDirectory(state, caller).some((entry) => entry.id === targetAgentId)) throw ineligibleTarget();
   const source = state.runs.find((run) => run.id === sourceRunId);
   const target = state.agents.find((agent) => agent.id === targetAgentId);
   if (!source || !target || target.id === source.agentId) throw ineligibleTarget();
@@ -351,7 +381,10 @@ export async function delegateTask(store: Store, sourceRunId: string, argumentsV
     placementOverrides: { delegated: placementOverride },
     maximumSourceTasks: maxChildrenPerRun,
     maximumSourceDepth: maxDelegationDepth,
-    assertAcceptable: (state, runId) => assertEligibleTarget(state, runId, targetAgentId, probe)
+    assertAcceptable: (state, source) => {
+      if (source.run === undefined) throw new CoordinationError("forbidden", "delegate_task requires a hub-hosted source run");
+      assertEligibleTarget(state, source.run.id, targetAgentId, probe);
+    }
   });
   const task = submitted.tasks[0];
   return { taskId: task.id, status: task.status, agentId: targetAgentId, created: submitted.created, task };
