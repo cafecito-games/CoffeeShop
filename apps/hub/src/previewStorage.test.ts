@@ -21,6 +21,28 @@ const identity = {
   entrypoint: "site/index.html"
 };
 
+const producerManifestUrl = new URL("../test-fixtures/preview-v1/manifest.json", import.meta.url);
+const producerContentUrl = new URL("../test-fixtures/preview-v1/content/", import.meta.url);
+
+async function publishProducerFixture(storage: PreviewStorage) {
+  const manifest = JSON.parse(await readFile(producerManifestUrl, "utf8")) as PreparedPreviewManifest;
+  const workspace = await storage.createPreparationWorkspace({
+    previewId: manifest.previewId,
+    artifactId: manifest.artifactId,
+    artifactSha256: manifest.artifactSha256,
+    entrypoint: manifest.entrypoint,
+    processingGeneration: 1
+  });
+  for (const file of manifest.files) {
+    const bytes = await readFile(new URL(file.path, producerContentUrl));
+    const path = join(workspace.contentDirectory, ...file.path.split("/"));
+    await mkdir(join(path, ".."), { recursive: true, mode: 0o700 });
+    await writeFile(path, bytes, { mode: 0o600 });
+  }
+  await storage.publishPrepared(workspace, manifest, 239);
+  return manifest;
+}
+
 test("streams an artifact into an immutable exclusive blob and converges exact replay", async () => {
   const directory = await mkdtemp(join(tmpdir(), "coffee-shop-preview-storage-"));
   const storage = new PreviewStorage(directory);
@@ -155,4 +177,46 @@ test("symlinked blobs and incomplete prepared targets are conflicts, never repla
     (error: unknown) => error instanceof PreviewStorageError && error.code === "storage-conflict"
   );
   assert.equal((await lstat(target)).isDirectory(), true);
+});
+
+test("reads producer-derived prepared bytes only through the exact canonical manifest entry", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "coffee-shop-preview-storage-"));
+  const storage = new PreviewStorage(directory);
+  const manifest = await publishProducerFixture(storage);
+  const expected = await readFile(new URL("site/index.html", producerContentUrl));
+
+  const result = await storage.readPreparedFile(manifest, 239, "site/index.html");
+  assert.deepEqual(result.bytes, expected);
+  assert.deepEqual(result.file, manifest.files.find((file) => file.path === "site/index.html"));
+  assert.deepEqual(result.manifest, manifest);
+  await assert.rejects(
+    storage.readPreparedFile(manifest, 239, "site/missing.html"),
+    (error: unknown) => error instanceof PreviewStorageError && error.code === "storage-conflict"
+  );
+  await assert.rejects(
+    storage.readPreparedFile(manifest, 239, "site/../site/index.html"),
+    (error: unknown) => error instanceof PreviewStorageError && error.code === "storage-conflict"
+  );
+});
+
+test("prepared reads deny changed bytes, links, permissions, and extra tree content", async () => {
+  for (const drift of ["bytes", "link", "permissions", "extra"] as const) {
+    const directory = await mkdtemp(join(tmpdir(), `coffee-shop-preview-storage-${drift}-`));
+    const storage = new PreviewStorage(directory);
+    const manifest = await publishProducerFixture(storage);
+    const contentRoot = join(directory, "prepared-previews", manifest.previewId, manifest.artifactSha256, "content");
+    const target = join(contentRoot, "site", "index.html");
+    if (drift === "bytes") await writeFile(target, "changed", { mode: 0o600 });
+    if (drift === "link") {
+      await import("node:fs/promises").then(({ unlink }) => unlink(target));
+      await symlink("app.js", target);
+    }
+    if (drift === "permissions") await chmod(target, 0o644);
+    if (drift === "extra") await writeFile(join(contentRoot, "site", "extra.txt"), "extra", { mode: 0o600 });
+    await assert.rejects(
+      storage.readPreparedFile(manifest, 239, "site/index.html"),
+      (error: unknown) => error instanceof PreviewStorageError && error.code === "storage-conflict",
+      drift
+    );
+  }
 });
