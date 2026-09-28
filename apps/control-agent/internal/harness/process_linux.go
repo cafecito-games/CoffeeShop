@@ -1,4 +1,4 @@
-//go:build !windows && !linux
+//go:build linux
 
 package harness
 
@@ -10,8 +10,11 @@ import (
 	"time"
 )
 
+// Linux can additionally bind a provider's lifetime to Barista's. Setpgid keeps ordinary
+// cancellation scoped to the provider tree; Pdeathsig closes the SIGKILL/crash boundary where the
+// parent has no opportunity to run command.Cancel.
 func configureProcessCancellation(command *exec.Cmd) {
-	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
 	command.Cancel = func() error {
 		if command.Process == nil {
 			return os.ErrProcessDone

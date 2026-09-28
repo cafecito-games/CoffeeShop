@@ -3,10 +3,12 @@
 package systemtest
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/capabilitypack"
@@ -23,7 +25,7 @@ func buildPackUpgradeFixture(t *testing.T, root, version string) packUpgradeFixt
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != "1.1.0" {
+	if version != "1.2.0" {
 		var authored map[string]any
 		if err := json.Unmarshal(tree[capabilitypack.PackManifestPath], &authored); err != nil {
 			t.Fatal(err)
@@ -92,13 +94,13 @@ func requireLivePackVersion(t *testing.T, cluster *environment, nodeID, version 
 // producer-built archives. Selection changes are ledger-only until a fresh daemon adopts them.
 func TestCapabilityPackUpgradeRestartAndRollback(t *testing.T) {
 	cluster := newEnvironment(t, environmentOptions{})
-	node := cluster.prepareNode(nodeOptions{id: "pack-upgrade", labels: []string{"pack-upgrade"}, concurrency: 1, instanceCapacity: integer(1)})
+	node := cluster.prepareNode(nodeOptions{id: "pack-upgrade", labels: []string{"pack-upgrade"}, concurrency: 2, instanceCapacity: integer(3)})
 	fixtures := filepath.Join(cluster.root, "pack-upgrade-fixtures")
 	if err := os.MkdirAll(fixtures, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	packA := buildPackUpgradeFixture(t, fixtures, "1.1.0")
-	packB := buildPackUpgradeFixture(t, fixtures, "1.1.1")
+	packA := buildPackUpgradeFixture(t, fixtures, "1.2.0")
+	packB := buildPackUpgradeFixture(t, fixtures, "1.2.1")
 	installPackCLI(t, node, packA)
 	requireSetupSuccess(t, activatePackCLI(t, node, packA), "activate pack A")
 	activationA := bytesIfPresent(t, filepath.Join(node.dataRoot, "activation.json"))
@@ -109,11 +111,82 @@ func TestCapabilityPackUpgradeRestartAndRollback(t *testing.T) {
 	node.options.componentManifest = packA.manifest
 	node.start()
 	requireLivePackVersion(t, cluster, node.options.id, packA.version)
+	clientID, secret := cluster.mintOrchestratorClient("Pack upgrade", "orchestrate")
+	bridge := cluster.startBridge("pack-upgrade", clientID, secret)
+	created := bridge.mustCallTool("create_thread", map[string]any{"title": "Pack upgrade", "objective": "Prove A/B/A run identity and restart-only adoption."})
+	threadID := text(object(created, "thread"), "id")
+	type packRun struct{ taskID, runID, instanceID string }
+	startRun := func(title, gate string) packRun {
+		instructions := script(t, step{Message: "pack run " + title})
+		if gate != "" {
+			instructions = script(t, step{Gate: gate}, step{Message: "pack run " + title})
+		}
+		spawned := bridge.mustCallTool("spawn_instance", map[string]any{
+			"threadId": threadID, "idempotencyKey": title,
+			"requirements": evaluationRequirementsAt("coffeeshop-artifacts", "claude-cli", "pack-upgrade"),
+			"initialTask":  map[string]any{"title": title, "instructions": instructions},
+		})
+		result := packRun{taskID: text(spawned, "initialTaskId"), instanceID: text(object(spawned, "instance"), "id")}
+		cluster.eventually(title+" started", func(current snapshot) (bool, string) {
+			item, known := current.task(result.taskID)
+			if !known {
+				return false, "task is absent"
+			}
+			run, ran := current.latestAttempt(item)
+			if ran {
+				result.runID = run.ID
+			}
+			if gate == "" {
+				return ran && item.Status == "completed", "task is not complete"
+			}
+			return ran && run.Status == "running", "task is not held"
+		})
+		return result
+	}
+	requireRunVersion := func(candidate packRun, version string) {
+		current := cluster.hub.snapshot()
+		item, known := current.task(candidate.taskID)
+		run, ran := current.run(candidate.runID)
+		allocation, allocated := allocationFor(current, candidate.instanceID)
+		if !known || !ran || !allocated || allocation.ExpectedCapabilityPack == nil || run.TransportSelection == nil || run.TransportSelection.EffectiveCapabilityPack == nil ||
+			allocation.ExpectedCapabilityPack.Version != version || run.TransportSelection.EffectiveCapabilityPack.Version != version ||
+			!slices.Equal(allocation.ExpectedCapabilityPack.RequiredSkills, []string{"coffeeshop-artifacts"}) {
+			t.Fatalf("%s lacks exact %s allocation/effective proof: task=%+v allocation=%+v run=%+v", candidate.taskID, version, item, allocation, run)
+		}
+	}
+
+	heldA := startRun("pack-A-held", "pack-A-held")
+	requireRunVersion(heldA, packA.version)
 
 	installPackCLI(t, node, packB)
+	activationBeforeTamper := bytesIfPresent(t, filepath.Join(node.dataRoot, "activation.json"))
+	if err := os.WriteFile(filepath.Join(node.dataRoot, "activation.json"), []byte("{broken"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	requireSetupFailure(t, activatePackCLI(t, node, packB), "refuse malformed activation ledger")
+	if err := os.WriteFile(filepath.Join(node.dataRoot, "activation.json"), activationBeforeTamper, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	targetB := filepath.Join(node.dataRoot, "capability-packs", "coffee-shop", systemCapabilityPackID, packB.version, "coffeeshop-capability-pack.tar.gz")
+	originalB := bytesIfPresent(t, targetB)
+	if err := os.WriteFile(targetB, []byte("tampered capability pack bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	requireSetupFailure(t, activatePackCLI(t, node, packB), "refuse tampered pack bytes")
+	if !bytes.Equal(activationBeforeTamper, bytesIfPresent(t, filepath.Join(node.dataRoot, "activation.json"))) {
+		t.Fatal("tampered pack activation mutated the selection ledger")
+	}
+	if err := os.WriteFile(targetB, originalB, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	requireSetupSuccess(t, activatePackCLI(t, node, packB), "activate pack B")
-	node.proxy.sever()
+	requireRunVersion(heldA, packA.version)
 	requireLivePackVersion(t, cluster, node.options.id, packA.version)
+	cluster.openGate("pack-A-held")
+	cluster.eventually("in-flight A completion", func(current snapshot) (bool, string) {
+		item, known := current.task(heldA.taskID)
+		return known && item.Status == "completed", "held A run is not complete"
+	})
 	node.stop(true)
 	node.options.componentManifest = packB.manifest
 	node.start()
@@ -121,9 +194,10 @@ func TestCapabilityPackUpgradeRestartAndRollback(t *testing.T) {
 	if b.RollbackVersion != packA.version || !b.RollbackAvailable {
 		t.Fatalf("pack B omitted rollback selection: %+v", b)
 	}
+	runB := startRun("pack-B-run", "")
+	requireRunVersion(runB, packB.version)
 
 	requireSetupSuccess(t, rollbackPackCLI(t, node, packB), "rollback pack B to A")
-	node.proxy.sever()
 	requireLivePackVersion(t, cluster, node.options.id, packB.version)
 	node.stop(true)
 	node.options.componentManifest = packA.manifest
@@ -132,4 +206,6 @@ func TestCapabilityPackUpgradeRestartAndRollback(t *testing.T) {
 	if a.RollbackAvailable || a.RollbackVersion != "" {
 		t.Fatalf("rolled-back pack retained an oscillating rollback target: %+v", a)
 	}
+	runA2 := startRun("pack-A-rollback-run", "")
+	requireRunVersion(runA2, packA.version)
 }

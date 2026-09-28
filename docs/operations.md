@@ -209,7 +209,7 @@ Rollback verifies the retained bytes again and consumes the retained target; it 
 
 ### Installing and verifying the canonical capability pack
 
-Build from the tagged checkout, retain the printed checksum, and use the same manifest for every setup command:
+Build from the tagged checkout, retain the printed checksum, and use the same manifest for every setup command. The canonical `components.json` describes all five managed components: on a fresh data root, first plan/apply the four harness and adapter prerequisites with every manual artifact/checksum named by that plan, following the component-specific commands in `apps/control-agent/internal/setup/manifest/README.md`. The focused sequence below is exact only once those prerequisites are already owned, so the resulting plan contains the capability pack as its sole install operation; `setup apply` deliberately refuses a partially supplied fresh-root plan.
 
 ```bash
 task capability-pack:build
@@ -219,11 +219,13 @@ barista setup apply --data-root <path> --manifest components.json --plan pack-pl
   --manual-artifact coffeeshop-capability-pack=$PWD/dist/capability-pack/coffeeshop-capability-pack.tar.gz \
   --manual-checksum coffeeshop-capability-pack=<sha256>
 barista setup activate --data-root <path> --manifest components.json \
-  --kind capability-pack --id coffeeshop-capability-pack --version 1.1.0
+  --kind capability-pack --id coffeeshop-capability-pack --version 1.2.0
 barista doctor --json --data-root <path> --manifest components.json
 ```
 
 Activation does not hot-adopt. Restart Barista, then require a fresh current-socket readiness report and a new run whose allocation expectation and effective-pack proof agree. For an upgrade, repeat plan/apply/activate with the next manifest, restart, and verify. To back out, run the following with the manifest that selected the current version, then restart again:
+
+The canonical 1.2.0 source tree was built twice independently with the repository packer and compared byte-for-byte. Both 13,803-byte archives had SHA-256 `8d34308e592a110864bf6d068c4c32e44ba9c8b4ae9bb325bf06791c2b5f1d0a`; release automation must reproduce that digest from the tagged source before supplying the manual checksum.
 
 ```bash
 barista setup rollback --data-root <path> --manifest components-next.json \

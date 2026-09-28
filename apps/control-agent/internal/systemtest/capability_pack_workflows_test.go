@@ -89,78 +89,195 @@ func missingEvaluationTool(skillID string, evaluation capabilitypack.EvaluationC
 	}
 }
 
-// evaluationSteps is intentionally exhaustive over producer identity. It supplies executable state
-// and actions, but never duplicates the producer-owned prompt, class, activation, or outcome.
+// evaluationSteps is a closed executable registry keyed by the producer-owned skill and case IDs.
+// An added or renamed row is fatal until its exact behavior is deliberately modeled here.
 func evaluationSteps(t *testing.T, skillID string, evaluation capabilitypack.EvaluationCase) []step {
 	t.Helper()
 	message := fmt.Sprintf("evaluation %s/%s: %s", skillID, evaluation.ID, evaluation.Outcome)
-	switch evaluation.Outcome {
-	case capabilitypack.OutcomeNoActivation, capabilitypack.OutcomeRequestMissingInput, capabilitypack.OutcomeReportUnsupportedCapability:
+	key := strings.NewReplacer("_", "-", "/", "-").Replace(evaluation.ID) + "-{{harness}}"
+	context := step{Call: "get_task_context", Arguments: map[string]any{}, As: "context"}
+	messageOnly := func(outcome string) []step {
+		if evaluation.Outcome != outcome {
+			t.Fatalf("%s/%s outcome=%s want=%s", skillID, evaluation.ID, evaluation.Outcome, outcome)
+		}
 		return []step{{Message: message}}
-	case capabilitypack.OutcomeReportRefusal:
-		context := step{Call: "get_task_context", Arguments: map[string]any{}, As: "context"}
-		var refused step
-		switch skillID {
-		case "coffeeshop-artifacts":
-			refused = step{Call: "post_artifact", Arguments: map[string]any{"relativePath": "../outside", "title": "refused", "kind": "report", "mediaType": "text/plain", "idempotencyKey": "eval-refused-{{harness}}"}, AllowError: true, As: "refusal"}
-		case "coffeeshop-preview":
-			refused = step{Call: "publish_preview", Arguments: map[string]any{"relativePath": "../outside", "entrypoint": "index.html", "title": "refused", "idempotencyKey": "eval-refused-{{harness}}"}, AllowError: true, As: "refusal"}
-		case "coffeeshop-coordination":
-			refused = step{Call: "get_instance", Arguments: map[string]any{"instanceId": "instance-outside-authority"}, AllowError: true, As: "refusal"}
-		case "coffeeshop-task-reporting":
-			refused = step{Call: "update_thread", Arguments: map[string]any{"status": "completed"}, AllowError: true, As: "refusal"}
-		default:
-			t.Fatalf("no refusal scenario for installed skill %s", skillID)
-		}
-		return []step{context, refused, {Message: message}}
-	case capabilitypack.OutcomeFollowWorkflow:
-		key := strings.NewReplacer("_", "-", "/", "-").Replace(evaluation.ID) + "-{{harness}}"
-		switch skillID {
-		case "coffeeshop-coordination":
-			return []step{
-				{Call: "get_task_context", Arguments: map[string]any{}, As: "context"},
-				{Call: "get_execution_inventory", Arguments: map[string]any{}, As: "inventory"},
-				{Call: "wait_for_task_events", Arguments: map[string]any{"timeoutMilliseconds": 0, "maximumEvents": 1}, As: "events"},
-				{Message: message},
-			}
-		case "coffeeshop-artifacts":
-			path := filepath.ToSlash(filepath.Join("evaluation", key+".txt"))
-			return []step{
-				{WriteFile: &writeFile{Path: path, Content: "producer-derived artifact\n"}},
-				{Call: "get_task_context", Arguments: map[string]any{}, As: "context"},
-				{Call: "post_artifact", Arguments: map[string]any{"relativePath": path, "title": key, "kind": "report", "mediaType": "text/plain", "idempotencyKey": "artifact-" + key}, As: "artifact"},
-				{Call: "update_task", Arguments: map[string]any{"idempotencyKey": "attach-" + key, "completion": map[string]any{"summary": message, "artifactIds": []string{"{{artifact.id}}"}}}, As: "updated"},
-				{Message: message},
-			}
-		case "coffeeshop-task-reporting":
-			return []step{
-				{Call: "get_task_context", Arguments: map[string]any{}, As: "context"},
-				{Call: "update_task", Arguments: map[string]any{"idempotencyKey": "progress-" + key, "progress": message}, As: "updated"},
-				{Call: "update_thread", Arguments: map[string]any{"summary": message}, AllowError: true, As: "thread"},
-				{Message: message},
-			}
-		case "coffeeshop-preview":
-			root := filepath.ToSlash(filepath.Join("preview", key))
-			steps := []step{
-				{WriteFile: &writeFile{Path: filepath.ToSlash(filepath.Join(root, "index.html")), Content: "<!doctype html><title>evaluation</title>"}},
-				{Call: "get_task_context", Arguments: map[string]any{}, As: "context"},
-				{Call: "publish_preview", Arguments: map[string]any{"relativePath": root, "entrypoint": "index.html", "title": key, "idempotencyKey": "preview-" + key}, As: "preview"},
-			}
-			if evaluation.ID == "edge-failed" {
-				steps[2].AllowError = true
-				return append(steps, step{Message: message})
-			}
-			return append(steps,
-				step{Call: "update_task", Arguments: map[string]any{"idempotencyKey": "attach-" + key, "completion": map[string]any{"summary": message, "artifactIds": []string{"{{preview.artifact.id}}"}}}, As: "updated"},
-				step{Message: message},
-			)
-		default:
-			t.Fatalf("no workflow scenario for installed skill %s", skillID)
-		}
-	default:
-		t.Fatalf("no executable scenario for %s/%s outcome %s", skillID, evaluation.ID, evaluation.Outcome)
 	}
-	return nil
+	workflow := func(steps ...step) []step {
+		if evaluation.Outcome != capabilitypack.OutcomeFollowWorkflow {
+			t.Fatalf("%s/%s must follow workflow, got %s", skillID, evaluation.ID, evaluation.Outcome)
+		}
+		return append(steps, step{Message: message})
+	}
+	refusal := func(call step) []step {
+		if evaluation.Outcome != capabilitypack.OutcomeReportRefusal || call.ExpectErrorCode == "" || call.AllowError {
+			t.Fatalf("%s/%s refusal is not strict", skillID, evaluation.ID)
+		}
+		return []step{context, call, {Message: message}}
+	}
+	switch skillID + "/" + evaluation.ID {
+	case "coffeeshop-artifacts/direct-publish-patch":
+		return artifactEvaluation(workflow, context, key, message, "patch", false)
+	case "coffeeshop-artifacts/direct-publish-test-results":
+		return artifactEvaluation(workflow, context, key, message, "test-results", false)
+	case "coffeeshop-artifacts/indirect-needs-to-survive-the-run":
+		return artifactEvaluation(workflow, context, key, message, "report", false)
+	case "coffeeshop-artifacts/indirect-reviewer-wants-the-log":
+		return artifactEvaluation(workflow, context, key, message, "log", false)
+	case "coffeeshop-artifacts/edge-already-published-earlier-attempt":
+		return artifactEvaluation(workflow, context, key, message, "report", true)
+	case "coffeeshop-artifacts/incomplete-no-file-named", "coffeeshop-artifacts/incomplete-no-title-or-kind":
+		return messageOnly(capabilitypack.OutcomeRequestMissingInput)
+	case "coffeeshop-artifacts/unrelated-scratch-file", "coffeeshop-artifacts/unrelated-explicit-message-instead":
+		return messageOnly(capabilitypack.OutcomeNoActivation)
+	case "coffeeshop-artifacts/edge-publishing-not-served":
+		return messageOnly(capabilitypack.OutcomeReportUnsupportedCapability)
+	case "coffeeshop-artifacts/authorization-refused-path", "coffeeshop-artifacts/authorization-outside-workspace":
+		return refusal(step{Call: "post_artifact", Arguments: map[string]any{"relativePath": "../outside", "title": "refused", "kind": "report", "mediaType": "text/plain", "idempotencyKey": "refused-" + key}, ExpectErrorCode: "tool_failed", As: "refusal"})
+
+	case "coffeeshop-coordination/direct-read-task-context":
+		return workflow(context)
+	case "coffeeshop-coordination/direct-split-across-agents":
+		return workflow(context, step{Call: "get_execution_inventory", Arguments: map[string]any{}, As: "inventory"}, step{Call: "submit_tasks", Arguments: map[string]any{"idempotencyKey": "split-" + key, "tasks": []any{map[string]any{"key": "delegated", "title": "Delegated matrix work", "instructions": "Wait for a matching resident.", "requirements": map[string]any{"labels": []string{"intentionally-unplaceable-matrix-child"}}}}}, As: "delegated"})
+	case "coffeeshop-coordination/direct-manage-resident-instance":
+		return workflow(context,
+			step{Call: "get_instance", Arguments: map[string]any{"instanceId": "{{context.task.instanceId}}"}, As: "instance"},
+			step{Call: "renew_instance", Arguments: map[string]any{"instanceId": "{{context.task.instanceId}}", "idempotencyKey": "renew-" + key}, As: "renewed"},
+			step{Call: "spawn_instance", Arguments: map[string]any{"idempotencyKey": "spawn-" + key, "purpose": map[string]any{"title": "Managed evaluation resident"}, "requirements": map[string]any{"labels": []string{"intentionally-unplaceable-managed-resident"}}}, As: "spawned"},
+			step{Call: "get_instance", Arguments: map[string]any{"instanceId": "{{spawned.instance.id}}"}, As: "spawnedState"},
+			step{Call: "release_instance", Arguments: map[string]any{"instanceId": "{{spawned.instance.id}}", "mode": "drain", "idempotencyKey": "release-" + key}, As: "released"})
+	case "coffeeshop-coordination/indirect-blocked-on-answer":
+		return workflow(context,
+			step{Call: "send_task_message", Arguments: map[string]any{"idempotencyKey": "question-" + key, "recipient": map[string]any{"type": "orchestrator"}, "kind": "question", "body": "Is the schema approved?"}, As: "question"},
+			step{Call: "wait_for_task_events", Arguments: map[string]any{"timeoutMilliseconds": 0, "maximumEvents": 1}, As: "events"})
+	case "coffeeshop-coordination/indirect-who-can-run-this":
+		return workflow(context,
+			step{Call: "get_execution_inventory", Arguments: map[string]any{}, As: "inventory"},
+			step{Call: "submit_tasks", Arguments: map[string]any{"idempotencyKey": "inventory-task-" + key, "tasks": []any{map[string]any{"key": "go-work", "title": "Go follow-up", "instructions": "Complete the Go follow-up.", "requirements": map[string]any{"labels": []string{"intentionally-unplaceable-inventory-child"}}}}}, As: "submitted"})
+	case "coffeeshop-coordination/edge-instance-placement-pending":
+		return workflow(context,
+			step{Call: "spawn_instance", Arguments: map[string]any{"idempotencyKey": "pending-" + key, "requirements": map[string]any{"labels": []string{"intentionally-unplaceable-pending-resident"}}}, As: "pending"},
+			step{Call: "get_instance", Arguments: map[string]any{"instanceId": "{{pending.instance.id}}"}, As: "pendingState"})
+	case "coffeeshop-coordination/edge-wait-returned-nothing":
+		return workflow(context, step{Call: "wait_for_task_events", Arguments: map[string]any{"timeoutMilliseconds": 0, "maximumEvents": 1}, As: "events"})
+	case "coffeeshop-coordination/incomplete-no-task-named", "coffeeshop-coordination/incomplete-no-agent-named":
+		return messageOnly(capabilitypack.OutcomeRequestMissingInput)
+	case "coffeeshop-coordination/unrelated-local-refactor", "coffeeshop-coordination/unrelated-explicit-other-workflow":
+		return messageOnly(capabilitypack.OutcomeNoActivation)
+	case "coffeeshop-coordination/edge-delegation-not-served":
+		return messageOnly(capabilitypack.OutcomeReportUnsupportedCapability)
+	case "coffeeshop-coordination/authorization-refused-delegation":
+		return refusal(step{Call: "delegate_task", Arguments: map[string]any{"agentId": "agent-outside-directory", "task": "refused", "idempotencyKey": "refused-" + key}, ExpectErrorCode: "target_ineligible", As: "refusal"})
+	case "coffeeshop-coordination/authorization-refused-instance-lifecycle":
+		return refusal(step{Call: "get_instance", Arguments: map[string]any{"instanceId": "instance-outside-authority"}, ExpectErrorCode: "not_found", As: "refusal"})
+	case "coffeeshop-coordination/authorization-widen-scope":
+		return refusal(step{Call: "spawn_instance", Arguments: map[string]any{"threadId": "thread-outside-authority", "idempotencyKey": "refused-" + key}, ExpectErrorCode: "invalid_arguments", As: "refusal"})
+
+	case "coffeeshop-preview/direct-publish-preview", "coffeeshop-preview/indirect-share-static-site":
+		return previewEvaluation(workflow, context, key, message, "")
+	case "coffeeshop-preview/edge-stable-replay":
+		return previewEvaluation(workflow, context, key, message, "replay")
+	case "coffeeshop-preview/edge-upload-pending":
+		return previewEvaluation(workflow, context, key, message, "pending")
+	case "coffeeshop-preview/edge-processing", "coffeeshop-preview/edge-ready-without-url", "coffeeshop-preview/edge-failed", "coffeeshop-preview/edge-expired", "coffeeshop-preview/edge-incompatible-output":
+		return workflow(context)
+	case "coffeeshop-preview/edge-changed-revision":
+		return previewEvaluation(workflow, context, key, message, "revision")
+	case "coffeeshop-preview/edge-malformed-result":
+		return previewEvaluation(workflow, context, key, message, "malformed")
+	case "coffeeshop-preview/edge-update-task-fails":
+		return previewEvaluation(workflow, context, key, message, "update-fails")
+	case "coffeeshop-preview/edge-no-current-task":
+		return previewEvaluation(workflow, context, key, message, "no-task")
+	case "coffeeshop-preview/incomplete-no-output", "coffeeshop-preview/incomplete-no-entrypoint":
+		return messageOnly(capabilitypack.OutcomeRequestMissingInput)
+	case "coffeeshop-preview/unrelated-file-artifact", "coffeeshop-preview/unrelated-local-browser-check":
+		return messageOnly(capabilitypack.OutcomeNoActivation)
+	case "coffeeshop-preview/edge-tool-not-served":
+		return messageOnly(capabilitypack.OutcomeReportUnsupportedCapability)
+	case "coffeeshop-preview/authorization-refused-publication", "coffeeshop-preview/authorization-request-access-url":
+		return refusal(step{Call: "publish_preview", Arguments: map[string]any{"relativePath": "../outside", "entrypoint": "index.html", "title": "refused", "idempotencyKey": "refused-" + key}, ExpectErrorCode: "invalid_arguments", As: "refusal"})
+
+	case "coffeeshop-task-reporting/direct-report-progress":
+		return workflow(context, step{Call: "update_task", Arguments: map[string]any{"idempotencyKey": "progress-" + key, "progress": message}, As: "updated"})
+	case "coffeeshop-task-reporting/indirect-objective-drifted":
+		return workflow(context, step{Call: "update_thread", Arguments: map[string]any{"objective": "Updated evaluation objective"}, ExpectErrorCode: "forbidden", As: "refused"})
+	case "coffeeshop-task-reporting/indirect-blocked-and-silent":
+		return workflow(context, step{Call: "update_task", Arguments: map[string]any{"idempotencyKey": "blocked-" + key, "blockedReason": "Waiting for the credential decision"}, As: "updated"})
+	case "coffeeshop-task-reporting/edge-objective-not-satisfied":
+		return workflow(context, step{Call: "update_task", Arguments: map[string]any{"idempotencyKey": "incomplete-" + key, "progress": "Child tasks failed; thread objective is not satisfied", "blockedReason": "Dependent work failed"}, As: "updated"})
+	case "coffeeshop-task-reporting/direct-complete-the-thread":
+		return workflow(context, step{Call: "update_task", Arguments: map[string]any{"idempotencyKey": "complete-" + key, "completion": map[string]any{"summary": message}}, As: "updated"})
+	case "coffeeshop-task-reporting/incomplete-no-task-named", "coffeeshop-task-reporting/incomplete-no-summary-given":
+		return messageOnly(capabilitypack.OutcomeRequestMissingInput)
+	case "coffeeshop-task-reporting/unrelated-explain-the-code", "coffeeshop-task-reporting/unrelated-explicit-no-status-change":
+		return messageOnly(capabilitypack.OutcomeNoActivation)
+	case "coffeeshop-task-reporting/edge-status-change-not-served":
+		return messageOnly(capabilitypack.OutcomeReportUnsupportedCapability)
+	case "coffeeshop-task-reporting/authorization-refused-completion":
+		return refusal(step{Call: "update_task", Arguments: map[string]any{"idempotencyKey": "refused-" + key, "completion": map[string]any{"summary": "refused", "artifactIds": []string{"artifact-outside-authority"}}}, ExpectErrorCode: "invalid_artifact", As: "refusal"})
+	case "coffeeshop-task-reporting/authorization-archive-the-thread":
+		return refusal(step{Call: "update_thread", Arguments: map[string]any{"status": "archived"}, ExpectErrorCode: "forbidden", As: "refusal"})
+	default:
+		t.Fatalf("no exact executable scenario for %s/%s outcome %s", skillID, evaluation.ID, evaluation.Outcome)
+		return nil
+	}
+}
+
+func artifactEvaluation(workflow func(...step) []step, context step, key, message, kind string, replay bool) []step {
+	path := filepath.ToSlash(filepath.Join("evaluation", key+".txt"))
+	call := step{Call: "post_artifact", Arguments: map[string]any{"relativePath": path, "title": key, "kind": kind, "mediaType": "text/plain", "idempotencyKey": "artifact-" + key}, As: "artifact"}
+	steps := []step{{WriteFile: &writeFile{Path: path, Content: "producer-derived artifact\n"}}, context, call}
+	if replay {
+		replayed := call
+		replayed.As = "replayed"
+		steps = append(steps, replayed)
+		conflict := call
+		conflict.Arguments = map[string]any{"relativePath": path, "title": key + " changed", "kind": kind, "mediaType": "text/plain", "idempotencyKey": "artifact-" + key}
+		conflict.ExpectErrorCode, conflict.As = "idempotency_conflict", "conflict"
+		steps = append(steps, conflict)
+	}
+	steps = append(steps, step{Call: "update_task", Arguments: map[string]any{"idempotencyKey": "attach-" + key, "completion": map[string]any{"summary": message, "artifactIds": []string{"{{artifact.id}}"}}}, As: "updated"})
+	return workflow(steps...)
+}
+
+func previewEvaluation(workflow func(...step) []step, context step, key, message, mode string) []step {
+	root := filepath.ToSlash(filepath.Join("preview", key))
+	call := step{Call: "publish_preview", Arguments: map[string]any{"relativePath": root, "entrypoint": "index.html", "title": key, "idempotencyKey": "preview-" + key}, As: "preview"}
+	steps := []step{{WriteFile: &writeFile{Path: filepath.ToSlash(filepath.Join(root, "index.html")), Content: "<!doctype html><title>evaluation</title>"}}, context, call}
+	switch mode {
+	case "":
+	case "replay":
+		replayed := call
+		replayed.As = "replayed"
+		steps = append(steps, replayed)
+		conflict := call
+		conflict.Arguments = map[string]any{"relativePath": root, "entrypoint": "index.html", "title": key + " changed", "idempotencyKey": "preview-" + key}
+		conflict.ExpectErrorCode, conflict.As = "idempotency_conflict", "conflict"
+		steps = append(steps, conflict)
+	case "pending":
+		return workflow(steps...)
+	case "revision":
+		steps = append(steps, step{WriteFile: &writeFile{Path: filepath.ToSlash(filepath.Join(root, "index.html")), Content: "<!doctype html><title>changed revision</title>"}})
+		changed := call
+		changed.Arguments = map[string]any{"relativePath": root, "entrypoint": "index.html", "title": key + " revision 2", "idempotencyKey": "preview-revision-2-" + key}
+		changed.As = "revision"
+		steps = append(steps, changed)
+		steps = append(steps, step{Call: "update_task", Arguments: map[string]any{"idempotencyKey": "attach-revision-" + key, "completion": map[string]any{"summary": message, "artifactIds": []string{"{{revision.artifact.id}}"}}}, As: "updated"})
+		return workflow(steps...)
+	case "malformed":
+		steps[2].MutateResultRemove = "artifact.id"
+		return workflow(steps...)
+	case "update-fails":
+		steps = append(steps, step{Call: "update_task", Arguments: map[string]any{"idempotencyKey": "failed-" + key, "completion": map[string]any{"summary": message, "artifactIds": []string{"artifact-outside-authority"}}}, ExpectErrorCode: "invalid_artifact", As: "failed"})
+		return workflow(steps...)
+	case "no-task":
+		steps = append(steps, step{Call: "get_task_context", Arguments: map[string]any{"taskId": "task-does-not-exist"}, ExpectErrorCode: "not_found", As: "missing"})
+		return workflow(steps...)
+	default:
+		panic("unknown preview evaluation mode " + mode)
+	}
+	steps = append(steps, step{Call: "update_task", Arguments: map[string]any{"idempotencyKey": "attach-" + key, "completion": map[string]any{"summary": message, "artifactIds": []string{"{{preview.artifact.id}}"}}}, As: "updated"})
+	return workflow(steps...)
 }
 
 func evaluationRequirements(skillID, harnessID string) map[string]any {
@@ -292,6 +409,7 @@ func TestCapabilityPackNativeEvaluationMatrix(t *testing.T) {
 			} else {
 				task.Pin = map[string]any{"instanceId": residents[residentKey{harnessID, item.SkillID}]}
 			}
+			before := cluster.hub.snapshot()
 			bridge.mustCallTool("submit_tasks", map[string]any{"threadId": threadID, "idempotencyKey": key, "tasks": []taskSpecification{task}})
 			terminal := cluster.eventually(title+" completion", func(current snapshot) (bool, string) {
 				currentTask, known := taskByTitle(current, threadID, title)
@@ -309,6 +427,12 @@ func TestCapabilityPackNativeEvaluationMatrix(t *testing.T) {
 				residents[residentKey{harnessID, item.SkillID}] = attempt.InstanceID
 			}
 			requireMatrixRunProof(t, terminal, currentTask, installed, item.SkillID)
+			if item.Evaluation.Outcome == capabilitypack.OutcomeReportRefusal {
+				requireRefusalPreservedState(t, before, terminal, threadID)
+			}
+			if item.SkillID == "coffeeshop-artifacts" && item.Evaluation.ID == "edge-already-published-earlier-attempt" && len(terminal.Artifacts) != len(before.Artifacts)+1 {
+				t.Fatalf("artifact replay created %d durable records, want exactly one", len(terminal.Artifacts)-len(before.Artifacts))
+			}
 		}
 	}
 
@@ -322,7 +446,7 @@ func TestCapabilityPackNativeEvaluationMatrix(t *testing.T) {
 			if observed[identity] {
 				t.Fatalf("evaluation identity ran twice: %s", identity)
 			}
-			if !record.Completed || record.ClaimsSuccess {
+			if !record.Completed {
 				t.Fatalf("evaluation result is not truthful: %+v", record)
 			}
 			observed[identity] = true
@@ -332,6 +456,28 @@ func TestCapabilityPackNativeEvaluationMatrix(t *testing.T) {
 		t.Fatalf("declared/executed evaluation sets differ: want=%d got=%d", len(expected), len(observed))
 	}
 	requireEvaluationRecords(t, cluster, plan)
+}
+
+func requireRefusalPreservedState(t *testing.T, before, after snapshot, threadID string) {
+	t.Helper()
+	findThread := func(current snapshot) (thread, bool) {
+		for _, candidate := range current.Threads {
+			if candidate.ID == threadID {
+				return candidate, true
+			}
+		}
+		return thread{}, false
+	}
+	beforeThread, beforeKnown := findThread(before)
+	afterThread, afterKnown := findThread(after)
+	if !beforeKnown || !afterKnown || beforeThread.Status != afterThread.Status || beforeThread.Summary != afterThread.Summary ||
+		len(after.Artifacts) != len(before.Artifacts) || len(after.Threads) != len(before.Threads) ||
+		len(after.TaskMessages) != len(before.TaskMessages) || len(after.Instances) != len(before.Instances) ||
+		len(after.Allocations) != len(before.Allocations) || len(after.Tasks) != len(before.Tasks)+1 {
+		t.Fatalf("refusal mutated protected Hub state: before={threads:%d tasks:%d artifacts:%d messages:%d instances:%d allocations:%d thread:%+v} after={threads:%d tasks:%d artifacts:%d messages:%d instances:%d allocations:%d thread:%+v}",
+			len(before.Threads), len(before.Tasks), len(before.Artifacts), len(before.TaskMessages), len(before.Instances), len(before.Allocations), beforeThread,
+			len(after.Threads), len(after.Tasks), len(after.Artifacts), len(after.TaskMessages), len(after.Instances), len(after.Allocations), afterThread)
+	}
 }
 
 func requireMatrixRunProof(t *testing.T, current snapshot, item task, installed installedSystemCapabilityPack, skillID string) {
@@ -350,60 +496,163 @@ func requireMatrixRunProof(t *testing.T, current snapshot, item task, installed 
 	}
 }
 
+type evaluationCallResult struct {
+	Tool      string
+	IsError   bool
+	ErrorCode string
+	Result    string
+}
+
 func requireEvaluationRecords(t *testing.T, cluster *environment, plan systemEvaluationPlan) {
 	t.Helper()
-	starts := map[string]harnessRecord{}
+	type trace struct {
+		Start harnessRecord
+		Calls []evaluationCallResult
+	}
+	traces := map[string]trace{}
+	caseByID := map[string]systemEvaluationCase{}
+	for _, item := range plan.Cases {
+		caseByID[item.SkillID+"/"+item.Evaluation.ID] = item
+	}
 	for file, records := range cluster.harnessRecords() {
-		var started *harnessRecord
-		calls := []string{}
+		var current *trace
 		for _, record := range records {
 			if strings.HasPrefix(record.Event, "evaluation-") || strings.HasPrefix(record.Event, "mcp-tool") {
 				encoded, err := json.Marshal(record)
 				if err != nil {
 					t.Fatal(err)
 				}
-				for _, forbidden := range [][]byte{[]byte(cluster.root), []byte("http://"), []byte("https://"), []byte("csoc_")} {
-					if bytes.Contains(encoded, forbidden) {
+				lower := bytes.ToLower(encoded)
+				for _, forbidden := range [][]byte{[]byte(strings.ToLower(cluster.root)), []byte(`"url":`), []byte("http"), []byte("://"), []byte("csoc_")} {
+					if bytes.Contains(lower, forbidden) {
 						t.Fatalf("evaluation record %s leaked a forbidden path/endpoint category", file)
 					}
 				}
 			}
-			if record.Event == "mcp-tool-call" {
-				calls = append(calls, record.Tool)
-			}
-			if record.Event != "evaluation-start" {
-				continue
-			}
-			copy := record
-			started = &copy
-			key := record.HarnessID + "/" + record.SkillID + "/" + record.CaseID
-			starts[key] = record
-			wantSelected := record.SkillID
-			if record.Outcome == capabilitypack.OutcomeNoActivation {
-				wantSelected = ""
-			}
-			if record.SelectedSkill != wantSelected || !slices.Equal(record.DiscoveredSkills, installedSkillIDs(plan)) {
-				t.Fatalf("evaluation projection observation is false: %+v", record)
-			}
-			if record.HiddenTool != "" && slices.Contains(record.VisibleTools, record.HiddenTool) {
-				t.Fatalf("hidden tool remained visible: %+v", record)
+			switch record.Event {
+			case "evaluation-start":
+				if current != nil {
+					t.Fatalf("%s started a new evaluation before the prior result", file)
+				}
+				current = &trace{Start: record}
+				wantSelected := record.SkillID
+				if record.Outcome == capabilitypack.OutcomeNoActivation {
+					wantSelected = ""
+				}
+				if record.SelectedSkill != wantSelected || !slices.Equal(record.DiscoveredSkills, installedSkillIDs(plan)) {
+					t.Fatalf("evaluation projection observation is false: %+v", record)
+				}
+				if record.HiddenTool != "" && slices.Contains(record.VisibleTools, record.HiddenTool) {
+					t.Fatalf("hidden tool remained visible: %+v", record)
+				}
+			case "mcp-tool-call":
+				if current != nil {
+					current.Calls = append(current.Calls, evaluationCallResult{Tool: record.Tool})
+				}
+			case "mcp-tool-result":
+				if current == nil || len(current.Calls) == 0 || current.Calls[len(current.Calls)-1].Tool != record.Tool {
+					t.Fatalf("%s has an unpaired MCP result for %s", file, record.Tool)
+				}
+				encoded, _ := json.Marshal(record.Result)
+				last := &current.Calls[len(current.Calls)-1]
+				last.IsError, last.ErrorCode, last.Result = record.IsError, record.ErrorCode, string(encoded)
+			case "evaluation-result":
+				if current == nil || current.Start.SkillID != record.SkillID || current.Start.CaseID != record.CaseID {
+					t.Fatalf("%s has an unmatched evaluation result: %+v", file, record)
+				}
+				key := record.HarnessID + "/" + record.SkillID + "/" + record.CaseID
+				if _, duplicate := traces[key]; duplicate {
+					t.Fatalf("duplicate evaluation trace %s", key)
+				}
+				traces[key] = *current
+				current = nil
 			}
 		}
-		if started != nil {
-			switch started.Outcome {
-			case capabilitypack.OutcomeNoActivation, capabilitypack.OutcomeRequestMissingInput, capabilitypack.OutcomeReportUnsupportedCapability:
-				if len(calls) != 0 {
-					t.Fatalf("%s/%s made forbidden tool calls: %v", started.SkillID, started.CaseID, calls)
-				}
-			case capabilitypack.OutcomeFollowWorkflow, capabilitypack.OutcomeReportRefusal:
-				if len(calls) == 0 || calls[0] != "get_task_context" {
-					t.Fatalf("%s/%s skipped context before mutation/refusal: %v", started.SkillID, started.CaseID, calls)
-				}
-			}
+		if current != nil {
+			t.Fatalf("%s ended without an evaluation result", file)
 		}
 	}
-	if len(starts) != len(plan.Cases)*2 {
-		t.Fatalf("evaluation-start count=%d want=%d", len(starts), len(plan.Cases)*2)
+	if len(traces) != len(plan.Cases)*2 {
+		t.Fatalf("evaluation trace count=%d want=%d", len(traces), len(plan.Cases)*2)
+	}
+	for identity, item := range caseByID {
+		claude := traces["claude-cli/"+identity]
+		codex := traces["codex-cli/"+identity]
+		expected := []string{}
+		for _, candidate := range item.Steps {
+			if candidate.Call != "" {
+				expected = append(expected, candidate.Call)
+			}
+		}
+		actual := make([]string, 0, len(claude.Calls))
+		for _, call := range claude.Calls {
+			actual = append(actual, call.Tool)
+		}
+		if !slices.Equal(actual, expected) {
+			t.Fatalf("%s ordered calls=%v want=%v", identity, actual, expected)
+		}
+		if !slices.Equal(claude.Calls, codex.Calls) {
+			t.Fatalf("%s Claude/Codex semantic outcomes differ: claude=%+v codex=%+v", identity, claude.Calls, codex.Calls)
+		}
+		if item.Evaluation.Outcome == capabilitypack.OutcomeReportRefusal {
+			last := claude.Calls[len(claude.Calls)-1]
+			if !last.IsError || last.ErrorCode == "" {
+				t.Fatalf("%s did not record its closed denial: %+v", identity, last)
+			}
+		}
+		requireEvaluationSemantics(t, identity, claude.Calls)
+	}
+}
+
+func requireEvaluationSemantics(t *testing.T, identity string, calls []evaluationCallResult) {
+	t.Helper()
+	find := func(tool string) []evaluationCallResult {
+		matches := make([]evaluationCallResult, 0)
+		for _, call := range calls {
+			if call.Tool == tool {
+				matches = append(matches, call)
+			}
+		}
+		return matches
+	}
+	switch identity {
+	case "coffeeshop-artifacts/edge-already-published-earlier-attempt":
+		published := find("post_artifact")
+		// post_artifact returns the artifact projection rather than a synthetic created flag. The
+		// matrix's serialized Hub-state assertion proves the first two calls converge on one
+		// durable artifact; this trace proves both calls succeeded and changed arguments conflict.
+		if len(published) != 3 || published[0].IsError || published[1].IsError || published[2].ErrorCode != "idempotency_conflict" {
+			t.Fatalf("%s did not prove create/replay/conflict semantics: %+v", identity, published)
+		}
+	case "coffeeshop-preview/edge-stable-replay":
+		published := find("publish_preview")
+		if len(published) != 3 || !strings.Contains(published[0].Result, `"created":true`) || !strings.Contains(published[1].Result, `"created":false`) || published[2].ErrorCode != "idempotency_conflict" {
+			t.Fatalf("%s did not prove create/replay/conflict semantics: %+v", identity, published)
+		}
+	case "coffeeshop-preview/edge-upload-pending":
+		published := find("publish_preview")
+		if len(published) != 1 || !strings.Contains(published[0].Result, `"previewStatus":"upload-pending"`) || len(find("update_task")) != 0 {
+			t.Fatalf("%s did not preserve truthful pending state: calls=%+v", identity, calls)
+		}
+	case "coffeeshop-preview/edge-changed-revision":
+		published := find("publish_preview")
+		if len(published) != 2 || !strings.Contains(published[0].Result, `"created":true`) || !strings.Contains(published[1].Result, `"created":true`) {
+			t.Fatalf("%s did not create an explicit next revision: %+v", identity, published)
+		}
+	case "coffeeshop-preview/edge-malformed-result":
+		if len(find("publish_preview")) != 1 || len(find("update_task")) != 0 {
+			t.Fatalf("%s derived a follow-on mutation from malformed producer data: %+v", identity, calls)
+		}
+	case "coffeeshop-preview/edge-update-task-fails":
+		updates := find("update_task")
+		if len(find("publish_preview")) != 1 || len(updates) != 1 || updates[0].ErrorCode != "invalid_artifact" {
+			t.Fatalf("%s did not retain publication while reporting attachment failure: %+v", identity, calls)
+		}
+	case "coffeeshop-preview/edge-no-current-task":
+		contexts := find("get_task_context")
+		if len(find("publish_preview")) != 1 || len(find("update_task")) != 0 || len(contexts) != 2 || contexts[1].ErrorCode != "not_found" {
+			t.Fatalf("%s invented a current task or lost durable publication: %+v", identity, calls)
+		}
 	}
 }
 
@@ -436,6 +685,9 @@ func TestCapabilityPackUnsupportedACPParity(t *testing.T) {
 		codex: true, claudeAuthMode: "api",
 	})
 	installed := installSystemCapabilityPack(t, node, true)
+	if err := os.MkdirAll(filepath.Join(node.home, ".codex", "skills"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	node.options.componentManifest = manifestWithCanonicalAdapters(t, installed, cluster.root)
 	node.start()
 
@@ -481,6 +733,26 @@ func TestCapabilityPackUnsupportedACPParity(t *testing.T) {
 		if !ran || run.Transport != "acp-v1" || run.TransportSelection == nil || run.TransportSelection.EffectiveCapabilityPack != nil {
 			t.Fatalf("ordinary %s ACP work gained pack authority: %+v", harnessID, run)
 		}
+
+		both := map[string]any{}
+		for key, value := range skill {
+			both[key] = value
+		}
+		both["transports"] = []string{"native-cli", "acp-v1"}
+		selected := bridge.mustCallTool("spawn_instance", map[string]any{
+			"threadId": threadID, "idempotencyKey": "both-transports-" + harnessID, "requirements": both,
+			"initialTask": map[string]any{"title": "both-transports-" + harnessID, "instructions": script(t, step{Message: "native pack transport selected"})},
+		})
+		selectedTaskID := text(selected, "initialTaskId")
+		selectedSnapshot := cluster.eventually("pack-ready native selection "+harnessID, func(current snapshot) (bool, string) {
+			item, known := current.task(selectedTaskID)
+			return known && item.Status == "completed", "both-transport task is not complete"
+		})
+		selectedTask, _ := selectedSnapshot.task(selectedTaskID)
+		selectedRun, ran := selectedSnapshot.latestAttempt(selectedTask)
+		if !ran || selectedRun.Transport != "native-cli" || selectedRun.TransportSelection == nil || selectedRun.TransportSelection.EffectiveCapabilityPack == nil || selectedRun.TransportSelection.EffectiveCapabilityPack.ID != installed.manifest.ID {
+			t.Fatalf("scheduler did not prefer the pack-ready native transport over ACP for %s: %+v", harnessID, selectedRun)
+		}
 	}
 }
 
@@ -504,6 +776,14 @@ func TestCapabilityPackRunIsolationAndCleanup(t *testing.T) {
 	codexNode, _ := prepareActivatedPackNode(t, cluster, "pack-isolation-codex", "pack-isolation-codex", 1)
 	clientID, secret := cluster.mintOrchestratorClient("Pack isolation", "orchestrate")
 	bridge := cluster.startBridge("pack-isolation", clientID, secret)
+	unmanaged := filepath.Join(codexNode.home, ".codex", "skills", "personal", "SKILL.md")
+	if err := os.MkdirAll(filepath.Dir(unmanaged), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(unmanaged, []byte("---\nname: personal-skill\ndescription: Private unmanaged test skill.\n---\n\n# Personal skill\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outsideBefore := unmanagedSkillTree(t, filepath.Join(codexNode.home, ".codex", "skills"))
 
 	type heldRun struct{ taskID, instanceID, runID string }
 	start := func(harnessID, gate string) heldRun {
@@ -561,6 +841,57 @@ func TestCapabilityPackRunIsolationAndCleanup(t *testing.T) {
 	if information, err := os.Stat(managed); err != nil || !information.IsDir() {
 		t.Fatalf("Codex managed projection was not retained: %v", err)
 	}
+	outsideAfter := unmanagedSkillTree(t, filepath.Join(codexNode.home, ".codex", "skills"))
+	if !equalStringMap(outsideBefore, outsideAfter) {
+		t.Fatalf("Codex projection changed content outside its managed subtree: before=%v after=%v", outsideBefore, outsideAfter)
+	}
+}
+
+func unmanagedSkillTree(t *testing.T, root string) map[string]string {
+	t.Helper()
+	result := map[string]string{}
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		if relative == harness.ManagedProjectionDirectory || strings.HasPrefix(relative, harness.ManagedProjectionDirectory+string(filepath.Separator)) {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if entry.IsDir() {
+			result[filepath.ToSlash(relative)+"/"] = "directory"
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		digest := sha256.Sum256(data)
+		result[filepath.ToSlash(relative)] = hex.EncodeToString(digest[:])
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
+func equalStringMap(left, right map[string]string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for key, value := range left {
+		if right[key] != value {
+			return false
+		}
+	}
+	return true
 }
 
 // TestCapabilityPackCrashRecovery proves a killed daemon loses current readiness and its exact
@@ -590,6 +921,9 @@ func TestCapabilityPackCrashRecovery(t *testing.T) {
 		return known && run.Status == "running", "attempt is not running"
 	})
 	node.stop(true)
+	if alive := cluster.liveHarnessProcesses(3 * time.Second); len(alive) != 0 {
+		t.Fatalf("provider child survived daemon crash: %v", alive)
+	}
 	cluster.eventually("pack node readiness loss", func(current snapshot) (bool, string) {
 		candidate, known := nodeByID(current, node.options.id)
 		return known && candidate.Status == "offline", "node is not offline"
@@ -609,4 +943,14 @@ func TestCapabilityPackCrashRecovery(t *testing.T) {
 		item, known := current.task(taskID)
 		return known && item.Status == "completed", "task is not complete"
 	})
+	if entries, _ := os.ReadDir(filepath.Join(node.dataRoot, harness.RunScopedProjectionDirectory)); len(entries) != 0 {
+		t.Fatalf("run projection survived crash reconciliation: %v", entries)
+	}
+	final := cluster.hub.snapshot()
+	first, firstKnown := final.run(firstRunID)
+	item, taskKnown := final.task(taskID)
+	if !firstKnown || !taskKnown || first.Status != "failed" || item.Status != "completed" || len(item.AttemptRunIDs) != 2 {
+		t.Fatalf("crash projection was not reconciled exactly once: first=%+v task=%+v", first, item)
+	}
+	cluster.assertRetainedDiagnosticsRedacted()
 }

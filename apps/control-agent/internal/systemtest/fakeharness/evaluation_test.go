@@ -28,7 +28,7 @@ func evaluationFixture(t *testing.T) (string, evaluationPlan) {
 		skills = append(skills, evaluationSkill{ID: id, Path: "skills/" + id + "/SKILL.md", SHA256: hex.EncodeToString(digest[:])})
 	}
 	plan := evaluationPlan{
-		SchemaVersion: "1", PackID: "coffeeshop-capability-pack", PackVersion: "1.1.0",
+		SchemaVersion: "1", PackID: "coffeeshop-capability-pack", PackVersion: "1.2.0",
 		PackDigest: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", Skills: skills,
 		Cases: []evaluationPlanCase{{
 			SkillID: "coffeeshop-preview",
@@ -107,6 +107,17 @@ func TestEvaluationPlanRejectsUnknownFieldsDuplicatesAndProjectionDrift(t *testi
 	}
 	if _, err := observeProjectedSkills(root, clean, "coffeeshop-preview"); err == nil {
 		t.Fatal("projected skill drift was accepted")
+	}
+
+	_, unsafe := evaluationFixture(t)
+	unsafe.Cases[0].Steps = []Step{{Call: "publish_preview", AllowError: true}}
+	unsafeBytes, _ := json.Marshal(unsafe)
+	path = filepath.Join(t.TempDir(), "unsafe.json")
+	if err := os.WriteFile(path, unsafeBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadEvaluationPlan(path); err == nil {
+		t.Fatal("evaluation plan that swallows a tool error was accepted")
 	}
 }
 

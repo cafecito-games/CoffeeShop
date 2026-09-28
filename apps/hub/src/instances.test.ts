@@ -1326,7 +1326,7 @@ test("store load removes only obsolete no-skill expectations and is idempotent o
   const created = await applyInstanceLifecycle(first, operatorCaller, createRequest("thread-one", { requirements: {} }), at(1));
   const reservation = await reserveInstanceAllocation(first, created.instance.id, candidate("/work/one"), at(2));
   assert.equal(reservation.kind, "reserved");
-  const expectation = { id: "coffeeshop-capability-pack", version: "1.1.0", requiredSkills: ["coffeeshop-preview"] };
+  const expectation = { id: "coffeeshop-capability-pack", version: "1.2.0", requiredSkills: ["coffeeshop-preview"] };
   await first.transact((state) => {
     Object.assign(state.allocations![0], { expectedCapabilityPack: structuredClone(expectation) });
     const delivery = state.instanceDeliveries!.find((record) => record.kind === "provision")!;

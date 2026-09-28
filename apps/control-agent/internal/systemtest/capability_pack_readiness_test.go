@@ -159,7 +159,7 @@ func TestCapabilityPackEvidenceFreshnessAndConflict(t *testing.T) {
 	first.waitSynchronized(t)
 
 	baseTime := time.Now().UTC().Truncate(time.Millisecond)
-	admitted := controlledCapabilityPackReport(nodeID, baseTime.Format(time.RFC3339Nano), "1.1.0")
+	admitted := controlledCapabilityPackReport(nodeID, baseTime.Format(time.RFC3339Nano), "1.2.0")
 	if err := sendControlledCapabilityPackReport(t, first, admitted); err != nil {
 		t.Fatal(err)
 	}
@@ -205,7 +205,7 @@ func TestCapabilityPackEvidenceFreshnessAndConflict(t *testing.T) {
 		})
 	}
 	firstInstance := spawn(bridge, "evidence-first")
-	assertExpectedVersion(firstInstance, "1.1.0")
+	assertExpectedVersion(firstInstance, "1.2.0")
 
 	if err := first.connection.Close(1000, "replace controlled peer"); err != nil {
 		t.Fatal(err)
@@ -216,16 +216,16 @@ func TestCapabilityPackEvidenceFreshnessAndConflict(t *testing.T) {
 	})
 	second := startCompatibilityBarista(t, cluster.hub.port, workspace, nodeID, "5")
 	second.waitSynchronized(t)
-	secondReport := controlledCapabilityPackReport(nodeID, baseTime.Add(time.Minute).Format(time.RFC3339Nano), "1.1.1")
+	secondReport := controlledCapabilityPackReport(nodeID, baseTime.Add(time.Minute).Format(time.RFC3339Nano), "1.2.1")
 	if err := sendControlledCapabilityPackReport(t, second, secondReport); err != nil {
 		t.Fatal(err)
 	}
 	// The Hub normally closes a superseded socket. If the old write races that close and succeeds,
 	// current-socket authorization must still ignore it; either transport outcome is acceptable.
 	_ = sendControlledCapabilityPackReport(t, first,
-		controlledCapabilityPackReport(nodeID, baseTime.Add(2*time.Minute).Format(time.RFC3339Nano), "1.1.0"))
+		controlledCapabilityPackReport(nodeID, baseTime.Add(2*time.Minute).Format(time.RFC3339Nano), "1.2.0"))
 	secondInstance := spawn(bridge, "evidence-second")
-	assertExpectedVersion(secondInstance, "1.1.1")
+	assertExpectedVersion(secondInstance, "1.2.1")
 
 	cluster.hub.restart()
 	cluster.eventually("Hub restart to clear connection-scoped readiness", func(current snapshot) (bool, string) {

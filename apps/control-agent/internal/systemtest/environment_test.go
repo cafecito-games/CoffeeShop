@@ -288,7 +288,9 @@ type harnessRecord struct {
 	HiddenTool       string          `json:"hiddenTool"`
 	Tool             string          `json:"tool"`
 	Arguments        map[string]any  `json:"arguments"`
-	ClaimsSuccess    bool            `json:"claimsSuccess"`
+	IsError          bool            `json:"isError"`
+	ErrorCode        string          `json:"errorCode"`
+	Result           map[string]any  `json:"result"`
 	Completed        bool            `json:"completed"`
 }
 

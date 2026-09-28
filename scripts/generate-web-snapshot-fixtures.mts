@@ -189,7 +189,7 @@ const lifecycle = await applyInstanceLifecycle(store, fixtureOperator, {
 }, "2026-09-22T12:07:00.000Z");
 const reservation = await reserveInstanceAllocation(store, lifecycle.instance.id, {
   nodeId: node.id, harnessId: "claude-cli", model: "sonnet", transport: "native-cli", workspace: "/srv/workspaces",
-  expectedCapabilityPack: { id: "coffeeshop-capability-pack", version: "1.1.0", requiredSkills: ["coffeeshop-preview"] }
+  expectedCapabilityPack: { id: "coffeeshop-capability-pack", version: "1.2.0", requiredSkills: ["coffeeshop-preview"] }
 }, "2026-09-22T12:07:01.000Z");
 if (reservation.kind !== "reserved") throw new Error(`fixture instance was not reserved: ${reservation.kind}`);
 await flushPendingInstanceDeliveries(store, () => true);
@@ -221,7 +221,7 @@ await store.transact((state) => {
     requestedTransport: "native-cli", selectedTransport: "native-cli",
     effectiveCapabilityPack: {
       id: "coffeeshop-capability-pack",
-      version: "1.1.0",
+      version: "1.2.0",
       skills: ["coffeeshop-artifacts", "coffeeshop-coordination", "coffeeshop-preview", "coffeeshop-task-reporting"]
     }
   } });

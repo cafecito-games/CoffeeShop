@@ -2,8 +2,27 @@ package main
 
 import (
 	"encoding/json"
+	"reflect"
 	"testing"
 )
+
+func TestStrictToolErrorsAndProducerMutationAreClosed(t *testing.T) {
+	failure := map[string]any{"error": map[string]any{"code": "not_found", "message": "private"}}
+	if code := toolErrorCode(failure); code != "not_found" {
+		t.Fatalf("error code=%q", code)
+	}
+	producer := map[string]any{"artifact": map[string]any{"id": "artifact-1", "status": "ready"}, "replayed": false}
+	mutated, removed := removeResultPath(producer, "artifact.id")
+	if !removed || reflect.DeepEqual(mutated, producer) {
+		t.Fatalf("producer mutation was not isolated: removed=%v mutated=%v", removed, mutated)
+	}
+	if producer["artifact"].(map[string]any)["id"] != "artifact-1" {
+		t.Fatal("fault injection mutated the producer-owned result")
+	}
+	if _, removed := removeResultPath(producer, "artifact.missing"); removed {
+		t.Fatal("missing mutation path was accepted")
+	}
+}
 
 func testEngine() *engine {
 	return &engine{variables: map[string]any{

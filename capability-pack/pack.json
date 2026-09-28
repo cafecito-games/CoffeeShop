@@ -1,7 +1,7 @@
 {
   "packSchemaVersion": "1",
   "id": "coffeeshop-capability-pack",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "label": "Coffee Shop capability pack (canonical workflow skills)",
   "summary": "Focused Coffee Shop workflows for durable task coordination, artifact and static-preview publication, and task and thread reporting. The workflows teach how to use run-scoped Coffee Shop tools; they grant no capability and carry no endpoint or credential.",
   "minimumControlProtocolVersion": "5",

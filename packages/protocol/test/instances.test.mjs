@@ -53,7 +53,7 @@ test("instance records reject unknown fields, statuses, and unbounded input", ()
 test("skill-bound instance messages require a covering normalized allocation pack expectation", () => {
   const skillInstance = { ...instance, requirements: { ...instance.requirements, skills: ["coffeeshop-review", "coffeeshop-preview"] } };
   const expectedCapabilityPack = {
-    id: "coffeeshop-capability-pack", version: "1.1.0", requiredSkills: ["coffeeshop-preview", "coffeeshop-review", "template-skill"]
+    id: "coffeeshop-capability-pack", version: "1.2.0", requiredSkills: ["coffeeshop-preview", "coffeeshop-review", "template-skill"]
   };
   const provision = { type: "instance.provision", instance: skillInstance, allocation: { ...allocation, expectedCapabilityPack } };
   assert.equal(protocol.validateInstanceHubMessage(provision, "5").ok, true);

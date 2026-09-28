@@ -169,5 +169,36 @@ func (client *mcpClient) tool(ctx context.Context, name string, arguments any) (
 			return toolResult{}, fmt.Errorf("tool %s returned undecodable content", name)
 		}
 	}
-	return toolResult{Value: value, IsError: result.IsError}, nil
+	outcome := toolResult{Value: value, IsError: result.IsError}
+	if activeRecorder != nil {
+		activeRecorder.write(map[string]any{
+			"event": "mcp-tool-result", "tool": name, "isError": outcome.IsError,
+			"errorCode": toolErrorCode(outcome.Value), "result": semanticToolResult(outcome.Value),
+		})
+	}
+	return outcome, nil
+}
+
+// semanticToolResult deliberately records only bounded workflow semantics. Raw MCP results can
+// contain workspace paths, preview access material, or endpoints and never enter test diagnostics.
+func semanticToolResult(value any) map[string]any {
+	object, _ := value.(map[string]any)
+	result := map[string]any{}
+	for _, key := range []string{"created", "replayed", "status"} {
+		if candidate, present := object[key]; present {
+			result[key] = candidate
+		}
+	}
+	if failure, _ := object["error"].(map[string]any); failure != nil {
+		if code, ok := failure["code"].(string); ok {
+			result["errorCode"] = code
+		}
+	}
+	for _, nested := range []string{"artifact", "preview", "instance", "allocation", "task"} {
+		candidate, _ := object[nested].(map[string]any)
+		if status, ok := candidate["status"].(string); ok {
+			result[nested+"Status"] = status
+		}
+	}
+	return result
 }

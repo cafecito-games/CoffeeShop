@@ -14,7 +14,7 @@ const report = {
   status: "available",
   pack: {
     id: "coffeeshop-capability-pack",
-    version: "1.1.0",
+    version: "1.2.0",
     skills: ["coffeeshop-artifacts", "coffeeshop-coordination", "coffeeshop-preview", "coffeeshop-task-reporting"]
   },
   surfaces: [
@@ -46,7 +46,7 @@ test("capability-pack readiness is an exact v5-only current-socket report", () =
 });
 
 test("allocation expectations and effective proofs share exact normalized pack identity", () => {
-  const expected = { id: "coffeeshop-capability-pack", version: "1.1.0", requiredSkills: ["coffeeshop-preview"] };
+  const expected = { id: "coffeeshop-capability-pack", version: "1.2.0", requiredSkills: ["coffeeshop-preview"] };
   assert.equal(validateExpectedCapabilityPack(expected).ok, true);
   assert.equal(validateExpectedCapabilityPack({ ...expected, requiredSkills: [] }).ok, false);
   assert.equal(validateExpectedCapabilityPack({ ...expected, requiredSkills: ["z", "a"] }).ok, false);

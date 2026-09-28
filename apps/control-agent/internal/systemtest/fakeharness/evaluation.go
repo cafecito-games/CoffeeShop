@@ -111,6 +111,24 @@ func (plan evaluationPlan) validate() error {
 		if (evaluation.Outcome == capabilitypack.OutcomeReportUnsupportedCapability) != (item.MissingTool != "") {
 			return errors.New("evaluation plan missing-tool evidence contradicts its outcome")
 		}
+		expectedErrors := 0
+		for _, step := range item.Steps {
+			if step.AllowError {
+				return errors.New("evaluation plan may not swallow a tool error")
+			}
+			if step.ExpectErrorCode != "" {
+				expectedErrors++
+				if step.Call == "" {
+					return errors.New("evaluation plan expected error has no tool call")
+				}
+			}
+			if step.MutateResultRemove != "" && (step.Call == "" || step.ExpectErrorCode != "") {
+				return errors.New("evaluation plan result mutation must follow one successful producer call")
+			}
+		}
+		if evaluation.Outcome == capabilitypack.OutcomeReportRefusal && expectedErrors != 1 {
+			return errors.New("evaluation plan refusal must carry exactly one closed expected error")
+		}
 		caseIDs[key] = true
 		prompts[evaluation.Prompt] = true
 	}
@@ -284,7 +302,7 @@ func runNativeEvaluation(host host, client *mcpClient, role string, arguments []
 		"packDigest": plan.PackDigest, "skillId": item.SkillID, "caseId": item.Evaluation.ID,
 		"class": item.Evaluation.Class, "outcome": item.Evaluation.Outcome,
 		"harnessId": role + "-cli", "transport": "native-cli",
-		"selectedSkill": observation.SelectedSkill, "claimsSuccess": false, "completed": err == nil,
+		"selectedSkill": observation.SelectedSkill, "completed": err == nil,
 	})
 	return true, err
 }
