@@ -22,6 +22,8 @@ Barista honours exactly four: `darwin-amd64`, `darwin-arm64`, `linux-amd64`, `li
 
 `version` is the harness version Barista supports, and it is enforced twice over: `barista setup activate` refuses a managed harness whose own `--version` output does not report exactly this version (`ProbeHarnessVersion` in `../activation.go`), so a node can never be running a version its records claim it is not. Bump the entry and re-run plan/apply/activate to move a node to a new version; the previous version's files stay installed as the rollback target until an explicit `barista setup prune`.
 
+Activation updates the next startup selection, not a live daemon. The running process holds the manifest, ledgers, and resolved executable it verified at startup, reports that process-local version, and emits one restart-required notice when the activation record changes. Restart to adopt the new pin. A rollback consumes the one retained target and also needs a restart; prune retains active, rollback, drifted, unowned, directory, and symlink evidence and removes only verified inactive owned files. The operator command sequence and recovery table are canonical in [`docs/operations.md`](../../../../../docs/operations.md#upgrading-restarting-rolling-back-and-pruning-a-managed-harness).
+
 Authentication is a **separate operator action after installation**, never part of it. Both harnesses keep their login in their own vendor-owned local storage on the compute machine. Barista installs, copies, exports, and forwards no credential, the hub never receives one, and `barista doctor` reports only a coarse `authReadiness` derived from an exit code.
 
 ### `claude-cli` — Claude Code

@@ -149,7 +149,7 @@ barista setup plan --data-root <path> --out plan.json
 barista setup apply --plan plan.json \
   --allowed-host github.com \
   --allowed-host release-assets.githubusercontent.com
-barista setup activate --component harness/codex-cli --version 0.147.0
+barista setup activate --kind harness --id codex-cli --version 0.147.0
 barista doctor            # activeVersion, rollbackVersion, provenance, authReadiness
 ```
 
@@ -168,12 +168,46 @@ barista setup apply --plan plan.json \
   --manual-checksum claude-cli=<sha256>
 
 # 3. Select it atomically. The previously active version is retained as the rollback target.
-barista setup activate --component harness/claude-cli --version 2.1.231
+barista setup activate --kind harness --id claude-cli --version 2.1.231
 ```
 
-Activation is verified-then-recorded, and the verification now includes the candidate's own claim about itself: **Barista refuses to activate a managed harness whose `--version` output does not report exactly the pinned version.** An output that names another version, carries no parsable version at all, looks secret-like, exits non-zero, cannot start, or exceeds the bounded timeout all refuse the selection — each with a distinct fixed reason naming only the component identity, because raw probe output may carry credentials and is never logged, reported, or surfaced. A refused activation leaves the activation ledger, the ownership ledger, and every installed file byte-identical, so the previously active version stays active and `barista setup rollback --component harness/claude-cli` still returns to the retained one.
+Activation is verified-then-recorded, and the verification now includes the candidate's own claim about itself: **Barista refuses to activate a managed harness whose `--version` output does not report exactly the pinned version.** An output that names another version, carries no parsable version at all, looks secret-like, exits non-zero, cannot start, or exceeds the bounded timeout all refuse the selection — each with a distinct fixed reason naming only the component identity, because raw probe output may carry credentials and is never logged, reported, or surfaced. A refused activation leaves the activation ledger, the ownership ledger, and every installed file byte-identical, so the previously active version stays active and `barista setup rollback --kind harness --id claude-cli` still returns to the retained one.
 
 Bumping a version is never an in-place mutation: the new version installs at its own path, and the old one stays until an explicit `barista setup prune`. Replaying a completed apply or re-activating the current, still-verifying version writes nothing. If the activated bytes later drift from the ownership ledger, the harness is not launched from them — it falls back to the external PATH installation and `barista doctor` reports the demotion (`provenance: external` with a note) rather than hiding it.
+
+### Upgrading, restarting, rolling back, and pruning a managed harness
+
+Use this order on each node. The version and artifact come from the manifest being deployed; do not copy a version from this example or infer one from a directory name.
+
+```bash
+# Prepare the next version while the current daemon may still be working.
+barista setup plan --data-root <path> --manifest components-next.json --out next-plan.json
+barista setup apply --data-root <path> --manifest components-next.json --plan next-plan.json \
+  --manual-artifact <component-id>=<artifact> \
+  --manual-checksum <component-id>=<sha256>
+barista setup activate --data-root <path> --manifest components-next.json \
+  --kind harness --id <component-id> --version <version>
+barista doctor --json --data-root <path> --manifest components-next.json
+
+# Finish or cancel work according to local policy, then restart the Barista service.
+# After restart, doctor and Compute must show the version the new process actually selected.
+barista doctor --json --data-root <path> --manifest components-next.json
+
+# If the new version must be backed out, consume the one retained target, then restart again.
+barista setup rollback --data-root <path> --manifest components-next.json \
+  --kind harness --id <component-id>
+barista doctor --json --data-root <path> --manifest components-next.json
+
+# Only after the selected version is healthy and no rollback target is needed:
+barista setup prune --data-root <path> --manifest components-next.json \
+  --kind harness --id <component-id>
+```
+
+Apply and activate do not signal or reconfigure another Barista process. A running daemon keeps the manifest, ledgers, executable, and component report it verified at startup; changing `activation.json` produces one bounded restart-required log notice and neither interrupts an in-flight run nor changes a later pre-restart run. Restart is the sole adoption boundary. A version-5 resident keeps its `instance.id`, but its process-local allocation is marked `lost` and one replacement gets a new `allocation.id` before pinned work resumes. Never infer continuity from the node counters or from a component report.
+
+Rollback verifies the retained bytes again and consumes the retained target; it does not swap the failed version into a new rollback slot, so a second rollback refuses instead of oscillating. Prune removes only inactive, digest-matching files recorded in the ownership ledger. It retains the active and rollback versions, drifted files, unowned files, directories, and symlinks, and never follows a symlink. Investigate a retention before changing bytes or ledgers by hand.
+
+Component inventory is informational. While the node is connected, its report describes the selection that process verified. A disconnect retains the last report for diagnosis but the node is offline, so the evidence is not live. A fresh registration clears that old report before accepting the new process's post-ack report; a Hub restart preserves the last accepted report with the node's offline state. Absence on a version-4 peer means “not reported,” never “none installed.” None of these states qualifies a node, allocation, or run for scheduling.
 
 Installation and authentication are separate steps, and installing proves nothing about the second. See the next section.
 
@@ -371,7 +405,7 @@ Older Baristas registering protocol versions 1–4 keep only their advertised co
 
 Rollback caveats: persisted state written by a newer hub may contain values an older hub cannot interpret—loading fails rather than guessing. Back up the SQLite database (including WAL/SHM while live, preferably with SQLite's backup mechanism), artifact tree, and prepared previews together before upgrade. `COFFEE_SHOP_DATA` is a one-time legacy JSON import source only: once the database contains state, SQLite is authoritative and later JSON changes are ignored. Rolling back across the v5 schema boundary requires restoring that pre-upgrade backup; an older hub must not be pointed at v5 state and expected to discard it.
 
-Adapter upgrades ship as a new manifest pin in a new Barista build: build the new adapter artifact, `barista setup plan` / `setup apply --manual-artifact` / `--manual-checksum` (or update the `--acp-adapter` digest), and restart Barista. Barista always refuses an adapter whose pinned version does not match its manifest.
+Managed-component upgrades ship as a new manifest pin in a new Barista build. Follow the tested plan/apply/activate/restart procedure above for harnesses and adapters; an adapter supplied with `--acp-adapter` remains an explicit digest-pinned alternative. Barista always refuses an adapter whose pinned version does not match its manifest, and a running process never hot-adopts a changed activation ledger.
 
 ## Failure recovery
 
@@ -386,6 +420,10 @@ Adapter upgrades ship as a new manifest pin in a new Barista build: build the ne
 | Hub restarted | Process or host restart | State reloads from SQLite, Baristas reconnect, replay outboxes, and reconcile exact resident inventories before scheduling resumes. |
 | Instance remains draining/failed | Release cleanup failed or no exact acknowledgement arrived | Keep it visible; do not edit SQLite or infer a free slot. Restore the Barista and retry the same release key/mode. Unknown remote residents are released, never adopted. |
 | Barista restarted | Process or node restart | It re-registers with a fresh inventory and capability report; running task attempts it no longer reports fail like lost attempts and retry. Cancelled runs stay cancelled because the hub, not Barista, is authoritative for run state. |
+| Setup apply refuses an edited/stale plan, changed target, checksum, digest, size, redirect, archive, or platform | The immutable plan no longer proves the exact operation, or the platform has no declared distribution | Leave the existing ledgers and selection alone. Correct the manifest/source/allowed host, create a fresh plan, and apply it. An unsupported platform has no fallback operation. |
+| Activate or rollback refuses a version | The candidate is absent, drifted, mismatched, unowned, or failed its bounded version probe | Keep running the previously selected process. Restore the exact owned bytes from the reviewed source or choose a new declared version, then rerun doctor and the operation. Never edit the ledgers to force it. |
+| Compute still reports the old version after activation | The daemon correctly kept its startup selection | Finish or cancel work, restart that Barista once, then wait for its fresh post-registration component report. Do not expect reconnecting the same process to adopt it. |
+| Prune reports retained files | The version is active/rollback-protected, or the path is drifted, unowned, a directory, or a symlink | Treat the report as a refusal, inspect locally, and correct ownership intentionally. Prune never deletes or follows evidence it cannot prove. |
 
 ## Security invariants
 

@@ -71,6 +71,8 @@ An unconfigured development hub accepts local enrollment without a token. Produc
 
 Run `barista --help` for the full command line. Environment equivalents are `CONTROL_ENDPOINT`, `BARISTA_NAME`, `BARISTA_ID`, `BARISTA_KIND`, `BARISTA_CONCURRENCY`, `WORKSPACE_ROOTS`, and `COFFEE_SHOP_TOKEN`.
 
+Barista may also install verified, versioned provider harnesses under its own data root. Upgrades follow `setup plan` → `setup apply` → `setup activate` → service restart; a live daemon never hot-adopts a changed selection. Rollback also requires a restart, and prune removes only verified inactive owned bytes. Provider login remains local and separate throughout. See the [tested managed-harness procedure](docs/operations.md#upgrading-restarting-rolling-back-and-pruning-a-managed-harness).
+
 ## Task catalog
 
 ```text
