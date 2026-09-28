@@ -27,6 +27,7 @@ import {
   type HarnessId,
   type HarnessTransport,
   type InstanceAllocation,
+  type ExpectedCapabilityPack,
   type InstanceControlMessage,
   type InstanceCreator,
   type InstanceHubMessage,
@@ -40,6 +41,7 @@ import {
   type Run
 } from "@coffee-shop/protocol";
 import { CoordinationError } from "./coordinationError.js";
+import { effectiveInstanceRequirements, normalizeInstanceRequirements, requirementsThroughTemplate } from "./instanceRequirements.js";
 import { cancelRunInState } from "./lifecycle.js";
 import { newEvent, newId, type State, type Store } from "./store.js";
 import { appendInitialTaskInState, applyAttemptOutcome, attemptIsRetryable, initialTaskOrigin } from "./tasks.js";
@@ -462,6 +464,42 @@ function replayResult(state: Readonly<State>, receipt: InstanceLifecycleReceipt)
   };
 }
 
+/**
+ * Receipts written before skill canonicalization hashed the caller's raw spelling. When that legacy
+ * digest differs, compare the complete immutable create material against the stored result instead;
+ * any missing record or changed purpose, requirements, lease, or initial task still conflicts.
+ */
+function legacyCreateReplayMatches(
+  state: Readonly<State>,
+  receipt: InstanceLifecycleReceipt,
+  request: Extract<InstanceLifecycleRequest, { operation: "create" }>
+): boolean {
+  if (receipt.operation !== "create") return false;
+  const instance = state.instances?.find((item) => item.id === receipt.instanceId && item.threadId === receipt.threadId);
+  if (!instance || instance.creator.kind !== request.idempotency.caller.kind
+    || instanceCreatorSourceKey(instance.creator) !== receipt.sourceKey) return false;
+  if ((state.instanceLifecycleReceipts ?? []).some((item) =>
+    item.instanceId === instance.id && item.operation === "renew")) return false;
+  const initialTask = receipt.initialTaskId === undefined
+    ? undefined
+    : state.tasks?.find((task) => task.id === receipt.initialTaskId && task.threadId === receipt.threadId);
+  if ((request.initialTask === undefined) !== (initialTask === undefined)) return false;
+  const materializedRequest: Extract<InstanceLifecycleRequest, { operation: "create" }> = {
+    ...request,
+    requirements: effectiveInstanceRequirements(request.requirements, state.templates ?? [])
+  };
+  const storedRequest: Extract<InstanceLifecycleRequest, { operation: "create" }> = {
+    operation: "create",
+    threadId: receipt.threadId,
+    idempotency: structuredClone(request.idempotency),
+    ...(instance.purpose === undefined ? {} : { purpose: structuredClone(instance.purpose) }),
+    requirements: structuredClone(instance.requirements),
+    idleTimeoutSeconds: instance.lease.idleTimeoutSeconds,
+    ...(initialTask === undefined ? {} : { initialTask: { title: initialTask.title, instructions: initialTask.instructions } })
+  };
+  return instanceRequestDigest(materializedRequest) === instanceRequestDigest(storedRequest);
+}
+
 const leaseExpiry = (at: string, idleTimeoutSeconds: number) => new Date(Date.parse(at) + idleTimeoutSeconds * 1000).toISOString();
 
 /**
@@ -497,59 +535,64 @@ export async function applyInstanceLifecycle(
 ): Promise<InstanceLifecycleResult> {
   const validated = validateInstanceLifecycleRequest(request);
   if (!validated.ok) throw new CoordinationError("invalid_arguments", validated.reason);
-  const digest = instanceRequestDigest(validated.value);
+  const normalizedRequest: InstanceLifecycleRequest = validated.value.operation === "create"
+    ? { ...validated.value, requirements: normalizeInstanceRequirements(validated.value.requirements) }
+    : validated.value;
+  const digest = instanceRequestDigest(normalizedRequest);
   const sourceKey = instanceCreatorSourceKey(caller);
-  if (JSON.stringify(request.idempotency.caller) !== JSON.stringify(caller)) {
+  if (JSON.stringify(normalizedRequest.idempotency.caller) !== JSON.stringify(caller)) {
     throw new CoordinationError("forbidden", "The idempotency caller does not match the authenticated principal");
   }
   let result: InstanceLifecycleResult | undefined;
   await store.transact((state) => {
     options.assertAuthorized?.(state);
-    const thread = authorizeInstanceThread(state, caller, request.threadId);
-    const prior = (state.instanceLifecycleReceipts ?? []).find((receipt) => receiptKeyMatches(receipt, request.threadId, sourceKey, request.idempotency.key));
+    const thread = authorizeInstanceThread(state, caller, normalizedRequest.threadId);
+    const prior = (state.instanceLifecycleReceipts ?? []).find((receipt) => receiptKeyMatches(receipt, normalizedRequest.threadId, sourceKey, normalizedRequest.idempotency.key));
     if (prior) {
-      if (prior.digest !== digest) {
+      if (prior.digest !== digest && !(normalizedRequest.operation === "create" && legacyCreateReplayMatches(state, prior, normalizedRequest))) {
         throw new CoordinationError("idempotency_conflict", "The idempotency key was already used with a different instance request");
       }
       result = replayResult(state, prior);
       return false;
     }
-    if (request.operation === "create") {
+    if (normalizedRequest.operation === "create") {
       if (thread.status !== "active") throw new CoordinationError("thread_inactive", "Instance creation requires an active thread");
+      const requirements = effectiveInstanceRequirements(normalizedRequest.requirements, state.templates ?? []);
       const instance: AgentInstance = {
         id: newId("instance"),
         threadId: thread.id,
         creator: { ...caller },
-        ...(request.purpose ? { purpose: structuredClone(request.purpose) } : {}),
+        ...(normalizedRequest.purpose ? { purpose: structuredClone(normalizedRequest.purpose) } : {}),
         delegation: { canDelegate: false },
-        requirements: structuredClone(request.requirements),
+        requirements: structuredClone(requirements),
         lease: {
-          idleTimeoutSeconds: request.idleTimeoutSeconds ?? defaultInstanceIdleTimeoutSeconds,
-          expiresAt: leaseExpiry(at, request.idleTimeoutSeconds ?? defaultInstanceIdleTimeoutSeconds)
+          idleTimeoutSeconds: normalizedRequest.idleTimeoutSeconds ?? defaultInstanceIdleTimeoutSeconds,
+          expiresAt: leaseExpiry(at, normalizedRequest.idleTimeoutSeconds ?? defaultInstanceIdleTimeoutSeconds)
         },
         status: "requested",
         createdAt: at,
         updatedAt: at
       };
       let initialTaskId: string | undefined;
-      if (request.initialTask) {
+      if (normalizedRequest.initialTask) {
         initialTaskId = appendInitialTaskInState(state, thread.id, {
-          title: request.initialTask.title,
-          instructions: request.initialTask.instructions,
-          requirements: structuredClone(request.requirements),
-          idempotencyKey: initialTaskIdempotencyKey(sourceKey, thread.id, request.idempotency.key),
+          title: normalizedRequest.initialTask.title,
+          instructions: normalizedRequest.initialTask.instructions,
+          requirements: structuredClone(requirements),
+          idempotencyKey: initialTaskIdempotencyKey(sourceKey, thread.id, normalizedRequest.idempotency.key),
           sourceKey,
           instanceId: instance.id
         }, at).id;
       }
       state.instances ??= [];
+      state.instanceRequirementsVersion = 1;
       state.instances.unshift(instance);
       state.instanceLifecycleReceipts ??= [];
       state.instanceLifecycleReceipts.push({
         id: newId("instreceipt"),
         threadId: thread.id,
         sourceKey,
-        idempotencyKey: request.idempotency.key,
+        idempotencyKey: normalizedRequest.idempotency.key,
         operation: "create",
         digest,
         instanceId: instance.id,
@@ -568,7 +611,7 @@ export async function applyInstanceLifecycle(
         replayed: false
       };
     } else {
-      const instance = (state.instances ?? []).find((item) => item.id === request.instanceId && item.threadId === request.threadId);
+      const instance = (state.instances ?? []).find((item) => item.id === normalizedRequest.instanceId && item.threadId === normalizedRequest.threadId);
       if (!instance) throw new CoordinationError("not_found", "Instance not found");
       /*
        * Scope before anything observable. The receipt budget is a property of the named instance, so
@@ -576,20 +619,20 @@ export async function applyInstanceLifecycle(
        * foreign instance: one at its budget would conflict while one below it stayed hidden behind the
        * not-found answer, which is how a caller could probe another thread's instances.
        */
-      assertReceiptBudget(state, instance.id, request.operation);
-      if (request.operation === "renew") {
+      assertReceiptBudget(state, instance.id, normalizedRequest.operation);
+      if (normalizedRequest.operation === "renew") {
         if (instance.status === "released" || instance.status === "failed") {
           throw new CoordinationError("conflict", `A ${instance.status} instance cannot be renewed`);
         }
         if (instance.status === "draining") throw new CoordinationError("conflict", "A draining instance cannot be renewed");
-        const idleTimeoutSeconds = request.idleTimeoutSeconds ?? instance.lease.idleTimeoutSeconds;
+        const idleTimeoutSeconds = normalizedRequest.idleTimeoutSeconds ?? instance.lease.idleTimeoutSeconds;
         instance.lease = { idleTimeoutSeconds, expiresAt: leaseExpiry(at, idleTimeoutSeconds) };
         instance.updatedAt = at;
         const allocation = currentAllocationInState(state, instance.id);
         if (allocation) allocation.lease = { ...instance.lease };
         state.instanceLifecycleReceipts ??= [];
         state.instanceLifecycleReceipts.push({
-          id: newId("instreceipt"), threadId: thread.id, sourceKey, idempotencyKey: request.idempotency.key,
+          id: newId("instreceipt"), threadId: thread.id, sourceKey, idempotencyKey: normalizedRequest.idempotency.key,
           operation: "renew", digest, instanceId: instance.id, createdAt: at
         });
         result = { instance: structuredClone(instance), replayed: false };
@@ -597,14 +640,14 @@ export async function applyInstanceLifecycle(
         if (terminalInstanceStatuses.includes(instance.status)) {
           throw new CoordinationError("conflict", `The instance is already ${instance.status}`);
         }
-        const intent = recordReleaseIntent(state, instance, request.mode, at);
+        const intent = recordReleaseIntent(state, instance, normalizedRequest.mode, at);
         if (canTransitionInstance(instance.status, "draining")) {
           instance.status = "draining";
           instance.updatedAt = at;
         }
         state.instanceLifecycleReceipts ??= [];
         state.instanceLifecycleReceipts.push({
-          id: newId("instreceipt"), threadId: thread.id, sourceKey, idempotencyKey: request.idempotency.key,
+          id: newId("instreceipt"), threadId: thread.id, sourceKey, idempotencyKey: normalizedRequest.idempotency.key,
           operation: "release", digest, instanceId: instance.id, createdAt: at
         });
         state.events.unshift(newEvent({
@@ -650,6 +693,39 @@ export function releaseUnneededInstanceInState(state: State, instanceId: string,
   }));
   settleDrainingInstances(state, at);
   return true;
+}
+
+/**
+ * Rejects a run-start proof that does not match the allocation's immutable pack expectation. The
+ * attempt is retryable, while the resident is cancelled and made unavailable so the next scheduler
+ * pass must place against fresh current-socket evidence and a new allocation.
+ */
+export function rejectInstanceAllocationProofInState(state: State, runId: string, reason: string, at: string): boolean {
+	const run = state.runs.find((item) => item.id === runId);
+	if (!run || run.instanceId === undefined || run.allocationId === undefined || !canTransitionRun(run.status, "failed")) return false;
+	const instance = (state.instances ?? []).find((item) => item.id === run.instanceId);
+	const allocation = (state.allocations ?? []).find((item) => item.id === run.allocationId && item.instanceId === run.instanceId);
+	if (!instance || !allocation || terminalInstanceStatuses.includes(instance.status)) return false;
+	run.status = "failed";
+	run.error = reason;
+	run.finishedAt = at;
+	const task = run.taskId === undefined ? undefined : state.tasks?.find((item) => item.id === run.taskId);
+	applyAttemptOutcome(state, run.id, at, { retryable: attemptIsRetryable(task) });
+	if (task?.placementInstanceId === instance.id) delete task.placementInstanceId;
+	recordReleaseIntent(state, instance, "cancel", at);
+	if (canTransitionInstance(instance.status, "draining")) instance.status = "draining";
+	instance.updatedAt = at;
+	state.events.unshift(newEvent({
+		type: "status",
+		title: "Capability pack proof rejected",
+		detail: `Run ${run.id} could not use allocation ${allocation.id}: ${reason}`,
+		threadId: run.threadId,
+		instanceId: instance.id,
+		allocationId: allocation.id,
+		runId: run.id
+	}));
+	settleDrainingInstances(state, at);
+	return true;
 }
 
 /** Records the release intent, escalating monotonically: once cancel, always cancel. */
@@ -720,6 +796,7 @@ export interface AllocationCandidate {
   transport: HarnessTransport;
   /** Canonical absolute path; Barista re-validates it against its WORKSPACE_ROOTS. */
   workspace: string;
+  expectedCapabilityPack?: ExpectedCapabilityPack;
 }
 
 export type ReservationResult =
@@ -732,6 +809,23 @@ export type ReservationResult =
    * would roll back placements that have nothing to do with the offending record.
    */
   | { kind: "invalid"; reason: string };
+
+function capabilityPackExpectationRefusal(
+  instance: Pick<AgentInstance, "requirements">,
+  expected: ExpectedCapabilityPack | undefined
+): string | undefined {
+  const requiredSkills = [...new Set(instance.requirements.skills ?? [])].sort();
+  if (requiredSkills.length === 0 && expected !== undefined) {
+    return "An allocation without skill requirements cannot carry a capability pack expectation";
+  }
+  if (requiredSkills.length > 0) {
+    if (expected === undefined) return "Skill requirements require an admitted capability pack expectation";
+    if (requiredSkills.some((skill) => !expected.requiredSkills.includes(skill))) {
+      return "The capability pack expectation does not cover the instance skill requirements";
+    }
+  }
+  return undefined;
+}
 
 const isUnderWorkspaceRoot = (workspace: string, root: string) =>
   workspace === root || workspace.startsWith(root.endsWith("/") ? root : `${root}/`);
@@ -807,7 +901,7 @@ function allocationRefusal(state: Readonly<State>, instance: AgentInstance, cand
   if (!(node.workspaceRoots ?? []).some((root) => isUnderWorkspaceRoot(candidate.workspace, root))) {
     return `Workspace ${candidate.workspace} is outside an authorized root on ${node.id}`;
   }
-  return undefined;
+  return capabilityPackExpectationRefusal(instance, candidate.expectedCapabilityPack);
 }
 
 /**
@@ -831,6 +925,7 @@ function writeAllocationInState(
     model: candidate.model,
     transport: candidate.transport,
     workspace: candidate.workspace,
+    ...(candidate.expectedCapabilityPack === undefined ? {} : { expectedCapabilityPack: structuredClone(candidate.expectedCapabilityPack) }),
     lease: { ...instance.lease },
     status: "reserved",
     createdAt: at,
@@ -870,7 +965,7 @@ export interface InstanceRequestSeed {
 }
 
 /** Builds and wire-validates a `requested` instance record without writing it. */
-function buildRequestedInstance(threadId: string, seed: InstanceRequestSeed, at: string): { ok: true; instance: AgentInstance } | { ok: false; reason: string } {
+function buildRequestedInstance(state: Readonly<State>, threadId: string, seed: InstanceRequestSeed, at: string): { ok: true; instance: AgentInstance } | { ok: false; reason: string } {
   const idleTimeoutSeconds = seed.idleTimeoutSeconds ?? defaultInstanceIdleTimeoutSeconds;
   const instance: AgentInstance = {
     id: newId("instance"),
@@ -878,7 +973,7 @@ function buildRequestedInstance(threadId: string, seed: InstanceRequestSeed, at:
     creator: seed.creator ? { ...seed.creator } : { ...operatorInstanceCreator },
     ...(seed.purpose ? { purpose: structuredClone(seed.purpose) } : {}),
     delegation: { canDelegate: seed.delegation?.canDelegate === true },
-    requirements: structuredClone(seed.requirements),
+    requirements: effectiveInstanceRequirements(seed.requirements, state.templates ?? []),
     lease: { idleTimeoutSeconds, expiresAt: leaseExpiry(at, idleTimeoutSeconds) },
     status: "requested",
     createdAt: at,
@@ -899,10 +994,11 @@ export function requestInstanceInState(state: State, seed: InstanceRequestSeed, 
   const thread = (state.threads ?? []).find((item) => item.id === seed.threadId);
   if (!thread) throw new CoordinationError("not_found", "Thread not found");
   if (thread.status !== "active") throw new CoordinationError("thread_inactive", "Instance creation requires an active thread");
-  const built = buildRequestedInstance(thread.id, seed, at);
+  const built = buildRequestedInstance(state, thread.id, seed, at);
   if (!built.ok) throw new CoordinationError("invalid_arguments", `The instance request is not valid: ${built.reason}`);
   const instance = built.instance;
   state.instances ??= [];
+  state.instanceRequirementsVersion = 1;
   state.instances.unshift(instance);
   state.events.unshift(newEvent({
     type: "status",
@@ -930,7 +1026,7 @@ export function placeInstanceInState(state: State, seed: InstanceRequestSeed, ca
   const thread = (state.threads ?? []).find((item) => item.id === seed.threadId);
   if (!thread) throw new CoordinationError("not_found", "Thread not found");
   if (thread.status !== "active") throw new CoordinationError("thread_inactive", "Instance creation requires an active thread");
-  const built = buildRequestedInstance(thread.id, seed, at);
+  const built = buildRequestedInstance(state, thread.id, seed, at);
   if (!built.ok) return { kind: "invalid", reason: built.reason };
   const instance = built.instance;
   const refusal = allocationRefusal(state, instance, candidate);
@@ -946,12 +1042,14 @@ export function placeInstanceInState(state: State, seed: InstanceRequestSeed, ca
     allocation: {
       id: "probe", instanceId: instance.id, nodeId: node.id, harnessId: candidate.harnessId, model: candidate.model,
       transport: candidate.transport, workspace: candidate.workspace, lease: { ...instance.lease },
+      ...(candidate.expectedCapabilityPack === undefined ? {} : { expectedCapabilityPack: structuredClone(candidate.expectedCapabilityPack) }),
       status: "reserved", createdAt: at, updatedAt: at
     }
   };
   const encodable = validateInstanceHubMessage(probe, "5");
   if (!encodable.ok) return { kind: "invalid", reason: `the provision command is not wire-valid: ${encodable.reason}` };
   state.instances ??= [];
+  state.instanceRequirementsVersion = 1;
   state.instances.unshift(instance);
   state.events.unshift(newEvent({
     type: "status",
@@ -1689,8 +1787,81 @@ const commandInstanceId = (message: InstanceHubMessage): string => {
   return message.instance.id;
 };
 
+/**
+ * Converges state written before instance requirements became canonical and template-effective.
+ * The migration runs before persisted-state assertions, changes only otherwise-valid instance and
+ * allocation shapes, and mirrors the authoritative records into pending command snapshots. An old
+ * no-skill expectation is removed rather than interpreted: it can never become readiness authority.
+ */
+export function migrateLegacyInstanceState(state: State): boolean {
+  if (state.instanceRequirementsVersion !== undefined) return false;
+  const templates = Array.isArray(state.templates) ? state.templates : [];
+  const instances = Array.isArray(state.instances) ? state.instances : [];
+  const allocations = Array.isArray(state.allocations) ? state.allocations : [];
+  const deliveries = Array.isArray(state.instanceDeliveries) ? state.instanceDeliveries : [];
+  // Empty and preview-only snapshots predate this private marker too, but have no instance
+  // authority to migrate. Leaving them byte-stable avoids rewriting unrelated producer fixtures;
+  // the first current instance writer stamps the version atomically with its record.
+  if (instances.length === 0 && allocations.length === 0 && deliveries.length === 0) return false;
+  const validTemplates = new Map<string, AgentTemplate>();
+  for (const template of templates) {
+    const validated = validateAgentTemplate(template);
+    if (validated.ok) validTemplates.set(validated.value.id, validated.value);
+  }
+  const instancesById = new Map<string, AgentInstance>();
+  for (const instance of instances) {
+    const validated = validateAgentInstance(instance);
+    if (!validated.ok) continue;
+    const template = validated.value.requirements.templateId === undefined
+      ? undefined
+      : validTemplates.get(validated.value.requirements.templateId);
+    const requirements = requirementsThroughTemplate(validated.value.requirements, template);
+    if (JSON.stringify(requirements) !== JSON.stringify(instance.requirements)) Object.assign(instance, { requirements });
+    instancesById.set(instance.id, instance);
+  }
+  const allocationsById = new Map<string, InstanceAllocation>();
+  for (const allocation of allocations) {
+    const validated = validateInstanceAllocation(allocation);
+    if (!validated.ok) continue;
+    const instance = instancesById.get(allocation.instanceId);
+    if (instance && (instance.requirements.skills?.length ?? 0) === 0 && allocation.expectedCapabilityPack !== undefined) {
+      Reflect.deleteProperty(allocation, "expectedCapabilityPack");
+    }
+    allocationsById.set(allocation.id, allocation);
+  }
+  for (const record of deliveries) {
+    const message: unknown = isRecord(record) ? record.message : undefined;
+    if (!isRecord(message) || message.type === "instance.release") continue;
+    if ((message.type !== "instance.provision" && message.type !== "dispatch")
+      || !isRecord(message.instance) || !isRecord(message.allocation)) continue;
+    const instance = typeof message.instance.id === "string" ? instancesById.get(message.instance.id) : undefined;
+    const allocation = typeof message.allocation.id === "string" ? allocationsById.get(message.allocation.id) : undefined;
+    if (!instance || !allocation) continue;
+    if (JSON.stringify(message.instance.requirements) !== JSON.stringify(instance.requirements)) {
+      Object.assign(message.instance, { requirements: structuredClone(instance.requirements) });
+    }
+    if (allocation.expectedCapabilityPack === undefined) {
+      if (message.allocation.expectedCapabilityPack !== undefined) {
+        Reflect.deleteProperty(message.allocation, "expectedCapabilityPack");
+      }
+    } else if (JSON.stringify(message.allocation.expectedCapabilityPack) !== JSON.stringify(allocation.expectedCapabilityPack)) {
+      Object.assign(message.allocation, { expectedCapabilityPack: structuredClone(allocation.expectedCapabilityPack) });
+    }
+  }
+  state.instanceRequirementsVersion = 1;
+  return true;
+}
+
 /** Rejects persisted instance state the hub cannot interpret; nothing is defaulted. */
 export function assertPersistedInstanceState(state: State) {
+  const requirementsVersion: unknown = state.instanceRequirementsVersion;
+  const hasInstanceRecords = (state.instances?.length ?? 0) > 0
+    || (state.allocations?.length ?? 0) > 0
+    || (state.instanceDeliveries?.length ?? 0) > 0;
+  if ((requirementsVersion !== undefined && requirementsVersion !== 1)
+    || (hasInstanceRecords && requirementsVersion !== 1)) {
+    throw new Error("Persisted instance requirements version is invalid");
+  }
   for (const [name, collection] of [
     ["instances", state.instances], ["allocations", state.allocations], ["templates", state.templates],
     ["instanceLifecycleReceipts", state.instanceLifecycleReceipts], ["instanceReleaseIntents", state.instanceReleaseIntents],
@@ -1710,6 +1881,7 @@ export function assertPersistedInstanceState(state: State) {
     if (!threadIds.has(instance.threadId)) throw new Error(`${context} names unknown thread ${instance.threadId}`);
   }
   const instanceThreadIds = new Map((state.instances ?? []).map((instance) => [instance.id, instance.threadId]));
+  const instancesById = new Map((state.instances ?? []).map((instance) => [instance.id, instance]));
   const allocationIds = new Set<string>();
   const allocationsById = new Map<string, InstanceAllocation>();
   const occupying = new Map<string, number>();
@@ -1720,6 +1892,8 @@ export function assertPersistedInstanceState(state: State) {
     if (allocationIds.has(allocation.id)) throw new Error(`${context} repeats allocation id ${allocation.id}`);
     allocationIds.add(allocation.id);
     if (!instanceIds.has(allocation.instanceId)) throw new Error(`${context} names unknown instance ${allocation.instanceId}`);
+    const expectationRefusal = capabilityPackExpectationRefusal(instancesById.get(allocation.instanceId)!, allocation.expectedCapabilityPack);
+    if (expectationRefusal !== undefined) throw new Error(`${context} is inconsistent: ${expectationRefusal}`);
     allocationsById.set(allocation.id, allocation);
     if (occupyingAllocationStatuses.includes(allocation.status)) {
       const count = (occupying.get(allocation.instanceId) ?? 0) + 1;

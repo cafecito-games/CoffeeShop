@@ -11,9 +11,11 @@ import {
   type AgentInstance,
   type AgentTemplate,
   type ComputeNode,
+  type CapabilityPackReadinessReport,
   type ControlProtocolVersion,
   type DispatchExecution,
   type ExecutionRequirements,
+  type ExpectedCapabilityPack,
   type HarnessId,
   type HarnessProfile,
   type HarnessTransport,
@@ -33,6 +35,7 @@ import {
   type WorkspaceLease
 } from "@coffee-shop/protocol";
 import { isWorkspaceWithinRoot } from "./agentConfiguration.js";
+import { normalizeSkillIdentifiers, requirementsThroughTemplate } from "./instanceRequirements.js";
 import {
   acceptInstanceWorkInState,
   appendInstanceDispatchInState,
@@ -66,10 +69,10 @@ import { dispatchableLease, exclusiveWorkspaceHolder, leasedIsolation, planWorks
  * node currently offers it.
  *
  * Hard machine facts stay hard. Operating system, architecture, labels and toolchains, memory,
- * harness, model, transport, project profile, and workspace are offering constraints that a
- * preference can never override. Role defaults — skills, instructions, avatars — live in
- * `AgentTemplate`, which is discovery metadata: a task naming a template may be placed only through
- * that template, and a task naming none needs no template at all.
+ * harness, model, transport, project profile, workspace, and capability-pack skills are offering
+ * constraints that a preference can never override. Role defaults and instructions live in
+ * `AgentTemplate`; a task naming a template may be placed only through it, while any effective
+ * skills are still proved from this Barista socket's live readiness report.
  *
  * A placed task gets a thread-scoped resident instance, not a node binding. A compatible ready or
  * idle instance in the same thread is reused; otherwise one is requested and its best eligible
@@ -117,6 +120,8 @@ export interface PlacementEnvironment {
   runs: readonly Run[];
   connection(nodeId: string): NodeConnection | undefined;
   capabilityReport(nodeId: string): NodeCapabilityReport | undefined;
+  /** Live report from this node's current socket; absence is no capability-pack evidence. */
+  capabilityPackReadiness?(nodeId: string): CapabilityPackReadinessReport | undefined;
   projectProfile(projectId: string): ProjectProfile | undefined;
   workspaceLeases?: readonly WorkspaceLease[];
   /** Thread-scoped resident instances; the reuse and pin candidates. */
@@ -144,6 +149,8 @@ export interface ExecutionOffering {
   fallbackTransport?: HarnessTransport;
   /** Canonical absolute path; Barista re-validates it against its own WORKSPACE_ROOTS. */
   workspace: string;
+  /** Exact live pack evidence admitted with the allocation. */
+  expectedCapabilityPack?: ExpectedCapabilityPack;
 }
 
 export interface PlacementCandidate {
@@ -364,9 +371,8 @@ function evaluateCandidate(task: Task, agent: Agent, profile: ProjectProfile | u
     unsatisfied.push({ kind, requirement, nodeId: agent.computeNodeId, agentId: agent.id, detail });
   };
 
-  const skills = new Set(agent.skills ?? []);
   for (const skill of requirements.skills ?? []) {
-    if (!skills.has(skill.toLowerCase())) add("skill", skill, "agent does not declare this skill");
+    add("skill", skill, "configured agent metadata is not live capability pack readiness");
   }
   if (requirements.harnessIds !== undefined && !requirements.harnessIds.includes(agent.harnessId)) {
     add("harness", requirements.harnessIds.join(", "), "agent is configured with a different harness");
@@ -518,6 +524,45 @@ function residentExclusion(profile: ProjectProfile | undefined): string | undefi
   return `a ${isolation} workspace lease cannot be granted to a resident instance: a version-5 dispatch carries no lease grant`;
 }
 
+function capabilityPackExpectation(
+  requiredSkills: readonly string[] | undefined,
+  offering: Pick<ExecutionOffering, "nodeId" | "harnessId" | "transport">,
+  environment: PlacementEnvironment,
+  add: (kind: PlacementRequirementKind, requirement: string, detail: string) => void
+): ExpectedCapabilityPack | undefined {
+  if (requiredSkills === undefined || requiredSkills.length === 0) return undefined;
+  const required = normalizeSkillIdentifiers(requiredSkills);
+  if (required.length === 0) return undefined;
+  const connection = environment.connection(offering.nodeId);
+  if (!connection || !supportsControlCapability(connection.protocolVersion, "capability-pack-readiness")) {
+    add("protocol-version", "capability-pack-readiness", "compute node's current socket cannot report capability pack readiness");
+    return undefined;
+  }
+  const report = environment.capabilityPackReadiness?.(offering.nodeId);
+  if (!report || report.status !== "available" || report.pack === undefined) {
+    add("skill", required.join(", "), "the current Barista socket has no available capability pack readiness report");
+    return undefined;
+  }
+  if (!report.surfaces.some((surface) => surface.harnessId === offering.harnessId && surface.transport === offering.transport)) {
+    add("skill", required.join(", "), `the active capability pack is not verified for ${offering.harnessId} over ${offering.transport}`);
+    return undefined;
+  }
+  const missing = required.filter((skill) => !report.pack!.skills.includes(skill));
+  if (missing.length > 0) {
+    add("skill", missing.join(", "), "the active capability pack does not declare every required skill");
+    return undefined;
+  }
+  return { id: report.pack.id, version: report.pack.version, requiredSkills: required };
+}
+
+function allocationCapabilityPackIsCurrent(allocation: InstanceAllocation, environment: PlacementEnvironment): boolean {
+  const admitted = allocation.expectedCapabilityPack;
+  if (admitted === undefined) return true;
+  const current = capabilityPackExpectation(admitted.requiredSkills, allocation, environment, () => {});
+  return current !== undefined && current.id === admitted.id && current.version === admitted.version
+    && current.requiredSkills.every((skill) => admitted.requiredSkills.includes(skill));
+}
+
 /**
  * Every hard requirement of `task` against one offering. Machine facts are proved from the node's
  * own fresh evidence; the harness, model, and transport are compared against what the offering
@@ -562,6 +607,7 @@ function evaluateOffering(
   if (profileHard?.transports !== undefined && !profileHard.transports.includes(offering.transport)) {
     add("project-profile", `transport ${profileHard.transports.join(", ")}`, "the project profile does not allow the offering's transport");
   }
+  const expectedCapabilityPack = capabilityPackExpectation(requirements.skills, offering, environment, add);
   const { resolve, readiness } = evaluateNodeEvidence(task, node, profile, environment, add);
   const usage = nodeUsage(node, environment.runs);
   if (requirements.minimumConcurrency !== undefined && usage.concurrency < requirements.minimumConcurrency) {
@@ -587,7 +633,7 @@ function evaluateOffering(
   const missingPreferredLabels = (preferences?.labels ?? []).filter((label) => resolve(`label:${label.toLowerCase()}`).state !== "ok").length;
   return {
     unsatisfied,
-    offering,
+    offering: expectedCapabilityPack === undefined ? offering : { ...offering, expectedCapabilityPack },
     usage,
     resident,
     ranks: [
@@ -627,18 +673,15 @@ export type TemplateResolution =
   | { kind: "template"; template: AgentTemplate }
   | { kind: "unsatisfied"; unsatisfied: UnsatisfiedRequirement };
 
-const templateSkills = (template: AgentTemplate) => new Set((template.skills ?? []).map((skill) => skill.toLowerCase()));
+const templateSkills = (template: AgentTemplate) => new Set(normalizeSkillIdentifiers(template.skills));
 
 /**
  * The template a task must be placed through, if any. A task naming `templateId` may use only that
- * template, and only when it declares every skill the task requires. A task that requires skills
- * without naming a template is placed through the least-identified template that declares them all,
- * which is the deterministic migration of a legacy skill requirement; a task that names neither
- * needs no configured template. There is never an arbitrary candidate: a skill or template
- * requirement nothing satisfies is an explicit diagnostic.
+ * template, and only when it declares every skill the task requires. Bare skills select no template:
+ * they are hard execution requirements proved directly from live capability-pack readiness.
  */
 export function resolveTaskTemplate(task: Task, templates: readonly AgentTemplate[]): TemplateResolution {
-  const required = (task.requirements.skills ?? []).map((skill) => skill.toLowerCase());
+  const required = normalizeSkillIdentifiers(task.requirements.skills);
   const named = task.requirements.templateId;
   const ordered = [...templates].sort((left, right) => compareText(left.id, right.id));
   if (named !== undefined) {
@@ -651,27 +694,8 @@ export function resolveTaskTemplate(task: Task, templates: readonly AgentTemplat
     }
     return { kind: "template", template };
   }
-  if (required.length === 0) return { kind: "none" };
-  const template = ordered.find((item) => {
-    const declared = templateSkills(item);
-    return required.every((skill) => declared.has(skill));
-  });
-  if (!template) {
-    return { kind: "unsatisfied", unsatisfied: { kind: "template", requirement: required.join(", "), detail: "no agent template declares every required skill, so the legacy skill requirement has no deterministic template" } };
-  }
-  return { kind: "template", template };
+  return { kind: "none" };
 }
-
-const intersect = (left: readonly string[] | undefined, right: readonly string[] | undefined): string[] | undefined => {
-  if (left === undefined) return right === undefined ? undefined : [...right];
-  if (right === undefined) return [...left];
-  return left.filter((value) => right.includes(value));
-};
-
-const union = (left: readonly string[] | undefined, right: readonly string[] | undefined): string[] | undefined => {
-  if (left === undefined && right === undefined) return undefined;
-  return [...new Set([...(left ?? []), ...(right ?? [])])];
-};
 
 /**
  * The hard requirements a task placed through a template must satisfy: the task's own, tightened by
@@ -680,37 +704,7 @@ const union = (left: readonly string[] | undefined, right: readonly string[] | u
  * Preferences merge field by field with the task's ranking winning, because a template's preference
  * is a default and the task's is a request.
  */
-export function requirementsThroughTemplate(requirements: ExecutionRequirements, template: AgentTemplate | undefined): ExecutionRequirements {
-  if (!template) return requirements;
-  const extra = template.requirements ?? {};
-  const merged: ExecutionRequirements = { ...requirements };
-  const narrow = <K extends "harnessIds" | "models" | "transports" | "operatingSystems" | "architectures">(key: K) => {
-    const value = intersect(requirements[key], extra[key]);
-    if (value === undefined) delete merged[key];
-    else merged[key] = value as ExecutionRequirements[K];
-  };
-  narrow("harnessIds");
-  narrow("models");
-  narrow("transports");
-  narrow("operatingSystems");
-  narrow("architectures");
-  const labels = union(requirements.labels, extra.labels);
-  if (labels === undefined) delete merged.labels;
-  else merged.labels = labels;
-  const skills = union(requirements.skills, extra.skills);
-  if (skills === undefined) delete merged.skills;
-  else merged.skills = skills;
-  for (const key of ["minimumConcurrency", "minimumMemoryMegabytes"] as const) {
-    const values = [requirements[key], extra[key]].filter((value): value is number => value !== undefined);
-    if (values.length) merged[key] = Math.max(...values);
-  }
-  if (merged.projectProfileId === undefined && extra.projectProfileId !== undefined) merged.projectProfileId = extra.projectProfileId;
-  if (merged.workspace === undefined && extra.workspace !== undefined) merged.workspace = { ...extra.workspace };
-  const preferences = { ...(template.preferences ?? {}), ...(extra.preferences ?? {}), ...(requirements.preferences ?? {}) };
-  if (Object.keys(preferences).length) merged.preferences = preferences;
-  merged.templateId = template.id;
-  return merged;
-}
+export { requirementsThroughTemplate } from "./instanceRequirements.js";
 
 /* ---------------------------------------------------------------------------------------------
  * Instances: reuse and explicit pins.
@@ -787,6 +781,15 @@ export function instanceUnsatisfied(
   }
   if (profileHard?.transports !== undefined && !profileHard.transports.includes(allocation.transport)) {
     add("project-profile", `transport ${profileHard.transports.join(", ")}`, "the project profile does not allow the instance's transport", node.id);
+  }
+  const expected = capabilityPackExpectation(requirements.skills, allocation, environment,
+    (kind, requirement, detail) => add(kind, requirement, detail, node.id));
+  if (expected !== undefined) {
+    const admitted = allocation.expectedCapabilityPack;
+    if (!admitted || admitted.id !== expected.id || admitted.version !== expected.version
+      || expected.requiredSkills.some((skill) => !admitted.requiredSkills.includes(skill))) {
+      add("skill", expected.requiredSkills.join(", "), "the resident allocation was not admitted with this pack identity and required skill subset", node.id);
+    }
   }
   if (requirements.projectProfileId !== instance.requirements.projectProfileId) {
     add("project-profile", requirements.projectProfileId ?? "none", "the instance was created for a different project policy", node.id);
@@ -873,14 +876,11 @@ export function placeTask(task: Task, environment: PlacementEnvironment): Placem
   }
   /*
    * A template a task names explicitly is a global admission gate: naming one it cannot be placed
-   * through leaves nothing to evaluate. A bare legacy skill requirement is not, because a configured
-   * agent declares its own skills and the compatibility path still matches them directly; it only
-   * closes the offering path, which has no skill evidence other than a template.
+   * through leaves nothing to evaluate. Bare skills name no template and flow into live readiness.
    */
   const templateResolution = resolveTaskTemplate(task, environment.templates ?? []);
   const namedTemplate = task.requirements.templateId !== undefined;
   if (templateResolution.kind === "unsatisfied" && namedTemplate) global.push(templateResolution.unsatisfied);
-  const templateGap = templateResolution.kind === "unsatisfied" ? templateResolution.unsatisfied : undefined;
   const requirements = requirementsThroughTemplate(
     task.requirements,
     templateResolution.kind === "template" ? templateResolution.template : undefined
@@ -960,6 +960,16 @@ export function placeTask(task: Task, environment: PlacementEnvironment): Placem
     && !(environment.allocations ?? []).some((item) => item.instanceId === owned.id && occupyingAllocation(item.status))
     ? owned
     : undefined);
+  const offeringTask = replacing === undefined ? effective : (() => {
+    const combinedSkills = normalizeSkillIdentifiers([
+      ...(effective.requirements.skills ?? []),
+      ...(replacing.requirements.skills ?? [])
+    ]);
+    const combinedRequirements: ExecutionRequirements = { ...effective.requirements };
+    if (combinedSkills.length === 0) delete combinedRequirements.skills;
+    else combinedRequirements.skills = combinedSkills;
+    return { ...effective, requirements: combinedRequirements };
+  })();
   const reusable = replacing !== undefined || pinnedAgentId !== undefined
     ? []
     : reusableInstances(effective, environment, profile, requiredNodeId);
@@ -996,14 +1006,13 @@ export function placeTask(task: Task, environment: PlacementEnvironment): Placem
     .filter((node) => requiredNodeId === undefined || node.id === requiredNodeId)
     .sort((left, right) => compareText(left.id, right.id));
   /*
-   * A legacy skill requirement with no covering template closes the offering path entirely: an
-   * offering carries no skill evidence of its own, so there is no candidate to evaluate. A node that
-   * publishes nothing for this workload still says why, because an unplaceable task must never end up
-   * with an empty diagnostic.
+   * Every published offering is evaluated against live readiness when skills are required. A node
+   * that publishes nothing for this workload still says why, because an unplaceable task must never
+   * end up with an empty diagnostic.
    */
   const requestedPath = requirements.workspace?.path;
   const silentNodes: UnsatisfiedRequirement[] = [];
-  const offeringEvaluations = templateGap !== undefined ? [] : offeringNodes.flatMap((node) => {
+  const offeringEvaluations = offeringNodes.flatMap((node) => {
     const published = nodeOfferings(node, requestedPath);
     if (published.length === 0) {
       if (offeredWorkspace(node, requestedPath) === undefined) {
@@ -1014,7 +1023,7 @@ export function placeTask(task: Task, environment: PlacementEnvironment): Placem
         silentNodes.push({ kind: "offering", requirement: "available harness", nodeId: node.id, detail: "the compute node publishes no available harness offering" });
       }
     }
-    return published.map((offering) => evaluateOffering(effective, offering, node, profile, environment));
+    return published.map((offering) => evaluateOffering(offeringTask, offering, node, profile, environment));
   });
   const eligibleOfferings = offeringEvaluations.filter((evaluation) => evaluation.offering !== undefined).sort(compareOfferings);
   if (eligibleOfferings.length) {
@@ -1056,11 +1065,7 @@ export function placeTask(task: Task, environment: PlacementEnvironment): Placem
     }
     return { kind: "waiting", instanceId: replacing.id, diagnostic: diagnostic([], unsatisfied) };
   }
-  if (templateGap !== undefined) {
-    if (offeringNodes.length) unsatisfied.push(templateGap);
-  } else {
-    unsatisfied.push(...silentNodes, ...offeringEvaluations.flatMap((evaluation) => evaluation.unsatisfied));
-  }
+  unsatisfied.push(...silentNodes, ...offeringEvaluations.flatMap((evaluation) => evaluation.unsatisfied));
   /*
    * Say so whenever the pin actually closed a candidate set that could otherwise have been tried, so
    * an operator reading the diagnostic is never left wondering why a healthy offering or an idle
@@ -1169,6 +1174,7 @@ export function dispatchMessageFor(
 export interface SchedulingContext {
   connection(nodeId: string): NodeConnection | undefined;
   capabilityReport(nodeId: string): NodeCapabilityReport | undefined;
+  capabilityPackReadiness?(nodeId: string): CapabilityPackReadinessReport | undefined;
   projectProfile(projectId: string): ProjectProfile | undefined;
   evidenceTTLMilliseconds?: number;
   /** Whether the node's current socket may receive `message`; only then is delivery recorded. */
@@ -1203,6 +1209,25 @@ function recordPlacement(task: Task, diagnostic: PlacementDiagnostic) {
   return true;
 }
 
+/** Persists the current refusal for a lifecycle-requested instance that has no task record of its own. */
+function recordInstancePlacementRefusal(state: State, instance: AgentInstance, detail: string) {
+  const bounded = detail.slice(0, 512);
+  const isCurrentDiagnostic = (event: State["events"][number]) =>
+    event.instanceId === instance.id && event.title === "Instance placement waiting";
+  const current = state.events.find(isCurrentDiagnostic);
+  const count = state.events.filter(isCurrentDiagnostic).length;
+  if (current?.detail === bounded && count === 1) return false;
+  state.events = state.events.filter((event) => !isCurrentDiagnostic(event));
+  state.events.unshift(newEvent({
+    type: "status",
+    title: "Instance placement waiting",
+    detail: bounded,
+    threadId: instance.threadId,
+    instanceId: instance.id
+  }));
+  return true;
+}
+
 function inconsistentAssignment(state: Readonly<State>, task: Task): string | undefined {
   if (task.status === "ready") return task.assignment ? "a ready task still records an assignment" : undefined;
   if (task.status !== "assigned" && task.status !== "running") return undefined;
@@ -1234,6 +1259,32 @@ export function runSchedulingPass(state: State, context: SchedulingContext, at: 
   // decides whether to reuse it or request another.
   if (convergeInstanceActivityInState(state, at)) changed = true;
   /*
+   * A pack-bound resident is reusable only while the same current socket still proves its admitted
+   * pack and exact surface. Retire an idle/provisioning generation as soon as that proof disappears;
+   * active work keeps its established execution authority, but no later task may enter the resident.
+   */
+  const readinessEnvironment = environmentFor();
+  for (const allocation of state.allocations ?? []) {
+    if (allocation.expectedCapabilityPack === undefined || !occupyingAllocationStatuses.includes(allocation.status)) continue;
+    const instance = (state.instances ?? []).find((item) => item.id === allocation.instanceId);
+    if (!instance || terminalInstanceStatuses.includes(instance.status) || instance.status === "draining") continue;
+    if (state.runs.some((run) => run.instanceId === instance.id && isActiveRunStatus(run.status))) continue;
+    if (allocationCapabilityPackIsCurrent(allocation, readinessEnvironment)) continue;
+    for (const task of state.tasks ?? []) {
+      if (task.placementInstanceId !== instance.id) continue;
+      delete task.placementInstanceId;
+      task.updatedAt = at;
+      state.events.unshift(newEvent({
+        type: "status",
+        title: "Task placement released",
+        detail: `Instance ${instance.id} no longer has current capability pack readiness for ${task.title.slice(0, 80)}`,
+        threadId: task.threadId
+      }));
+      changed = true;
+    }
+    if (releaseUnneededInstanceInState(state, instance.id, at)) changed = true;
+  }
+  /*
    * A placement intent survives only as long as the instance it names can still carry the task. A
    * released, failed, draining, or vanished instance is immutable history: the intent is dropped so
    * the retry policy places the task afresh — on a new instance with new identities — instead of
@@ -1261,21 +1312,24 @@ export function runSchedulingPass(state: State, context: SchedulingContext, at: 
     if (!unusable) releaseUnneededInstanceInState(state, released, at);
     changed = true;
   }
-  const environmentFor = (): PlacementEnvironment => ({
-    agents: state.agents,
-    nodes: state.nodes,
-    runs: state.runs,
-    connection: context.connection,
-    capabilityReport: context.capabilityReport,
-    projectProfile: context.projectProfile,
-    workspaceLeases: state.workspaceLeases,
-    instances: state.instances,
-    allocations: state.allocations,
-    templates: state.templates,
-    residentUsage: (node) => residentInstanceUsage(node, state.allocations ?? [], nodeResidencyInState(state, node.id)),
-    evidenceTTLMilliseconds: context.evidenceTTLMilliseconds,
-    now: at
-  });
+  function environmentFor(): PlacementEnvironment {
+    return {
+      agents: state.agents,
+      nodes: state.nodes,
+      runs: state.runs,
+      connection: context.connection,
+      capabilityReport: context.capabilityReport,
+      capabilityPackReadiness: context.capabilityPackReadiness,
+      projectProfile: context.projectProfile,
+      workspaceLeases: state.workspaceLeases,
+      instances: state.instances,
+      allocations: state.allocations,
+      templates: state.templates,
+      residentUsage: (node) => residentInstanceUsage(node, state.allocations ?? [], nodeResidencyInState(state, node.id)),
+      evidenceTTLMilliseconds: context.evidenceTTLMilliseconds,
+      now: at
+    };
+  }
   /*
    * A lifecycle request creates the durable identity before placement and may have no initial task.
    * Drive those requested identities through the same offering authority as task-created residents;
@@ -1287,13 +1341,22 @@ export function runSchedulingPass(state: State, context: SchedulingContext, at: 
       || (state.allocations ?? []).some((item) => item.instanceId === instance.id && occupyingAllocation(item.status))) continue;
     const thread = state.threads?.find((item) => item.id === instance.threadId);
     if (thread?.status !== "active") continue;
-    const intent: Task = {
+    const owningTask = [...readyTasks(state)].find((task) =>
+      task.placementInstanceId === instance.id || task.placementOverride?.instanceId === instance.id);
+    const template = instance.requirements.templateId === undefined
+      ? undefined
+      : (state.templates ?? []).find((item) => item.id === instance.requirements.templateId);
+    const syntheticRequirements = structuredClone(instance.requirements);
+    if (template !== undefined) {
+      delete syntheticRequirements.templateId;
+    }
+    const intent: Task = owningTask ?? {
       id: `instance-placement:${instance.id}`,
       threadId: instance.threadId,
       title: instance.purpose?.name ?? instance.id,
       instructions: "",
       status: "ready",
-      requirements: structuredClone(instance.requirements),
+      requirements: syntheticRequirements,
       dependencies: [],
       idempotencyKey: `instance-placement:${instance.id}`,
       attemptRunIds: [],
@@ -1302,15 +1365,29 @@ export function runSchedulingPass(state: State, context: SchedulingContext, at: 
       updatedAt: at
     };
     const decision = placeTask(intent, environmentFor());
-    if (decision.kind !== "offering") continue;
+    if (decision.kind !== "offering") {
+      const detail = decision.diagnostic.unsatisfied.length === 0
+        ? "no live offering currently satisfies this instance request"
+        : decision.diagnostic.unsatisfied
+          .map((refusal) => `${refusal.kind} ${refusal.requirement}: ${refusal.detail}`)
+          .join("; ");
+      changed = recordInstancePlacementRefusal(state, instance, detail) || changed;
+      continue;
+    }
     const reserved = reservationAsPlacement(state, instance.id, {
       nodeId: decision.offering.nodeId,
       harnessId: decision.offering.harnessId,
       model: decision.offering.model,
       transport: decision.offering.transport,
-      workspace: decision.offering.workspace
+      workspace: decision.offering.workspace,
+      ...(decision.offering.expectedCapabilityPack === undefined ? {} : { expectedCapabilityPack: decision.offering.expectedCapabilityPack })
     }, at);
-    if (reserved.kind === "placed") changed = true;
+    if (reserved.kind === "placed") {
+      state.events = state.events.filter((event) =>
+        !(event.instanceId === instance.id && event.title === "Instance placement waiting"));
+      changed = true;
+    }
+    else changed = recordInstancePlacementRefusal(state, instance, reserved.reason) || changed;
   }
   for (const task of [...readyTasks(state)]) {
     const thread = state.threads?.find((item) => item.id === task.threadId);
@@ -1338,7 +1415,8 @@ export function runSchedulingPass(state: State, context: SchedulingContext, at: 
         harnessId: offering.harnessId,
         model: offering.model,
         transport: offering.transport,
-        workspace: offering.workspace
+        workspace: offering.workspace,
+        ...(offering.expectedCapabilityPack === undefined ? {} : { expectedCapabilityPack: offering.expectedCapabilityPack })
       };
       const placement: InstancePlacementResult = decision.instanceId === undefined
         ? placeInstanceInState(state, {

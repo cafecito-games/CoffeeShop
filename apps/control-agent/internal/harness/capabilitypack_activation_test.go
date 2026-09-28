@@ -99,10 +99,49 @@ func packTestRunner(t *testing.T, harnessID, binary, dataRoot string, pack *Acti
 	t.Helper()
 	lines := &[]string{}
 	runner := NewRunner([]protocol.HarnessProfile{{ID: harnessID, Binary: binary, Available: true}}).
-		WithCapabilityPack(pack, unavailable, requirement, dataRoot).
+		WithCapabilityPack(pack, CapabilityPackUnavailability{Detail: unavailable, ReasonCode: PackActiveUnverified}, requirement, dataRoot).
 		WithCapabilityPackReport(func(line string) { *lines = append(*lines, line) })
 	runner.packInventory = confirmingInventory(confirmRoots...)
 	return runner, lines
+}
+
+func TestCapabilityPackReadinessAndAllocationExpectationUseTheActiveVerifiedPack(t *testing.T) {
+	pack, _ := packFixture(t)
+	runner := NewRunner([]protocol.HarnessProfile{{ID: "codex-cli", Available: true, Transports: []string{TransportNative}}}).
+		WithCapabilityPack(&pack, CapabilityPackUnavailability{}, PackOptional, t.TempDir())
+	report := runner.CapabilityPackReadiness("node-one", "2026-09-28T12:00:00Z")
+	require.NoError(t, report.Validate())
+	require.Equal(t, "available", report.Status)
+	require.Equal(t, pack.ID, report.Pack.ID)
+	require.Equal(t, slices.Sorted(slices.Values(pack.Manifest.SkillIDs())), report.Pack.Skills)
+	require.Equal(t, []protocol.CapabilityPackSurface{{HarnessID: "codex-cli", Transport: "native-cli"}}, report.Surfaces)
+
+	required := protocol.ExpectedCapabilityPack{ID: pack.ID, Version: pack.Version, RequiredSkills: []string{report.Pack.Skills[0]}}
+	require.NoError(t, runner.AdmitCapabilityPack(&required, "codex-cli", TransportNative))
+	wrongVersion := required
+	wrongVersion.Version = "99.0.0"
+	require.Error(t, runner.AdmitCapabilityPack(&wrongVersion, "codex-cli", TransportNative))
+	missingSkill := required
+	missingSkill.RequiredSkills = []string{"not-in-pack"}
+	require.Error(t, runner.AdmitCapabilityPack(&missingSkill, "codex-cli", TransportNative))
+	require.Error(t, runner.AdmitCapabilityPack(&required, "codex-cli", TransportACP))
+
+	proof := runner.effectiveCapabilityPack(&PackProjection{})
+	require.Equal(t, &protocol.EffectiveCapabilityPack{ID: pack.ID, Version: pack.Version, Skills: report.Pack.Skills}, proof)
+	unavailable := NewRunner(nil).WithCapabilityPack(nil, CapabilityPackUnavailability{Detail: "arbitrary operator wording", ReasonCode: PackNotSelected}, PackOptional, t.TempDir()).
+		CapabilityPackReadiness("node-one", "2026-09-28T12:00:00Z")
+	require.Equal(t, "not-selected", unavailable.ReasonCode)
+	drifted := pack
+	drifted.Reread = func() (capabilitypack.Tree, capabilitypack.PackManifest, string, error) {
+		return drifted.Tree, drifted.Manifest, strings.Repeat("0", 64), nil
+	}
+	driftReport := NewRunner([]protocol.HarnessProfile{{ID: "codex-cli", Available: true, Transports: []string{TransportNative}}}).
+		WithCapabilityPack(&drifted, CapabilityPackUnavailability{}, PackOptional, t.TempDir()).
+		CapabilityPackReadiness("node-one", "2026-09-28T12:00:00Z")
+	require.Equal(t, "unavailable", driftReport.Status)
+	require.Equal(t, "active-unverified", driftReport.ReasonCode)
+	require.Nil(t, driftReport.Pack)
+	require.Empty(t, driftReport.Surfaces)
 }
 
 // fakeVendorHome installs a fake HOME with a $CODEX_HOME that looks like a real one, including the
@@ -1172,7 +1211,7 @@ func TestCapabilityPackVocabulariesAreClosed(t *testing.T) {
 		parsed, err := ParsePackRequirement(string(requirement))
 		require.NoError(t, err)
 		require.Equal(t, requirement, parsed)
-		runner := NewRunner(nil).WithCapabilityPack(&pack, "", requirement, t.TempDir())
+		runner := NewRunner(nil).WithCapabilityPack(&pack, CapabilityPackUnavailability{}, requirement, t.TempDir())
 		require.Equal(t, requirement, runner.CapabilityPackRequirement())
 		err = runner.unskilled(Invocation{Run: packRun("codex-cli")}, requirement, packUnavailablef("a named reason"))
 		if requirement == PackRequired {
@@ -1191,7 +1230,7 @@ func TestCapabilityPackVocabulariesAreClosed(t *testing.T) {
 		// A caller that bypassed configuration parsing collapses to the strictest policy, never the
 		// permissive one, so an invalid value can never silently weaken the node.
 		require.Equal(t, PackRequired,
-			NewRunner(nil).WithCapabilityPack(&pack, "", PackRequirement(outside), t.TempDir()).CapabilityPackRequirement())
+			NewRunner(nil).WithCapabilityPack(&pack, CapabilityPackUnavailability{}, PackRequirement(outside), t.TempDir()).CapabilityPackRequirement())
 	}
 	// An unwired Runner keeps the optional reading rather than an empty requirement.
 	require.Equal(t, PackOptional, NewRunner(nil).CapabilityPackRequirement())

@@ -336,7 +336,7 @@ func TestPreviewWorkflowAtInstalledProjectionBoundary(t *testing.T) {
 
 			lines := []string{}
 			runner := NewRunner([]protocol.HarnessProfile{{ID: "codex-cli", Binary: binary, Available: true}}).
-				WithCapabilityPack(&pack, "", PackRequired, t.TempDir()).
+				WithCapabilityPack(&pack, CapabilityPackUnavailability{}, PackRequired, t.TempDir()).
 				WithCapabilityPackReport(func(line string) { lines = append(lines, line) })
 			result, err := runner.Execute(ctx, Invocation{
 				Run:   protocol.Run{ID: runID, HarnessID: "codex-cli", Model: "default", Prompt: previewWorkflowScript(t, test.status, test.malformed, test.replay), Transport: TransportNative},

@@ -139,6 +139,7 @@ const safeAllocation = (allocation: NonNullable<ReturnType<typeof currentAllocat
   harnessId: allocation.harnessId,
   model: allocation.model,
   transport: allocation.transport,
+  ...(allocation.expectedCapabilityPack === undefined ? {} : { expectedCapabilityPack: structuredClone(allocation.expectedCapabilityPack) }),
   lease: { ...allocation.lease },
   status: allocation.status,
   createdAt: allocation.createdAt,

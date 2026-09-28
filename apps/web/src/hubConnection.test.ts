@@ -405,6 +405,14 @@ describe("version-4 orchestration snapshot validation", () => {
     };
     expect(isSnapshot({ ...snapshot("v4"), runs: [run] })).toBe(true);
     expect(isSnapshot({ ...snapshot("bad"), runs: [{ ...run, transport: "carrier-pigeon" }] })).toBe(false);
+    expect(isSnapshot({ ...snapshot("v5"), runs: [{ ...run, transportSelection: {
+      requestedTransport: "native-cli", selectedTransport: "native-cli",
+      effectiveCapabilityPack: { id: "coffee-shop-core", version: "1.0.0", skills: ["review"] }
+    } }] })).toBe(true);
+    expect(isSnapshot({ ...snapshot("bad-proof"), runs: [{ ...run, transportSelection: {
+      requestedTransport: "native-cli", selectedTransport: "native-cli",
+      effectiveCapabilityPack: { id: "coffee-shop-core", version: "1.0.0", skills: [] }
+    } }] })).toBe(false);
   });
 });
 

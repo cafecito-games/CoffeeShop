@@ -1,0 +1,28 @@
+{
+  "type": "capability-pack.readiness",
+  "report": {
+    "nodeId": "node-one",
+    "observedAt": "2026-09-28T12:00:00Z",
+    "status": "available",
+    "pack": {
+      "id": "coffeeshop-capability-pack",
+      "version": "1.1.0",
+      "skills": [
+        "coffeeshop-artifacts",
+        "coffeeshop-coordination",
+        "coffeeshop-preview",
+        "coffeeshop-task-reporting"
+      ]
+    },
+    "surfaces": [
+      {
+        "harnessId": "claude-cli",
+        "transport": "native-cli"
+      },
+      {
+        "harnessId": "codex-cli",
+        "transport": "native-cli"
+      }
+    ]
+  }
+}

@@ -59,7 +59,7 @@
       "nodeId": "node-workshop",
       "harnessId": "claude-cli",
       "model": "sonnet",
-      "transport": "acp-v1",
+      "transport": "native-cli",
       "workspace": "/srv/workspaces",
       "prompt": "Review the exact active allocation",
       "status": "running",
@@ -69,7 +69,21 @@
       "taskId": "task_mul73pcf_000qvg",
       "createdAt": "2026-09-22T12:07:04.000Z",
       "attempt": 1,
-      "startedAt": "2026-09-22T12:07:05.000Z"
+      "startedAt": "2026-09-22T12:07:05.000Z",
+      "transportSelection": {
+        "requestedTransport": "native-cli",
+        "selectedTransport": "native-cli",
+        "effectiveCapabilityPack": {
+          "id": "coffeeshop-capability-pack",
+          "version": "1.1.0",
+          "skills": [
+            "coffeeshop-artifacts",
+            "coffeeshop-coordination",
+            "coffeeshop-preview",
+            "coffeeshop-task-reporting"
+          ]
+        }
+      }
     },
     {
       "id": "run-login",
@@ -222,6 +236,9 @@
       "instructions": "Review the exact active allocation",
       "status": "running",
       "requirements": {
+        "skills": [
+          "coffeeshop-preview"
+        ],
         "harnessIds": [
           "claude-cli"
         ],
@@ -229,7 +246,7 @@
           "sonnet"
         ],
         "transports": [
-          "acp-v1"
+          "native-cli"
         ],
         "templateId": "template-reviewer"
       },
@@ -251,7 +268,7 @@
         "allocationId": "allocation_mul73pcd_000nii",
         "nodeId": "node-workshop",
         "harnessId": "claude-cli",
-        "transport": "acp-v1",
+        "transport": "native-cli",
         "model": "sonnet",
         "assignedAt": "2026-09-22T12:07:04.000Z"
       }

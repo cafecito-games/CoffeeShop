@@ -80,11 +80,11 @@ type taskSpecification struct {
 	Pin          map[string]any   `json:"pin,omitempty"`
 }
 
-// buildRequirements asks for a writable, leased checkout of the project on an agent with the build
-// skill, over ACP.
+// buildRequirements asks for a writable, leased checkout of the project over ACP. These workflow
+// fixtures predate capability-pack skills; their old configured-agent "build" label was descriptive
+// metadata, not runtime pack authority.
 func buildRequirements(projectID string, harnessIDs ...string) map[string]any {
 	requirements := map[string]any{
-		"skills":           []string{"build"},
 		"projectProfileId": projectID,
 		"transports":       []string{"acp-v1"},
 		"workspace":        map[string]any{"writable": true},

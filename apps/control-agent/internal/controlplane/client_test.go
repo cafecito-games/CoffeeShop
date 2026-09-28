@@ -205,13 +205,14 @@ func TestReconnectFlushesLifecycleBeforeCompletingSync(t *testing.T) {
 
 func TestComponentInventoryIsBuiltAfterAckAndWrittenBeforeOutboxAndSync(t *testing.T) {
 	var built atomic.Int32
+	var readinessBuilt atomic.Int32
 	types := make(chan []string, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		connection, err := websocket.Accept(writer, request, nil)
 		require.NoError(t, err)
 		defer connection.Close(websocket.StatusNormalClosure, "test complete")
-		got := make([]string, 0, 4)
-		for len(got) < 4 {
+		got := make([]string, 0, 5)
+		for len(got) < 5 {
 			_, data, readErr := connection.Read(request.Context())
 			require.NoError(t, readErr)
 			var envelope struct {
@@ -232,17 +233,22 @@ func TestComponentInventoryIsBuiltAfterAckAndWrittenBeforeOutboxAndSync(t *testi
 		protocol.ComputeNode{ID: "node-one"}, nil, emptyCapabilityReport).WithComponentInventory(func(context.Context) protocol.ComponentInventoryReport {
 		built.Add(1)
 		return protocol.ComponentInventoryReport{NodeID: "node-one", ObservedAt: "2026-09-28T12:00:00Z", Components: []protocol.ComponentInventoryEntry{}}
+	}).WithCapabilityPackReadiness(func(context.Context) protocol.CapabilityPackReadinessReport {
+		readinessBuilt.Add(1)
+		return protocol.CapabilityPackReadinessReport{NodeID: "node-one", ObservedAt: "2026-09-28T12:00:00Z", Status: "unavailable", Surfaces: []protocol.CapabilityPackSurface{}, ReasonCode: "not-selected"}
 	})
 	client.send(protocol.Outbound{Type: "run.completed", RunID: "run-one", Output: "done", At: now()})
 	connected, err := client.runOnce(context.Background())
 	require.Error(t, err)
 	require.True(t, connected)
-	require.Equal(t, []string{"register", "component.inventory", "run.completed", "sync.complete"}, <-types)
+	require.Equal(t, []string{"register", "component.inventory", "capability-pack.readiness", "run.completed", "sync.complete"}, <-types)
 	require.EqualValues(t, 1, built.Load())
+	require.EqualValues(t, 1, readinessBuilt.Load())
 }
 
 func TestComponentInventoryIsRebuiltForEveryAcknowledgedReconnect(t *testing.T) {
 	observations := make(chan string, 2)
+	readinessObservations := make(chan string, 2)
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		connection, err := websocket.Accept(writer, request, nil)
 		require.NoError(t, err)
@@ -260,6 +266,10 @@ func TestComponentInventoryIsRebuiltForEveryAcknowledgedReconnect(t *testing.T) 
 				acknowledgeRegistration(t, request.Context(), connection)
 			case "component.inventory":
 				observations <- envelope.Report.ObservedAt
+			case "capability-pack.readiness":
+				var readiness protocol.CapabilityPackReadinessMessage
+				require.NoError(t, json.Unmarshal(data, &readiness))
+				readinessObservations <- readiness.Report.ObservedAt
 			case "sync.complete":
 				return
 			}
@@ -272,6 +282,9 @@ func TestComponentInventoryIsRebuiltForEveryAcknowledgedReconnect(t *testing.T) 
 		protocol.ComputeNode{ID: "node-one"}, nil, emptyCapabilityReport).WithComponentInventory(func(context.Context) protocol.ComponentInventoryReport {
 		build := builds.Add(1)
 		return protocol.ComponentInventoryReport{NodeID: "node-one", ObservedAt: time.Date(2026, 9, 28, 12, 0, int(build), 0, time.UTC).Format(time.RFC3339), Components: []protocol.ComponentInventoryEntry{}}
+	}).WithCapabilityPackReadiness(func(context.Context) protocol.CapabilityPackReadinessReport {
+		build := builds.Load()
+		return protocol.CapabilityPackReadinessReport{NodeID: "node-one", ObservedAt: time.Date(2026, 9, 28, 12, 1, int(build), 0, time.UTC).Format(time.RFC3339), Status: "unavailable", Surfaces: []protocol.CapabilityPackSurface{}, ReasonCode: "not-selected"}
 	})
 	for range 2 {
 		connected, err := client.runOnce(context.Background())
@@ -279,6 +292,7 @@ func TestComponentInventoryIsRebuiltForEveryAcknowledgedReconnect(t *testing.T) 
 		require.True(t, connected)
 	}
 	require.Equal(t, []string{"2026-09-28T12:00:01Z", "2026-09-28T12:00:02Z"}, []string{<-observations, <-observations})
+	require.Equal(t, []string{"2026-09-28T12:01:01Z", "2026-09-28T12:01:02Z"}, []string{<-readinessObservations, <-readinessObservations})
 	require.EqualValues(t, 2, builds.Load())
 }
 

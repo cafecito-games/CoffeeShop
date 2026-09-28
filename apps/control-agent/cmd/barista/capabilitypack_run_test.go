@@ -120,7 +120,8 @@ func TestActivationLedgerRejectionDistinctFromNoSelection(t *testing.T) {
 	require.Nil(t, activation.Rejection)
 	pack, noSelection := activeCapabilityPack(manifest, ownership, activation, dataRoot, "b")
 	require.Nil(t, pack)
-	require.Equal(t, "no capability pack version is activated on this node", noSelection)
+	require.Equal(t, "no capability pack version is activated on this node", noSelection.Detail)
+	require.Equal(t, harness.PackNotSelected, noSelection.ReasonCode)
 
 	// A rejected ledger. The reason names the ledger and never the selection.
 	require.NoError(t, os.WriteFile(filepath.Join(dataRoot, "activation.json"), []byte("{not json"), 0o644))
@@ -128,7 +129,8 @@ func TestActivationLedgerRejectionDistinctFromNoSelection(t *testing.T) {
 	require.NotNil(t, rejected.Rejection)
 	pack, rejection := activeCapabilityPack(manifest, ownership, rejected, dataRoot, "b")
 	require.Nil(t, pack)
-	require.Equal(t, "the activation ledger could not be accepted, so no capability pack was resolved", rejection)
+	require.Equal(t, "the activation ledger could not be accepted, so no capability pack was resolved", rejection.Detail)
+	require.Equal(t, harness.PackActivationRejected, rejection.ReasonCode)
 	require.NotEqual(t, noSelection, rejection)
 
 	// A selection whose bytes stopped verifying is a third, distinct reason.
@@ -141,16 +143,17 @@ func TestActivationLedgerRejectionDistinctFromNoSelection(t *testing.T) {
 	require.NoError(t, os.WriteFile(installed.Path, []byte("not an archive"), 0o644))
 	pack, drifted := activeCapabilityPack(manifest, activatedOwnership, activatedActivation, activated, "b")
 	require.Nil(t, pack)
-	require.Equal(t, "the activated capability pack version could not be verified", drifted)
+	require.Equal(t, "the activated capability pack version could not be verified", drifted.Detail)
+	require.Equal(t, harness.PackActiveUnverified, drifted.ReasonCode)
 	require.NotEqual(t, noSelection, drifted)
 	require.NotEqual(t, rejection, drifted)
 
 	// Every reason is a distinct, non-empty string, so no consumer can confuse two of them.
 	reasons := map[string]bool{}
-	for _, reason := range []string{noSelection, rejection, drifted} {
-		require.NotEmpty(t, reason)
-		require.False(t, reasons[reason])
-		reasons[reason] = true
+	for _, reason := range []harness.CapabilityPackUnavailability{noSelection, rejection, drifted} {
+		require.NotEmpty(t, reason.Detail)
+		require.False(t, reasons[reason.Detail])
+		reasons[reason.Detail] = true
 	}
 }
 

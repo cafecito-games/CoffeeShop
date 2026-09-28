@@ -480,6 +480,36 @@ test("a legacy thread promotes to one instance, exactly once, in a single transa
   assert.equal(restarted.read((state) => (state.threads![0].orchestrator as { instanceId: string }).instanceId), promotedInstanceId);
 });
 
+test("legacy promotion carries the exact live capability-pack expectation", async () => {
+  const { store, context } = await promotableWorld();
+  await store.transact((state) => {
+    const template = templateForLegacyAgent(state, "orchestrator")!;
+    template.skills = ["descriptive-only"];
+    template.requirements = { ...template.requirements, skills: ["Review", "preview"] };
+  });
+  context.capabilityPackReadiness = () => ({
+    nodeId: "node-alpha", observedAt: at, status: "available",
+    pack: { id: "coffee-shop-core", version: "1.0.0", skills: ["preview", "review"] },
+    surfaces: [{ harnessId: "codex-cli", transport: "native-cli" }]
+  });
+  await store.transact((state) => {
+    const promotion = promoteThreadToInstanceInState(state, "thread-one", context, later(10));
+    assert.equal(promotion.kind, "promoted", promotion.kind === "not-eligible" ? promotion.reason : "");
+    assert.deepEqual(state.instances![0].requirements.skills, ["preview", "review"]);
+    assert.deepEqual(state.allocations![0].expectedCapabilityPack, {
+      id: "coffee-shop-core", version: "1.0.0", requiredSkills: ["preview", "review"]
+    });
+  });
+
+  const missing = await promotableWorld();
+  await missing.store.transact((state) => {
+    templateForLegacyAgent(state, "orchestrator")!.requirements!.skills = ["review"];
+    const promotion = promoteThreadToInstanceInState(state, "thread-one", missing.context, later(10));
+    assert.equal(promotion.kind, "not-eligible");
+    assert.deepEqual([state.instances ?? [], state.allocations ?? []], [[], []]);
+  });
+});
+
 test("promotion defers to an active legacy run and refuses a thread with no imported template", async () => {
   const active = await promotableWorld({ activeLegacyRun: true });
   await active.store.transact((state) => {

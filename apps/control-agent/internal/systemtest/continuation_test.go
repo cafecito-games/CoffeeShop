@@ -37,7 +37,7 @@ func TestOrchestratorContinuation(t *testing.T) {
 		}
 		return script(t, append(steps, step{Message: name + " done"})...)
 	}
-	requirements := map[string]any{"skills": []string{"build"}, "harnessIds": []string{"claude-cli"}}
+	requirements := map[string]any{"harnessIds": []string{"claude-cli"}}
 	orchestrate := script(t,
 		submitTasks("continuation-chain", "batch",
 			taskSpecification{Key: "first", Title: "first", Instructions: chained("", "first"), Requirements: requirements},

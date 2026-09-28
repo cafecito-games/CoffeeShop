@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { threadOrchestrator, type Snapshot } from "@coffee-shop/protocol";
 import { render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { isSnapshot } from "./hubConnection.js";
 import { ApprovalsView } from "./orchestration/ApprovalsView.js";
 import { SettingsView } from "./settings/SettingsView.js";
@@ -25,6 +25,8 @@ const current = readFixture("hubSnapshot.json");
 const legacy = readFixture("legacyHubSnapshot.json");
 // Produced by apps/hub/test-fixtures/generate-artifact-preview-fixtures.mts through Store.snapshot().
 const preview = readFixture("hubPreviewSnapshot.json");
+
+afterEach(() => vi.useRealTimers());
 
 function renderViews(snapshot: Snapshot) {
   render(<>
@@ -93,6 +95,13 @@ describe("hub snapshot fixtures", () => {
       kind: "current",
       allocation: { instanceId: active!.id, status: "active" }
     });
+    expect(activeAllocation.kind === "current" ? activeAllocation.allocation.expectedCapabilityPack : undefined).toEqual({
+      id: "coffeeshop-capability-pack", version: "1.1.0", requiredSkills: ["coffeeshop-preview"]
+    });
+    expect(snapshot.runs.find((run) => run.id === "run-instance-review")?.transportSelection?.effectiveCapabilityPack).toEqual({
+      id: "coffeeshop-capability-pack", version: "1.1.0",
+      skills: ["coffeeshop-artifacts", "coffeeshop-coordination", "coffeeshop-preview", "coffeeshop-task-reporting"]
+    });
     expect(currentAllocationFor(released!.id, snapshot.allocations!)).toEqual({ kind: "unavailable" });
     expect(currentAllocationFor(replacementPending!.id, snapshot.allocations!)).toEqual({ kind: "unavailable" });
     expect(allocationHistory(released!.id, snapshot.allocations!)).toMatchObject([{ status: "released" }]);
@@ -119,6 +128,8 @@ describe("hub snapshot fixtures", () => {
   });
 
   it("accepts ready preview metadata exactly as the Hub projects it", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-27T12:04:00.000Z"));
     const snapshot = preview as Snapshot;
     expect(snapshot.artifactPreviews).toHaveLength(1);
     expect(snapshot.artifactPreviews?.[0]).toMatchObject({ status: "ready", accessState: "eligible" });

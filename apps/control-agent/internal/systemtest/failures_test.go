@@ -35,7 +35,7 @@ func TestAdapterCrashBlocksDependents(t *testing.T) {
 	t.Parallel()
 	cluster := newWorkflowCluster(t, environmentOptions{}, "")
 
-	requirements := map[string]any{"skills": []string{"build"}, "harnessIds": []string{"claude-cli"}}
+	requirements := map[string]any{"harnessIds": []string{"claude-cli"}}
 	orchestrate := script(t,
 		submitTasks("crash-graph", "batch",
 			taskSpecification{
@@ -106,7 +106,7 @@ func TestMalformedACPFrameFailsRun(t *testing.T) {
 				step{Raw: "this is not an ACP frame\n"},
 				step{Hang: true},
 			),
-			Requirements: map[string]any{"skills": []string{"build"}, "harnessIds": []string{"codex-cli"}},
+			Requirements: map[string]any{"harnessIds": []string{"codex-cli"}},
 		}),
 		step{Message: "submitted"},
 	)
@@ -170,7 +170,7 @@ func TestACPCancellation(t *testing.T) {
 				step{Message: "working"},
 				step{Hang: true},
 			),
-			Requirements: map[string]any{"skills": []string{"build"}, "harnessIds": []string{"codex-cli"}},
+			Requirements: map[string]any{"harnessIds": []string{"codex-cli"}},
 		}),
 		step{Message: "submitted"},
 	)
@@ -243,7 +243,7 @@ func TestNoEligibleComputeWaitsForQualifyingNode(t *testing.T) {
 		submitTasks("gpu-render", "batch", taskSpecification{
 			Key: "render", Title: "render",
 			Instructions: "Render the frame.\n" + script(t, step{Message: "render done"}),
-			Requirements: map[string]any{"skills": []string{"gpu-build"}, "labels": []string{"gpu"}},
+			Requirements: map[string]any{"labels": []string{"gpu"}},
 		}),
 		step{Message: "submitted"},
 	)
@@ -303,7 +303,7 @@ func TestNativeFallbackWhenACPUnusable(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(fallbackWorkspace, ".fake-acp-reject-session"), []byte("reject ACP sessions\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cluster.createAgent(agentOptions{
+	fallbackAgent := cluster.createAgent(agentOptions{
 		name: "Fallback Builder", harnessID: "codex-cli", model: "default", nodeID: "node-a",
 		workspace: fallbackWorkspace, skills: []string{"fallback"},
 	})
@@ -311,7 +311,7 @@ func TestNativeFallbackWhenACPUnusable(t *testing.T) {
 		submitTasks("fallback-dispatch", "batch", taskSpecification{
 			Key: "fallback", Title: "fallback",
 			Instructions: "Produce the result through whichever transport works.\n" + script(t, step{Message: "fallback result=done"}),
-			Requirements: map[string]any{"skills": []string{"fallback"}},
+			Pin:          map[string]any{"agentId": fallbackAgent},
 		}),
 		step{Message: "submitted"},
 	)
@@ -372,23 +372,24 @@ func TestExclusiveWorkspaceCollision(t *testing.T) {
 		projectProfile(e2eProject, "git-worktree", "when-unchanged"),
 	}
 	cluster := newWorkflowCluster(t, environmentOptions{profiles: profiles}, "")
+	agentIDs := []string{}
 	for _, name := range []string{"Exclusive One", "Exclusive Two"} {
-		cluster.createAgent(agentOptions{
+		agentIDs = append(agentIDs, cluster.createAgent(agentOptions{
 			name: name, harnessID: "codex-cli", model: "default", nodeID: "node-a",
 			workspace: cluster.checkoutA, skills: []string{"exclusive"},
-		})
+		}))
 	}
 	requirements := map[string]any{
-		"skills": []string{"exclusive"}, "projectProfileId": "shared-checkout",
-		"workspace": map[string]any{"writable": true},
+		"projectProfileId": "shared-checkout",
+		"workspace":        map[string]any{"writable": true},
 	}
 	scripted := func(name string) string {
 		return script(t, step{Gate: "exclusive-hold-" + name}, step{Message: name + " done"})
 	}
 	orchestrate := script(t,
 		submitTasks("exclusive-collision", "batch",
-			taskSpecification{Key: "holder", Title: "holder", Instructions: "Hold the shared checkout.\n" + scripted("holder"), Requirements: requirements},
-			taskSpecification{Key: "waiter", Title: "waiter", Instructions: "Wait for the shared checkout.\n" + scripted("waiter"), Requirements: requirements},
+			taskSpecification{Key: "holder", Title: "holder", Instructions: "Hold the shared checkout.\n" + scripted("holder"), Requirements: requirements, Pin: map[string]any{"agentId": agentIDs[0]}},
+			taskSpecification{Key: "waiter", Title: "waiter", Instructions: "Wait for the shared checkout.\n" + scripted("waiter"), Requirements: requirements, Pin: map[string]any{"agentId": agentIDs[1]}},
 		),
 		step{Message: "submitted"},
 	)
@@ -464,7 +465,7 @@ func TestCrossThreadAccessIsRejected(t *testing.T) {
 	cluster := newWorkflowCluster(t, environmentOptions{}, "")
 	orchestratorWorkspace := cluster.nodeA.directory("orchestration")
 
-	requirements := map[string]any{"skills": []string{"build"}, "harnessIds": []string{"claude-cli"}}
+	requirements := map[string]any{"harnessIds": []string{"claude-cli"}}
 	firstOrchestrate := script(t,
 		submitTasks("cross-thread-private", "batch", taskSpecification{
 			Key: "private", Title: "private",

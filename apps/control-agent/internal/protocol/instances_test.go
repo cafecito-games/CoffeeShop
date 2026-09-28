@@ -39,6 +39,22 @@ func instanceFixtureProducer() map[string]any {
 		ID: "run-one", ThreadID: i.ThreadID, InstanceID: i.ID, AllocationID: a.ID, NodeID: a.NodeID, HarnessID: a.HarnessID, Model: a.Model,
 		Workspace: a.Workspace, Transport: a.Transport, Prompt: "Implement the shared contracts.", Status: "queued", Output: "", Depth: 0, CreatedAt: instanceAt,
 	}}
+	packInstance := i
+	packSkills := []string{"coffeeshop-review", "coffeeshop-preview"}
+	packInstance.Requirements.Skills = &packSkills
+	packAllocation := a
+	packAllocation.ExpectedCapabilityPack = &ExpectedCapabilityPack{
+		ID: "coffeeshop-capability-pack", Version: "1.1.0",
+		RequiredSkills: []string{"coffeeshop-preview", "coffeeshop-review", "template-skill"},
+	}
+	packProvisionInstance := packInstance
+	packProvisionInstance.Status = "provisioning"
+	packProvisionAllocation := packAllocation
+	packProvisionAllocation.Status = "provisioning"
+	packProvision := InstanceHubMessage{Type: "instance.provision", Instance: instancePointer(packProvisionInstance), Allocation: instancePointer(packProvisionAllocation)}
+	packDispatch := dispatch
+	packDispatch.Instance = instancePointer(packInstance)
+	packDispatch.Allocation = instancePointer(packAllocation)
 	sessionBindingID := "session-one"
 	resumeRun := *dispatch.Run
 	resumeAllocation := *dispatch.Allocation
@@ -49,7 +65,7 @@ func instanceFixtureProducer() map[string]any {
 		ID: sessionBindingID, ProviderSessionID: "provider-session-one", ResumePrompt: "Continue the shared contracts.",
 	}}
 	result := map[string]any{
-		"provision": provision, "dispatch": dispatch, "dispatch-resume": dispatchResume,
+		"provision": provision, "provision-pack": packProvision, "dispatch": dispatch, "dispatch-pack": packDispatch, "dispatch-resume": dispatchResume,
 		"release":         InstanceHubMessage{Type: "instance.release", InstanceID: i.ID, AllocationID: a.ID, Mode: "drain"},
 		"heartbeat":       InstanceControlMessage{Type: "heartbeat", NodeID: a.NodeID, ActiveRuns: instancePointer(0), ActiveInstances: instancePointer(1), ActiveInstanceIDs: instancePointer([]string{i.ID}), At: instanceAt},
 		"heartbeat-empty": InstanceControlMessage{Type: "heartbeat", NodeID: a.NodeID, ActiveRuns: instancePointer(0), ActiveInstances: instancePointer(0), ActiveInstanceIDs: instancePointer([]string{}), At: instanceAt},
@@ -96,7 +112,7 @@ func TestInstanceProducerFixtures(t *testing.T) {
 			require.Equal(t, string(data), string(encoded), "fixture must be real producer output byte-for-byte")
 			var decoded any
 			switch name {
-			case "provision", "dispatch", "dispatch-resume", "release":
+			case "provision", "provision-pack", "dispatch", "dispatch-pack", "dispatch-resume", "release":
 				decoded, err = DecodeInstanceHubMessage(data, "5")
 				_, legacyError := DecodeInbound(data)
 				require.Error(t, legacyError, "the legacy decoder must not erase instance identity")
@@ -121,6 +137,39 @@ func TestInstanceProducerFixtures(t *testing.T) {
 			require.Equal(t, string(data), string(append(roundtrip, '\n')))
 		})
 	}
+}
+
+func TestSkillBoundInstanceMessagesRequireCoveringPackExpectation(t *testing.T) {
+	message := instanceFixtureProducer()["provision"].(InstanceHubMessage)
+	skills := []string{"coffeeshop-review", "coffeeshop-preview"}
+	message.Instance.Requirements.Skills = &skills
+	encoded, err := json.Marshal(message)
+	require.NoError(t, err)
+	_, err = DecodeInstanceHubMessage(encoded, "5")
+	require.Error(t, err)
+
+	message.Allocation.ExpectedCapabilityPack = &ExpectedCapabilityPack{
+		ID: "coffeeshop-capability-pack", Version: "1.1.0", RequiredSkills: []string{"coffeeshop-preview", "coffeeshop-review", "template-skill"},
+	}
+	encoded, err = json.Marshal(message)
+	require.NoError(t, err)
+	_, err = DecodeInstanceHubMessage(encoded, "5")
+	require.NoError(t, err)
+
+	message.Allocation.ExpectedCapabilityPack.RequiredSkills = []string{"coffeeshop-preview"}
+	encoded, err = json.Marshal(message)
+	require.NoError(t, err)
+	_, err = DecodeInstanceHubMessage(encoded, "5")
+	require.Error(t, err)
+
+	message.Instance.Requirements.Skills = nil
+	message.Allocation.ExpectedCapabilityPack.RequiredSkills = []string{"template-skill"}
+	encoded, err = json.Marshal(message)
+	require.NoError(t, err)
+	require.Error(t, ValidateCurrentInstanceHubMessage(message), "a current no-skill allocation cannot carry an expectation")
+	decoded, err := DecodeInstanceHubMessage(encoded, "5")
+	require.NoError(t, err, "one release accepts an old Hub's in-flight frame")
+	require.Nil(t, decoded.Allocation.ExpectedCapabilityPack, "the obsolete expectation is ignored, never readiness authority")
 }
 
 func TestInstanceVocabularyAndTransitionsMatchTypeScript(t *testing.T) {

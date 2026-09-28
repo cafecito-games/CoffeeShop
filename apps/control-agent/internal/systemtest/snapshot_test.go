@@ -79,17 +79,18 @@ type agentInstance struct {
 }
 
 type instanceAllocation struct {
-	ID         string        `json:"id"`
-	InstanceID string        `json:"instanceId"`
-	NodeID     string        `json:"nodeId"`
-	HarnessID  string        `json:"harnessId"`
-	Model      string        `json:"model"`
-	Transport  string        `json:"transport"`
-	Workspace  string        `json:"workspace"`
-	Lease      instanceLease `json:"lease"`
-	Status     string        `json:"status"`
-	CreatedAt  string        `json:"createdAt"`
-	UpdatedAt  string        `json:"updatedAt"`
+	ID                     string                           `json:"id"`
+	InstanceID             string                           `json:"instanceId"`
+	NodeID                 string                           `json:"nodeId"`
+	HarnessID              string                           `json:"harnessId"`
+	Model                  string                           `json:"model"`
+	Transport              string                           `json:"transport"`
+	Workspace              string                           `json:"workspace"`
+	ExpectedCapabilityPack *protocol.ExpectedCapabilityPack `json:"expectedCapabilityPack"`
+	Lease                  instanceLease                    `json:"lease"`
+	Status                 string                           `json:"status"`
+	CreatedAt              string                           `json:"createdAt"`
+	UpdatedAt              string                           `json:"updatedAt"`
 }
 
 type agentTemplate struct {
@@ -106,10 +107,11 @@ type agentTemplate struct {
 }
 
 type transportSelection struct {
-	RequestedTransport string         `json:"requestedTransport"`
-	SelectedTransport  string         `json:"selectedTransport"`
-	FallbackReason     string         `json:"fallbackReason"`
-	Adapter            map[string]any `json:"adapter"`
+	RequestedTransport      string                            `json:"requestedTransport"`
+	SelectedTransport       string                            `json:"selectedTransport"`
+	FallbackReason          string                            `json:"fallbackReason"`
+	Adapter                 map[string]any                    `json:"adapter"`
+	EffectiveCapabilityPack *protocol.EffectiveCapabilityPack `json:"effectiveCapabilityPack"`
 }
 
 type run struct {

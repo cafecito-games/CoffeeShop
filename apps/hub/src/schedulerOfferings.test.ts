@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -10,6 +10,7 @@ import {
   validateInstanceRequirements,
   type AgentInstance,
   type AgentTemplate,
+  type CapabilityPackReadinessReport,
   type ComputeNode,
   type ControlProtocolVersion,
   type ExecutionRequirements,
@@ -91,6 +92,7 @@ interface Fixture {
   connections: Map<string, NodeConnection>;
   reports: Map<string, NodeCapabilityReport>;
   profiles: Map<string, ProjectProfile>;
+  packReadiness: Map<string, CapabilityPackReadinessReport>;
 }
 
 function fixture(nodes: ComputeNode[], tasks: Task[], seed: Partial<State> = {}): Fixture {
@@ -101,13 +103,15 @@ function fixture(nodes: ComputeNode[], tasks: Task[], seed: Partial<State> = {})
     },
     connections: new Map(nodes.map((item) => [item.id, { protocolVersion: "5" as ControlProtocolVersion, synced: true }])),
     reports: new Map(),
-    profiles: new Map()
+    profiles: new Map(),
+    packReadiness: new Map()
   };
 }
 
 const context = (current: Fixture): SchedulingContext => ({
   connection: (nodeId) => current.connections.get(nodeId),
   capabilityReport: (nodeId) => current.reports.get(nodeId),
+  capabilityPackReadiness: (nodeId) => current.packReadiness.get(nodeId),
   projectProfile: (projectId) => current.profiles.get(projectId),
   canDeliver: (_nodeId, message: HubToControlAgent) => message.type === "dispatch"
 });
@@ -118,6 +122,7 @@ const environment = (current: Fixture): PlacementEnvironment => ({
   runs: current.state.runs,
   connection: (nodeId) => current.connections.get(nodeId),
   capabilityReport: (nodeId) => current.reports.get(nodeId),
+  capabilityPackReadiness: (nodeId) => current.packReadiness.get(nodeId),
   projectProfile: (projectId) => current.profiles.get(projectId),
   instances: current.state.instances,
   allocations: current.state.allocations,
@@ -438,6 +443,154 @@ test("a requested exact pin reports hard offering mismatch without agent fallbac
   assert.ok(kinds(current, "initial").includes("model"));
 });
 
+test("a standalone requested instance persists an actionable placement refusal", () => {
+  const requested: AgentInstance = {
+    id: "instance-requested", threadId: "thread-one", creator: { kind: "operator", operatorId: "operator" },
+    delegation: { canDelegate: false }, requirements: { models: ["not-offered"] },
+    lease: { idleTimeoutSeconds: 1800, expiresAt: later(1800) }, status: "requested", createdAt: at, updatedAt: at
+  };
+  const current = fixture([node("node-alpha")], [], { instances: [requested] });
+  assert.equal(runSchedulingPass(current.state, context(current), at).changed, true);
+  assert.equal(allocations(current).length, 0);
+  const refusal = current.state.events.find((event) => event.instanceId === requested.id && event.title === "Instance placement waiting");
+  assert.match(refusal?.detail ?? "", /not-offered|different model/);
+  assert.equal(runSchedulingPass(current.state, context(current), later(1)).changed, false, "the same refusal is persisted once, not appended every pass");
+  current.connections.delete("node-alpha");
+  assert.equal(runSchedulingPass(current.state, context(current), later(2)).changed, true);
+  current.connections.set("node-alpha", { protocolVersion: "5", synced: true });
+  assert.equal(runSchedulingPass(current.state, context(current), later(3)).changed, true);
+  assert.equal(current.state.events.filter((event) => event.instanceId === requested.id && event.title === "Instance placement waiting").length, 1,
+    "alternating refusal details update one bounded projected diagnostic");
+});
+
+test("a requested template instance reserves from effective hard skills and carries their expectation", () => {
+  const template: AgentTemplate = {
+    id: "template-review", name: "Review", skills: ["descriptive-only"], requirements: { skills: ["review"] }
+  };
+  const requested: AgentInstance = {
+    id: "instance-requested", threadId: "thread-one", creator: { kind: "operator", operatorId: "operator" },
+    delegation: { canDelegate: false }, requirements: { templateId: template.id, skills: ["review"] },
+    lease: { idleTimeoutSeconds: 1800, expiresAt: later(1800) }, status: "requested", createdAt: at, updatedAt: at
+  };
+  const current = fixture([node("node-alpha")], [], { instances: [requested], templates: [template] });
+  current.state.allocations = [{
+    id: "allocation-lost", instanceId: requested.id, nodeId: "node-alpha", harnessId: "claude-cli", model: "fable",
+    transport: "native-cli", workspace: "/workspace", lease: { ...requested.lease }, status: "lost", createdAt: at, updatedAt: at
+  }];
+  current.packReadiness.set("node-alpha", {
+    nodeId: "node-alpha", observedAt: at, status: "available", pack: { id: "coffee-shop-core", version: "1.0.0", skills: ["review"] },
+    surfaces: [{ harnessId: "claude-cli", transport: "native-cli" }]
+  });
+  runSchedulingPass(current.state, context(current), at);
+  assert.equal(instances(current)[0].id, requested.id);
+  assert.equal(allocations(current).length, 2, "the lost generation is retained beside its replacement");
+  assert.deepEqual(allocations(current).find((item) => item.status === "reserved")?.expectedCapabilityPack,
+    { id: "coffee-shop-core", version: "1.0.0", requiredSkills: ["review"] });
+});
+
+test("a persisted pre-materialization template instance enforces every hard requirement", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "coffee-shop-legacy-template-"));
+  const path = join(directory, "state.json");
+  const persisted = new Store(path);
+  await persisted.load();
+  const template: AgentTemplate = {
+    id: "template-review", name: "Review", skills: ["descriptive-only"],
+    requirements: { harnessIds: ["codex-cli"], minimumConcurrency: 2, skills: ["review"] }
+  };
+  const requested: AgentInstance = {
+    id: "instance-requested", threadId: "thread-one", creator: { kind: "operator", operatorId: "operator" },
+    delegation: { canDelegate: false }, requirements: { templateId: template.id, skills: [" Preview ", "PREVIEW"] },
+    lease: { idleTimeoutSeconds: 1800, expiresAt: later(1800) }, status: "requested", createdAt: at, updatedAt: at
+  };
+  await persisted.transact((state) => {
+    state.threads = [thread()];
+    state.nodes = [node("node-alpha")];
+    state.templates = [template];
+    state.instances = [requested];
+    return true;
+  });
+  const legacyState = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>;
+  delete legacyState.instanceRequirementsVersion;
+  await writeFile(path, JSON.stringify(legacyState));
+  const reloaded = new Store(path);
+  await reloaded.load();
+  const state = reloaded.read((value) => structuredClone(value));
+  const current = fixture(state.nodes, state.tasks ?? [], state);
+  current.packReadiness.set("node-alpha", {
+    nodeId: "node-alpha", observedAt: at, status: "available",
+    pack: { id: "coffee-shop-core", version: "1.0.0", skills: ["preview", "review"] },
+    surfaces: [{ harnessId: "codex-cli", transport: "native-cli" }]
+  });
+  runSchedulingPass(current.state, context(current), at);
+  assert.equal(allocations(current).length, 0);
+  assert.equal(current.state.events.some((event) => event.title === "Instance placement waiting" && event.detail.includes("harness")), true);
+
+  current.state.nodes[0].harnesses = [{ id: "codex-cli", label: "Codex", description: "", available: true, authMode: "local-account", models: ["fable"] }];
+  current.state.nodes[0].concurrency = 1;
+  runSchedulingPass(current.state, context(current), later(1));
+  assert.equal(allocations(current).length, 0);
+  assert.equal(current.state.events.some((event) => event.title === "Instance placement waiting" && event.detail.includes("concurrency")), true);
+
+  current.state.nodes[0].concurrency = 2;
+  runSchedulingPass(current.state, context(current), later(2));
+  assert.deepEqual(current.state.instances![0].requirements.skills, ["preview", "review"]);
+  assert.deepEqual(allocations(current)[0].expectedCapabilityPack,
+    { id: "coffee-shop-core", version: "1.0.0", requiredSkills: ["preview", "review"] });
+  assert.equal(current.state.events.some((event) => event.title === "Instance placement waiting"), false);
+});
+
+test("a requested instance whose persisted template was deleted remains fail closed", () => {
+  const requested: AgentInstance = {
+    id: "instance-requested", threadId: "thread-one", creator: { kind: "operator", operatorId: "operator" },
+    delegation: { canDelegate: false }, requirements: { templateId: "template-deleted" },
+    lease: { idleTimeoutSeconds: 1800, expiresAt: later(1800) }, status: "requested", createdAt: at, updatedAt: at
+  };
+  const current = fixture([node("node-alpha")], [], { instances: [requested] });
+  runSchedulingPass(current.state, context(current), at);
+  assert.equal(allocations(current).length, 0);
+  assert.equal(current.state.events.some((event) =>
+    event.instanceId === requested.id && event.title === "Instance placement waiting" && event.detail.includes("template-deleted")), true);
+});
+
+test("lost-allocation re-reservation unions the task and instance hard skills", () => {
+  const requested: AgentInstance = {
+    id: "instance-requested", threadId: "thread-one", creator: { kind: "operator", operatorId: "operator" },
+    delegation: { canDelegate: false }, requirements: { skills: ["review"] },
+    lease: { idleTimeoutSeconds: 1800, expiresAt: later(1800) }, status: "requested", createdAt: at, updatedAt: at
+  };
+  const pinned = task("one", { skills: ["PREVIEW"] }, {
+    placementInstanceId: requested.id,
+    placementOverride: { instanceId: requested.id, authorizedBy: "policy" }
+  });
+  const current = fixture([node("node-alpha")], [pinned], {
+    instances: [requested], allocations: [{
+      id: "allocation-lost", instanceId: requested.id, nodeId: "node-alpha", harnessId: "claude-cli", model: "fable",
+      transport: "native-cli", workspace: "/workspace", lease: { ...requested.lease }, status: "lost", createdAt: at, updatedAt: at
+    }]
+  });
+  current.packReadiness.set("node-alpha", {
+    nodeId: "node-alpha", observedAt: at, status: "available", pack: { id: "coffee-shop-core", version: "1.0.0", skills: ["preview", "review"] },
+    surfaces: [{ harnessId: "claude-cli", transport: "native-cli" }]
+  });
+  runSchedulingPass(current.state, context(current), at);
+  assert.deepEqual(allocations(current).find((item) => item.status === "reserved")?.expectedCapabilityPack,
+    { id: "coffee-shop-core", version: "1.0.0", requiredSkills: ["preview", "review"] });
+
+  const missing = fixture([node("node-alpha")], [structuredClone(pinned)], {
+    instances: [{ ...structuredClone(requested), status: "requested" }],
+    allocations: current.state.allocations!.filter((item) => item.status === "lost").map((item) => structuredClone(item))
+  });
+  missing.packReadiness.set("node-alpha", {
+    nodeId: "node-alpha", observedAt: at, status: "available", pack: { id: "coffee-shop-core", version: "1.0.0", skills: ["preview"] },
+    surfaces: [{ harnessId: "claude-cli", transport: "native-cli" }]
+  });
+  runSchedulingPass(missing.state, context(missing), at);
+  assert.equal(allocations(missing).some((item) => item.status === "reserved"), false);
+  assert.equal(taskById(missing, "one").placement?.unsatisfied.some((entry) => entry.kind === "skill" && entry.requirement.includes("review")), true);
+  assert.equal(missing.state.events.filter((event) => event.instanceId === requested.id && event.title === "Instance placement waiting").length, 1);
+  assert.equal(runSchedulingPass(missing.state, context(missing), later(1)).changed, false);
+});
+
 test("a failed or draining allocation releases the placement and the retry gets fresh identities", () => {
   const current = fixture([node("node-alpha", { instanceCapacity: 2 })], [task("one")]);
   runSchedulingPass(current.state, context(current), at);
@@ -606,6 +759,10 @@ test("a task naming a template may be placed only through that template, and the
 
   const placed = fixture([node("node-alpha")], [task("one", { templateId: "template-reviewer", skills: ["rust"] })], { templates: [template] });
   placed.reports.set("node-alpha", report("node-alpha", [evidence("label:gpu", "true")]));
+  placed.packReadiness.set("node-alpha", {
+    nodeId: "node-alpha", observedAt: at, status: "available", pack: { id: "coffee-shop-core", version: "1.0.0", skills: ["rust"] },
+    surfaces: [{ harnessId: "claude-cli", transport: "native-cli" }]
+  });
   runSchedulingPass(placed.state, context(placed), at);
   assert.equal(allocations(placed).length, 1);
   assert.equal(instances(placed)[0].requirements.templateId, "template-reviewer");
@@ -615,6 +772,7 @@ test("a task naming a template may be placed only through that template, and the
 
   // The template's own hard requirement is not negotiable.
   const unmet = fixture([node("node-alpha")], [task("one", { templateId: "template-reviewer" })], { templates: [template] });
+  unmet.packReadiness.set("node-alpha", placed.packReadiness.get("node-alpha")!);
   runSchedulingPass(unmet.state, context(unmet), at);
   assert.equal(allocations(unmet).length, 0);
   assert.deepEqual(kinds(unmet, "one"), ["label"]);
@@ -628,19 +786,84 @@ test("a task naming a template may be placed only through that template, and the
   assert.deepEqual(kinds(wrongSkill, "one"), ["template"]);
 });
 
-test("a legacy skill requirement migrates deterministically or reports an explicit template gap", () => {
+test("template display skills never become hard readiness requirements", () => {
+  const descriptive: AgentTemplate = {
+    id: "template-descriptive", name: "Historian", skills: ["legacy-metadata"],
+    requirements: { models: ["fable"] }
+  };
+  const current = fixture([node("node-alpha")], [task("one", { templateId: descriptive.id })], { templates: [descriptive] });
+  runSchedulingPass(current.state, context(current), at);
+  assert.equal(allocations(current).length, 1);
+  assert.equal(allocations(current)[0].expectedCapabilityPack, undefined);
+  assert.equal(instances(current)[0].requirements.skills, undefined);
+});
+
+test("effective skill requirements normalize once before template admission and readiness", () => {
+  const template: AgentTemplate = {
+    id: "template-review", name: "Reviewer", skills: ["review", "preview"],
+    requirements: { skills: ["PREVIEW"] }
+  };
+  const current = fixture([node("node-alpha")], [task("one", { templateId: template.id, skills: [" Review ", "PREVIEW", "review"] })], { templates: [template] });
+  current.packReadiness.set("node-alpha", {
+    nodeId: "node-alpha", observedAt: at, status: "available",
+    pack: { id: "coffee-shop-core", version: "1.0.0", skills: ["preview", "review"] },
+    surfaces: [{ harnessId: "claude-cli", transport: "native-cli" }]
+  });
+  runSchedulingPass(current.state, context(current), at);
+  assert.deepEqual(instances(current)[0].requirements.skills, ["preview", "review"]);
+  assert.deepEqual(allocations(current)[0].expectedCapabilityPack?.requiredSkills, ["preview", "review"]);
+});
+
+test("bare skills use only live current-socket pack readiness and persist the exact expectation", () => {
   const rust: AgentTemplate = { id: "template-a-rust", name: "Rust", skills: ["rust"] };
   const alsoRust: AgentTemplate = { id: "template-b-rust", name: "Rust too", skills: ["rust", "go"] };
-  assert.deepEqual(resolveTaskTemplate(task("one", { skills: ["rust"] }), [alsoRust, rust]), { kind: "template", template: rust });
+  assert.deepEqual(resolveTaskTemplate(task("one", { skills: ["rust"] }), [alsoRust, rust]), { kind: "none" });
 
   const placed = fixture([node("node-alpha")], [task("one", { skills: ["rust"] })], { templates: [alsoRust, rust] });
+  placed.packReadiness.set("node-alpha", {
+    nodeId: "node-alpha", observedAt: at, status: "available",
+    pack: { id: "coffee-shop-core", version: "1.0.0", skills: ["go", "rust"] },
+    surfaces: [{ harnessId: "claude-cli", transport: "native-cli" }]
+  });
   runSchedulingPass(placed.state, context(placed), at);
-  assert.equal(instances(placed)[0].requirements.templateId, "template-a-rust");
+  assert.equal(instances(placed)[0].requirements.templateId, undefined);
+  assert.deepEqual(allocations(placed)[0].expectedCapabilityPack, {
+    id: "coffee-shop-core", version: "1.0.0", requiredSkills: ["rust"]
+  });
 
   const gap = fixture([node("node-alpha")], [task("one", { skills: ["cobol"] })], { templates: [rust] });
   runSchedulingPass(gap.state, context(gap), at);
-  assert.equal(instances(gap).length, 0, "no arbitrary candidate is chosen for an unmapped legacy skill");
-  assert.deepEqual(kinds(gap, "one"), ["template"]);
+  assert.equal(instances(gap).length, 0, "stored template or inventory metadata never substitutes for live readiness");
+  assert.deepEqual(kinds(gap, "one"), ["skill"]);
+});
+
+test("resident reuse requires the same current pack identity and a covering admitted subset", () => {
+  const resident: AgentInstance = {
+    id: "instance-pack-v1", threadId: "thread-one", creator: { kind: "operator", operatorId: "operator" },
+    delegation: { canDelegate: false }, requirements: { skills: ["rust"] },
+    lease: { idleTimeoutSeconds: 1800, expiresAt: later(1800) }, status: "idle", createdAt: at, updatedAt: at
+  };
+  const allocation: InstanceAllocation = {
+    id: "allocation-pack-v1", instanceId: resident.id, nodeId: "node-alpha", harnessId: "claude-cli", model: "fable",
+    transport: "native-cli", workspace: "/workspace", expectedCapabilityPack: { id: "coffee-shop-core", version: "1.0.0", requiredSkills: ["rust"] },
+    lease: { ...resident.lease }, status: "active", createdAt: at, updatedAt: at
+  };
+  const current = fixture([node("node-alpha")], [task("one", { skills: ["rust"] })], {
+    instances: [resident], allocations: [allocation]
+  });
+  current.packReadiness.set("node-alpha", {
+    nodeId: "node-alpha", observedAt: later(1), status: "available",
+    pack: { id: "coffee-shop-core", version: "2.0.0", skills: ["rust"] },
+    surfaces: [{ harnessId: "claude-cli", transport: "native-cli" }]
+  });
+  runSchedulingPass(current.state, context(current), later(1));
+  assert.equal(current.state.runs.length, 0, "the old resident is never dispatched after readiness rotates");
+  assert.equal(resident.status, "draining", "the stale allocation is retired instead of remaining reusable history");
+  assert.equal(current.state.instanceDeliveries?.some((entry) => entry.kind === "release" && entry.allocationId === allocation.id), true);
+  assert.equal(instances(current).length, 2, "placement requests a replacement resident");
+  assert.deepEqual(allocations(current).find((item) => item.id !== allocation.id)?.expectedCapabilityPack, {
+    id: "coffee-shop-core", version: "2.0.0", requiredSkills: ["rust"]
+  });
 });
 
 test("offerings are derived from the producer's own registration bytes", () => {
@@ -685,6 +908,7 @@ async function outboxStore(current: Fixture) {
     state.nodes = current.state.nodes;
     state.tasks = current.state.tasks;
     state.instances = current.state.instances;
+    state.instanceRequirementsVersion = current.state.instanceRequirementsVersion;
     state.allocations = current.state.allocations;
     state.templates = current.state.templates;
     state.runs = current.state.runs;

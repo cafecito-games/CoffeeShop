@@ -54,6 +54,9 @@ type Invocation struct {
 	// ProviderSession is called at most once by the native driver with the vendor CLI's own
 	// session identity. It is reported for operator reference only and is never resumed.
 	ProviderSession func(string)
+	// ExpectedCapabilityPack is immutable allocation evidence selected by the hub. When present,
+	// Barista must prove this exact pack and required skill subset before sending the prompt.
+	ExpectedCapabilityPack *protocol.ExpectedCapabilityPack
 
 	// begin is installed by Runner.Execute; drivers call it when the prompt is about to be sent.
 	begin func(transportDetails)
@@ -82,7 +85,8 @@ type EstablishedSession struct {
 
 // transportDetails is what a driver knows about the transport it is about to start.
 type transportDetails struct {
-	capabilities *protocol.AcpAgentCapabilities
+	capabilities            *protocol.AcpAgentCapabilities
+	effectiveCapabilityPack *protocol.EffectiveCapabilityPack
 }
 
 func (invocation Invocation) announce(details transportDetails) {
@@ -119,11 +123,11 @@ type Runner struct {
 	// usageMutex guards executableUsage.
 	usageMutex sync.Mutex
 	// pack is the one verified active capability pack this daemon adopted at startup, or nil when
-	// none could be resolved. packUnavailable is then the fixed reason, which is reported rather than
+	// none could be resolved. packUnavailability is then the fixed typed reason, which is reported rather than
 	// collapsed into "nothing selected": a rejected activation ledger and an unselected pack are
 	// distinct outcomes and neither is ever reported as the other.
-	pack            *ActivePack
-	packUnavailable string
+	pack               *ActivePack
+	packUnavailability CapabilityPackUnavailability
 	// packRequirement is the node administrator's capability-pack policy. Nothing in the control
 	// protocol carries it, so a node that has not opted in keeps the optional reading.
 	packRequirement PackRequirement
@@ -145,6 +149,22 @@ type Runner struct {
 	// this daemon's runs, which is why a running daemon never adopts a selection change in place.
 	executableUsage map[string]int
 }
+
+// CapabilityPackUnavailability carries the authority's closed reason independently from its
+// operator-facing wording. Consumers never infer protocol meaning from prose.
+type CapabilityPackUnavailability struct {
+	Detail     string
+	ReasonCode CapabilityPackReadinessReasonCode
+}
+
+type CapabilityPackReadinessReasonCode string
+
+const (
+	PackNotSelected        CapabilityPackReadinessReasonCode = "not-selected"
+	PackActivationRejected CapabilityPackReadinessReasonCode = "activation-rejected"
+	PackActiveUnverified   CapabilityPackReadinessReasonCode = "active-unverified"
+	PackNoSupportedSurface CapabilityPackReadinessReasonCode = "no-supported-surface"
+)
 
 func NewRunner(profiles []protocol.HarnessProfile) *Runner {
 	runner := &Runner{
@@ -174,9 +194,9 @@ func (r *Runner) WithManagedHarnesses(managed map[string]ManagedHarness) *Runner
 // reason none is available when pack is nil, the node's requirement policy, and the Barista-owned
 // data root every projection lives beneath. internal/setup resolves the pack; the harness package
 // receives the resolved value and never interprets a ledger itself.
-func (r *Runner) WithCapabilityPack(pack *ActivePack, unavailable string, requirement PackRequirement, dataRoot string) *Runner {
+func (r *Runner) WithCapabilityPack(pack *ActivePack, unavailable CapabilityPackUnavailability, requirement PackRequirement, dataRoot string) *Runner {
 	r.pack = pack
-	r.packUnavailable = unavailable
+	r.packUnavailability = unavailable
 	if requirement == "" {
 		requirement = PackOptional
 	}
@@ -455,6 +475,7 @@ func (r *Runner) beginning(invocation Invocation, selection protocol.RunTranspor
 				capabilities := *details.capabilities
 				selection.ACP = &capabilities
 			}
+			selection.EffectiveCapabilityPack = details.effectiveCapabilityPack
 			if report != nil {
 				report(selection)
 			}

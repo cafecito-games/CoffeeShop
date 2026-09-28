@@ -23,6 +23,7 @@ const (
 	CapabilityOrchestration      = "orchestration"
 	CapabilityInstances          = "instances"
 	CapabilityComponentInventory = "component-inventory"
+	CapabilityPackReadiness      = "capability-pack-readiness"
 )
 
 var capabilityIntroducedIn = map[string]int{
@@ -31,6 +32,7 @@ var capabilityIntroducedIn = map[string]int{
 	CapabilityOrchestration:      4,
 	CapabilityInstances:          5,
 	CapabilityComponentInventory: 5,
+	CapabilityPackReadiness:      5,
 }
 
 func IsSupportedVersion(version string) bool {
@@ -610,17 +612,18 @@ type AgentInstance struct {
 
 // Resolved identity/placement is immutable for this ID. Replacement requires a new ID.
 type InstanceAllocation struct {
-	ID         string        `json:"id"`
-	InstanceID string        `json:"instanceId"`
-	NodeID     string        `json:"nodeId"`
-	HarnessID  string        `json:"harnessId"`
-	Model      string        `json:"model"`
-	Transport  string        `json:"transport"`
-	Workspace  string        `json:"workspace"`
-	Lease      InstanceLease `json:"lease"`
-	Status     string        `json:"status"`
-	CreatedAt  string        `json:"createdAt"`
-	UpdatedAt  string        `json:"updatedAt"`
+	ID                     string                  `json:"id"`
+	InstanceID             string                  `json:"instanceId"`
+	NodeID                 string                  `json:"nodeId"`
+	HarnessID              string                  `json:"harnessId"`
+	Model                  string                  `json:"model"`
+	Transport              string                  `json:"transport"`
+	Workspace              string                  `json:"workspace"`
+	ExpectedCapabilityPack *ExpectedCapabilityPack `json:"expectedCapabilityPack,omitempty"`
+	Lease                  InstanceLease           `json:"lease"`
+	Status                 string                  `json:"status"`
+	CreatedAt              string                  `json:"createdAt"`
+	UpdatedAt              string                  `json:"updatedAt"`
 }
 type AgentTemplate struct {
 	ID           string                         `json:"id"`
@@ -856,7 +859,7 @@ var v5Instance = v5Object(map[string]v5Rule{
 var v5Allocation = v5Object(map[string]v5Rule{
 	"id": v5ID, "instanceId": v5ID, "nodeId": v5ID, "harnessId": v5Enum(HarnessIDs), "model": v5String(1, identifierBytes),
 	"transport": v5Enum(HarnessTransports), "workspace": v5Path, "lease": v5Lease, "status": v5Enum(AllocationStatuses), "createdAt": v5Time, "updatedAt": v5Time,
-}, nil)
+}, map[string]v5Rule{"expectedCapabilityPack": v5ExpectedCapabilityPack})
 var v5Template = v5Object(map[string]v5Rule{"id": v5ID, "name": v5String(1, InstanceNameBytes)}, map[string]v5Rule{
 	"purpose": v5Purpose, "glyph": v5String(1, identifierBytes), "avatarShape": v5Enum([]string{"cup", "bean", "moka", "kettle", "grinder", "pour-over"}),
 	"avatarColor": v5Enum([]string{"amber", "sage", "clay", "sky", "plum", "rose"}), "instructions": v5String(0, InstanceInstructionsBytes),
@@ -875,6 +878,7 @@ var v5Run = v5Object(map[string]v5Rule{
 		if !v5Object(map[string]v5Rule{"requestedTransport": v5Enum(HarnessTransports), "selectedTransport": v5Enum(HarnessTransports)}, map[string]v5Rule{
 			"fallbackReason": v5Enum(TransportFallbackReasons), "harnessVersion": v5NormalizedVersion,
 			"approvalPolicy": v5Enum(ApprovalPolicies), "acp": v5ACP,
+			"effectiveCapabilityPack": v5EffectiveCapabilityPack,
 			"adapter": v5Object(map[string]v5Rule{
 				"id": func(value any) bool {
 					text, ok := value.(string)
@@ -939,6 +943,69 @@ func DecodeAgentTemplate(data []byte) (AgentTemplate, error) {
 	err := decodeInstanceValue(data, v5Template, &result)
 	return result, err
 }
+
+// ValidateCurrentInstanceHubMessage applies invariants every current Hub writer must satisfy. The
+// rolling wire decoder below has one deliberately narrower compatibility exception: it removes an
+// obsolete no-skill expectation emitted by the immediately preceding Hub release before this
+// validator can interpret it as capability-pack authority.
+func ValidateCurrentInstanceHubMessage(message InstanceHubMessage) error {
+	if message.Type == "instance.release" {
+		return nil
+	}
+	if message.Instance == nil || message.Allocation == nil {
+		return fmt.Errorf("instance and allocation are required")
+	}
+	instance, allocation := message.Instance, message.Allocation
+	if instance.ID != allocation.InstanceID || instance.Lease != allocation.Lease {
+		return fmt.Errorf("instance allocation identity or lease mismatch")
+	}
+	requiredSkills := []string{}
+	if message.Instance.Requirements.Skills != nil {
+		requiredSkills = *message.Instance.Requirements.Skills
+	}
+	expected := message.Allocation.ExpectedCapabilityPack
+	if len(requiredSkills) == 0 && expected != nil {
+		return fmt.Errorf("instance skill requirements and allocation capability pack expectation mismatch")
+	}
+	if len(requiredSkills) > 0 && expected == nil {
+		return fmt.Errorf("instance skill requirements and allocation capability pack expectation mismatch")
+	}
+	if expected != nil {
+		covered := make(map[string]struct{}, len(expected.RequiredSkills))
+		for _, skill := range expected.RequiredSkills {
+			covered[skill] = struct{}{}
+		}
+		for _, skill := range requiredSkills {
+			if _, ok := covered[skill]; !ok {
+				return fmt.Errorf("instance skill requirements and allocation capability pack expectation mismatch")
+			}
+		}
+	}
+	if message.Type == "instance.provision" {
+		if instance.Status != "provisioning" || !slices.Contains([]string{"reserved", "provisioning"}, allocation.Status) {
+			return fmt.Errorf("invalid provision state")
+		}
+		return nil
+	}
+	if message.Type != "dispatch" || message.Run == nil {
+		return fmt.Errorf("unknown instance message")
+	}
+	run := message.Run
+	identityMatches := run.InstanceID == instance.ID && run.AllocationID == allocation.ID && run.ThreadID == instance.ThreadID
+	placementMatches := run.NodeID == allocation.NodeID && run.HarnessID == allocation.HarnessID && run.Model == allocation.Model &&
+		run.Transport == allocation.Transport && run.Workspace == allocation.Workspace
+	stateAllowsDispatch := run.Status == "queued" && allocation.Status == "active" &&
+		slices.Contains([]string{"ready", "busy", "idle"}, instance.Status)
+	bindingMatches := (run.SessionBindingID == nil) == (message.SessionBinding == nil)
+	if bindingMatches && message.SessionBinding != nil {
+		bindingMatches = run.Transport == "acp-v1" && *run.SessionBindingID == message.SessionBinding.ID
+	}
+	if !identityMatches || !placementMatches || !stateAllowsDispatch || !bindingMatches || (run.FallbackTransport != nil && run.Transport != "acp-v1") {
+		return fmt.Errorf("invalid dispatch identity, state, or placement")
+	}
+	return nil
+}
+
 func DecodeInstanceHubMessage(data []byte, version string) (InstanceHubMessage, error) {
 	var message InstanceHubMessage
 	if !SupportsCapability(version, CapabilityInstances) {
@@ -967,27 +1034,16 @@ func DecodeInstanceHubMessage(data []byte, version string) (InstanceHubMessage, 
 		return message, nil
 	}
 	instance, allocation := message.Instance, message.Allocation
-	if instance.ID != allocation.InstanceID || instance.Lease != allocation.Lease {
-		return message, fmt.Errorf("instance allocation identity or lease mismatch")
+	/*
+		Rolling compatibility for exactly one prior Hub release: that writer could attach an
+		expectation to a genuinely no-skill instance. It granted no skill authority, so discard it
+		before admission. Missing or non-covering expectations for skill work remain strict failures.
+	*/
+	if (instance.Requirements.Skills == nil || len(*instance.Requirements.Skills) == 0) && allocation.ExpectedCapabilityPack != nil {
+		allocation.ExpectedCapabilityPack = nil
 	}
-	if message.Type == "instance.provision" {
-		if instance.Status != "provisioning" || !slices.Contains([]string{"reserved", "provisioning"}, allocation.Status) {
-			return message, fmt.Errorf("invalid provision state")
-		}
-		return message, nil
-	}
-	run := message.Run
-	identityMatches := run.InstanceID == instance.ID && run.AllocationID == allocation.ID && run.ThreadID == instance.ThreadID
-	placementMatches := run.NodeID == allocation.NodeID && run.HarnessID == allocation.HarnessID && run.Model == allocation.Model &&
-		run.Transport == allocation.Transport && run.Workspace == allocation.Workspace
-	stateAllowsDispatch := run.Status == "queued" && allocation.Status == "active" &&
-		slices.Contains([]string{"ready", "busy", "idle"}, instance.Status)
-	bindingMatches := (run.SessionBindingID == nil) == (message.SessionBinding == nil)
-	if bindingMatches && message.SessionBinding != nil {
-		bindingMatches = run.Transport == "acp-v1" && *run.SessionBindingID == message.SessionBinding.ID
-	}
-	if !identityMatches || !placementMatches || !stateAllowsDispatch || !bindingMatches || (run.FallbackTransport != nil && run.Transport != "acp-v1") {
-		return message, fmt.Errorf("invalid dispatch identity, state, or placement")
+	if err := ValidateCurrentInstanceHubMessage(message); err != nil {
+		return message, err
 	}
 	return message, nil
 }

@@ -141,6 +141,10 @@ export function InstanceDetail({ instance, allocations, nodes, runs, tasks, thre
           <Definition label="Node">{nodes.find((node) => node.id === current.allocation.nodeId)?.name ?? current.allocation.nodeId}</Definition>
           <Definition label="Harness / model">{current.allocation.harnessId} · {current.allocation.model}</Definition>
           <Definition label="Transport">{current.allocation.transport}</Definition>
+          {current.allocation.expectedCapabilityPack && <Definition label="Capability pack">
+            {current.allocation.expectedCapabilityPack.id}@{current.allocation.expectedCapabilityPack.version}
+            <small> · {current.allocation.expectedCapabilityPack.requiredSkills.join(", ")}</small>
+          </Definition>}
           <Definition label="Workspace"><code>{current.allocation.workspace}</code></Definition>
         </dl>}
       </section>

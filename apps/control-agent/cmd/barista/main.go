@@ -198,7 +198,7 @@ func run(args []string) int {
 	}
 	activePack, packUnavailable := activeCapabilityPack(componentManifest, ownership, activation, cfg.DataRoot, version)
 	if activePack == nil {
-		log.Printf("capability pack: %s; runs on this node are %s", packUnavailable, cfg.CapabilityPackRequirement)
+		log.Printf("capability pack: %s; runs on this node are %s", packUnavailable.Detail, cfg.CapabilityPackRequirement)
 	} else {
 		log.Printf("capability pack %s@%s (%s) is active; runs on this node are %s",
 			activePack.ID, activePack.Version, activePack.ArchiveDigest, cfg.CapabilityPackRequirement)
@@ -218,7 +218,12 @@ func run(args []string) int {
 		assessment := setup.AssessComponents(buildContext, componentManifest, ownership, cfg.DataRoot, setup.CurrentPlatform(), activation, profiles, options)
 		return setup.ComponentInventoryReport(cfg.NodeID, time.Now().UTC().Format(time.RFC3339Nano), assessment)
 	}
-	client := controlplane.NewClient(cfg, node, runner, buildCapabilityReport).WithComponentInventory(buildComponentInventory)
+	buildCapabilityPackReadiness := func(context.Context) protocol.CapabilityPackReadinessReport {
+		return runner.CapabilityPackReadiness(cfg.NodeID, time.Now().UTC().Format(time.RFC3339Nano))
+	}
+	client := controlplane.NewClient(cfg, node, runner, buildCapabilityReport).
+		WithComponentInventory(buildComponentInventory).
+		WithCapabilityPackReadiness(buildCapabilityPackReadiness)
 	if err := client.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		log.Printf("Barista stopped: %v", err)
 		return 1

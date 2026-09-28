@@ -50,6 +50,21 @@ test("instance records reject unknown fields, statuses, and unbounded input", ()
   assert.equal(protocol.validateInstanceAllocation({ ...allocation, status: "unknown" }).ok, false);
 });
 
+test("skill-bound instance messages require a covering normalized allocation pack expectation", () => {
+  const skillInstance = { ...instance, requirements: { ...instance.requirements, skills: ["coffeeshop-review", "coffeeshop-preview"] } };
+  const expectedCapabilityPack = {
+    id: "coffeeshop-capability-pack", version: "1.1.0", requiredSkills: ["coffeeshop-preview", "coffeeshop-review", "template-skill"]
+  };
+  const provision = { type: "instance.provision", instance: skillInstance, allocation: { ...allocation, expectedCapabilityPack } };
+  assert.equal(protocol.validateInstanceHubMessage(provision, "5").ok, true);
+  assert.equal(protocol.validateInstanceHubMessage({ ...provision, allocation }, "5").ok, false);
+  assert.equal(protocol.validateInstanceHubMessage({ ...provision, allocation: { ...allocation, expectedCapabilityPack: {
+    ...expectedCapabilityPack, requiredSkills: ["coffeeshop-preview"]
+  } } }, "5").ok, false);
+  assert.equal(protocol.validateInstanceHubMessage({ type: "instance.provision", instance, allocation: { ...allocation, expectedCapabilityPack } }, "5").ok, false,
+    "a truly no-skill allocation cannot carry an expectation");
+});
+
 test("resident evidence distinguishes absent, empty, duplicate, and malformed data", () => {
   const value = { type: "sync.complete", nodeId: "node-one", at };
   assert.equal(protocol.validateInstanceControlMessage(value, "5").ok, true);
@@ -76,15 +91,15 @@ test("heartbeat residency evidence follows the sync.complete rule and capability
 });
 
 test("Go-produced fixtures validate and round-trip byte-for-byte through the TypeScript encoder", () => {
-  for (const name of ["provision", "dispatch", "dispatch-resume", "release", "ready", "released", "failed", "register", "heartbeat", "heartbeat-empty", "sync", "sync-empty", "sync-absent", "create", "template"]) {
+  for (const name of ["provision", "provision-pack", "dispatch", "dispatch-pack", "dispatch-resume", "release", "ready", "released", "failed", "register", "heartbeat", "heartbeat-empty", "sync", "sync-empty", "sync-absent", "create", "template"]) {
     const bytes = readFileSync(new URL(`./fixtures/control-v5/${name}.json`, import.meta.url), "utf8");
     const value = JSON.parse(bytes);
-    const validate = ["provision", "dispatch", "dispatch-resume", "release"].includes(name) ? protocol.validateInstanceHubMessage
+    const validate = ["provision", "provision-pack", "dispatch", "dispatch-pack", "dispatch-resume", "release"].includes(name) ? protocol.validateInstanceHubMessage
       : name === "create" ? protocol.validateInstanceLifecycleRequest : name === "template" ? protocol.validateAgentTemplate : protocol.validateInstanceControlMessage;
     const result = validate(value, "5");
     assert.equal(result.ok, true, `${name}: ${result.reason}`);
     assert.equal(JSON.stringify(result.value, null, 2) + "\n", bytes);
-    if (["provision", "dispatch", "dispatch-resume", "release"].includes(name)) {
+    if (["provision", "provision-pack", "dispatch", "dispatch-pack", "dispatch-resume", "release"].includes(name)) {
       for (const version of ["1", "2", "3", "4", "6", ""]) assert.equal(protocol.canSendToControlAgent(value, version), false);
     } else if (!["create", "template", "sync-absent"].includes(name)) {
       for (const version of ["1", "2", "3", "4", "6", ""]) assert.equal(protocol.canAcceptFromControlAgent(value, version), false, `${name}/${version}`);

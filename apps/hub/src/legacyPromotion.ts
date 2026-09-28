@@ -67,6 +67,7 @@ export function placementEnvironmentFor(state: Readonly<State>, context: Schedul
     runs: state.runs,
     connection: context.connection,
     capabilityReport: context.capabilityReport,
+    capabilityPackReadiness: context.capabilityPackReadiness,
     projectProfile: context.projectProfile,
     workspaceLeases: state.workspaceLeases,
     instances: state.instances,
@@ -112,7 +113,8 @@ export function promoteThreadToInstanceInState(state: State, threadId: string, c
     harnessId: offering.harnessId,
     model: offering.model,
     transport: offering.transport,
-    workspace: offering.workspace
+    workspace: offering.workspace,
+    ...(offering.expectedCapabilityPack === undefined ? {} : { expectedCapabilityPack: offering.expectedCapabilityPack })
   }, at);
   if (placement.kind !== "placed") return ineligible(placement.reason);
 
