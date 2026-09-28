@@ -372,7 +372,7 @@ test("maps malformed archives, unsafe paths, missing entrypoints, and crossed li
   }
 });
 
-test("shared path, file-count, file-size, expanded, ratio, compressed, and inflated budgets enforce exact boundaries", async () => {
+test("shared path, file-count, directory-count, file-size, expanded, ratio, compressed, and inflated budgets enforce exact boundaries", async () => {
   const pathAtLimit = `${"a".repeat(250)}/${"b".repeat(250)}/${"c".repeat(250)}/${"d".repeat(250)}/${"e".repeat(15)}.html`;
   assert.equal(Buffer.byteLength(pathAtLimit), previewBundleContract.maximumPathBytes);
   const paxAtLimit = bundle([
@@ -400,6 +400,18 @@ test("shared path, file-count, file-size, expanded, ratio, compressed, and infla
   const countOverLimit = bundle([...entriesAtCount, { name: "files/overflow.txt", body: Buffer.alloc(0) }]);
   await assert.rejects(
     prepareBytes(countOverLimit, "index.html", "preview-count-over"),
+    (error: unknown) => error instanceof ArtifactIngestionError && error.failureCode === "limit-exceeded"
+  );
+
+  const directoriesOverLimit = bundle([
+    { name: "index.html", body: Buffer.from("directory count") },
+    ...Array.from({ length: previewBundleContract.maximumRegularFiles + 1 }, (_, index) => ({
+      name: `directories/${index.toString().padStart(4, "0")}`,
+      type: "5"
+    }))
+  ]);
+  await assert.rejects(
+    prepareBytes(directoriesOverLimit, "index.html", "preview-directory-count-over"),
     (error: unknown) => error instanceof ArtifactIngestionError && error.failureCode === "limit-exceeded"
   );
 

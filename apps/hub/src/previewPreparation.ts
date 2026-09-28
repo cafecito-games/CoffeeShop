@@ -381,6 +381,7 @@ async function extractTar(reader: StreamReader, workspace: PreparationWorkspace,
   const ancestorSpellings = new Map<string, string>();
   let pendingPaxPath: string | undefined;
   let expandedBytes = 0;
+  let directoryEntries = 0;
   let sawFirstZero = false;
 
   const recordPath = (path: string, type: "regular-file" | "directory") => {
@@ -443,7 +444,14 @@ async function extractTar(reader: StreamReader, workspace: PreparationWorkspace,
     }
     const resolvedPath = recordPath(pendingPaxPath ?? header.name, logicalType);
     pendingPaxPath = undefined;
-    if (header.type === "5") continue;
+    if (header.type === "5") {
+      // Keep explicit directory headers independently bounded by the v1 entry ceiling.
+      directoryEntries += 1;
+      if (directoryEntries > previewBundleContract.maximumRegularFiles) {
+        throw new ArchiveFailure("limit-exceeded", fixedFailureMessage["limit-exceeded"]);
+      }
+      continue;
+    }
 
     if (header.size > previewBundleContract.maximumFileBytes
       || files.length + 1 > previewBundleContract.maximumRegularFiles) {

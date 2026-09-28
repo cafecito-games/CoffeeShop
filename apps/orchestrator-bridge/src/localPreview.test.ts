@@ -218,6 +218,17 @@ test("rejects every package numeric one-over boundary and compression-ratio bomb
     /file-count/i
   );
 
+  const directoryCountRoot = await mkdtemp(join(tmpdir(), "coffee-shop-local-preview-directory-count-"));
+  await mkdir(join(directoryCountRoot, "site"));
+  await writeFile(join(directoryCountRoot, "site", "index.html"), "ok");
+  for (let index = 0; index <= previewBundleContract.maximumRegularFiles; index += 1) {
+    await mkdir(join(directoryCountRoot, "site", `directory-${index.toString().padStart(4, "0")}`));
+  }
+  await assert.rejects(
+    captureLocalPreview(await canonicalWorkingRoot(directoryCountRoot), argumentsValue),
+    /directory-count/i
+  );
+
   const expandedRoot = await mkdtemp(join(tmpdir(), "coffee-shop-local-preview-expanded-"));
   await mkdir(join(expandedRoot, "site"));
   await writeFile(join(expandedRoot, "site", "index.html"), "ok");

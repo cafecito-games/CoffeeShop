@@ -212,6 +212,7 @@ async function scanInventory(sourceRoot: string, signal: AbortSignal | undefined
   const directories: DirectoryIdentity[] = [];
   const collisionKeys = new Set<string>();
   let expandedBytes = 0;
+  let directoryEntries = 0;
 
   const walk = async (absoluteDirectory: string, archiveDirectory: string): Promise<void> => {
     throwIfCancelled(signal);
@@ -219,6 +220,13 @@ async function scanInventory(sourceRoot: string, signal: AbortSignal | undefined
       throw new LocalArtifactError("the preview source directory is unavailable", { cause: error });
     });
     if (before.isSymbolicLink() || !before.isDirectory()) fail("the preview source must contain only real directories and regular files");
+    // Directory-only trees need their own bound; reuse the v1 entry ceiling without changing its wire contract.
+    if (archiveDirectory !== "") {
+      directoryEntries += 1;
+      if (directoryEntries > previewBundleContract.maximumRegularFiles) {
+        fail("the preview source exceeds its directory-count limit");
+      }
+    }
     directories.push({
       path: archiveDirectory,
       absolutePath: absoluteDirectory,

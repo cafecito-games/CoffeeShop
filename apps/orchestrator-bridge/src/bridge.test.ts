@@ -15,6 +15,7 @@ import { BridgeServer, channelNotificationMethod } from "./bridgeServer.js";
 import { FakeHub, FakeHubToolError, type FakeHubOptions } from "./fakeHub.js";
 import { HubConnection } from "./hubConnection.js";
 import { canonicalWorkingRoot, captureLocalArtifact, type LocalArtifactGateway } from "./localArtifact.js";
+import { captureLocalPreview } from "./localPreview.js";
 import { pinnedProtocolRevision } from "./protocolRevision.js";
 
 interface ChannelEvent {
@@ -269,6 +270,27 @@ test("post_artifact local refusals happen before a Hub RPC and never reveal the 
   const result = await harness.client.callTool({ name: "post_artifact", arguments: {
     threadId: "thread-one", relativePath: "../secret", title: "Result", kind: "report",
     mediaType: "text/plain", idempotencyKey: "result-one"
+  } });
+  assert.equal(result.isError, true);
+  assert.equal(harness.hub.receivedOfType("rpc.request").length, 0);
+  assert.equal(JSON.stringify(result).includes(root), false);
+});
+
+test("publish_preview local refusals happen before a Hub RPC and never reveal the working root", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "coffee-shop-bridge-preview-"));
+  const workingRoot = await canonicalWorkingRoot(root);
+  const harness = await startHarness({
+    scopes: ["orchestrate"],
+    localArtifacts: {
+      capture: (value) => captureLocalArtifact(workingRoot, value),
+      capturePreview: (value) => captureLocalPreview(workingRoot, value),
+      upload: async () => assert.fail("upload must not run")
+    }
+  });
+  t.after(() => harness.close());
+  const result = await harness.client.callTool({ name: "publish_preview", arguments: {
+    threadId: "thread-one", relativePath: "missing", entrypoint: "index.html", title: "Preview",
+    idempotencyKey: "preview-one"
   } });
   assert.equal(result.isError, true);
   assert.equal(harness.hub.receivedOfType("rpc.request").length, 0);
