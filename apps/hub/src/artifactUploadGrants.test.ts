@@ -98,10 +98,47 @@ test("refreshing an unuploaded replay revokes the old grant, and concurrent clai
     first = issueArtifactUploadGrantInState(state, state.artifacts![0]!, clientId, at, () => Buffer.alloc(32, 1)).token;
     second = issueArtifactUploadGrantInState(state, state.artifacts![0]!, clientId, later(1), () => Buffer.alloc(32, 2)).token;
   });
+  assert.equal(store.read((state) => state.artifactUploadGrants?.length), 1, "an exact replay retains only its fresh authority");
   assert.equal(await claimArtifactUploadGrant(store, artifact.id, first, later(2)), false);
   const claims = await Promise.all(Array.from({ length: 8 }, () => claimArtifactUploadGrant(store, artifact.id, second, later(3))));
   assert.equal(claims.filter(Boolean).length, 1);
   assert.equal(store.snapshot().artifacts![0]!.uploaded, false, "claiming transport authority never infers upload success");
+});
+
+test("issuance prunes consumed, revoked, and expired grants while retaining live unrelated authority", async () => {
+  const { store, clientId } = await fixture();
+  const token = async (fill: number, artifactId: string, atValue: string) => {
+    let issued = "";
+    await store.transact((state) => {
+      const base = state.artifacts![0]!;
+      const candidate = {
+        ...base,
+        id: artifactId,
+        downloadPath: `/api/artifacts/${artifactId}/content`,
+        idempotencyKey: artifactId,
+        createdAt: atValue
+      };
+      state.artifacts!.push(candidate);
+      issued = issueArtifactUploadGrantInState(state, candidate, clientId, atValue, () => Buffer.alloc(32, fill)).token;
+    });
+    return issued;
+  };
+
+  const consumed = await token(11, "artifact-consumed", at);
+  assert.equal(await claimArtifactUploadGrant(store, "artifact-consumed", consumed, later(1)), true);
+  await token(12, "artifact-revoked", later(2));
+  await store.transact((state) => {
+    const record = state.artifactUploadGrants!.find((grant) => grant.artifactId === "artifact-revoked")!;
+    record.revokedAt = later(3);
+  });
+  await token(13, "artifact-expired", at);
+  const live = await token(14, "artifact-live", later(artifactUploadGrantLifetimeMilliseconds - 1));
+  await token(15, "artifact-new", later(artifactUploadGrantLifetimeMilliseconds));
+
+  const records = store.read((state) => structuredClone(state.artifactUploadGrants));
+  assert.deepEqual(records?.map((grant) => grant.artifactId).sort(), ["artifact-live", "artifact-new"]);
+  assert.equal(await claimArtifactUploadGrant(store, "artifact-consumed", consumed, later(artifactUploadGrantLifetimeMilliseconds + 1)), false);
+  assert.equal(await claimArtifactUploadGrant(store, "artifact-live", live, later(artifactUploadGrantLifetimeMilliseconds + 1)), true);
 });
 
 test("persisted grant state rejects plaintext, corrupt lifecycle, and duplicate active authority", async () => {

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { mkdtemp, mkdir, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, mkdir, rename, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -67,18 +67,28 @@ test("rejects final symlinks, directories, and a final-component replacement", a
   await assert.rejects(captureLocalArtifact(canonical, { ...argumentsValue, relativePath: "reports/replace.txt" }, {
     beforeOpen: async () => {
       await writeFile(join(root, "replacement.txt"), "replacement");
-      const { rename, unlink } = await import("node:fs/promises");
       await unlink(join(root, "reports", "replace.txt"));
       await symlink(join(root, "replacement.txt"), join(root, "reports", "replace.txt"));
     }
   }), (error: NodeJS.ErrnoException) => error.code === "ELOOP" || /symbolic link/.test(error.message));
 
-  await writeFile(join(root, "reports", "replace-regular.txt"), "original");
+  const original = join(root, "reports", "replace-regular.txt");
+  const replacement = join(root, "reports", "replace-regular-next.txt");
+  await writeFile(original, "original");
+  const originalIdentity = await lstat(original);
   await assert.rejects(captureLocalArtifact(canonical, { ...argumentsValue, relativePath: "reports/replace-regular.txt" }, {
     beforeOpen: async () => {
-      const { unlink } = await import("node:fs/promises");
-      await unlink(join(root, "reports", "replace-regular.txt"));
-      await writeFile(join(root, "reports", "replace-regular.txt"), "replacement");
+      // Keep the original inode live while creating the replacement, then atomically replace the
+      // directory entry. Overlayfs may recycle an unlinked inode immediately, so unlink+write does
+      // not deterministically exercise the product's dev/inode replacement guard.
+      await writeFile(replacement, "replacement");
+      const replacementIdentity = await lstat(replacement);
+      assert.notDeepEqual(
+        [replacementIdentity.dev, replacementIdentity.ino],
+        [originalIdentity.dev, originalIdentity.ino],
+        "the race fixture must hold two distinct live file identities"
+      );
+      await rename(replacement, original);
     }
   }), /changed while it was being opened/);
 });

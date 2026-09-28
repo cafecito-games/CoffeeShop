@@ -405,30 +405,51 @@ interface NormalizedArtifactRegistration {
   idempotencyKey: string;
 }
 
-function requiredArtifactString(values: Record<string, unknown>, key: string, maximumBytes: number) {
+type ArtifactRegistrationPolicy = CallerSource["kind"];
+
+function requiredArtifactString(
+  values: Record<string, unknown>,
+  key: string,
+  maximum: number,
+  policy: ArtifactRegistrationPolicy
+) {
   const value = typeof values[key] === "string" ? values[key].trim() : "";
   if (!value) throw new CoordinationError("invalid_arguments", `${key} is required`);
-  if (Buffer.byteLength(value, "utf8") > maximumBytes) throw new CoordinationError("invalid_arguments", `${key} exceeds its byte limit`);
+  const length = policy === "external" ? Buffer.byteLength(value, "utf8") : value.length;
+  if (length > maximum) {
+    throw new CoordinationError("invalid_arguments", `${key} exceeds its ${policy === "external" ? "byte" : "character"} limit`);
+  }
   return value;
 }
 
-function normalizeArtifactRegistration(argumentsValue: unknown): NormalizedArtifactRegistration {
+function normalizeArtifactRegistration(argumentsValue: unknown, policy: ArtifactRegistrationPolicy): NormalizedArtifactRegistration {
   const values = record(argumentsValue);
-  onlyKeys(values, ["relativePath", "title", "kind", "mediaType", "summary", "size", "sha256", "idempotencyKey"], "artifact arguments");
-  const suppliedPath = requiredArtifactString(values, "relativePath", 1_024).replaceAll("\\", "/");
-  const relativePath = posix.normalize(suppliedPath);
-  const title = requiredArtifactString(values, "title", 256);
-  const kind = requiredArtifactString(values, "kind", 64);
-  const mediaType = requiredArtifactString(values, "mediaType", 128);
-  if (values.summary !== undefined && typeof values.summary !== "string") throw new CoordinationError("invalid_arguments", "summary must be a string");
-  const summary = typeof values.summary === "string" ? values.summary.trim() : "";
-  if (Buffer.byteLength(summary, "utf8") > 2_000) throw new CoordinationError("invalid_arguments", "summary exceeds its byte limit");
-  const sha256 = requiredArtifactString(values, "sha256", 64);
-  const idempotencyKey = requiredArtifactString(values, "idempotencyKey", 128);
+  if (policy === "external") {
+    onlyKeys(values, ["relativePath", "title", "kind", "mediaType", "summary", "size", "sha256", "idempotencyKey"], "artifact arguments");
+  }
+  const requestedPath = requiredArtifactString(values, "relativePath", 1_024, policy);
+  const suppliedPath = policy === "external" ? requestedPath.replaceAll("\\", "/") : requestedPath;
+  const relativePath = policy === "external" ? posix.normalize(suppliedPath) : suppliedPath;
+  const title = requiredArtifactString(values, "title", 256, policy);
+  const kind = requiredArtifactString(values, "kind", 64, policy);
+  const mediaType = requiredArtifactString(values, "mediaType", 128, policy);
+  if (policy === "external" && values.summary !== undefined && typeof values.summary !== "string") {
+    throw new CoordinationError("invalid_arguments", "summary must be a string");
+  }
+  const suppliedSummary = typeof values.summary === "string" ? values.summary.trim() : "";
+  const summary = policy === "external" ? suppliedSummary : suppliedSummary.slice(0, 2_000);
+  if (policy === "external" && Buffer.byteLength(summary, "utf8") > 2_000) {
+    throw new CoordinationError("invalid_arguments", "summary exceeds its byte limit");
+  }
+  const sha256 = requiredArtifactString(values, "sha256", 64, policy);
+  const idempotencyKey = requiredArtifactString(values, "idempotencyKey", 128, policy);
   const size = values.size;
-  if (/^(?:[A-Za-z]:|[\\/])/.test(suppliedPath) || /[\u0000-\u001f\u007f]/.test(relativePath)
+  const invalidExternalPath = /^(?:[A-Za-z]:|[\\/])/.test(suppliedPath) || /[\u0000-\u001f\u007f]/.test(relativePath)
     || relativePath === "." || relativePath === ".." || relativePath.startsWith("../")
-    || relativePath.split("/").some((segment) => !segment || segment === "." || segment === "..")) {
+    || relativePath.split("/").some((segment) => !segment || segment === "." || segment === "..");
+  const invalidRunPath = /^(?:[A-Za-z]:[\\/]|[\\/])/.test(relativePath)
+    || relativePath.split(/[\\/]+/).includes("..");
+  if (policy === "external" ? invalidExternalPath : invalidRunPath) {
     throw new CoordinationError("invalid_arguments", "relativePath must stay within the run workspace");
   }
   if (!(ordinaryArtifactKinds as readonly string[]).includes(kind)) {
@@ -441,12 +462,18 @@ function normalizeArtifactRegistration(argumentsValue: unknown): NormalizedArtif
   return { relativePath, title, kind: kind as Artifact["kind"], mediaType, summary, size, sha256, idempotencyKey };
 }
 
-const sameArtifactRegistration = (artifact: Artifact, normalized: NormalizedArtifactRegistration) =>
+const sameArtifactRegistration = (
+  artifact: Artifact,
+  normalized: NormalizedArtifactRegistration,
+  policy: ArtifactRegistrationPolicy
+) =>
   artifact.relativePath === normalized.relativePath
   && artifact.title === normalized.title
   && artifact.kind === normalized.kind
   && artifact.mediaType === normalized.mediaType
-  && artifact.summary === normalized.summary
+  // Historical run retries never compared summary. External registrations were introduced with
+  // full semantic equality and retain it; the first stored run summary remains authoritative.
+  && (policy === "run" || artifact.summary === normalized.summary)
   && artifact.size === normalized.size
   && artifact.sha256 === normalized.sha256;
 
@@ -459,7 +486,7 @@ export interface ArtifactRegistrationResult {
 
 /** Registers against the authoritative caller identity and attachment in the committing transaction. */
 export async function createArtifactForSource(store: Store, callerSource: CallerSource, argumentsValue: unknown, at = new Date().toISOString()): Promise<ArtifactRegistrationResult> {
-  const normalized = normalizeArtifactRegistration(argumentsValue);
+  const normalized = normalizeArtifactRegistration(argumentsValue, callerSource.kind);
   let artifact: Artifact | undefined;
   let uploadGrant: ArtifactUploadGrant | undefined;
   let created = false;
@@ -477,7 +504,7 @@ export async function createArtifactForSource(store: Store, callerSource: Caller
       && artifactSourceKey(item) === caller.sourceKey
       && item.idempotencyKey === normalized.idempotencyKey);
     if (artifact) {
-      if (!sameArtifactRegistration(artifact, normalized)) {
+      if (!sameArtifactRegistration(artifact, normalized, callerSource.kind)) {
         throw new CoordinationError("idempotency_conflict", "The idempotency key was already used with different artifact metadata");
       }
       if (caller.principal.kind === "external" && !artifact.uploaded) {

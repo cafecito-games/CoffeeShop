@@ -1650,6 +1650,7 @@ const byteLength = (value: string) => encoder.encode(value).length;
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 const hasOnlyKeys = (value: Record<string, unknown>, keys: readonly string[]) => Object.keys(value).every((key) => keys.includes(key));
 const isBoundedString = (value: unknown, limit: number): value is string => typeof value === "string" && byteLength(value) <= limit;
+const isCharacterBoundedString = (value: unknown, limit: number): value is string => typeof value === "string" && value.length <= limit;
 const isIdentifier = (value: unknown): value is string => isBoundedString(value, harnessEventLimits.identifierBytes) && value.length > 0;
 const isOptional = (value: unknown, check: (value: unknown) => boolean) => value === undefined || check(value);
 const isNonNegativeInteger = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
@@ -1717,20 +1718,29 @@ export function validateArtifact(value: unknown): Validation<Artifact> {
   if (source.value.kind === "external" && value.kind === previewBundleArtifactKind) {
     return reject("external preview artifacts require dedicated lifecycle authority");
   }
-  if (!isBoundedString(value.relativePath, 1_024) || value.relativePath.length === 0
-    || value.relativePath.startsWith("/") || /^[A-Za-z]:/.test(value.relativePath) || value.relativePath.includes("\\")
-    || /[\u0000-\u001f\u007f]/.test(value.relativePath)
-    || value.relativePath.split("/").some((segment) => segment === "" || segment === "." || segment === "..")) {
+  const external = source.value.kind === "external";
+  const bounded = (candidate: unknown, limit: number) =>
+    external ? isBoundedString(candidate, limit) : isCharacterBoundedString(candidate, limit);
+  const relativePath = value.relativePath;
+  if (typeof relativePath !== "string") return reject("artifact has an invalid relative path");
+  const invalidExternalPath = relativePath.startsWith("/") || /^[A-Za-z]:/.test(relativePath)
+    || relativePath.includes("\\") || /[\u0000-\u001f\u007f]/.test(relativePath)
+    || relativePath.split("/").some((segment) => segment === "" || segment === "." || segment === "..");
+  const invalidRunPath = /^(?:[A-Za-z]:[\\/]|[\\/])/.test(relativePath)
+    || relativePath.split(/[\\/]+/).includes("..");
+  if (!bounded(relativePath, 1_024) || relativePath.length === 0
+    || (external ? invalidExternalPath : invalidRunPath)) {
     return reject("artifact has an invalid relative path");
   }
-  if (!isBoundedString(value.title, 256) || value.title.length === 0
-    || !isBoundedString(value.mediaType, 128) || value.mediaType.length === 0
-    || !isBoundedString(value.summary, 2_000)) return reject("artifact display metadata is invalid");
+  if (typeof value.title !== "string" || !bounded(value.title, 256) || value.title.length === 0
+    || typeof value.mediaType !== "string" || !bounded(value.mediaType, 128) || value.mediaType.length === 0
+    || !bounded(value.summary, 2_000)) return reject("artifact display metadata is invalid");
   if (!(artifactKinds as readonly unknown[]).includes(value.kind)) return reject("artifact has an unknown kind");
   if (!isNonNegativeInteger(value.size) || value.size > artifactMaximumBytes) return reject("artifact size is invalid");
   if (typeof value.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(value.sha256)) return reject("artifact digest is invalid");
   if (value.downloadPath !== `/api/artifacts/${encodeURIComponent(value.id)}/content`) return reject("artifact download path is invalid");
-  if (typeof value.uploaded !== "boolean" || !isBoundedString(value.idempotencyKey, 128) || value.idempotencyKey.length === 0
+  if (typeof value.uploaded !== "boolean" || typeof value.idempotencyKey !== "string"
+    || !bounded(value.idempotencyKey, 128) || value.idempotencyKey.length === 0
     || !isTimestamp(value.createdAt)) return reject("artifact lifecycle metadata is invalid");
   return accept(value as unknown as Artifact);
 }

@@ -77,3 +77,25 @@ test("the shared artifact validator accepts both producer classes and rejects un
   assert.equal(validateArtifact({ ...externalArtifact, size: artifactMaximumBytes + 1 }).ok, false);
   assert.equal(validateArtifact({ ...externalArtifact, sha256: "A".repeat(64) }).ok, false);
 });
+
+test("legacy run metadata keeps character limits while every external field remains byte-bounded", () => {
+  // Byte-faithful to Barista's producer map at apps/control-agent/internal/mcpserver/server.go:290-292
+  // and its canonical returned path at server.go:355.
+  const segment = "é".repeat(90);
+  const compatibility = {
+    relativePath: [`${segment}\\literal`, ...Array.from({ length: 5 }, () => segment)].join("/"),
+    title: "界".repeat(100),
+    mediaType: `x/${"é".repeat(64)}`,
+    summary: "é".repeat(2_000),
+    idempotencyKey: "鍵".repeat(64)
+  };
+  assert.equal(validateArtifact({ ...runArtifact, ...compatibility }).ok, true);
+  assert.match(compatibility.relativePath, /\\literal\//, "the run fixture covers historical path preservation");
+  for (const field of Object.keys(compatibility)) {
+    assert.equal(
+      validateArtifact({ ...externalArtifact, [field]: compatibility[field] }).ok,
+      false,
+      `external ${field} must retain the issue-60 byte bound`
+    );
+  }
+});

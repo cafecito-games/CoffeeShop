@@ -40,15 +40,21 @@ export function issueArtifactUploadGrantInState(
   at: string,
   entropy: EntropySource = randomBytes
 ): ArtifactUploadGrant {
+  if (!isTimestamp(at)) throw new Error("Artifact upload grant creation time must be a timestamp");
   const source = artifactSource(artifact);
   if (!source.ok || source.value.kind !== "external" || source.value.clientId !== clientId
     || artifact.threadId === undefined || artifact.uploaded) {
     throw new Error("An upload grant requires one unuploaded external artifact");
   }
-  state.artifactUploadGrants ??= [];
-  for (const grant of state.artifactUploadGrants) {
-    if (grant.artifactId === artifact.id && grant.consumedAt === undefined && grant.revokedAt === undefined) grant.revokedAt = at;
-  }
+  const issuedAt = Date.parse(at);
+  // A retained digest has authority only while the grant is live. Prune every terminal/expired
+  // record and the artifact's replaced capability in the same deterministic transaction that mints
+  // its successor; unrelated live capabilities remain available to their in-flight uploads.
+  state.artifactUploadGrants = (state.artifactUploadGrants ?? []).filter((grant) =>
+    grant.consumedAt === undefined
+    && grant.revokedAt === undefined
+    && Date.parse(grant.expiresAt) > issuedAt
+    && grant.artifactId !== artifact.id);
   const bytes = entropy(artifactUploadGrantEntropyBytes);
   if (!Buffer.isBuffer(bytes) || bytes.length !== artifactUploadGrantEntropyBytes) {
     throw new Error("Artifact upload grant entropy must be exactly 32 bytes");

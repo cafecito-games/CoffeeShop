@@ -267,12 +267,14 @@ test("registers external artifacts with source-scoped replay and fresh bridge-on
   assert.equal(replay.artifact.id, created.artifact.id);
   assert.notEqual(replay.uploadGrant.token, created.uploadGrant.token);
   assert.equal(context.store.snapshot().artifacts?.length, 1);
+  assert.equal(context.store.read((state) => state.artifactUploadGrants?.length), 1, "exact replay prunes replaced private authority");
 
   const second = await welcomed(context);
   await call(second.connection, second.transport, "attach_thread", { threadId });
   const reconnectReplay = resultOf(await call(second.connection, second.transport, "post_artifact", argumentsValue));
   assert.equal(reconnectReplay.artifact.id, created.artifact.id);
   assert.notEqual(reconnectReplay.uploadGrant.token, replay.uploadGrant.token);
+  assert.equal(context.store.read((state) => state.artifactUploadGrants?.length), 1, "reconnect replay remains bounded");
 
   const beforeConflict = context.store.read((state) => JSON.stringify([state.artifacts, state.artifactUploadGrants, state.events]));
   assert.equal(errorOf(await call(second.connection, second.transport, "post_artifact", {
