@@ -25,7 +25,8 @@ import {
   ingestArtifactContent,
   preparePreviewBundle,
   reconcileArtifactBlob,
-  recoverPreviewPreparation
+  recoverPreviewPreparation,
+  retryPreviewPreparation
 } from "./previewPreparation.js";
 import { PreviewStorage } from "./previewStorage.js";
 import { Store } from "./store.js";
@@ -410,6 +411,86 @@ test("the upload workflow streams exact bytes, settles ready, and preserves ordi
   });
   assert.equal(ordinaryResult.kind, "ordinary");
   assert.deepEqual(await storage.readArtifact(ordinary.artifact.id), ordinaryBody);
+});
+
+test("operator retry owns one fresh generation and concurrent calls never start a second extraction", async () => {
+  const { store, storage } = await fixture();
+  const bytes = validBundle();
+  const registered = await register(store, bytes);
+  const abort = new AbortController();
+  abort.abort();
+  await assert.rejects(ingestArtifactContent(store, storage, {
+    artifactId: registered.artifact.id, contentType: "application/octet-stream", body: Readable.from([bytes]),
+    signal: abort.signal,
+    now: (() => { const values = [after(1), after(2)]; return () => values.shift() ?? after(2); })()
+  }));
+  assert.equal(store.snapshot(after(3)).artifactPreviews?.[0].status, "failed");
+
+  const originalRead = storage.readArtifact.bind(storage);
+  let releaseRead!: () => void;
+  const held = new Promise<void>((resolve) => { releaseRead = resolve; });
+  let markRead!: () => void;
+  const readStarted = new Promise<void>((resolve) => { markRead = resolve; });
+  let reads = 0;
+  storage.readArtifact = async (...args) => {
+    reads += 1;
+    markRead();
+    await held;
+    return originalRead(...args);
+  };
+  const broadcasts: string[] = [];
+  const times = [after(4), after(5)];
+  const first = retryPreviewPreparation(store, storage, registered.preview.id, {
+    now: () => times.shift() ?? after(5),
+    onCommitted: (value) => broadcasts.push(value.status)
+  });
+  await readStarted;
+  const replay = await retryPreviewPreparation(store, storage, registered.preview.id, {
+    now: () => after(4), onCommitted: () => broadcasts.push("unexpected")
+  });
+  assert.equal(replay.replayed, true);
+  assert.equal(replay.preview.status, "processing");
+  assert.equal(replay.preview.processingGeneration, 2);
+  assert.equal(reads, 1);
+  releaseRead();
+  const accepted = await first;
+  assert.equal(accepted.replayed, false);
+  assert.equal(accepted.preview.status, "ready");
+  assert.equal(accepted.preview.processingGeneration, 2);
+  assert.deepEqual(broadcasts, ["processing", "ready"]);
+  assert.equal(store.read((state) => state.previewProcessingReceipts?.length), 2);
+});
+
+test("operator retry rejects absent, unuploaded, mismatched, ready, and expired state before preparation", async () => {
+  const bytes = validBundle();
+  const { store, storage } = await fixture();
+  const registered = await register(store, bytes);
+  await assert.rejects(retryPreviewPreparation(store, storage, "missing"),
+    (error: unknown) => error instanceof Error && "code" in error && error.code === "not_found");
+  await assert.rejects(retryPreviewPreparation(store, storage, registered.preview.id),
+    (error: unknown) => error instanceof Error && "code" in error && error.code === "artifact_mismatch");
+
+  await stageBundle(storage, bytes, registered.artifact.id);
+  await reconcileArtifactBlob(store, storage, registered.artifact.id);
+  await store.transact((state) => {
+    state.artifactPreviews = state.artifactPreviews?.map((preview) => ({ ...preview, artifactSha256: "b".repeat(64) }));
+  });
+  await assert.rejects(retryPreviewPreparation(store, storage, registered.preview.id),
+    (error: unknown) => error instanceof Error && "code" in error && error.code === "artifact_mismatch");
+  await store.transact((state) => {
+    state.artifactPreviews = state.artifactPreviews?.map((preview) => ({ ...preview, artifactSha256: sha256(bytes) }));
+  });
+  await assert.rejects(retryPreviewPreparation(store, storage, registered.preview.id),
+    (error: unknown) => error instanceof Error && "code" in error && error.code === "invalid_transition");
+
+  await store.transact((state) => {
+    const current = state.artifactPreviews![0]!;
+    current.status = "failed"; current.processingGeneration = 1; current.updatedAt = after(2);
+    current.failedAt = after(2); current.failureCode = "processing-failed";
+  });
+  await assert.rejects(retryPreviewPreparation(store, storage, registered.preview.id, {
+    now: () => after(previewBundleContract.defaultTtlSeconds + 1)
+  }), (error: unknown) => error instanceof Error && "code" in error && error.code === "preview_expired");
 });
 
 test("bad preview uploads fail only generation zero and never commit bytes", async () => {

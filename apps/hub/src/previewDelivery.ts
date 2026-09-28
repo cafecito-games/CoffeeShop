@@ -2,6 +2,7 @@ import { isIP } from "node:net";
 import type { Server as HttpServer } from "node:http";
 import express, {
   type Express,
+  type ErrorRequestHandler,
   type Request,
   type RequestHandler,
   type Response
@@ -15,6 +16,7 @@ import {
 } from "@coffee-shop/protocol";
 import { expireDuePreviews, renewPreview } from "./artifactPreviews.js";
 import { CoordinationError } from "./coordinationError.js";
+import { ArtifactIngestionError, retryPreviewPreparation } from "./previewPreparation.js";
 import {
   createPreviewCapabilityUrl,
   signPreviewAccessToken,
@@ -44,6 +46,16 @@ const denialBody = Buffer.from("Not Found\n", "utf8");
 const misdirectedBody = Buffer.from("Misdirected Request\n", "utf8");
 const methodBody = Buffer.from("Method Not Allowed\n", "utf8");
 const unavailableBody = { error: "Preview access is unavailable" } as const;
+
+export const previewRetryJsonErrorHandler: ErrorRequestHandler = (error, request, _response, next) => {
+  if (request.method === "POST" && /^\/api\/previews\/[^/]+\/retry$/.test(request.path)
+    && error instanceof SyntaxError && "body" in error) {
+    request.body = undefined;
+    next();
+    return;
+  }
+  next(error);
+};
 
 export type DisabledPreviewDeliveryConfig = { readonly enabled: false };
 
@@ -493,6 +505,10 @@ function exactRenewalBody(body: unknown): body is { ttlSeconds: number } {
     && typeof body.ttlSeconds === "number" && Number.isSafeInteger(body.ttlSeconds);
 }
 
+function exactEmptyBody(body: unknown) {
+  return isRecord(body) && Object.keys(body).length === 0;
+}
+
 function safeStorageLog(
   log: ((event: PreviewDeliveryLogEvent) => void) | undefined,
   error: unknown,
@@ -559,6 +575,26 @@ export function registerPreviewOperatorRoutes(app: Express, dependencies: Previe
         return response.status(422).json({ error: error.message });
       }
       return response.status(409).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/previews/:id/retry", async (request, response) => {
+    if (!exactEmptyBody(request.body)) return response.status(422).json({ error: "Retry requires an empty JSON object" });
+    try {
+      const result = await retryPreviewPreparation(store, storage, request.params.id, {
+        now: () => new Date(now()).toISOString(),
+        onCommitted: broadcast
+      });
+      return response.status(result.replayed ? 200 : 202).json(result);
+    } catch (error) {
+      if (error instanceof CoordinationError) {
+        if (error.code === "not_found") return response.status(404).json({ error: "Preview not found" });
+        return response.status(409).json({ error: "Preview retry is unavailable" });
+      }
+      if (error instanceof ArtifactIngestionError) {
+        return response.status(409).json({ error: "Preview retry is unavailable" });
+      }
+      return response.status(500).json({ error: "Preview retry failed" });
     }
   });
 }

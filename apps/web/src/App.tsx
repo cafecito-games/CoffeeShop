@@ -6,7 +6,7 @@ import {
 } from "@phosphor-icons/react";
 import {
   isActiveRunStatus, threadOwnerAgentId, type Agent, type AgentState, type ApprovalRequest, type Artifact, type ChatMessage,
-  type ComputeNode, type HarnessSessionBinding, type Run, type RunActivity, type RunStatus, type Snapshot, type Thread, type ThreadStatus
+  type ArtifactPreview, type ComputeNode, type HarnessSessionBinding, type Run, type RunActivity, type RunStatus, type Snapshot, type Thread, type ThreadStatus
 } from "@coffee-shop/protocol";
 import { AccessibleDialog } from "./AccessibleDialog.js";
 import { useViewportMetrics } from "./useViewportMetrics.js";
@@ -25,6 +25,7 @@ import { RunActivityPanel } from "./orchestration/RunActivityPanel.js";
 import { SettingsView } from "./settings/SettingsView.js";
 import { ProjectsView } from "./ProjectsView.js";
 import { ThreadsView } from "./ThreadsView.js";
+import { PreviewArtifact } from "./PreviewArtifact.js";
 import { PwaInstallProvider } from "./settings/PwaInstall.js";
 import {
   CreateInstanceDialog, InstanceDetail, InstanceSidebar, MobileInstanceIndex, ReleaseInstanceDialog,
@@ -244,12 +245,13 @@ const runStatusLabels: Record<RunStatus, string> = {
   queued: "Queued", running: "Running", completed: "Completed", failed: "Failed", cancelled: "Cancelled"
 };
 
-function RunInspector({ selectedRunId, run, runs, threads, artifacts, agents, nodes, runActivity, approvals, sessionBindings, onClose, onInspectRun, canMutate }: {
+function RunInspector({ selectedRunId, run, runs, threads, artifacts, artifactPreviews, agents, nodes, runActivity, approvals, sessionBindings, onClose, onInspectRun, canMutate }: {
   selectedRunId: string;
   run?: Run;
   runs: Run[];
   threads: Thread[];
   artifacts: Artifact[];
+  artifactPreviews?: ArtifactPreview[];
   agents: Agent[];
   nodes: ComputeNode[];
   runActivity: RunActivity[];
@@ -268,6 +270,7 @@ function RunInspector({ selectedRunId, run, runs, threads, artifacts, agents, no
   const thread = run?.threadId ? threads.find((item) => item.id === run.threadId) : undefined;
   const children = run ? runs.filter((item) => item.parentRunId === run.id) : [];
   const runArtifacts = run ? artifacts.filter((item) => item.runId === run.id && item.uploaded) : [];
+  const previewByArtifact = new Map((artifactPreviews ?? []).map((preview) => [preview.artifactId, preview]));
   const activity = run ? runActivity.find((item) => item.runId === run.id) : undefined;
   const runApprovals = run ? approvals.filter((item) => item.runId === run.id) : [];
   const sessionBinding = run?.sessionBindingId ? sessionBindings.find((item) => item.id === run.sessionBindingId) : undefined;
@@ -338,7 +341,12 @@ function RunInspector({ selectedRunId, run, runs, threads, artifacts, agents, no
           <RunActivityPanel activity={activity} transportSelection={run.transportSelection} sessionBinding={sessionBinding} approvals={runApprovals} />
           {providerSession && <section className="run-text"><h3>Provider session</h3><ProviderSessionCard reference={providerSession} nodeName={node?.name ?? run.nodeId} /></section>}
           {children.length > 0 && <section className="run-related"><h3>Delegated tasks</h3>{children.map((child) => <button key={child.id} onClick={() => onInspectRun(child.id)}><span>{actorLabel(child, agents)}</span><small>{runStatusLabels[child.status]}</small></button>)}</section>}
-          {runArtifacts.length > 0 && <section className="run-related"><h3>Artifacts</h3>{runArtifacts.map((artifact) => <button key={artifact.id} onClick={() => void downloadArtifact(artifact)}><span>{artifact.title}</span><small>{artifact.kind} · {artifact.size} bytes</small></button>)}</section>}
+          {runArtifacts.length > 0 && <section className="run-related"><h3>Artifacts</h3>{runArtifacts.map((artifact) => {
+            const preview = previewByArtifact.get(artifact.id);
+            return preview
+              ? <PreviewArtifact key={artifact.id} artifact={artifact} preview={preview} canMutate={canMutate} apiFetch={apiFetch} />
+              : <button key={artifact.id} onClick={() => void downloadArtifact(artifact)}><span>{artifact.title}</span><small>{artifact.kind} · {artifact.size} bytes</small></button>;
+          })}</section>}
           {notice && <p className="run-notice" role="alert">{notice}</p>}
           {isActiveRunStatus(run.status) && (
             <footer className="run-actions">
@@ -613,7 +621,7 @@ function CoffeeShopApp() {
         {effectiveView === "instances" && <InstanceDetail instance={selectedInstance} allocations={snapshot.allocations ?? []} nodes={snapshot.nodes} runs={snapshot.runs} tasks={snapshot.tasks ?? []} threads={snapshot.threads ?? []} canMutate={canMutate} busy={instanceMutationBusy} onRenew={renewInstance} onRelease={(instance) => setReleasingInstanceId(instance.id)} onInspectRun={setSelectedRunId} onBack={() => setSelectedInstanceId(undefined)} />}
         {effectiveView === "templates" && !selectedTemplate && <MobileTemplateIndex templates={snapshot.templates ?? []} canMutate={canMutate} onSelect={setSelectedTemplateId} onCreate={() => setEditingTemplate("create")} />}
         {effectiveView === "templates" && <TemplateDetail template={selectedTemplate} canMutate={canMutate} onEdit={() => setEditingTemplate("edit")} onDelete={() => setDeletingTemplate(true)} onBack={() => setSelectedTemplateId(undefined)} />}
-        {effectiveView === "threads" && <ThreadsView threads={snapshot.threads ?? []} runs={snapshot.runs} artifacts={snapshot.artifacts ?? []} agents={snapshot.agents} orchestratorClients={orchestratorClients} orchestratorAttachments={orchestratorAttachments} canMutate={canMutate} onContinue={continueThread} onInspectRun={setSelectedRunId} onSetStatus={setThreadStatus} />}
+        {effectiveView === "threads" && <ThreadsView threads={snapshot.threads ?? []} runs={snapshot.runs} artifacts={snapshot.artifacts ?? []} artifactPreviews={snapshot.artifactPreviews} agents={snapshot.agents} orchestratorClients={orchestratorClients} orchestratorAttachments={orchestratorAttachments} canMutate={canMutate} apiFetch={apiFetch} onContinue={continueThread} onInspectRun={setSelectedRunId} onSetStatus={setThreadStatus} />}
         {effectiveView === "activity" && <ActivityView events={snapshot.events} agents={snapshot.agents} onInspectRun={setSelectedRunId} />}
         {effectiveView === "orchestration" && (
           <OrchestrationView
@@ -639,7 +647,7 @@ function CoffeeShopApp() {
       {legacySnapshot && selected && inspectorOpen && <Inspector agent={selected} nodes={snapshot.nodes} sessions={providerSessionsForAgent(selected.id, snapshot.runs, snapshot.sessionBindings ?? [])} onClose={() => setInspectorOpen(false)} onSave={updateAgent} onReconcile={retry} canMutate={false} />}
       {externalThread && <ExternalThreadDialog thread={externalThread} description={describeThreadOrchestrator(externalThread, { agents: snapshot.agents, clients: orchestratorClients, attachments: orchestratorAttachments })} taskMessages={snapshot.taskMessages ?? []} canMutate={canMutate} apiFetch={apiFetch} onClose={() => setExternalThreadId(undefined)} />}
       {reviewingApproval && <ApprovalDialog approval={reviewingApproval} agents={snapshot.agents} nodes={snapshot.nodes} runs={snapshot.runs} tasks={snapshot.tasks ?? []} orchestratorClients={orchestratorClients} canMutate={canMutate} onClose={() => setReviewingApprovalId(undefined)} apiFetch={apiFetch} />}
-      {selectedRunId && <RunInspector selectedRunId={selectedRunId} run={snapshot.runs.find((run) => run.id === selectedRunId)} runs={snapshot.runs} threads={snapshot.threads ?? []} artifacts={snapshot.artifacts ?? []} agents={snapshot.agents} nodes={snapshot.nodes} runActivity={snapshot.runActivity ?? []} approvals={snapshot.approvals ?? []} sessionBindings={snapshot.sessionBindings ?? []} onClose={() => setSelectedRunId(undefined)} onInspectRun={setSelectedRunId} canMutate={canMutate} />}
+      {selectedRunId && <RunInspector selectedRunId={selectedRunId} run={snapshot.runs.find((run) => run.id === selectedRunId)} runs={snapshot.runs} threads={snapshot.threads ?? []} artifacts={snapshot.artifacts ?? []} artifactPreviews={snapshot.artifactPreviews} agents={snapshot.agents} nodes={snapshot.nodes} runActivity={snapshot.runActivity ?? []} approvals={snapshot.approvals ?? []} sessionBindings={snapshot.sessionBindings ?? []} onClose={() => setSelectedRunId(undefined)} onInspectRun={setSelectedRunId} canMutate={canMutate} />}
       <nav className="desktop-nav" aria-label="Primary">
         <div className="rail-brand" aria-label="Coffee Shop"><Coffee size={21} /></div>
         {legacySnapshot

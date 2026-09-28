@@ -64,6 +64,7 @@ import {
   createPreviewDeliveryApp,
   listenPreviewTopology,
   parsePreviewDeliveryConfig,
+  previewRetryJsonErrorHandler,
   registerPreviewOperatorRoutes,
   requestTargetsPreviewAuthority,
   runPreviewExpiryMaintenance
@@ -99,6 +100,7 @@ if (process.env.NODE_ENV === "production" && !token) {
 app.use(createMainPreviewHostGuard(previewDeliveryConfiguration));
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
+app.use(previewRetryJsonErrorHandler);
 app.use(operatorCredentialGuard(token));
 
 const broadcast = () => {
