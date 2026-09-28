@@ -83,8 +83,29 @@ describe("PreviewArtifact", () => {
     rerender(<PreviewArtifact artifact={artifact} preview={preview()} canMutate apiFetch={apiFetch} />);
     fireEvent.click(screen.getByRole("button", { name: /Request access/ }));
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    rerender(<PreviewArtifact artifact={artifact} preview={preview({
+      updatedAt: "2026-09-27T12:03:00.000Z",
+      expiresAt: "2026-09-28T12:03:00.000Z"
+    })} canMutate apiFetch={apiFetch} />);
+    expect(screen.queryByRole("link")).not.toBeInTheDocument();
+    rerender(<PreviewArtifact artifact={artifact} preview={preview()} canMutate apiFetch={apiFetch} />);
+    fireEvent.click(screen.getByRole("button", { name: /Request access/ }));
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
     rerender(<PreviewArtifact artifact={artifact} preview={preview()} canMutate={false} apiFetch={apiFetch} />);
     expect(screen.queryByRole("link")).not.toBeInTheDocument();
+  });
+
+  it("enables renewal when the minimum extension threshold passes and releases its clock timer", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-27T12:04:30.000Z"));
+    const { unmount } = render(<PreviewArtifact artifact={artifact} preview={preview()} canMutate apiFetch={vi.fn()} />);
+    expect(screen.queryByRole("button", { name: /Renew lifecycle/ })).not.toBeInTheDocument();
+
+    act(() => vi.advanceTimersByTime(30_000));
+    expect(screen.getByRole("button", { name: "Renew lifecycle for preview Launch preview" })).toBeInTheDocument();
+
+    unmount();
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it("drops an access response that races an identity or connection change", async () => {

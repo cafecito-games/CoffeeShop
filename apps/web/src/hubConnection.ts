@@ -563,7 +563,10 @@ function previewCollectionCorrelates(value: Record<string, unknown>) {
     const sameActor = artifact.agentId === preview.agentId
       && artifact.instanceId === preview.instanceId
       && artifact.allocationId === preview.allocationId;
-    if (artifact.uploaded !== true || artifact.kind !== "preview-bundle"
+    const permitsUnuploadedArtifact = preview.processingGeneration === 0
+      && (preview.status === "upload-pending"
+        || (preview.status === "failed" && preview.failureCode === "upload-failed"));
+    if ((artifact.uploaded !== true && !permitsUnuploadedArtifact) || artifact.kind !== "preview-bundle"
       || artifact.mediaType !== "application/vnd.coffee-shop.preview-bundle+tar+gzip"
       || artifact.sha256 !== preview.artifactSha256 || artifact.threadId !== preview.threadId
       || artifact.runId !== preview.runId || !sameActor) return false;

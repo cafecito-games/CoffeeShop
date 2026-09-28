@@ -38,9 +38,12 @@ export function renewalTtlSeconds(preview: ArtifactPreview, nowMilliseconds: num
 }
 
 function identityOf(artifact: Artifact, preview: ArtifactPreview) {
-  return [preview.id, artifact.id, artifact.sha256, preview.threadId, preview.runId,
+  return JSON.stringify([preview.id, artifact.id, artifact.sha256, artifact.uploaded,
+    preview.artifactSha256, preview.threadId, preview.runId,
     preview.agentId ?? "", preview.instanceId ?? "", preview.allocationId ?? "",
-    preview.processingGeneration, preview.status, preview.accessState].join(":");
+    preview.entrypoint, preview.processingGeneration, preview.status, preview.accessState,
+    preview.createdAt, preview.updatedAt, preview.expiresAt, preview.readyAt ?? "",
+    preview.failedAt ?? "", preview.failureCode ?? "", preview.expiredAt ?? ""]);
 }
 
 function validAccess(value: unknown, preview: ArtifactPreview, nowMilliseconds: number) {
@@ -106,9 +109,15 @@ export function PreviewArtifact({ artifact, preview, canMutate, apiFetch, compac
   useEffect(() => {
     setNowMilliseconds(Date.now());
     const delay = Math.max(0, Date.parse(preview.expiresAt) - Date.now());
-    const timer = window.setTimeout(() => setNowMilliseconds(Date.now()), delay);
-    return () => window.clearTimeout(timer);
-  }, [preview.expiresAt, identity]);
+    const expiryTimer = window.setTimeout(() => setNowMilliseconds(Date.now()), delay);
+    const clockTimer = preview.status === "ready" && delay > 0
+      ? window.setInterval(() => setNowMilliseconds(Date.now()), 30_000)
+      : undefined;
+    return () => {
+      window.clearTimeout(expiryTimer);
+      if (clockTimer !== undefined) window.clearInterval(clockTimer);
+    };
+  }, [preview.expiresAt, preview.status, identity]);
   useEffect(() => {
     if (!grant) return;
     const delay = Math.max(0, Date.parse(grant.expiresAt) - Date.now());

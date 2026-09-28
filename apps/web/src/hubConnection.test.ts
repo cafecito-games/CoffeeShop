@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import type { Snapshot } from "@coffee-shop/protocol";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -159,7 +161,8 @@ describe("snapshot validation", () => {
       idempotencyKey: "preview-one", createdAt: base.createdAt
     };
     for (const [status, preview] of Object.entries(byStatus)) {
-      expect(isSnapshot({ ...snapshot(generatedAt), artifacts: [artifact], artifactPreviews: [{ ...preview, status }] })).toBe(true);
+      const correlatedArtifact = status === "upload-pending" ? { ...artifact, uploaded: false } : artifact;
+      expect(isSnapshot({ ...snapshot(generatedAt), artifacts: [correlatedArtifact], artifactPreviews: [{ ...preview, status }] })).toBe(true);
     }
 
     const ready = { ...byStatus.ready, status: "ready" };
@@ -178,6 +181,35 @@ describe("snapshot validation", () => {
       expect(isSnapshot({ ...snapshot(generatedAt), artifacts: [artifact], artifactPreviews: collection })).toBe(false);
     }
     expect(isSnapshot({ ...snapshot(generatedAt), artifactPreviews: undefined })).toBe(true);
+  });
+
+  it("accepts the Hub producer's unuploaded registration and upload-failure projections only at generation zero", () => {
+    // These exact artifact/preview bytes are regenerated and byte-checked by apps/hub/src/hubTools.test.ts.
+    const produced = JSON.parse(readFileSync(join(process.cwd(), "../../packages/protocol/test/fixtures/hub-tools/publish-preview-created.json"), "utf8")) as {
+      artifact: Record<string, unknown>;
+      preview: Record<string, unknown>;
+    };
+    const registered = {
+      ...snapshot("2026-09-27T12:01:00.000Z"),
+      artifacts: [produced.artifact],
+      artifactPreviews: [produced.preview]
+    };
+    expect(isSnapshot(registered)).toBe(true);
+
+    const failed = {
+      ...produced.preview,
+      status: "failed",
+      updatedAt: "2026-09-27T12:01:00.000Z",
+      failedAt: "2026-09-27T12:01:00.000Z",
+      failureCode: "upload-failed"
+    };
+    expect(isSnapshot({ ...registered, artifactPreviews: [failed] })).toBe(true);
+
+    for (const invalid of [
+      { ...produced.preview, status: "processing", processingGeneration: 1, updatedAt: "2026-09-27T12:01:00.000Z" },
+      { ...failed, processingGeneration: 1 },
+      { ...produced.preview, artifactSha256: "b".repeat(64) }
+    ]) expect(isSnapshot({ ...registered, artifactPreviews: [invalid] })).toBe(false);
   });
 
   it("rejects duplicate and cross-linked preview records as one snapshot update", () => {
