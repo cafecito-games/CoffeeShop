@@ -943,6 +943,69 @@ func DecodeAgentTemplate(data []byte) (AgentTemplate, error) {
 	err := decodeInstanceValue(data, v5Template, &result)
 	return result, err
 }
+
+// ValidateCurrentInstanceHubMessage applies invariants every current Hub writer must satisfy. The
+// rolling wire decoder below has one deliberately narrower compatibility exception: it removes an
+// obsolete no-skill expectation emitted by the immediately preceding Hub release before this
+// validator can interpret it as capability-pack authority.
+func ValidateCurrentInstanceHubMessage(message InstanceHubMessage) error {
+	if message.Type == "instance.release" {
+		return nil
+	}
+	if message.Instance == nil || message.Allocation == nil {
+		return fmt.Errorf("instance and allocation are required")
+	}
+	instance, allocation := message.Instance, message.Allocation
+	if instance.ID != allocation.InstanceID || instance.Lease != allocation.Lease {
+		return fmt.Errorf("instance allocation identity or lease mismatch")
+	}
+	requiredSkills := []string{}
+	if message.Instance.Requirements.Skills != nil {
+		requiredSkills = *message.Instance.Requirements.Skills
+	}
+	expected := message.Allocation.ExpectedCapabilityPack
+	if len(requiredSkills) == 0 && expected != nil {
+		return fmt.Errorf("instance skill requirements and allocation capability pack expectation mismatch")
+	}
+	if len(requiredSkills) > 0 && expected == nil {
+		return fmt.Errorf("instance skill requirements and allocation capability pack expectation mismatch")
+	}
+	if expected != nil {
+		covered := make(map[string]struct{}, len(expected.RequiredSkills))
+		for _, skill := range expected.RequiredSkills {
+			covered[skill] = struct{}{}
+		}
+		for _, skill := range requiredSkills {
+			if _, ok := covered[skill]; !ok {
+				return fmt.Errorf("instance skill requirements and allocation capability pack expectation mismatch")
+			}
+		}
+	}
+	if message.Type == "instance.provision" {
+		if instance.Status != "provisioning" || !slices.Contains([]string{"reserved", "provisioning"}, allocation.Status) {
+			return fmt.Errorf("invalid provision state")
+		}
+		return nil
+	}
+	if message.Type != "dispatch" || message.Run == nil {
+		return fmt.Errorf("unknown instance message")
+	}
+	run := message.Run
+	identityMatches := run.InstanceID == instance.ID && run.AllocationID == allocation.ID && run.ThreadID == instance.ThreadID
+	placementMatches := run.NodeID == allocation.NodeID && run.HarnessID == allocation.HarnessID && run.Model == allocation.Model &&
+		run.Transport == allocation.Transport && run.Workspace == allocation.Workspace
+	stateAllowsDispatch := run.Status == "queued" && allocation.Status == "active" &&
+		slices.Contains([]string{"ready", "busy", "idle"}, instance.Status)
+	bindingMatches := (run.SessionBindingID == nil) == (message.SessionBinding == nil)
+	if bindingMatches && message.SessionBinding != nil {
+		bindingMatches = run.Transport == "acp-v1" && *run.SessionBindingID == message.SessionBinding.ID
+	}
+	if !identityMatches || !placementMatches || !stateAllowsDispatch || !bindingMatches || (run.FallbackTransport != nil && run.Transport != "acp-v1") {
+		return fmt.Errorf("invalid dispatch identity, state, or placement")
+	}
+	return nil
+}
+
 func DecodeInstanceHubMessage(data []byte, version string) (InstanceHubMessage, error) {
 	var message InstanceHubMessage
 	if !SupportsCapability(version, CapabilityInstances) {
@@ -971,52 +1034,16 @@ func DecodeInstanceHubMessage(data []byte, version string) (InstanceHubMessage, 
 		return message, nil
 	}
 	instance, allocation := message.Instance, message.Allocation
-	if instance.ID != allocation.InstanceID || instance.Lease != allocation.Lease {
-		return message, fmt.Errorf("instance allocation identity or lease mismatch")
+	/*
+		Rolling compatibility for exactly one prior Hub release: that writer could attach an
+		expectation to a genuinely no-skill instance. It granted no skill authority, so discard it
+		before admission. Missing or non-covering expectations for skill work remain strict failures.
+	*/
+	if (instance.Requirements.Skills == nil || len(*instance.Requirements.Skills) == 0) && allocation.ExpectedCapabilityPack != nil {
+		allocation.ExpectedCapabilityPack = nil
 	}
-	requiredSkills := []string{}
-	if instance.Requirements.Skills != nil {
-		requiredSkills = *instance.Requirements.Skills
-	}
-	expectedSkills := []string(nil)
-	if allocation.ExpectedCapabilityPack != nil {
-		expectedSkills = allocation.ExpectedCapabilityPack.RequiredSkills
-	}
-	covered := true
-	if allocation.ExpectedCapabilityPack != nil {
-		expected := make(map[string]struct{}, len(expectedSkills))
-		for _, skill := range expectedSkills {
-			expected[skill] = struct{}{}
-		}
-		for _, skill := range requiredSkills {
-			if _, ok := expected[skill]; !ok {
-				covered = false
-				break
-			}
-		}
-	}
-	if (len(requiredSkills) == 0) != (allocation.ExpectedCapabilityPack == nil) ||
-		(allocation.ExpectedCapabilityPack != nil && !covered) {
-		return message, fmt.Errorf("instance skill requirements and allocation capability pack expectation mismatch")
-	}
-	if message.Type == "instance.provision" {
-		if instance.Status != "provisioning" || !slices.Contains([]string{"reserved", "provisioning"}, allocation.Status) {
-			return message, fmt.Errorf("invalid provision state")
-		}
-		return message, nil
-	}
-	run := message.Run
-	identityMatches := run.InstanceID == instance.ID && run.AllocationID == allocation.ID && run.ThreadID == instance.ThreadID
-	placementMatches := run.NodeID == allocation.NodeID && run.HarnessID == allocation.HarnessID && run.Model == allocation.Model &&
-		run.Transport == allocation.Transport && run.Workspace == allocation.Workspace
-	stateAllowsDispatch := run.Status == "queued" && allocation.Status == "active" &&
-		slices.Contains([]string{"ready", "busy", "idle"}, instance.Status)
-	bindingMatches := (run.SessionBindingID == nil) == (message.SessionBinding == nil)
-	if bindingMatches && message.SessionBinding != nil {
-		bindingMatches = run.Transport == "acp-v1" && *run.SessionBindingID == message.SessionBinding.ID
-	}
-	if !identityMatches || !placementMatches || !stateAllowsDispatch || !bindingMatches || (run.FallbackTransport != nil && run.Transport != "acp-v1") {
-		return message, fmt.Errorf("invalid dispatch identity, state, or placement")
+	if err := ValidateCurrentInstanceHubMessage(message); err != nil {
+		return message, err
 	}
 	return message, nil
 }

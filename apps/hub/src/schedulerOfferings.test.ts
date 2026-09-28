@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -488,6 +488,70 @@ test("a requested template instance reserves from effective hard skills and carr
     { id: "coffee-shop-core", version: "1.0.0", requiredSkills: ["review"] });
 });
 
+test("a persisted pre-materialization template instance enforces every hard requirement", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "coffee-shop-legacy-template-"));
+  const path = join(directory, "state.json");
+  const persisted = new Store(path);
+  await persisted.load();
+  const template: AgentTemplate = {
+    id: "template-review", name: "Review", skills: ["descriptive-only"],
+    requirements: { harnessIds: ["codex-cli"], minimumConcurrency: 2, skills: ["review"] }
+  };
+  const requested: AgentInstance = {
+    id: "instance-requested", threadId: "thread-one", creator: { kind: "operator", operatorId: "operator" },
+    delegation: { canDelegate: false }, requirements: { templateId: template.id, skills: [" Preview ", "PREVIEW"] },
+    lease: { idleTimeoutSeconds: 1800, expiresAt: later(1800) }, status: "requested", createdAt: at, updatedAt: at
+  };
+  await persisted.transact((state) => {
+    state.threads = [thread()];
+    state.nodes = [node("node-alpha")];
+    state.templates = [template];
+    state.instances = [requested];
+    return true;
+  });
+  const legacyState = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>;
+  delete legacyState.instanceRequirementsVersion;
+  await writeFile(path, JSON.stringify(legacyState));
+  const reloaded = new Store(path);
+  await reloaded.load();
+  const state = reloaded.read((value) => structuredClone(value));
+  const current = fixture(state.nodes, state.tasks ?? [], state);
+  current.packReadiness.set("node-alpha", {
+    nodeId: "node-alpha", observedAt: at, status: "available",
+    pack: { id: "coffee-shop-core", version: "1.0.0", skills: ["preview", "review"] },
+    surfaces: [{ harnessId: "codex-cli", transport: "native-cli" }]
+  });
+  runSchedulingPass(current.state, context(current), at);
+  assert.equal(allocations(current).length, 0);
+  assert.equal(current.state.events.some((event) => event.title === "Instance placement waiting" && event.detail.includes("harness")), true);
+
+  current.state.nodes[0].harnesses = [{ id: "codex-cli", label: "Codex", description: "", available: true, authMode: "local-account", models: ["fable"] }];
+  current.state.nodes[0].concurrency = 1;
+  runSchedulingPass(current.state, context(current), later(1));
+  assert.equal(allocations(current).length, 0);
+  assert.equal(current.state.events.some((event) => event.title === "Instance placement waiting" && event.detail.includes("concurrency")), true);
+
+  current.state.nodes[0].concurrency = 2;
+  runSchedulingPass(current.state, context(current), later(2));
+  assert.deepEqual(current.state.instances![0].requirements.skills, ["preview", "review"]);
+  assert.deepEqual(allocations(current)[0].expectedCapabilityPack,
+    { id: "coffee-shop-core", version: "1.0.0", requiredSkills: ["preview", "review"] });
+  assert.equal(current.state.events.some((event) => event.title === "Instance placement waiting"), false);
+});
+
+test("a requested instance whose persisted template was deleted remains fail closed", () => {
+  const requested: AgentInstance = {
+    id: "instance-requested", threadId: "thread-one", creator: { kind: "operator", operatorId: "operator" },
+    delegation: { canDelegate: false }, requirements: { templateId: "template-deleted" },
+    lease: { idleTimeoutSeconds: 1800, expiresAt: later(1800) }, status: "requested", createdAt: at, updatedAt: at
+  };
+  const current = fixture([node("node-alpha")], [], { instances: [requested] });
+  runSchedulingPass(current.state, context(current), at);
+  assert.equal(allocations(current).length, 0);
+  assert.equal(current.state.events.some((event) =>
+    event.instanceId === requested.id && event.title === "Instance placement waiting" && event.detail.includes("template-deleted")), true);
+});
+
 test("lost-allocation re-reservation unions the task and instance hard skills", () => {
   const requested: AgentInstance = {
     id: "instance-requested", threadId: "thread-one", creator: { kind: "operator", operatorId: "operator" },
@@ -844,6 +908,7 @@ async function outboxStore(current: Fixture) {
     state.nodes = current.state.nodes;
     state.tasks = current.state.tasks;
     state.instances = current.state.instances;
+    state.instanceRequirementsVersion = current.state.instanceRequirementsVersion;
     state.allocations = current.state.allocations;
     state.templates = current.state.templates;
     state.runs = current.state.runs;

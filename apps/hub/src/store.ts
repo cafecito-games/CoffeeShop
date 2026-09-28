@@ -50,6 +50,7 @@ import { assertPersistedTemplateState, importLegacyAgentTemplates, type LegacyTe
 import type { HarnessEventStream, StoredHarnessEvent } from "./harnessEvents.js";
 import {
   assertPersistedInstanceState,
+  migrateLegacyInstanceState,
   type InstanceDeliveryRecord,
   type InstanceLifecycleReceipt,
   type InstanceReleaseIntent,
@@ -188,6 +189,8 @@ export interface StoredOrchestratorClient extends OrchestratorClient {
 
 /** Hub-internal collections that are persisted but never published in snapshots. */
 interface HubOnlyState {
+  /** One-time schema marker for canonical, template-materialized instance requirements. */
+  instanceRequirementsVersion?: 1;
   taskSubmissions?: TaskSubmission[];
   taskUpdates?: TaskUpdateRecord[];
   taskEventJournal?: TaskEventEntry[];
@@ -1103,6 +1106,7 @@ export class Store {
     const addedOrchestration = addOrchestrationDefaults(loaded);
     addInstanceDefaults(loaded);
     const addedTemplateConfiguration = addAgentTemplateConfigurationDefaults(loaded);
+    const migratedInstanceRequirements = migrateLegacyInstanceState(loaded);
     addArtifactPreviewDefaults(loaded);
     const addedComponentInventories = addComponentInventoryDefaults(loaded);
     if (this.sqlite) loaded.projectProfiles ??= [];
@@ -1140,7 +1144,8 @@ export class Store {
     // timestamp (and WAL write) merely because the Hub restarted; imports/default migrations still
     // persist exactly once, and a new database must always receive its initial row.
     const explicitMigration = removedDemoRecords || addedAgentAvatars || addedCoordination || addedThreads || addedOrchestration
-      || addedThreadOrchestrators || addedApprovalResolvers || addedTemplateConfiguration || addedComponentInventories || droppedBorrowedKeys || importedTemplates;
+      || addedThreadOrchestrators || addedApprovalResolvers || addedTemplateConfiguration || migratedInstanceRequirements
+      || addedComponentInventories || droppedBorrowedKeys || importedTemplates;
     if (needsInitialSqliteWrite || explicitMigration || (this.sqlite && JSON.stringify(loaded) !== beforeMigrations)) await this.save(loaded);
     this.state = loaded;
   }
@@ -1161,7 +1166,7 @@ export class Store {
       harnessEventStreams: _harnessEventStreams, harnessEvents: _harnessEvents,
       instanceLifecycleReceipts: _instanceLifecycleReceipts, instanceReleaseIntents: _instanceReleaseIntents,
       instanceDeliveries: _instanceDeliveries, remoteReleaseRequests: _remoteReleaseRequests,
-      nodeInstanceResidency: _nodeInstanceResidency,
+      nodeInstanceResidency: _nodeInstanceResidency, instanceRequirementsVersion: _instanceRequirementsVersion,
       agentTemplateConfigurationReceipts: _agentTemplateConfigurationReceipts,
       previewRegistrationReceipts: _previewRegistrationReceipts, previewProcessingReceipts: _previewProcessingReceipts,
       projectProfilesImported: _projectProfilesImported, orchestratorClients, artifactPreviews, ...published

@@ -41,7 +41,7 @@ import {
   type Run
 } from "@coffee-shop/protocol";
 import { CoordinationError } from "./coordinationError.js";
-import { effectiveInstanceRequirements, normalizeInstanceRequirements } from "./instanceRequirements.js";
+import { effectiveInstanceRequirements, normalizeInstanceRequirements, requirementsThroughTemplate } from "./instanceRequirements.js";
 import { cancelRunInState } from "./lifecycle.js";
 import { newEvent, newId, type State, type Store } from "./store.js";
 import { appendInitialTaskInState, applyAttemptOutcome, attemptIsRetryable, initialTaskOrigin } from "./tasks.js";
@@ -464,6 +464,42 @@ function replayResult(state: Readonly<State>, receipt: InstanceLifecycleReceipt)
   };
 }
 
+/**
+ * Receipts written before skill canonicalization hashed the caller's raw spelling. When that legacy
+ * digest differs, compare the complete immutable create material against the stored result instead;
+ * any missing record or changed purpose, requirements, lease, or initial task still conflicts.
+ */
+function legacyCreateReplayMatches(
+  state: Readonly<State>,
+  receipt: InstanceLifecycleReceipt,
+  request: Extract<InstanceLifecycleRequest, { operation: "create" }>
+): boolean {
+  if (receipt.operation !== "create") return false;
+  const instance = state.instances?.find((item) => item.id === receipt.instanceId && item.threadId === receipt.threadId);
+  if (!instance || instance.creator.kind !== request.idempotency.caller.kind
+    || instanceCreatorSourceKey(instance.creator) !== receipt.sourceKey) return false;
+  if ((state.instanceLifecycleReceipts ?? []).some((item) =>
+    item.instanceId === instance.id && item.operation === "renew")) return false;
+  const initialTask = receipt.initialTaskId === undefined
+    ? undefined
+    : state.tasks?.find((task) => task.id === receipt.initialTaskId && task.threadId === receipt.threadId);
+  if ((request.initialTask === undefined) !== (initialTask === undefined)) return false;
+  const materializedRequest: Extract<InstanceLifecycleRequest, { operation: "create" }> = {
+    ...request,
+    requirements: effectiveInstanceRequirements(request.requirements, state.templates ?? [])
+  };
+  const storedRequest: Extract<InstanceLifecycleRequest, { operation: "create" }> = {
+    operation: "create",
+    threadId: receipt.threadId,
+    idempotency: structuredClone(request.idempotency),
+    ...(instance.purpose === undefined ? {} : { purpose: structuredClone(instance.purpose) }),
+    requirements: structuredClone(instance.requirements),
+    idleTimeoutSeconds: instance.lease.idleTimeoutSeconds,
+    ...(initialTask === undefined ? {} : { initialTask: { title: initialTask.title, instructions: initialTask.instructions } })
+  };
+  return instanceRequestDigest(materializedRequest) === instanceRequestDigest(storedRequest);
+}
+
 const leaseExpiry = (at: string, idleTimeoutSeconds: number) => new Date(Date.parse(at) + idleTimeoutSeconds * 1000).toISOString();
 
 /**
@@ -513,7 +549,7 @@ export async function applyInstanceLifecycle(
     const thread = authorizeInstanceThread(state, caller, normalizedRequest.threadId);
     const prior = (state.instanceLifecycleReceipts ?? []).find((receipt) => receiptKeyMatches(receipt, normalizedRequest.threadId, sourceKey, normalizedRequest.idempotency.key));
     if (prior) {
-      if (prior.digest !== digest) {
+      if (prior.digest !== digest && !(normalizedRequest.operation === "create" && legacyCreateReplayMatches(state, prior, normalizedRequest))) {
         throw new CoordinationError("idempotency_conflict", "The idempotency key was already used with a different instance request");
       }
       result = replayResult(state, prior);
@@ -549,6 +585,7 @@ export async function applyInstanceLifecycle(
         }, at).id;
       }
       state.instances ??= [];
+      state.instanceRequirementsVersion = 1;
       state.instances.unshift(instance);
       state.instanceLifecycleReceipts ??= [];
       state.instanceLifecycleReceipts.push({
@@ -961,6 +998,7 @@ export function requestInstanceInState(state: State, seed: InstanceRequestSeed, 
   if (!built.ok) throw new CoordinationError("invalid_arguments", `The instance request is not valid: ${built.reason}`);
   const instance = built.instance;
   state.instances ??= [];
+  state.instanceRequirementsVersion = 1;
   state.instances.unshift(instance);
   state.events.unshift(newEvent({
     type: "status",
@@ -1011,6 +1049,7 @@ export function placeInstanceInState(state: State, seed: InstanceRequestSeed, ca
   const encodable = validateInstanceHubMessage(probe, "5");
   if (!encodable.ok) return { kind: "invalid", reason: `the provision command is not wire-valid: ${encodable.reason}` };
   state.instances ??= [];
+  state.instanceRequirementsVersion = 1;
   state.instances.unshift(instance);
   state.events.unshift(newEvent({
     type: "status",
@@ -1748,8 +1787,81 @@ const commandInstanceId = (message: InstanceHubMessage): string => {
   return message.instance.id;
 };
 
+/**
+ * Converges state written before instance requirements became canonical and template-effective.
+ * The migration runs before persisted-state assertions, changes only otherwise-valid instance and
+ * allocation shapes, and mirrors the authoritative records into pending command snapshots. An old
+ * no-skill expectation is removed rather than interpreted: it can never become readiness authority.
+ */
+export function migrateLegacyInstanceState(state: State): boolean {
+  if (state.instanceRequirementsVersion !== undefined) return false;
+  const templates = Array.isArray(state.templates) ? state.templates : [];
+  const instances = Array.isArray(state.instances) ? state.instances : [];
+  const allocations = Array.isArray(state.allocations) ? state.allocations : [];
+  const deliveries = Array.isArray(state.instanceDeliveries) ? state.instanceDeliveries : [];
+  // Empty and preview-only snapshots predate this private marker too, but have no instance
+  // authority to migrate. Leaving them byte-stable avoids rewriting unrelated producer fixtures;
+  // the first current instance writer stamps the version atomically with its record.
+  if (instances.length === 0 && allocations.length === 0 && deliveries.length === 0) return false;
+  const validTemplates = new Map<string, AgentTemplate>();
+  for (const template of templates) {
+    const validated = validateAgentTemplate(template);
+    if (validated.ok) validTemplates.set(validated.value.id, validated.value);
+  }
+  const instancesById = new Map<string, AgentInstance>();
+  for (const instance of instances) {
+    const validated = validateAgentInstance(instance);
+    if (!validated.ok) continue;
+    const template = validated.value.requirements.templateId === undefined
+      ? undefined
+      : validTemplates.get(validated.value.requirements.templateId);
+    const requirements = requirementsThroughTemplate(validated.value.requirements, template);
+    if (JSON.stringify(requirements) !== JSON.stringify(instance.requirements)) Object.assign(instance, { requirements });
+    instancesById.set(instance.id, instance);
+  }
+  const allocationsById = new Map<string, InstanceAllocation>();
+  for (const allocation of allocations) {
+    const validated = validateInstanceAllocation(allocation);
+    if (!validated.ok) continue;
+    const instance = instancesById.get(allocation.instanceId);
+    if (instance && (instance.requirements.skills?.length ?? 0) === 0 && allocation.expectedCapabilityPack !== undefined) {
+      Reflect.deleteProperty(allocation, "expectedCapabilityPack");
+    }
+    allocationsById.set(allocation.id, allocation);
+  }
+  for (const record of deliveries) {
+    const message: unknown = isRecord(record) ? record.message : undefined;
+    if (!isRecord(message) || message.type === "instance.release") continue;
+    if ((message.type !== "instance.provision" && message.type !== "dispatch")
+      || !isRecord(message.instance) || !isRecord(message.allocation)) continue;
+    const instance = typeof message.instance.id === "string" ? instancesById.get(message.instance.id) : undefined;
+    const allocation = typeof message.allocation.id === "string" ? allocationsById.get(message.allocation.id) : undefined;
+    if (!instance || !allocation) continue;
+    if (JSON.stringify(message.instance.requirements) !== JSON.stringify(instance.requirements)) {
+      Object.assign(message.instance, { requirements: structuredClone(instance.requirements) });
+    }
+    if (allocation.expectedCapabilityPack === undefined) {
+      if (message.allocation.expectedCapabilityPack !== undefined) {
+        Reflect.deleteProperty(message.allocation, "expectedCapabilityPack");
+      }
+    } else if (JSON.stringify(message.allocation.expectedCapabilityPack) !== JSON.stringify(allocation.expectedCapabilityPack)) {
+      Object.assign(message.allocation, { expectedCapabilityPack: structuredClone(allocation.expectedCapabilityPack) });
+    }
+  }
+  state.instanceRequirementsVersion = 1;
+  return true;
+}
+
 /** Rejects persisted instance state the hub cannot interpret; nothing is defaulted. */
 export function assertPersistedInstanceState(state: State) {
+  const requirementsVersion: unknown = state.instanceRequirementsVersion;
+  const hasInstanceRecords = (state.instances?.length ?? 0) > 0
+    || (state.allocations?.length ?? 0) > 0
+    || (state.instanceDeliveries?.length ?? 0) > 0;
+  if ((requirementsVersion !== undefined && requirementsVersion !== 1)
+    || (hasInstanceRecords && requirementsVersion !== 1)) {
+    throw new Error("Persisted instance requirements version is invalid");
+  }
   for (const [name, collection] of [
     ["instances", state.instances], ["allocations", state.allocations], ["templates", state.templates],
     ["instanceLifecycleReceipts", state.instanceLifecycleReceipts], ["instanceReleaseIntents", state.instanceReleaseIntents],

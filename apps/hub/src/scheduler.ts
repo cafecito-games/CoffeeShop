@@ -1343,9 +1343,11 @@ export function runSchedulingPass(state: State, context: SchedulingContext, at: 
     if (thread?.status !== "active") continue;
     const owningTask = [...readyTasks(state)].find((task) =>
       task.placementInstanceId === instance.id || task.placementOverride?.instanceId === instance.id);
+    const template = instance.requirements.templateId === undefined
+      ? undefined
+      : (state.templates ?? []).find((item) => item.id === instance.requirements.templateId);
     const syntheticRequirements = structuredClone(instance.requirements);
-    if (syntheticRequirements.templateId !== undefined
-      && (state.templates ?? []).some((template) => template.id === syntheticRequirements.templateId)) {
+    if (template !== undefined) {
       delete syntheticRequirements.templateId;
     }
     const intent: Task = owningTask ?? {
@@ -1380,7 +1382,11 @@ export function runSchedulingPass(state: State, context: SchedulingContext, at: 
       workspace: decision.offering.workspace,
       ...(decision.offering.expectedCapabilityPack === undefined ? {} : { expectedCapabilityPack: decision.offering.expectedCapabilityPack })
     }, at);
-    if (reserved.kind === "placed") changed = true;
+    if (reserved.kind === "placed") {
+      state.events = state.events.filter((event) =>
+        !(event.instanceId === instance.id && event.title === "Instance placement waiting"));
+      changed = true;
+    }
     else changed = recordInstancePlacementRefusal(state, instance, reserved.reason) || changed;
   }
   for (const task of [...readyTasks(state)]) {

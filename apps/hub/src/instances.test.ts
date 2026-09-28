@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -7,6 +8,7 @@ import test from "node:test";
 import {
   allocationStatuses,
   hasAuthoritativeInstanceEvidence,
+  instanceLifecycleDigestInput,
   instanceLimits,
   instanceStatuses,
   validateInstanceHubMessage,
@@ -220,6 +222,40 @@ test("create normalizes skill identity before storage and idempotency comparison
   assert.equal(replay.replayed, true);
   await assert.rejects(applyInstanceLifecycle(store, operatorCaller, createRequest("thread-one", {
     requirements: { skills: ["review", "build"] }
+  }), at(3)), /idempotency key was already used/);
+});
+
+test("a pre-upgrade create receipt replays normalized requirements but still conflicts on changed work", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "coffee-shop-instance-replay-"));
+  const path = join(directory, "state.json");
+  const raw = createRequest("thread-one", {
+    requirements: { skills: [" Review ", "preview", "REVIEW"] }
+  }) as Extract<InstanceLifecycleRequest, { operation: "create" }>;
+  const first = new Store(path);
+  await first.load();
+  await first.transact((state) => { seedThread(state); });
+  const created = await applyInstanceLifecycle(first, operatorCaller, raw, at(1));
+  const legacyInput = instanceLifecycleDigestInput(raw);
+  assert.equal(legacyInput.ok, true);
+  await first.transact((state) => {
+    Object.assign(state.instances![0], { requirements: structuredClone(raw.requirements) });
+    state.instanceLifecycleReceipts![0].digest = createHash("sha256").update((legacyInput as { ok: true; value: string }).value).digest("hex");
+    return true;
+  });
+  const legacyState = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>;
+  delete legacyState.instanceRequirementsVersion;
+  await writeFile(path, JSON.stringify(legacyState));
+
+  const restarted = new Store(path);
+  await restarted.load();
+  const replay = await applyInstanceLifecycle(restarted, operatorCaller, createRequest("thread-one", {
+    requirements: { skills: ["PREVIEW", "review"] }
+  }), at(2));
+  assert.equal(replay.replayed, true);
+  assert.equal(replay.instance.id, created.instance.id);
+  assert.deepEqual(replay.instance.requirements.skills, ["preview", "review"]);
+  await assert.rejects(applyInstanceLifecycle(restarted, operatorCaller, createRequest("thread-one", {
+    requirements: { skills: ["preview", "build"] }
   }), at(3)), /idempotency key was already used/);
 });
 
@@ -617,7 +653,8 @@ test("reservation validates the candidate and leaves the instance requested on f
   const cases = [
     { nodeId: "node-one", harnessId: "codex-cli" as const, model: "fable", transport: "native-cli" as const, workspace: "/work/a" },
     { nodeId: "node-one", harnessId: "claude-cli" as const, model: "other-model", transport: "native-cli" as const, workspace: "/work/a" },
-    { nodeId: "node-one", harnessId: "claude-cli" as const, model: "fable", transport: "native-cli" as const, workspace: "/outside/a" }
+    { nodeId: "node-one", harnessId: "claude-cli" as const, model: "fable", transport: "native-cli" as const, workspace: "/outside/a" },
+    { ...candidate("/work/a"), expectedCapabilityPack: { id: "coffee-shop-core", version: "1.0.0", requiredSkills: ["review"] } }
   ];
   for (const entry of cases) {
     const result = await reserveInstanceAllocation(store, created.instance.id, entry, at(2));
@@ -1242,13 +1279,6 @@ test("store load rejects malformed or duplicated instance state", async () => {
     (state.instances as AgentInstance[])[0].requirements.skills = ["coffeeshop-preview"];
     state.allocations = [allocationFor(baseInstance, "allocation-one")];
   }, /Skill requirements require an admitted capability pack expectation/);
-  await rejects((state) => {
-    (state.instances as AgentInstance[])[0].status = "provisioning";
-    state.allocations = [{
-      ...allocationFor(baseInstance, "allocation-one"),
-      expectedCapabilityPack: { id: "coffeeshop-capability-pack", version: "1.1.0", requiredSkills: ["coffeeshop-preview"] }
-    }];
-  }, /without skill requirements cannot carry a capability pack expectation/);
   // An explicit null is malformed persisted state, not an absent legacy collection.
   await rejects((state) => { state.instances = null; }, /Persisted instances collection is not an array/);
   await rejects((state) => { state.remoteReleaseRequests = null; }, /Persisted remoteReleaseRequests collection is not an array/);
@@ -1285,6 +1315,40 @@ test("store load rejects malformed or duplicated instance state", async () => {
   await rejects((state) => {
     state.remoteReleaseRequests = [{ nodeId: "node-one", instanceId: "resident-one", requestedAt: at(1) }];
   }, /has no residency record from node node-one to support it/);
+});
+
+test("store load removes only obsolete no-skill expectations and is idempotent on reopen", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "coffee-shop-instance-xor-"));
+  const path = join(directory, "state.json");
+  const first = new Store(path);
+  await first.load();
+  await first.transact((state) => { seedThread(state); seedNode(state); });
+  const created = await applyInstanceLifecycle(first, operatorCaller, createRequest("thread-one", { requirements: {} }), at(1));
+  const reservation = await reserveInstanceAllocation(first, created.instance.id, candidate("/work/one"), at(2));
+  assert.equal(reservation.kind, "reserved");
+  const expectation = { id: "coffeeshop-capability-pack", version: "1.1.0", requiredSkills: ["coffeeshop-preview"] };
+  await first.transact((state) => {
+    Object.assign(state.allocations![0], { expectedCapabilityPack: structuredClone(expectation) });
+    const delivery = state.instanceDeliveries!.find((record) => record.kind === "provision")!;
+    if (delivery.message.type !== "instance.provision") throw new Error("expected provision fixture");
+    Object.assign(delivery.message.allocation, { expectedCapabilityPack: structuredClone(expectation) });
+    return true;
+  });
+  const legacyState = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>;
+  delete legacyState.instanceRequirementsVersion;
+  await writeFile(path, JSON.stringify(legacyState));
+
+  const migrated = new Store(path);
+  await migrated.load();
+  migrated.read((state) => {
+    assert.equal(state.allocations![0].expectedCapabilityPack, undefined);
+    const delivery = state.instanceDeliveries!.find((record) => record.kind === "provision")!;
+    assert.equal(delivery.message.type === "instance.provision" && delivery.message.allocation.expectedCapabilityPack, undefined);
+  });
+  const migratedBytes = await readFile(path, "utf8");
+  const reopened = new Store(path);
+  await reopened.load();
+  assert.equal(await readFile(path, "utf8"), migratedBytes, "current remediated state is not rewritten on reopen");
 });
 
 const allocationFor = (instance: AgentInstance, allocationId: string) => ({

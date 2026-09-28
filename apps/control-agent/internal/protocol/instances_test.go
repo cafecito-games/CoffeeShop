@@ -166,8 +166,10 @@ func TestSkillBoundInstanceMessagesRequireCoveringPackExpectation(t *testing.T) 
 	message.Allocation.ExpectedCapabilityPack.RequiredSkills = []string{"template-skill"}
 	encoded, err = json.Marshal(message)
 	require.NoError(t, err)
-	_, err = DecodeInstanceHubMessage(encoded, "5")
-	require.Error(t, err, "a truly no-skill allocation cannot carry an expectation")
+	require.Error(t, ValidateCurrentInstanceHubMessage(message), "a current no-skill allocation cannot carry an expectation")
+	decoded, err := DecodeInstanceHubMessage(encoded, "5")
+	require.NoError(t, err, "one release accepts an old Hub's in-flight frame")
+	require.Nil(t, decoded.Allocation.ExpectedCapabilityPack, "the obsolete expectation is ignored, never readiness authority")
 }
 
 func TestInstanceVocabularyAndTransitionsMatchTypeScript(t *testing.T) {
