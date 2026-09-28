@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync, writeFileSync } from "node:fs";
 import test from "node:test";
 import { CoordinationError } from "./coordination.js";
 import {
@@ -109,6 +110,82 @@ test("revoked, unknown, and terminal sources fail closed", async () => {
   }
   assert.equal(store.snapshot().tasks?.length, 0);
 });
+
+test("preview publication delegates to the dedicated authority and broadcasts only creation", async () => {
+  const store = await orchestrationStore();
+  const hub = fixtureHandler(store);
+  const request = {
+    relativePath: "site",
+    title: "Site preview",
+    kind: "preview-bundle",
+    mediaType: "application/vnd.coffee-shop.preview-bundle+tar+gzip",
+    summary: "Static site",
+    size: 512,
+    sha256: "a".repeat(64),
+    entrypoint: "index.html",
+    ttlSeconds: 300,
+    idempotencyKey: "preview-site-1"
+  };
+
+  const created = await hub.call("publish_preview", rootRunId, request) as {
+    artifact: { id: string; uploaded: boolean };
+    preview: { id: string; artifactId: string; status: string; accessState: string };
+    uploadPath: string;
+    created: boolean;
+  };
+  assert.equal(created.created, true);
+  assert.equal(created.artifact.uploaded, false);
+  assert.equal(created.preview.artifactId, created.artifact.id);
+  assert.equal(created.preview.status, "upload-pending");
+  assert.equal(created.preview.accessState, "unavailable");
+  assert.equal(created.uploadPath, `/api/artifacts/${created.artifact.id}/content`);
+  assert.deepEqual(outputViolations("publish_preview", created), []);
+  assert.equal(hub.broadcasts, 1);
+
+  const replayed = await hub.call("publish_preview", rootRunId, request) as typeof created;
+  assert.equal(replayed.created, false);
+  assert.equal(replayed.artifact.id, created.artifact.id);
+  assert.equal(replayed.preview.id, created.preview.id);
+  assert.equal(hub.broadcasts, 1, "an exact registration replay is a no-write response");
+});
+
+test("publish_preview fixtures are byte-faithful outputs from the Hub registration producer", async () => {
+  const store = await orchestrationStore();
+  const hub = fixtureHandler(store, { now: () => fixtureTimeForProducer });
+  const request = {
+    relativePath: "site", title: "Site preview", kind: "preview-bundle",
+    mediaType: "application/vnd.coffee-shop.preview-bundle+tar+gzip", summary: "Static site",
+    size: 512, sha256: "a".repeat(64), entrypoint: "index.html", ttlSeconds: 300,
+    idempotencyKey: "preview-site-1"
+  };
+  const originalNow = Date.now;
+  const originalRandom = Math.random;
+  Date.now = () => Date.parse(fixtureTimeForProducer);
+  Math.random = () => 0.123456789;
+  try {
+    const created = await hub.call("publish_preview", rootRunId, request);
+    const createdBytes = `${JSON.stringify(created, null, 2)}\n`;
+    const createdURL = new URL("../../../packages/protocol/test/fixtures/hub-tools/publish-preview-created.json", import.meta.url);
+    if (process.env.UPDATE_PUBLISH_PREVIEW_FIXTURES === "1") writeFileSync(createdURL, createdBytes);
+    assert.equal(readFileSync(createdURL, "utf8"), createdBytes);
+
+    await store.transact((state) => {
+      const artifact = state.artifacts?.find((item) => item.id === (created as { artifact: { id: string } }).artifact.id);
+      assert.ok(artifact);
+      artifact.uploaded = true;
+    });
+    const replayed = await hub.call("publish_preview", rootRunId, request);
+    const replayedBytes = `${JSON.stringify(replayed, null, 2)}\n`;
+    const replayedURL = new URL("../../../packages/protocol/test/fixtures/hub-tools/publish-preview-replayed.json", import.meta.url);
+    if (process.env.UPDATE_PUBLISH_PREVIEW_FIXTURES === "1") writeFileSync(replayedURL, replayedBytes);
+    assert.equal(readFileSync(replayedURL, "utf8"), replayedBytes);
+  } finally {
+    Date.now = originalNow;
+    Math.random = originalRandom;
+  }
+});
+
+const fixtureTimeForProducer = "2026-09-27T12:00:00.000Z";
 
 test("legacy delegation to a statically ineligible target fails without writing anything", async () => {
   const store = await orchestrationStore();

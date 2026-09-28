@@ -38,3 +38,22 @@ func TestToolSchemasMatchSharedFixture(t *testing.T) {
 	require.NoError(t, err, "run with UPDATE_HUB_TOOL_FIXTURE=1 to regenerate the fixture")
 	require.JSONEq(t, string(fixture), string(encoded))
 }
+
+func TestPublishPreviewSchemaKeepsPackagingAuthorityInBarista(t *testing.T) {
+	definition := definitions["publish_preview"]
+	require.Equal(t, []string{"relativePath", "entrypoint", "title", "idempotencyKey"}, definition.input["required"])
+	properties := definition.input["properties"].(schema)
+	require.ElementsMatch(t, []string{"relativePath", "entrypoint", "title", "summary", "ttlSeconds", "idempotencyKey"}, mapKeys(properties))
+	for _, forbidden := range []string{"kind", "mediaType", "size", "sha256", "archive", "uploadPath"} {
+		require.NotContains(t, properties, forbidden)
+	}
+	require.False(t, protocol.IsDelegationHubToolName("publish_preview"))
+}
+
+func mapKeys(value schema) []string {
+	keys := make([]string, 0, len(value))
+	for key := range value {
+		keys = append(keys, key)
+	}
+	return keys
+}

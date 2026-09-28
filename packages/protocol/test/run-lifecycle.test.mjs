@@ -37,7 +37,7 @@ test("agent harness identities remain a closed mutation vocabulary", () => {
 
 test("hub MCP tools remain a small stable vocabulary", () => {
   assert.deepEqual(hubToolNames, [
-    "get_task_context", "delegate_task", "post_artifact", "update_thread",
+    "get_task_context", "delegate_task", "post_artifact", "publish_preview", "update_thread",
     "get_execution_inventory", "submit_tasks", "send_task_message", "wait_for_task_events", "update_task"
   ]);
   assert.deepEqual(delegationHubToolNames, ["delegate_task", "get_execution_inventory", "submit_tasks"]);

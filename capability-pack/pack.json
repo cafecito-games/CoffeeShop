@@ -9,6 +9,7 @@
     "get_task_context",
     "delegate_task",
     "post_artifact",
+    "publish_preview",
     "update_thread",
     "get_execution_inventory",
     "submit_tasks",
@@ -77,7 +78,7 @@
     },
     {
       "path": "references/hub-tools.md",
-      "sha256": "e9f5430339ec3f8c86e273c21230b6a9eee63eadfe16d22d5d1412e6f40e2291"
+      "sha256": "b6b6b55ea0c8118ff270591ffd7a6bfeefda448ec7be126fba65b6a73a1eb28f"
     },
     {
       "path": "skills/coffeeshop-artifacts/SKILL.md",

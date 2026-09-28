@@ -1,4 +1,5 @@
 import { isHubToolName, type HubRpcError, type Task } from "@coffee-shop/protocol";
+import { registerPreview } from "./artifactPreviews.js";
 import { createArtifact, delegateTask, submitTasks, taskContext, updateTask } from "./coordination.js";
 import { CoordinationError } from "./coordinationError.js";
 import { executionInventory, type InventoryEnvironment } from "./executionInventory.js";
@@ -15,6 +16,8 @@ export interface HubToolEnvironment {
   schedule(): Promise<void>;
   /** Publishes a new snapshot after a mutation. */
   broadcast(): void;
+  /** Clock seam for producer-derived fixtures and deterministic registration tests. */
+  now?(): string;
   /** How long a submission waits for its first scheduling pass before answering. */
   schedulingWaitMilliseconds?: number;
 }
@@ -118,6 +121,11 @@ export function createHubToolHandler(environment: HubToolEnvironment) {
       case "post_artifact": {
         const result = await createArtifact(store, sourceRunId, values);
         environment.broadcast();
+        return result;
+      }
+      case "publish_preview": {
+        const result = await registerPreview(store, sourceRunId, values, environment.now?.() ?? new Date().toISOString());
+        if (result.created) environment.broadcast();
         return result;
       }
       case "update_thread": {

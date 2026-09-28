@@ -29,4 +29,6 @@ func TestHubToolVocabularyMatchesSharedFixture(t *testing.T) {
 		require.True(t, IsDelegationHubToolName(name))
 	}
 	require.False(t, IsHubToolName("unknown_tool"))
+	require.True(t, IsHubToolName("publish_preview"))
+	require.False(t, IsDelegationHubToolName("publish_preview"))
 }

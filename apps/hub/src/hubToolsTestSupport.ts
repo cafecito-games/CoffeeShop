@@ -91,6 +91,7 @@ export interface FixtureHandlerOptions {
   connections?: Record<string, NodeConnection>;
   reports?: Record<string, NodeCapabilityReport>;
   schedule?: () => Promise<void>;
+  now?: () => string;
 }
 
 export function fixtureHandler(store: Store, options: FixtureHandlerOptions = {}) {
@@ -109,6 +110,7 @@ export function fixtureHandler(store: Store, options: FixtureHandlerOptions = {}
       await options.schedule?.();
     },
     broadcast: () => { broadcasts += 1; },
+    now: options.now,
     schedulingWaitMilliseconds: 50
   };
   return {

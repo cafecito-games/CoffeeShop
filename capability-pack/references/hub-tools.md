@@ -11,6 +11,7 @@ served tool description in the run; never assume a shape from this file.
 | `get_task_context` | every run |
 | `delegate_task` | only a run allowed to delegate |
 | `post_artifact` | every run |
+| `publish_preview` | every run |
 | `update_thread` | every run |
 | `get_execution_inventory` | only a run allowed to delegate |
 | `submit_tasks` | only a run allowed to delegate |
