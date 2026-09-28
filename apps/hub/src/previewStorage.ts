@@ -61,6 +61,12 @@ export interface PreparedPreviewManifest extends PreparedPreviewIdentity {
   files: PreparedPreviewFile[];
 }
 
+export interface VerifiedPreparedPreviewFile {
+  readonly bytes: Buffer;
+  readonly file: PreparedPreviewFile;
+  readonly manifest: PreparedPreviewManifest;
+}
+
 interface UploadMarker {
   schemaVersion: 1;
   kind: "upload";
@@ -170,6 +176,7 @@ async function hashRegularFile(path: string) {
       size: metadata.size,
       sha256: hash.digest("hex"),
       mode: metadata.mode & 0o777,
+      links: metadata.nlink,
       device: metadata.dev,
       inode: metadata.ino
     };
@@ -647,7 +654,8 @@ export class PreviewStorage {
     }
     const manifestPath = join(path, manifestName);
     const manifestMetadata = await lstat(manifestPath);
-    if (!manifestMetadata.isFile() || manifestMetadata.isSymbolicLink() || (manifestMetadata.mode & 0o777) !== 0o600
+    if (!manifestMetadata.isFile() || manifestMetadata.isSymbolicLink() || manifestMetadata.nlink !== 1
+      || (manifestMetadata.mode & 0o777) !== 0o600
       || manifestMetadata.size > previewBundleContract.maximumRegularFiles * (previewBundleContract.maximumPathBytes + 192)) {
       throw new PreviewStorageError("storage-conflict", "Prepared preview manifest has an invalid storage type");
     }
@@ -700,8 +708,8 @@ export class PreviewStorage {
           throw new PreviewStorageError("storage-conflict", "Prepared preview contains a special object");
         }
         const hashed = await hashRegularFile(child);
-        if (hashed.mode !== 0o600) {
-          throw new PreviewStorageError("storage-conflict", "Prepared preview file permissions changed");
+        if (hashed.mode !== 0o600 || hashed.links !== 1) {
+          throw new PreviewStorageError("storage-conflict", "Prepared preview file permissions or links changed");
         }
         inventory.push({ path: logicalPath, size: hashed.size, sha256: hashed.sha256 });
         containsFile = true;
@@ -732,6 +740,52 @@ export class PreviewStorage {
       }
       if (error instanceof PreviewStorageError) throw error;
       throw new PreviewStorageError("storage-conflict", "Prepared preview target could not be verified", { cause: error });
+    }
+  }
+
+  /**
+   * Reads one exact manifest member after re-verifying the complete immutable target. The returned
+   * bytes are hashed from the same no-follow handle whose metadata is checked, so callers never
+   * receive a local path or race a second pathname open.
+   */
+  async readPreparedFile(
+    identity: PreparedPreviewIdentity,
+    compressedSize: number,
+    logicalPath: string
+  ): Promise<VerifiedPreparedPreviewFile> {
+    if (!validatePreviewBundlePath(logicalPath).ok) {
+      throw new PreviewStorageError("storage-conflict", "Prepared preview file path is invalid");
+    }
+    const manifest = await this.verifyPrepared(identity, compressedSize);
+    if (manifest === undefined) {
+      throw new PreviewStorageError("storage-conflict", "Prepared preview target is unavailable");
+    }
+    const file = manifest.files.find((item) => item.path === logicalPath);
+    if (file === undefined) {
+      throw new PreviewStorageError("storage-conflict", "Prepared preview file is not in the manifest");
+    }
+
+    let handle: FileHandle | undefined;
+    try {
+      const path = join(this.preparedPath(identity), "content", ...logicalPath.split("/"));
+      handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+      const before = await handle.stat();
+      if (!before.isFile() || before.nlink !== 1 || (before.mode & 0o777) !== 0o600 || before.size !== file.size) {
+        throw new PreviewStorageError("storage-conflict", "Prepared preview file metadata changed");
+      }
+      const bytes = await handle.readFile();
+      const after = await handle.stat();
+      if (!after.isFile() || after.dev !== before.dev || after.ino !== before.ino
+        || after.size !== before.size || after.nlink !== 1 || (after.mode & 0o777) !== 0o600
+        || bytes.length !== file.size || createHash("sha256").update(bytes).digest("hex") !== file.sha256) {
+        throw new PreviewStorageError("storage-conflict", "Prepared preview file bytes changed");
+      }
+      return { bytes, file: { ...file }, manifest };
+    } catch (error) {
+      if (error instanceof PreviewStorageError) throw error;
+      throw new PreviewStorageError("storage-conflict", "Prepared preview file could not be verified", { cause: error });
+    } finally {
+      await handle?.close();
     }
   }
 

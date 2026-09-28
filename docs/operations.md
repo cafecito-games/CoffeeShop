@@ -20,12 +20,56 @@ Environment variables:
 | `COFFEE_SHOP_DATABASE` | Absolute path of the SQLite database. | Next to `COFFEE_SHOP_DATA` as `coffee-shop.sqlite` (the container sets `/data/coffee-shop.sqlite`) |
 | `COFFEE_SHOP_DATA` | Legacy JSON snapshot to import when a new SQLite database has no state. It is never rewritten after import. | `<repo>/data/state.json` (the container keeps `/data/state.json` as the migration source) |
 | `PROJECT_PROFILES_PATH` | Legacy project-profile JSON to import once when the database has no profiles. New deployments should manage projects in the PWA. | `<repo>/config/project-profiles.json` |
+| `COFFEE_SHOP_PUBLIC_ORIGIN` | Canonical public `http`/`https` origin of the PWA/API. Required with preview delivery. | unset |
+| `PREVIEW_PUBLIC_ORIGIN` | Canonical isolated preview origin. Its hostname must differ from the Hub hostname; plain HTTP is local-loopback only. | unset |
+| `PREVIEW_BIND_HOST` / `PREVIEW_PORT` | Preview-only socket bind address and port (`1..65535`). The bind address is never public authority. | unset |
+| `PREVIEW_SIGNING_KEYS` | One to four comma-separated `kid:<64 lowercase hex>` HMAC keys. Protect as a deployment secret. | unset |
+| `PREVIEW_ACTIVE_SIGNING_KEY_ID` | One configured key ID used for new issuance. Retained non-active keys verify only their own existing grants. | unset |
+| `PREVIEW_ACCESS_DEFAULT_TTL_SECONDS` / `PREVIEW_ACCESS_MAX_TTL_SECONDS` | Access capability default and ceiling, each `60..3600`; the default cannot exceed the maximum. | `900` / `3600` when delivery is enabled |
 
-Durable state is the SQLite database plus an `artifacts` directory created **next to** it (`<dirname>/artifacts/`). Both must be on a persistent volume. SQLite runs in WAL mode with full synchronous commits; Coffee Shop supports one active hub process per database. On first startup with an empty database, the hub imports `COFFEE_SHOP_DATA` if it exists. The old JSON file remains untouched as a rollback artifact.
+Durable state is the SQLite database plus the `artifacts` and `prepared-previews` directories created **next to** it. All must be on one persistent volume and backed up together; a database backup without its immutable artifact and prepared trees cannot serve or recover a ready preview. SQLite runs in WAL mode with full synchronous commits; Coffee Shop supports one active hub process per database. On first startup with an empty database, the hub imports `COFFEE_SHOP_DATA` if it exists. The old JSON file remains untouched as a rollback artifact.
 
-Build and run the container with `task container:build` and `docker compose up`; `compose.yaml` requires `COFFEE_SHOP_TOKEN` and mounts the `coffee-shop-data` volume at `/data`. Terminate TLS in front of the hub. The startup log line is `Coffee Shop hub listening on http://localhost:<port>`.
+Build and run the container with `task container:build` and `docker compose up`; `compose.yaml` requires `COFFEE_SHOP_TOKEN` and `PREVIEW_SIGNING_KEYS`, publishes both ports, and mounts the `coffee-shop-data` volume at `/data`. Terminate TLS in front of both production hostnames. Startup logs name both bound listeners but never a key or capability URL.
 
-Health check: `GET /api/health` returns `{ ok, service, controlAgents }` and is never token-gated. Before an upgrade, stop the hub and back up `coffee-shop.sqlite` together with the artifacts directory (or snapshot the whole persistent volume); never commit the database, `data/*.json`, or a real token.
+Health check: `GET /api/health` returns `{ ok, service, controlAgents }` and is never token-gated. Before an upgrade, stop the hub and back up `coffee-shop.sqlite` together with `artifacts/` and `prepared-previews/` (or snapshot the whole persistent volume); never commit the database, `data/*.json`, or a real token.
+
+## Serving isolated artifact previews
+
+Preview delivery is disabled only when all eight preview-related variables in the table above are absent. If any one is present, the Hub validates the complete configuration before storage recovery or either listen call; missing, duplicate, malformed, same-host, or unsafe values stop startup and the error names only the variable. Disabled mode starts no preview listener and `POST /api/previews/:id/access` returns `503`; artifact registration, upload, preparation, recovery, snapshots, and ordinary downloads remain available.
+
+For local Compose use `http://hub.localhost:8787` for the PWA/API and `http://preview.localhost:8788` for previews. Both `.localhost` names resolve to loopback in modern browsers, but they remain distinct browser origins. Generate a key without placing it in the repository:
+
+```sh
+openssl rand -hex 32
+```
+
+Set `PREVIEW_SIGNING_KEYS=current:<output>` and `PREVIEW_ACTIVE_SIGNING_KEY_ID=current` in the protected deployment environment, then start Compose. Never put the output in `.env.example`, Compose, a support ticket, or a shell command committed to history.
+
+In production, publish two TLS virtual hosts, for example `https://coffee.example.com` and `https://preview.example.com`. Route the former to Hub port 8787 and the latter to preview port 8788. Preserve the original raw `Host` header; do not rewrite it to the upstream address, and do not expect `Forwarded` or `X-Forwarded-Host` to authorize a request. Route `/events`, `/control-agent`, `/orchestrator-client`, and every `/api/*` path only to the Hub host. Route only `/_coffee-shop/preview/v1/...` to the preview host. A swapped route returns `421`, which is the intended topology alarm. Production `PREVIEW_PUBLIC_ORIGIN` must be HTTPS; HTTP is accepted only for `localhost`, a `.localhost` name, `127.0.0.1`, or `[::1]`.
+
+Capabilities are response-only bearer secrets in URL paths. Configure proxy, ingress, CDN, browser-observability, and application logs to redact the complete segment after `/_coffee-shop/preview/v1/`; do not log request targets, query strings, `Referer`, cookies, or authorization headers on the preview virtual host. Do not persist an access response in snapshots, analytics, browser storage, chat, or control messages. `HEAD` performs the same authorization and integrity work as `GET`; `Range`, cookies, Hub bearer headers, and `?token=` never add authority.
+
+Rotate keys with add/activate/drain/remove:
+
+1. Generate a new 32-byte key under a new unique `kid`; add it to `PREVIEW_SIGNING_KEYS` while retaining the old entry.
+2. Set `PREVIEW_ACTIVE_SIGNING_KEY_ID` to the new ID, restart, and verify new issuance.
+3. Wait `PREVIEW_ACCESS_MAX_TTL_SECONDS + 30` seconds, then remove the old entry and restart. Removal immediately revokes any remaining old grant.
+
+Never reuse a `kid` with different bytes while an old grant can exist. To roll back during the drain window, retain both exact keys and restore the former active ID; no persisted URL migration is needed. A restart with the same ring validates unexpired grants, while a removed/unknown key never falls back to the active or first entry.
+
+Lifecycle expiry and signed expiry are both closed boundaries: access is denied when the clock equals either one. The 15-second expiry sweep persists due lifecycle transitions and broadcasts only on change, but access checks the wall clock independently, so delayed maintenance never extends a grant. Expiry does not delete prepared content. Include `prepared-previews/` in volume snapshots; restore it with the matching database and `artifacts/` directory, then restart so recovery can fail closed on any mismatch.
+
+Preview troubleshooting:
+
+| Symptom | Cause and action |
+|---|---|
+| Hub stops before listening and names a preview variable | Configuration is partial or malformed. Supply the complete set, or remove every preview-related variable to disable the feature. Generate a new key if its shape is wrong; never paste the rejected value into logs. |
+| `421 Misdirected Request` | The reverse proxy sent a public hostname to the wrong listener, rewrote `Host`, or combined Host headers. Preserve exactly one original Host and correct the virtual-host upstream. |
+| Operator access endpoint returns `503` | Preview delivery is deliberately disabled. Configure the complete two-host topology and restart. |
+| Access issuance returns `409` | The preview is not ready/unexpired or its uploaded artifact/prepared target is not exact. Inspect lifecycle state and bounded Hub storage code; do not regenerate bytes in the delivery path. |
+| A signed URL returns the generic `404` | The grant, key, lifecycle, generation, path, manifest, or bytes are no longer valid. Request a new URL after confirming readiness; never infer which condition from the public response. |
+| Relative assets work but `/asset.js` does not | Root-relative references intentionally drop the capability prefix. Produce bundle-relative URLs; the server does not rewrite HTML or add a `<base>`. |
+| Old URLs stop immediately after rotation | The old `kid` was removed before the drain interval. Restore both exact keys, restart, then repeat the drain procedure. |
 
 ## Bootstrapping a compute node
 

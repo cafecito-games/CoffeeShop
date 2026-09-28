@@ -57,6 +57,15 @@ import { loadProjectProfilesFromFile } from "./projectProfiles.js";
 import { computeNodeProjectReadiness } from "./projectReadiness.js";
 import { ArtifactIngestionError, ingestArtifactContent, recoverPreviewPreparation } from "./previewPreparation.js";
 import { PreviewStorage } from "./previewStorage.js";
+import {
+  createMainPreviewHostGuard,
+  createPreviewDeliveryApp,
+  listenPreviewTopology,
+  parsePreviewDeliveryConfig,
+  registerPreviewOperatorRoutes,
+  requestTargetsPreviewAuthority,
+  runPreviewExpiryMaintenance
+} from "./previewDelivery.js";
 import { retainedHarnessEvents } from "./harnessEvents.js";
 import { expireDueApprovals, receiveApprovalUndeliverable, receiveHarnessEvent, reconcileApprovals, resolveApproval } from "./harnessGateway.js";
 import { createRedactor } from "./redaction.js";
@@ -67,6 +76,7 @@ import { newEvent, newId, newMessage, Store } from "./store.js";
 import { newThread, updateThreadByOperator, updateThreadForRun } from "./threads.js";
 import { cleanupWorkspaceLeaseByOperator, receiveWorkspaceLeaseUpdate, reconcileWorkspaceLeases, workspaceLeaseConfirmation } from "./workspaceLeases.js";
 
+const previewDeliveryConfiguration = parsePreviewDeliveryConfig(process.env);
 const app = express();
 const server = createServer(app);
 const controlAgents = new ControlConnectionRegistry<WebSocket>(WebSocket.OPEN);
@@ -84,6 +94,7 @@ if (process.env.NODE_ENV === "production" && !token) {
   throw new Error("COFFEE_SHOP_TOKEN is required in production");
 }
 
+app.use(createMainPreviewHostGuard(previewDeliveryConfiguration));
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
 app.use(operatorCredentialGuard(token));
@@ -92,6 +103,13 @@ const broadcast = () => {
   const payload = JSON.stringify({ type: "snapshot", data: store.snapshot() });
   for (const socket of clients) if (socket.readyState === WebSocket.OPEN) socket.send(payload);
 };
+const previewServer = previewDeliveryConfiguration.enabled
+  ? createServer(createPreviewDeliveryApp({
+    store,
+    storage: artifactStorage,
+    configuration: previewDeliveryConfiguration
+  }))
+  : undefined;
 
 const taskEventWaiters = new TaskEventWaiters(store);
 const orchestratorClients = createOrchestratorClientGateway({
@@ -575,6 +593,12 @@ app.post("/api/approvals/:id/resolution", async (req, res) => {
 });
 
 registerOrchestratorClientRoutes(app, { store, broadcast, revocations: orchestratorClientRevocations });
+registerPreviewOperatorRoutes(app, {
+  store,
+  storage: artifactStorage,
+  configuration: previewDeliveryConfiguration,
+  broadcast
+});
 
 app.get("/api/runs/:id/events", (req, res) => {
   if (!store.getRun(req.params.id)) return res.status(404).json({ error: "Run not found" });
@@ -722,6 +746,10 @@ if (existsSync(webDist)) {
 
 const wss = new WebSocketServer({ noServer: true });
 server.on("upgrade", (request, socket, head) => {
+  if (requestTargetsPreviewAuthority(request, previewDeliveryConfiguration)) {
+    socket.end("HTTP/1.1 421 Misdirected Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
+    return;
+  }
   const url = new URL(request.url ?? "/", `http://${request.headers.host}`);
   const isControlAgent = url.pathname === "/control-agent" || url.pathname === "/worker";
   const suppliedToken = request.headers.authorization?.replace(/^Bearer\s+/i, "") ?? url.searchParams.get("token");
@@ -1084,10 +1112,23 @@ setInterval(() => {
     .catch((error) => console.error("approval expiry failed", error));
 }, 15_000).unref();
 setInterval(() => {
+  void runPreviewExpiryMaintenance(store, broadcast)
+    .catch(() => console.error("preview expiry maintenance failed", { code: "unexpected" }));
+}, 15_000).unref();
+setInterval(() => {
   void orchestratorClients.expireAttachments().catch((error) => console.error("orchestrator attachment expiry failed", error));
 }, orchestratorClientHeartbeatSeconds * 1000).unref();
+// Both configured listeners must bind successfully; a partial topology is closed before startup fails.
+await listenPreviewTopology(
+  { server, port, host: "0.0.0.0" },
+  previewServer && previewDeliveryConfiguration.enabled
+    ? { server: previewServer, port: previewDeliveryConfiguration.port, host: previewDeliveryConfiguration.bindHost }
+    : undefined
+);
+
 // PORT=0 asks the operating system for a free port; the log names the port actually bound.
-server.listen(port, "0.0.0.0", () => {
-  const address = server.address();
-  console.log(`Coffee Shop hub listening on http://localhost:${typeof address === "object" && address ? address.port : port}`);
-});
+const address = server.address();
+console.log(`Coffee Shop hub listening on http://localhost:${typeof address === "object" && address ? address.port : port}`);
+if (previewServer && previewDeliveryConfiguration.enabled) {
+  console.log(`Coffee Shop preview delivery listening on ${previewDeliveryConfiguration.bindHost}:${previewDeliveryConfiguration.port}`);
+}

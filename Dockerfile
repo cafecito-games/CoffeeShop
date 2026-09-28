@@ -22,5 +22,5 @@ COPY --from=build /app/packages/protocol/package.json ./packages/protocol/packag
 COPY --from=build /app/packages/protocol/dist ./packages/protocol/dist
 RUN pnpm install --prod --frozen-lockfile=false
 VOLUME ["/data"]
-EXPOSE 8787
+EXPOSE 8787 8788
 CMD ["node", "apps/hub/dist/index.js"]
