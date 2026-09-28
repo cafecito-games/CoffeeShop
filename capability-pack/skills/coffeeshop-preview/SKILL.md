@@ -10,6 +10,17 @@ A preview is a static directory published as one immutable Coffee Shop artifact.
 the build, and the model never receives the signed access URL. Build inside the authorized workspace,
 publish through `publish_preview`, and report only the lifecycle state the tool actually returned.
 
+## Non-negotiable workflow invariants
+
+- MUST call `get_task_context` before `publish_preview`.
+- MUST reuse one stable publication key and byte-for-byte equivalent arguments for an unchanged retry.
+- MUST treat `artifact.uploaded` and `preview.status` as separate facts.
+- MUST NOT claim Ready unless the returned `preview.status` is `ready`.
+- MUST NOT invent, request, persist, or print a signed access URL or operator credential.
+- MUST refuse publication when output needs a server, SPA fallback, root-relative assets, external/API connections, or inline scripts.
+- MUST report a publication refusal or malformed result and stop without an alternate tool, broader path, new key, or success claim.
+- MUST attach the returned artifact through `update_task` with its own stable key; an exact retry reuses that key and arguments.
+
 ## Establish the durable context
 
 1. Call `get_task_context` before building or publishing. Use only the current task, run, thread, and

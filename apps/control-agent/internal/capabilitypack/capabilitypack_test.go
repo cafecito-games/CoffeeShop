@@ -395,13 +395,27 @@ func TestPreviewWorkflowOwnsPublishPreview(t *testing.T) {
 	if !slices.Equal(preview.RequiredTools, wantTools) {
 		t.Fatalf("coffeeshop-preview required tools = %v, want %v", preview.RequiredTools, wantTools)
 	}
-	content := strings.ToLower(string(tree[preview.Path]))
-	for _, contract := range []string{
-		"artifact.uploaded", "preview.status", "operator", "access URL", "same idempotency key",
-		"root-relative", "connect-src 'none'", "inline scripts", "update_task",
-	} {
-		if !strings.Contains(content, strings.ToLower(contract)) {
-			t.Fatalf("coffeeshop-preview does not teach %q", contract)
+	document := string(tree[preview.Path])
+	invariants := skillSectionBullets(t, document, "## Non-negotiable workflow invariants")
+	wantInvariants := []string{
+		"MUST call `get_task_context` before `publish_preview`.",
+		"MUST reuse one stable publication key and byte-for-byte equivalent arguments for an unchanged retry.",
+		"MUST treat `artifact.uploaded` and `preview.status` as separate facts.",
+		"MUST NOT claim Ready unless the returned `preview.status` is `ready`.",
+		"MUST NOT invent, request, persist, or print a signed access URL or operator credential.",
+		"MUST refuse publication when output needs a server, SPA fallback, root-relative assets, external/API connections, or inline scripts.",
+		"MUST report a publication refusal or malformed result and stop without an alternate tool, broader path, new key, or success claim.",
+		"MUST attach the returned artifact through `update_task` with its own stable key; an exact retry reuses that key and arguments.",
+	}
+	if !slices.Equal(invariants, wantInvariants) {
+		t.Fatalf("coffeeshop-preview invariants = %q, want exact fail-closed contract %q", invariants, wantInvariants)
+	}
+	if !strings.Contains(document, "delivery enforces\n  `connect-src 'none'`.") {
+		t.Fatal("coffeeshop-preview does not name the exact fail-closed connection policy")
+	}
+	for _, forbidden := range []string{"http://", "https://", "signedurl", "authorization: bearer"} {
+		if strings.Contains(strings.ToLower(document), forbidden) {
+			t.Fatalf("coffeeshop-preview leaks or teaches authority-bearing material %q", forbidden)
 		}
 	}
 	suite, err := ParseEvaluationSuite(preview.EvaluationPath, tree[preview.EvaluationPath])
@@ -423,6 +437,25 @@ func TestPreviewWorkflowOwnsPublishPreview(t *testing.T) {
 			t.Fatalf("coffeeshop-preview evaluations omit %s", required)
 		}
 	}
+}
+
+func skillSectionBullets(t *testing.T, document, heading string) []string {
+	t.Helper()
+	start := strings.Index(document, heading+"\n")
+	if start < 0 {
+		t.Fatalf("skill has no %s section", heading)
+	}
+	section := document[start+len(heading)+1:]
+	if end := strings.Index(section, "\n## "); end >= 0 {
+		section = section[:end]
+	}
+	bullets := []string{}
+	for _, line := range strings.Split(section, "\n") {
+		if strings.HasPrefix(line, "- ") {
+			bullets = append(bullets, strings.TrimPrefix(line, "- "))
+		}
+	}
+	return bullets
 }
 
 // TestVocabularyDriftBreaksValidation performs the mutation upstream drift would cause — a rename, an
