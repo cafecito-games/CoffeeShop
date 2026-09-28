@@ -40,6 +40,12 @@ export function invalidInstanceFixtures() {
   mutate("dispatch legacy actor ambiguity", "hub", "dispatch", (v) => { v.run.agentId = "legacy"; });
   mutate("dispatch template prohibited", "hub", "dispatch", (v) => { v.agent = { id: "legacy" }; });
   mutate("dispatch allocation missing", "hub", "dispatch", (v) => { delete v.run.allocationId; });
+  mutate("dispatch session grant missing", "hub", "dispatch-resume", (v) => { delete v.sessionBinding; });
+  mutate("dispatch session run identity missing", "hub", "dispatch-resume", (v) => { delete v.run.sessionBindingId; });
+  mutate("dispatch session identity mismatch", "hub", "dispatch-resume", (v) => { v.sessionBinding.id = "session-other"; });
+  mutate("dispatch session on native transport", "hub", "dispatch-resume", (v) => { v.run.transport = "native-cli"; v.allocation.transport = "native-cli"; });
+  mutate("dispatch session grant unknown field", "hub", "dispatch-resume", (v) => { v.sessionBinding.secret = "forbidden"; });
+  mutate("dispatch session resume prompt bound", "hub", "dispatch-resume", (v) => { v.sessionBinding.resumePrompt = "x".repeat(65537); });
   mutate("dispatch released allocation", "hub", "dispatch", (v) => { v.allocation.status = "released"; });
   mutate("dispatch draining instance", "hub", "dispatch", (v) => { v.instance.status = "draining"; });
   for (const ids of [null, ["same", "same"], [""], ["bad/id"]]) mutate(`invalid resident IDs ${JSON.stringify(ids)}`, "control", "sync", (v) => { v.activeInstanceIds = ids; });

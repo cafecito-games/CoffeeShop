@@ -20,7 +20,8 @@
       ],
       "operatingSystems": [
         "darwin"
-      ]
+      ],
+      "templateId": "template-one"
     },
     "lease": {
       "idleTimeoutSeconds": 1800,

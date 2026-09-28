@@ -48,15 +48,16 @@ export const nodeAdvertisesResume = (node: ComputeNode | undefined, harnessId: s
 export const sessionResumeUnavailableReason = "unsupported execution: session resume not available for this harness on this Barista";
 
 /**
- * Only a thread orchestrator's non-task run can be continued later; every other session ends with
- * its run. The thread's own orchestrator record decides it, matched against the run's runtime actor,
- * so an instance-orchestrated thread continues exactly as an agent-orchestrated one did and a worker
- * resident of the same thread is never mistaken for its orchestrator.
+ * A resident instance owns its provider session across sequential tasks for the lifetime of its
+ * exact allocation. Compatibility agent sessions remain continuable only for the thread
+ * orchestrator's non-task run; worker-agent task sessions still end with their run.
  */
 const isContinuable = (state: Readonly<State>, run: Run) => {
+  const actor = actorOf(run);
+  if (actor?.kind === "instance") return true;
   if (run.taskId !== undefined) return false;
   const thread = state.threads?.find((item) => item.id === run.threadId);
-  return thread !== undefined && isThreadOrchestratorActor(thread, actorOf(run));
+  return thread !== undefined && isThreadOrchestratorActor(thread, actor);
 };
 
 /**
@@ -132,6 +133,15 @@ export interface SessionDispatchSource {
   nodes?: readonly ComputeNode[];
   sessionBindings?: readonly HarnessSessionBinding[];
   orchestratorInboxes?: readonly OrchestratorInbox[];
+}
+
+/** The newest idle provider session in this run's exact actor/allocation context, if resumable. */
+export function resumableSessionBindingFor(run: Run, source: SessionDispatchSource): HarnessSessionBinding | undefined {
+  const node = source.nodes?.find((item) => item.id === run.nodeId);
+  if (!nodeAdvertisesResume(node, run.harnessId)) return undefined;
+  return [...(source.sessionBindings ?? [])]
+    .filter((binding) => isResumableFor(binding, run))
+    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt) || right.id.localeCompare(left.id))[0];
 }
 
 /**
@@ -269,12 +279,13 @@ export async function receiveSessionBinding(store: Store, nodeId: string, runId:
 /**
  * Settles session bindings when a run becomes terminal, in the same transaction. A session whose
  * thread-owner, non-task run completed its ACP turn becomes `idle` with the capabilities that run
- * negotiated, so a later continuation may resume it, and any older idle binding in the same context
- * is closed, keeping at most one resumable session per context. A session of any other run, such as
- * a task attempt, can never be continued and is `closed`; any other ending fails it. A binding a
- * run asked to resume but that failed before its prompt is failed too, so the next continuation
- * replaces it, except when Barista refused only because its adapter cannot resume: the session
- * itself is intact and stays idle.
+ * negotiated, so a later continuation may resume it; the same is true of a completed task on a
+ * resident instance, whose exact allocation owns the session between prompts. Any older idle
+ * binding in the same context is closed, keeping at most one resumable session per context. A
+ * compatibility worker-agent task session is `closed`; any other ending fails it. A binding a run
+ * asked to resume but that failed before its prompt is failed too, so the next continuation replaces
+ * it, except when Barista refused only because its adapter cannot resume: the session itself is
+ * intact and stays idle.
  */
 export function settleSessionBindingsForTerminalRun(state: State, runId: string, at: string) {
   const run = state.runs.find((item) => item.id === runId);

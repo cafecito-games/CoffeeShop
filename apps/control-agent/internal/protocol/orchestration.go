@@ -589,6 +589,7 @@ type InstanceExecutionRequirements struct {
 	MinimumConcurrency     *int                           `json:"minimumConcurrency,omitempty"`
 	MinimumMemoryMegabytes *int64                         `json:"minimumMemoryMegabytes,omitempty"`
 	ProjectProfileID       *string                        `json:"projectProfileId,omitempty"`
+	TemplateID             *string                        `json:"templateId,omitempty"`
 	Workspace              *InstanceWorkspaceRequirements `json:"workspace,omitempty"`
 	Preferences            *InstanceExecutionPreferences  `json:"preferences,omitempty"`
 }
@@ -667,13 +668,14 @@ type InstanceRun struct {
 	ProviderSessionID  *string                `json:"providerSessionId,omitempty"`
 }
 type InstanceHubMessage struct {
-	Type         string              `json:"type"`
-	Instance     *AgentInstance      `json:"instance,omitempty"`
-	Allocation   *InstanceAllocation `json:"allocation,omitempty"`
-	Run          *InstanceRun        `json:"run,omitempty"`
-	InstanceID   string              `json:"instanceId,omitempty"`
-	AllocationID string              `json:"allocationId,omitempty"`
-	Mode         string              `json:"mode,omitempty"`
+	Type           string                  `json:"type"`
+	Instance       *AgentInstance          `json:"instance,omitempty"`
+	Allocation     *InstanceAllocation     `json:"allocation,omitempty"`
+	Run            *InstanceRun            `json:"run,omitempty"`
+	SessionBinding *DispatchSessionBinding `json:"sessionBinding,omitempty"`
+	InstanceID     string                  `json:"instanceId,omitempty"`
+	AllocationID   string                  `json:"allocationId,omitempty"`
+	Mode           string                  `json:"mode,omitempty"`
 }
 type InstanceControlMessage struct {
 	Type              string       `json:"type"`
@@ -842,7 +844,7 @@ var v5Preferences = v5Object(nil, map[string]v5Rule{"nodeIds": v5Names, "harness
 var v5Requirements = v5Object(nil, map[string]v5Rule{
 	"skills": v5Names, "harnessIds": v5Strings(InstanceRequirementEntries, v5Enum(HarnessIDs)), "models": v5Names,
 	"transports": v5Strings(InstanceRequirementEntries, v5Enum(HarnessTransports)), "operatingSystems": v5Names, "architectures": v5Names, "labels": v5Names,
-	"minimumConcurrency": v5Count, "minimumMemoryMegabytes": v5Integer(0, 4294967295), "projectProfileId": v5ID, "preferences": v5Preferences,
+	"minimumConcurrency": v5Count, "minimumMemoryMegabytes": v5Integer(0, 4294967295), "projectProfileId": v5ID, "templateId": v5ID, "preferences": v5Preferences,
 	"workspace": v5Object(map[string]v5Rule{"writable": v5Boolean}, map[string]v5Rule{"repository": v5String(0, InstanceWorkspaceBytes), "path": v5Path}),
 })
 var v5Instance = v5Object(map[string]v5Rule{
@@ -889,6 +891,20 @@ var v5Run = v5Object(map[string]v5Rule{
 		return json.Unmarshal(data, &selection) == nil && selection.Validate() == nil
 	},
 })
+
+func v5DispatchSessionBinding(value any) bool {
+	if !v5Object(map[string]v5Rule{
+		"id": v5String(1, identifierBytes), "providerSessionId": v5String(1, identifierBytes),
+	}, map[string]v5Rule{"resumePrompt": v5String(0, SessionResumePromptMaximumBytes)})(value) {
+		return false
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		return false
+	}
+	var binding DispatchSessionBinding
+	return json.Unmarshal(data, &binding) == nil && binding.Validate() == nil
+}
 
 func decodeInstanceValue(data []byte, rule v5Rule, target any) error {
 	if !utf8.Valid(data) {
@@ -937,7 +953,7 @@ func DecodeInstanceHubMessage(data []byte, version string) (InstanceHubMessage, 
 		case "instance.provision":
 			return v5Object(map[string]v5Rule{"type": v5Enum([]string{"instance.provision"}), "instance": v5Instance, "allocation": v5Allocation}, nil)(value)
 		case "dispatch":
-			return v5Object(map[string]v5Rule{"type": v5Enum([]string{"dispatch"}), "instance": v5Instance, "allocation": v5Allocation, "run": v5Run}, nil)(value)
+			return v5Object(map[string]v5Rule{"type": v5Enum([]string{"dispatch"}), "instance": v5Instance, "allocation": v5Allocation, "run": v5Run}, map[string]v5Rule{"sessionBinding": v5DispatchSessionBinding})(value)
 		default:
 			return false
 		}
@@ -964,7 +980,11 @@ func DecodeInstanceHubMessage(data []byte, version string) (InstanceHubMessage, 
 		run.Transport == allocation.Transport && run.Workspace == allocation.Workspace
 	stateAllowsDispatch := run.Status == "queued" && allocation.Status == "active" &&
 		slices.Contains([]string{"ready", "busy", "idle"}, instance.Status)
-	if !identityMatches || !placementMatches || !stateAllowsDispatch || (run.FallbackTransport != nil && run.Transport != "acp-v1") {
+	bindingMatches := (run.SessionBindingID == nil) == (message.SessionBinding == nil)
+	if bindingMatches && message.SessionBinding != nil {
+		bindingMatches = run.Transport == "acp-v1" && *run.SessionBindingID == message.SessionBinding.ID
+	}
+	if !identityMatches || !placementMatches || !stateAllowsDispatch || !bindingMatches || (run.FallbackTransport != nil && run.Transport != "acp-v1") {
 		return message, fmt.Errorf("invalid dispatch identity, state, or placement")
 	}
 	return message, nil

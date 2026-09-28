@@ -7,10 +7,11 @@ import { isSnapshot } from "./hubConnection.js";
 import { ApprovalsView } from "./orchestration/ApprovalsView.js";
 import { SettingsView } from "./settings/SettingsView.js";
 import { ThreadsView } from "./ThreadsView.js";
+import { allocationHistory, currentAllocationFor, exactCurrentRuns, exactCurrentTasks, visibleInstances } from "./instances/instancePresentation.js";
 
 /*
  * Both fixtures are bytes the hub itself publishes. `hubSnapshot.json` is what `Store.snapshot()`
- * (apps/hub/src/store.ts:499) emits for a state built with the hub's own orchestration functions;
+ * emits from SQLite state built with the hub's own orchestration functions;
  * `legacyHubSnapshot.json` is that snapshot reduced to the fields `packages/protocol/src/index.ts`
  * declared at commit 7334091, the last commit before external orchestrators, which is what an
  * older hub publishes to this PWA. Regenerate both with
@@ -74,6 +75,35 @@ describe("hub snapshot fixtures", () => {
     expect(JSON.stringify(preview)).not.toContain("previewRegistrationReceipts");
     expect(JSON.stringify(preview)).not.toContain("previewProcessingReceipts");
     expect(JSON.stringify(preview)).not.toMatch(/signedUrl|bearer|token/i);
+  });
+
+  it("carries the Hub producer's exact v5 instance triplet and inert template defaults", () => {
+    const snapshot = current as Snapshot;
+    expect(snapshot.instances).toHaveLength(3);
+    expect(snapshot.allocations).toHaveLength(3);
+    expect(snapshot.templates).toHaveLength(1);
+    const active = snapshot.instances!.find((instance) => instance.status === "busy");
+    const released = snapshot.instances!.find((instance) => instance.status === "released");
+    const replacementPending = snapshot.instances!.find((instance) => instance.status === "requested");
+    expect(active).toBeDefined();
+    expect(released).toBeDefined();
+    expect(replacementPending).toBeDefined();
+    const activeAllocation = currentAllocationFor(active!.id, snapshot.allocations!);
+    expect(activeAllocation).toMatchObject({
+      kind: "current",
+      allocation: { instanceId: active!.id, status: "active" }
+    });
+    expect(currentAllocationFor(released!.id, snapshot.allocations!)).toEqual({ kind: "unavailable" });
+    expect(currentAllocationFor(replacementPending!.id, snapshot.allocations!)).toEqual({ kind: "unavailable" });
+    expect(allocationHistory(released!.id, snapshot.allocations!)).toMatchObject([{ status: "released" }]);
+    expect(allocationHistory(replacementPending!.id, snapshot.allocations!)).toMatchObject([{ status: "lost" }]);
+    expect(visibleInstances(snapshot.instances!, false).map((instance) => instance.id)).not.toContain(released!.id);
+    expect(visibleInstances(snapshot.instances!, true).map((instance) => instance.id)).toContain(released!.id);
+    expect(exactCurrentRuns(active!.id, activeAllocation, snapshot.runs).map((run) => run.id)).toEqual(["run-instance-review"]);
+    expect(exactCurrentTasks(active!.id, activeAllocation, snapshot.tasks ?? []).map((task) => task.title)).toEqual(["Review checkout"]);
+    expect(snapshot.templates![0]).not.toHaveProperty("nodeId");
+    expect(snapshot.templates![0]).not.toHaveProperty("status");
+    expect(snapshot.templates![0]).not.toHaveProperty("sessionBindingId");
   });
 
   it("accepts ready preview metadata exactly as the Hub projects it", () => {

@@ -77,6 +77,7 @@ type taskSpecification struct {
 	Instructions string           `json:"instructions"`
 	Requirements map[string]any   `json:"requirements,omitempty"`
 	Dependencies []map[string]any `json:"dependencies,omitempty"`
+	Pin          map[string]any   `json:"pin,omitempty"`
 }
 
 // buildRequirements asks for a writable, leased checkout of the project on an agent with the build

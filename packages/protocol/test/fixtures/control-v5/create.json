@@ -18,7 +18,8 @@
     ],
     "operatingSystems": [
       "darwin"
-    ]
+    ],
+    "templateId": "template-one"
   },
   "initialTask": {
     "title": "Contracts",

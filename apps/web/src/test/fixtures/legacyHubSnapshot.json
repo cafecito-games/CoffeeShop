@@ -25,8 +25,8 @@
       "name": "Workshop",
       "kind": "home-server",
       "platform": "darwin · arm64",
-      "status": "online",
-      "lastSeen": "2026-09-22T12:00:00.000Z",
+      "status": "busy",
+      "lastSeen": "2026-09-22T12:09:04.000Z",
       "activeRuns": 1,
       "concurrency": 2,
       "workspaceRoots": [
@@ -41,6 +41,10 @@
           "authMode": "local-subscription",
           "models": [
             "sonnet"
+          ],
+          "transports": [
+            "native-cli",
+            "acp-v1"
           ]
         }
       ],
@@ -48,6 +52,25 @@
     }
   ],
   "runs": [
+    {
+      "id": "run-instance-review",
+      "instanceId": "instance_mul73pca_000ih4",
+      "allocationId": "allocation_mul73pcd_000nii",
+      "nodeId": "node-workshop",
+      "harnessId": "claude-cli",
+      "model": "sonnet",
+      "transport": "acp-v1",
+      "workspace": "/srv/workspaces",
+      "prompt": "Review the exact active allocation",
+      "status": "running",
+      "output": "",
+      "depth": 0,
+      "threadId": "thread_mul73pc1_0003cx",
+      "taskId": "task_mul73pcf_000qvg",
+      "createdAt": "2026-09-22T12:07:04.000Z",
+      "attempt": 1,
+      "startedAt": "2026-09-22T12:07:05.000Z"
+    },
     {
       "id": "run-login",
       "agentId": "milo",
@@ -59,44 +82,124 @@
       "status": "running",
       "output": "",
       "depth": 0,
-      "threadId": "thread_mud4zi3v_v96kiv",
+      "threadId": "thread_mul73pc0_0001og",
       "createdAt": "2026-09-22T12:00:00.000Z"
     }
   ],
   "events": [
     {
       "type": "status",
+      "title": "Instance allocation lost",
+      "detail": "Instance instance_mul73pcq_0019cl was no longer resident on node-workshop",
+      "threadId": "thread_mul73pc1_0003cx",
+      "id": "evt_mul73pcv_001hqx",
+      "createdAt": "2026-09-28T12:00:00.032Z"
+    },
+    {
+      "type": "status",
+      "title": "Instance allocation reserved",
+      "detail": "lost-instance fixture · provisioning on node-workshop",
+      "threadId": "thread_mul73pc1_0003cx",
+      "id": "evt_mul73pcu_001g2g",
+      "createdAt": "2026-09-28T12:00:00.031Z"
+    },
+    {
+      "type": "status",
+      "title": "Instance requested",
+      "detail": "lost-instance fixture · requested",
+      "threadId": "thread_mul73pc1_0003cx",
+      "id": "evt_mul73pcs_001cpi",
+      "createdAt": "2026-09-28T12:00:00.029Z"
+    },
+    {
+      "type": "status",
+      "title": "Instance released",
+      "detail": "released-instance fixture · released",
+      "threadId": "thread_mul73pc1_0003cx",
+      "id": "evt_mul73pcp_0017o4",
+      "createdAt": "2026-09-28T12:00:00.026Z"
+    },
+    {
+      "type": "status",
+      "title": "Instance release requested (drain)",
+      "detail": "released-instance fixture · draining",
+      "threadId": "thread_mul73pc1_0003cx",
+      "id": "evt_mul73pco_0015zn",
+      "createdAt": "2026-09-28T12:00:00.025Z"
+    },
+    {
+      "type": "status",
+      "title": "Instance allocation reserved",
+      "detail": "released-instance fixture · provisioning on node-workshop",
+      "threadId": "thread_mul73pc1_0003cx",
+      "id": "evt_mul73pcm_0012mp",
+      "createdAt": "2026-09-28T12:00:00.023Z"
+    },
+    {
+      "type": "status",
+      "title": "Instance requested",
+      "detail": "released-instance fixture · requested",
+      "threadId": "thread_mul73pc1_0003cx",
+      "id": "evt_mul73pck_000z9s",
+      "createdAt": "2026-09-28T12:00:00.021Z"
+    },
+    {
+      "type": "status",
+      "title": "1 task submitted",
+      "detail": "Review checkout",
+      "threadId": "thread_mul73pc1_0003cx",
+      "id": "evt_mul73pch_000u8e",
+      "createdAt": "2026-09-28T12:00:00.018Z"
+    },
+    {
+      "type": "status",
+      "title": "Instance allocation reserved",
+      "detail": "Checkout Reviewer · provisioning on node-workshop",
+      "threadId": "thread_mul73pc1_0003cx",
+      "id": "evt_mul73pce_000p6z",
+      "createdAt": "2026-09-28T12:00:00.015Z"
+    },
+    {
+      "type": "status",
+      "title": "Instance requested",
+      "detail": "Checkout Reviewer · requested",
+      "threadId": "thread_mul73pc1_0003cx",
+      "id": "evt_mul73pcc_000lu2",
+      "createdAt": "2026-09-28T12:00:00.013Z"
+    },
+    {
+      "type": "status",
       "title": "Approval approved",
       "detail": "Write to config.json",
-      "threadId": "thread_mud4zi3v_v96kiv",
+      "threadId": "thread_mul73pc0_0001og",
       "agentId": "milo",
       "runId": "run-login",
-      "id": "evt_mud4zi3x_o5zjpm",
-      "createdAt": "2026-09-22T20:38:35.373Z"
+      "id": "evt_mul73pc9_000gsn",
+      "createdAt": "2026-09-28T12:00:00.010Z"
     },
     {
       "type": "status",
       "title": "Approval requested",
       "detail": "Write to config.json",
-      "threadId": "thread_mud4zi3v_v96kiv",
+      "threadId": "thread_mul73pc0_0001og",
       "agentId": "milo",
       "runId": "run-login",
-      "id": "evt_mud4zi3x_zf2tmg",
-      "createdAt": "2026-09-22T20:38:35.373Z"
+      "id": "evt_mul73pc8_000f47",
+      "createdAt": "2026-09-28T12:00:00.009Z"
     },
     {
       "type": "status",
       "title": "Thread created",
       "detail": "Checkout funnel",
-      "threadId": "thread_mud4zi3w_tudoki",
-      "id": "evt_mud4zi3w_qiucv4",
-      "createdAt": "2026-09-22T20:38:35.372Z"
+      "threadId": "thread_mul73pc1_0003cx",
+      "id": "evt_mul73pc2_00051e",
+      "createdAt": "2026-09-28T12:00:00.003Z"
     }
   ],
   "messages": [],
   "threads": [
     {
-      "id": "thread_mud4zi3v_v96kiv",
+      "id": "thread_mul73pc0_0001og",
       "title": "Ship the login path",
       "objective": "Ship the login path",
       "summary": "",
@@ -111,11 +214,53 @@
   "artifacts": [],
   "runActivity": [],
   "orchestratorInboxes": [],
-  "tasks": [],
+  "tasks": [
+    {
+      "id": "task_mul73pcf_000qvg",
+      "threadId": "thread_mul73pc1_0003cx",
+      "title": "Review checkout",
+      "instructions": "Review the exact active allocation",
+      "status": "running",
+      "requirements": {
+        "harnessIds": [
+          "claude-cli"
+        ],
+        "models": [
+          "sonnet"
+        ],
+        "transports": [
+          "acp-v1"
+        ],
+        "templateId": "template-reviewer"
+      },
+      "dependencies": [],
+      "placementOverride": {
+        "instanceId": "instance_mul73pca_000ih4",
+        "authorizedBy": "operator"
+      },
+      "sourceKey": "orchestrator-client:orchestrator-client-fixture-active",
+      "idempotencyKey": "fixture-exact-task",
+      "attemptRunIds": [
+        "run-instance-review"
+      ],
+      "createdAt": "2026-09-22T12:07:03.000Z",
+      "updatedAt": "2026-09-22T12:07:05.000Z",
+      "assignment": {
+        "runId": "run-instance-review",
+        "instanceId": "instance_mul73pca_000ih4",
+        "allocationId": "allocation_mul73pcd_000nii",
+        "nodeId": "node-workshop",
+        "harnessId": "claude-cli",
+        "transport": "acp-v1",
+        "model": "sonnet",
+        "assignedAt": "2026-09-22T12:07:04.000Z"
+      }
+    }
+  ],
   "taskMessages": [
     {
-      "id": "taskmsg_mud4zi3x_jy1h4z",
-      "threadId": "thread_mud4zi3w_tudoki",
+      "id": "taskmsg_mul73pc6_000br9",
+      "threadId": "thread_mul73pc1_0003cx",
       "sender": {
         "type": "operator"
       },
@@ -127,7 +272,7 @@
       "body": "Please prioritize the login path",
       "artifactIds": [],
       "sourceKey": "operator",
-      "idempotencyKey": "opmsg_mud4zi3x_iw1lme",
+      "idempotencyKey": "opmsg_mul73pc5_000a2s",
       "createdAt": "2026-09-22T12:04:00.000Z"
     }
   ],
@@ -135,9 +280,9 @@
   "sessionBindings": [],
   "approvals": [
     {
-      "id": "approval_mud4zi3x_fyn8o5",
+      "id": "approval_mul73pc7_000dfq",
       "harnessApprovalId": "acp-permission-1",
-      "threadId": "thread_mud4zi3v_v96kiv",
+      "threadId": "thread_mul73pc0_0001og",
       "runId": "run-login",
       "nodeId": "node-workshop",
       "title": "Write to config.json",
@@ -160,8 +305,8 @@
       "resolvedAt": "2026-09-22T12:06:00.000Z",
       "resolvedBy": {
         "kind": "orchestrator",
-        "clientId": "orchestrator-client-a17822b2f216a5c9",
-        "attachmentId": "attachment_mud4zi3w_opbgp4"
+        "clientId": "orchestrator-client-fixture-active",
+        "attachmentId": "attachment_mul73pc3_0006pv"
       },
       "delivery": {
         "status": "pending",
@@ -173,5 +318,5 @@
     }
   ],
   "workspaceLeases": [],
-  "generatedAt": "2026-09-22T20:38:35.373Z"
+  "generatedAt": "2026-09-28T12:10:00.000Z"
 }

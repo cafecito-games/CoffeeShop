@@ -238,7 +238,9 @@ When a `ready` task cannot be placed, `task.placement.unsatisfied` records every
 | `inventory-stale` | Evidence is older than the TTL or future-dated | Wait for the node's periodic capability report, or check node clock skew |
 | `agent` | No configured agent is a candidate, or a placement override is malformed/unauthorized | Configure an agent on a qualifying node, or fix/authorize the override |
 | `capacity` | Node slots full, or an `exclusive-existing` lease already holds the workspace | Wait for capacity, or let the existing lease settle |
-| `protocol-version` | Node registered a protocol version without orchestration | Upgrade that Barista to version 4 |
+| `protocol-version` | Node registered a protocol version without the required capability | Upgrade to version 5 for instance placement; versions 1–4 remain compatibility-only |
+| `resident-capacity` | All qualifying nodes hold their configured resident slots | Release/drain an instance or raise `BARISTA_INSTANCE_CAPACITY`; this is separate from run concurrency |
+| `instance` | An exact pin is missing, foreign, draining, unallocated, or incompatible | Inspect the named thread instance and allocation; an exact pin never falls back |
 | `assignment` | A persisted assignment cannot be interpreted | Operator attention required; inspect the task |
 
 Placement overrides (from task pins or policy) only narrow candidates; they never bypass a hard requirement.
@@ -347,7 +349,9 @@ Approvals an orchestrator resolves are labelled "Resolved by orchestrator (<cred
 ## Monitoring and diagnostics
 
 - `GET /api/health` — liveness plus the number of connected control agents.
-- `GET /api/snapshot` — full published state. Fields worth watching: `nodes[].status`/`activeRuns`/`lastSeen`/`harnesses[].transports`; `runs[].status` and `runs[].transportSelection`; `tasks[].placement.unsatisfied`; `approvals[]` pending count; `workspaceLeases[]` non-settled statuses; `orchestratorInboxes[]` `consecutiveFailures`.
+- `GET /api/snapshot` — full published state. Watch `nodes[].activeRuns`/`concurrency` separately from `activeInstances`/`instanceCapacity`; correlate work only by exact `runs[].instanceId` plus `allocationId`; inspect `instances`, `allocations`, `tasks[].placement.unsatisfied`, approvals, leases, and inbox failures.
+- `GET /api/threads/:threadId/instances?includeTerminal=true` and `GET /api/threads/:threadId/instances/:instanceId` — thread-scoped lifecycle and retained allocation history. Create with `POST /api/threads/:threadId/instances`; renew and release through the corresponding instance routes using stable idempotency keys. Use `mode: "drain"` to wait for active work and `mode: "cancel"` to terminate it.
+- Instance leases expire at the closed `expiresAt` boundary. Renew before that timestamp with one stable key; the Hub serializes renewal and expiry, so the first committed state wins and an exact renewal replay cannot extend the lease twice. The 15-second maintenance pass begins drain for an idle expired resident and keeps its slot occupied until exact release acknowledgement.
 - `GET /api/runs/:id/events?after=N` — retained harness events plus the `runActivity` projection for a run.
 - Barista logs (stdout/stderr, collected by the service manager): discovery, connection state, enrolled roots, `ACP adapter for <id> passed its startup probe` / `is disabled: ...`, and `no ACP adapter loaded for <id>: <reason>`.
 - `barista doctor --json` — machine-readable node readiness.
@@ -357,15 +361,15 @@ The hub pings every control socket every 15 seconds and terminates a socket that
 
 ## Upgrades and rollback
 
-Ship the hub and Barista from the same release. The hub acknowledges an admitted registration with a `ping`, and Barista waits up to ten seconds for that acknowledgement before replaying its outbox; a current Barista connected to a hub that predates the acknowledgement never completes registration and stays in its reconnect loop. Upgrade the hub first:
+Ship the hub and Barista from the same release and upgrade the hub first. A version-4 Barista may reconnect and settle compatible legacy work, but it is excluded from new instances until upgraded to version 5:
 
 1. Stop the Baristas, or leave them running and accept their reconnect loop until restarted.
-2. Upgrade and restart the hub; it reloads state from the JSON file and marks disconnected nodes offline.
+2. Upgrade and restart the hub; it reloads authoritative SQLite state and marks disconnected nodes offline.
 3. Upgrade and restart each Barista; each re-registers (the hub refuses a second live connection for a node ID with close code 1008, so stop the old process first) and passes its reconnect barrier.
 
-Older Baristas registering protocol versions 1–3 keep their legacy direct runs but never receive task attempts (a `protocol-version` diagnostic excludes them). Version-1 nodes additionally have queued-run redispatch disabled.
+Older Baristas registering protocol versions 1–4 keep only their advertised compatibility behavior and never receive a new instance provision or instance dispatch. Version-1 nodes additionally have queued-run redispatch disabled.
 
-Rollback caveats: persisted state written by a newer hub may contain values an older hub cannot interpret — loading fails rather than guessing — so keep a backup of the state file (and artifacts directory) from before the upgrade and restore it when rolling the hub back. Roll the Baristas back together with the hub, for the registration acknowledgement reason above. A Barista rolled back to an older protocol version keeps legacy direct runs only; its running task attempts are reconciled as lost at its next reconnect barrier.
+Rollback caveats: persisted state written by a newer hub may contain values an older hub cannot interpret—loading fails rather than guessing. Back up the SQLite database (including WAL/SHM while live, preferably with SQLite's backup mechanism), artifact tree, and prepared previews together before upgrade. `COFFEE_SHOP_DATA` is a one-time legacy JSON import source only: once the database contains state, SQLite is authoritative and later JSON changes are ignored. Rolling back across the v5 schema boundary requires restoring that pre-upgrade backup; an older hub must not be pointed at v5 state and expected to discard it.
 
 Adapter upgrades ship as a new manifest pin in a new Barista build: build the new adapter artifact, `barista setup plan` / `setup apply --manual-artifact` / `--manual-checksum` (or update the `--acp-adapter` digest), and restart Barista. Barista always refuses an adapter whose pinned version does not match its manifest.
 
@@ -379,7 +383,8 @@ Adapter upgrades ship as a new manifest pin in a new Barista build: build the ne
 | Approval stuck pending | Operator has not answered, or delivery is blocked | Answer within the 9-minute lifetime. If delivery shows `not-applied`, the harness session is gone; handle the new permission request instead. |
 | Lease stuck `retained` | Dirty, diverged, or ambiguous worktree | Follow the recovery procedure above: merge/push to keep, or `git worktree remove --force` + `git branch -D` to discard, then `POST /api/workspace-leases/:id/cleanup`. |
 | Orchestrator wake keeps failing | Continuation run failing repeatedly | Backoff (5 s → 10 min) caps pressure automatically; fix the underlying placement or harness failure and watch `consecutiveFailures` reset. |
-| Hub restarted | Process or host restart | State reloads from the JSON file, Baristas reconnect and replay their outboxes, offline nodes are marked, and scheduling resumes. Nothing to do. |
+| Hub restarted | Process or host restart | State reloads from SQLite, Baristas reconnect, replay outboxes, and reconcile exact resident inventories before scheduling resumes. |
+| Instance remains draining/failed | Release cleanup failed or no exact acknowledgement arrived | Keep it visible; do not edit SQLite or infer a free slot. Restore the Barista and retry the same release key/mode. Unknown remote residents are released, never adopted. |
 | Barista restarted | Process or node restart | It re-registers with a fresh inventory and capability report; running task attempts it no longer reports fail like lost attempts and retry. Cancelled runs stay cancelled because the hub, not Barista, is authoritative for run state. |
 
 ## Security invariants
@@ -398,4 +403,4 @@ These must remain true in any deployment; do not weaken them:
 
 ## Verifying a release
 
-Run `task ci` (format checks, TypeScript, Go, and system tests, typechecks, vet, and builds) before releasing. `task test` includes `task system:test`, which can also be run on its own: a deterministic multi-node end-to-end suite (`apps/control-agent/internal/systemtest`) that starts a real hub and real Barista processes, installs `fakeharness` as the pinned ACP adapters and native CLIs, and proves the orchestration workflow and its failure handling — parallel placement across two nodes and harnesses, dependency blocking, durable messages, approvals (accept, reject, expiry), cancellation, adapter crash, malformed frames, native fallback, partition and crash recovery, hub restart, session resume and replacement, workspace collision and dirty retention, cross-thread isolation, mixed protocol versions, and a credential canary. It needs Node.js with workspace dependencies (`task install`), Go, and Git, uses no provider account or network, and keeps a failing scenario's temporary directory (logged) for diagnosis. It does not exercise real adapter builds; verify those on each node with the startup probe and `barista doctor`.
+Run `task ci` (format checks, TypeScript, Go, and system tests, typechecks, vet, and builds) before releasing. `task test` includes `task system:test`, which can also be run on its own: a deterministic multi-node end-to-end suite (`apps/control-agent/internal/systemtest`) that starts a real hub and real Barista processes, installs `fakeharness` as the pinned ACP adapters and native CLIs, and proves the orchestration workflow and its failure handling — parallel placement across two nodes and harnesses, dependency blocking, durable messages, approvals (accept, reject, expiry), cancellation, adapter crash, malformed frames, native fallback, partition and crash recovery, hub restart, session resume and replacement, workspace collision and dirty retention, cross-thread isolation, mixed protocol versions, credential canaries, and the version-5 instance lifecycle (replay, exact pins, independent capacities, expiry, drain/cancel, reconnect replacement, migration, and v4 exclusion). `task system:test:instances` runs that focused instance slice. The suite needs Node.js with workspace dependencies (`task install`), Go, and Git, uses no provider account or network, and keeps a failing scenario's temporary directory (logged) for diagnosis. It does not exercise real adapter builds; verify those on each node with the startup probe and `barista doctor`.

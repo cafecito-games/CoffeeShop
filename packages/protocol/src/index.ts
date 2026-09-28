@@ -2996,7 +2996,8 @@ export const instanceControlMessageTypes = ["instance.ready", "instance.failed",
 export type InstanceHubMessage =
   | { type: "instance.provision"; instance: AgentInstance; allocation: InstanceAllocation }
   | ({ type: "instance.release"; mode: InstanceReleaseMode } & InstanceActor)
-  | { type: "dispatch"; instance: AgentInstance; allocation: InstanceAllocation; run: InstanceRun };
+  | { type: "dispatch"; instance: AgentInstance; allocation: InstanceAllocation; run: InstanceRun;
+      sessionBinding?: DispatchExecution["sessionBinding"] };
 export type InstanceControlMessage =
   | ({ type: "instance.ready" | "instance.released"; nodeId: string; at: string } & InstanceActor)
   | ({ type: "instance.failed"; nodeId: string; at: string; error: string } & InstanceActor)
@@ -3150,13 +3151,19 @@ export function validateInstanceRun(value: unknown): Validation<InstanceRun> {
     || !isOptional(value.transportSelection, (item) => validateRunTransportSelection(item).ok)) return reject("invalid instance run");
   return accept(value as unknown as InstanceRun);
 }
+function instanceDispatchSessionBinding(value: unknown): value is NonNullable<DispatchExecution["sessionBinding"]> {
+  return isRecord(value) && hasOnlyKeys(value, ["id", "providerSessionId", "resumePrompt"])
+    && isIdentifier(value.id) && isIdentifier(value.providerSessionId)
+    && !containsSecretLikeValue({ id: value.id, providerSessionId: value.providerSessionId })
+    && isOptional(value.resumePrompt, (prompt) => isBoundedString(prompt, sessionResumePromptMaximumBytes));
+}
 export function validateInstanceHubMessage(value: unknown, version: ControlProtocolVersion): Validation<InstanceHubMessage> {
   if (!supportsControlCapability(version, "instances") || !isRecord(value)) return reject("instances require protocol v5");
   if (value.type === "instance.release") {
     if (!hasOnlyKeys(value, ["type", "instanceId", "allocationId", "mode"]) || !instanceID(value.instanceId) || !instanceID(value.allocationId) || !isInstanceReleaseMode(value.mode)) return reject("invalid instance release");
     return accept(value as unknown as InstanceHubMessage);
   }
-  if ((value.type !== "instance.provision" && value.type !== "dispatch") || !hasOnlyKeys(value, value.type === "dispatch" ? ["type", "instance", "allocation", "run"] : ["type", "instance", "allocation"])) return reject("unknown instance message or field");
+  if ((value.type !== "instance.provision" && value.type !== "dispatch") || !hasOnlyKeys(value, value.type === "dispatch" ? ["type", "instance", "allocation", "run", "sessionBinding"] : ["type", "instance", "allocation"])) return reject("unknown instance message or field");
   const instance = validateAgentInstance(value.instance);
   const allocation = validateInstanceAllocation(value.allocation);
   if (!instance.ok || !allocation.ok || instance.value.id !== allocation.value.instanceId
@@ -3169,7 +3176,9 @@ export function validateInstanceHubMessage(value: unknown, version: ControlProto
     if (!run.ok || run.value.instanceId !== instance.value.id || run.value.allocationId !== allocation.value.id
       || run.value.threadId !== instance.value.threadId || run.value.status !== "queued"
       || !["ready", "busy", "idle"].includes(instance.value.status) || allocation.value.status !== "active"
-      || !(["nodeId", "harnessId", "model", "transport", "workspace"] as const).every((key) => run.value[key] === allocation.value[key])) return reject("invalid dispatch identity, state, or resolved placement");
+      || !(["nodeId", "harnessId", "model", "transport", "workspace"] as const).every((key) => run.value[key] === allocation.value[key])
+      || (run.value.sessionBindingId === undefined) !== (value.sessionBinding === undefined)
+      || (value.sessionBinding !== undefined && (run.value.transport !== "acp-v1" || !instanceDispatchSessionBinding(value.sessionBinding) || value.sessionBinding.id !== run.value.sessionBindingId))) return reject("invalid dispatch identity, state, resolved placement, or session binding");
   }
   return accept(value as unknown as InstanceHubMessage);
 }

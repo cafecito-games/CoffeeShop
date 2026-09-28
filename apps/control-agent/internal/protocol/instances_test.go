@@ -24,7 +24,7 @@ func instanceFixtureProducer() map[string]any {
 		Creator:      InstanceCreator{Kind: "operator", OperatorID: "operator-one"},
 		Purpose:      &InstancePurpose{Name: instancePointer("Issue 73 Developer"), Instructions: instancePointer("Implement the shared contracts.")},
 		Delegation:   InstanceDelegationPolicy{CanDelegate: false},
-		Requirements: InstanceExecutionRequirements{HarnessIDs: instancePointer([]string{"claude-cli"}), OperatingSystems: instancePointer([]string{"darwin"})},
+		Requirements: InstanceExecutionRequirements{TemplateID: instancePointer("template-one"), HarnessIDs: instancePointer([]string{"claude-cli"}), OperatingSystems: instancePointer([]string{"darwin"})},
 		Lease:        InstanceLease{IdleTimeoutSeconds: DefaultInstanceIdleTimeoutSeconds, ExpiresAt: "2026-09-24T12:30:00Z"},
 		Status:       "provisioning", CreatedAt: instanceAt, UpdatedAt: instanceAt,
 	}
@@ -39,8 +39,17 @@ func instanceFixtureProducer() map[string]any {
 		ID: "run-one", ThreadID: i.ThreadID, InstanceID: i.ID, AllocationID: a.ID, NodeID: a.NodeID, HarnessID: a.HarnessID, Model: a.Model,
 		Workspace: a.Workspace, Transport: a.Transport, Prompt: "Implement the shared contracts.", Status: "queued", Output: "", Depth: 0, CreatedAt: instanceAt,
 	}}
+	sessionBindingID := "session-one"
+	resumeRun := *dispatch.Run
+	resumeAllocation := *dispatch.Allocation
+	resumeRun.Transport = "acp-v1"
+	resumeAllocation.Transport = "acp-v1"
+	resumeRun.SessionBindingID = &sessionBindingID
+	dispatchResume := InstanceHubMessage{Type: "dispatch", Instance: dispatch.Instance, Allocation: &resumeAllocation, Run: &resumeRun, SessionBinding: &DispatchSessionBinding{
+		ID: sessionBindingID, ProviderSessionID: "provider-session-one", ResumePrompt: "Continue the shared contracts.",
+	}}
 	result := map[string]any{
-		"provision": provision, "dispatch": dispatch,
+		"provision": provision, "dispatch": dispatch, "dispatch-resume": dispatchResume,
 		"release":         InstanceHubMessage{Type: "instance.release", InstanceID: i.ID, AllocationID: a.ID, Mode: "drain"},
 		"heartbeat":       InstanceControlMessage{Type: "heartbeat", NodeID: a.NodeID, ActiveRuns: instancePointer(0), ActiveInstances: instancePointer(1), ActiveInstanceIDs: instancePointer([]string{i.ID}), At: instanceAt},
 		"heartbeat-empty": InstanceControlMessage{Type: "heartbeat", NodeID: a.NodeID, ActiveRuns: instancePointer(0), ActiveInstances: instancePointer(0), ActiveInstanceIDs: instancePointer([]string{}), At: instanceAt},
@@ -87,7 +96,7 @@ func TestInstanceProducerFixtures(t *testing.T) {
 			require.Equal(t, string(data), string(encoded), "fixture must be real producer output byte-for-byte")
 			var decoded any
 			switch name {
-			case "provision", "dispatch", "release":
+			case "provision", "dispatch", "dispatch-resume", "release":
 				decoded, err = DecodeInstanceHubMessage(data, "5")
 				_, legacyError := DecodeInbound(data)
 				require.Error(t, legacyError, "the legacy decoder must not erase instance identity")

@@ -6,16 +6,19 @@ package systemtest
 // packages/protocol/src/index.ts; the hub is the only producer.
 
 type snapshot struct {
-	Agents              []agent             `json:"agents"`
-	Nodes               []computeNode       `json:"nodes"`
-	Runs                []run               `json:"runs"`
-	Threads             []thread            `json:"threads"`
-	Tasks               []task              `json:"tasks"`
-	TaskMessages        []taskMessage       `json:"taskMessages"`
-	Artifacts           []artifact          `json:"artifacts"`
-	SessionBindings     []sessionBinding    `json:"sessionBindings"`
-	OrchestratorInboxes []orchestratorInbox `json:"orchestratorInboxes"`
-	Approvals           []approval          `json:"approvals"`
+	Agents              []agent              `json:"agents"`
+	Instances           []agentInstance      `json:"instances"`
+	Allocations         []instanceAllocation `json:"allocations"`
+	Templates           []agentTemplate      `json:"templates"`
+	Nodes               []computeNode        `json:"nodes"`
+	Runs                []run                `json:"runs"`
+	Threads             []thread             `json:"threads"`
+	Tasks               []task               `json:"tasks"`
+	TaskMessages        []taskMessage        `json:"taskMessages"`
+	Artifacts           []artifact           `json:"artifacts"`
+	SessionBindings     []sessionBinding     `json:"sessionBindings"`
+	OrchestratorInboxes []orchestratorInbox  `json:"orchestratorInboxes"`
+	Approvals           []approval           `json:"approvals"`
 	// Orchestrator credentials as published: the secret hash is hub-only and never appears here.
 	OrchestratorClients     []orchestratorClient     `json:"orchestratorClients"`
 	OrchestratorAttachments []orchestratorAttachment `json:"orchestratorAttachments"`
@@ -31,10 +34,67 @@ type agent struct {
 }
 
 type computeNode struct {
-	ID        string           `json:"id"`
-	Status    string           `json:"status"`
-	Version   string           `json:"version"`
-	Harnesses []map[string]any `json:"harnesses"`
+	ID               string           `json:"id"`
+	Status           string           `json:"status"`
+	Version          string           `json:"version"`
+	Platform         string           `json:"platform"`
+	ActiveRuns       int              `json:"activeRuns"`
+	Concurrency      int              `json:"concurrency"`
+	InstanceCapacity *int             `json:"instanceCapacity"`
+	ActiveInstances  *int             `json:"activeInstances"`
+	Harnesses        []map[string]any `json:"harnesses"`
+}
+
+type instancePurpose struct {
+	Name         string `json:"name"`
+	Title        string `json:"title"`
+	Summary      string `json:"summary"`
+	Instructions string `json:"instructions"`
+}
+
+type instanceLease struct {
+	IdleTimeoutSeconds int    `json:"idleTimeoutSeconds"`
+	ExpiresAt          string `json:"expiresAt"`
+}
+
+type agentInstance struct {
+	ID           string          `json:"id"`
+	ThreadID     string          `json:"threadId"`
+	Creator      map[string]any  `json:"creator"`
+	Purpose      instancePurpose `json:"purpose"`
+	Delegation   map[string]bool `json:"delegation"`
+	Requirements map[string]any  `json:"requirements"`
+	Lease        instanceLease   `json:"lease"`
+	Status       string          `json:"status"`
+	CreatedAt    string          `json:"createdAt"`
+	UpdatedAt    string          `json:"updatedAt"`
+}
+
+type instanceAllocation struct {
+	ID         string        `json:"id"`
+	InstanceID string        `json:"instanceId"`
+	NodeID     string        `json:"nodeId"`
+	HarnessID  string        `json:"harnessId"`
+	Model      string        `json:"model"`
+	Transport  string        `json:"transport"`
+	Workspace  string        `json:"workspace"`
+	Lease      instanceLease `json:"lease"`
+	Status     string        `json:"status"`
+	CreatedAt  string        `json:"createdAt"`
+	UpdatedAt  string        `json:"updatedAt"`
+}
+
+type agentTemplate struct {
+	ID            string          `json:"id"`
+	Name          string          `json:"name"`
+	Purpose       instancePurpose `json:"purpose"`
+	Instructions  string          `json:"instructions"`
+	Skills        []string        `json:"skills"`
+	Tags          []string        `json:"tags"`
+	Requirements  map[string]any  `json:"requirements"`
+	Preferences   map[string]any  `json:"preferences"`
+	Delegation    map[string]bool `json:"delegation"`
+	LegacyAgentID string          `json:"legacyAgentId"`
 }
 
 type transportSelection struct {
@@ -48,6 +108,8 @@ type run struct {
 	ID                 string              `json:"id"`
 	ThreadID           string              `json:"threadId"`
 	AgentID            string              `json:"agentId"`
+	InstanceID         string              `json:"instanceId"`
+	AllocationID       string              `json:"allocationId"`
 	NodeID             string              `json:"nodeId"`
 	HarnessID          string              `json:"harnessId"`
 	Workspace          string              `json:"workspace"`
@@ -67,10 +129,11 @@ type run struct {
 }
 
 type thread struct {
-	ID           string `json:"id"`
-	OwnerAgentID string `json:"ownerAgentId"`
-	Status       string `json:"status"`
-	Summary      string `json:"summary"`
+	ID           string         `json:"id"`
+	OwnerAgentID string         `json:"ownerAgentId"`
+	Orchestrator map[string]any `json:"orchestrator"`
+	Status       string         `json:"status"`
+	Summary      string         `json:"summary"`
 }
 
 type unsatisfiedRequirement struct {
@@ -78,6 +141,7 @@ type unsatisfiedRequirement struct {
 	Requirement string `json:"requirement"`
 	NodeID      string `json:"nodeId"`
 	AgentID     string `json:"agentId"`
+	InstanceID  string `json:"instanceId"`
 	Detail      string `json:"detail"`
 }
 
@@ -91,20 +155,41 @@ type taskDependency struct {
 	Policy string `json:"policy"`
 }
 
+type placementOverride struct {
+	InstanceID   string `json:"instanceId"`
+	AgentID      string `json:"agentId"`
+	NodeID       string `json:"nodeId"`
+	AuthorizedBy string `json:"authorizedBy"`
+}
+
+type taskAssignment struct {
+	RunID        string `json:"runId"`
+	AgentID      string `json:"agentId"`
+	InstanceID   string `json:"instanceId"`
+	AllocationID string `json:"allocationId"`
+	NodeID       string `json:"nodeId"`
+	HarnessID    string `json:"harnessId"`
+	Transport    string `json:"transport"`
+	Model        string `json:"model"`
+	AssignedAt   string `json:"assignedAt"`
+}
+
 type task struct {
-	ID            string               `json:"id"`
-	ThreadID      string               `json:"threadId"`
-	Title         string               `json:"title"`
-	Status        string               `json:"status"`
-	Dependencies  []taskDependency     `json:"dependencies"`
-	Assignment    map[string]any       `json:"assignment"`
-	Placement     *placementDiagnostic `json:"placement"`
-	AttemptRunIDs []string             `json:"attemptRunIds"`
-	Result        string               `json:"result"`
-	Error         string               `json:"error"`
-	Progress      map[string]any       `json:"progress"`
-	CreatedAt     string               `json:"createdAt"`
-	FinishedAt    string               `json:"finishedAt"`
+	ID                  string               `json:"id"`
+	ThreadID            string               `json:"threadId"`
+	Title               string               `json:"title"`
+	Status              string               `json:"status"`
+	Dependencies        []taskDependency     `json:"dependencies"`
+	PlacementOverride   *placementOverride   `json:"placementOverride"`
+	PlacementInstanceID string               `json:"placementInstanceId"`
+	Assignment          *taskAssignment      `json:"assignment"`
+	Placement           *placementDiagnostic `json:"placement"`
+	AttemptRunIDs       []string             `json:"attemptRunIds"`
+	Result              string               `json:"result"`
+	Error               string               `json:"error"`
+	Progress            map[string]any       `json:"progress"`
+	CreatedAt           string               `json:"createdAt"`
+	FinishedAt          string               `json:"finishedAt"`
 }
 
 type participant struct {
@@ -113,32 +198,43 @@ type participant struct {
 }
 
 type taskMessage struct {
-	ID                 string      `json:"id"`
-	ThreadID           string      `json:"threadId"`
-	Sender             participant `json:"sender"`
-	Recipient          participant `json:"recipient"`
-	Sequence           int         `json:"sequence"`
-	Kind               string      `json:"kind"`
-	Body               string      `json:"body"`
-	CorrelationID      string      `json:"correlationId"`
-	InReplyToMessageID string      `json:"inReplyToMessageId"`
-	IdempotencyKey     string      `json:"idempotencyKey"`
+	ID                 string         `json:"id"`
+	ThreadID           string         `json:"threadId"`
+	Sender             participant    `json:"sender"`
+	Recipient          participant    `json:"recipient"`
+	Sequence           int            `json:"sequence"`
+	Kind               string         `json:"kind"`
+	Body               string         `json:"body"`
+	CorrelationID      string         `json:"correlationId"`
+	InReplyToMessageID string         `json:"inReplyToMessageId"`
+	IdempotencyKey     string         `json:"idempotencyKey"`
+	Actor              *instanceActor `json:"actor"`
+}
+
+type instanceActor struct {
+	InstanceID   string `json:"instanceId"`
+	AllocationID string `json:"allocationId"`
 }
 
 type artifact struct {
-	ID       string `json:"id"`
-	ThreadID string `json:"threadId"`
-	RunID    string `json:"runId"`
-	Title    string `json:"title"`
-	Size     int    `json:"size"`
-	SHA256   string `json:"sha256"`
-	Uploaded bool   `json:"uploaded"`
+	ID           string `json:"id"`
+	ThreadID     string `json:"threadId"`
+	RunID        string `json:"runId"`
+	AgentID      string `json:"agentId"`
+	InstanceID   string `json:"instanceId"`
+	AllocationID string `json:"allocationId"`
+	Title        string `json:"title"`
+	Size         int    `json:"size"`
+	SHA256       string `json:"sha256"`
+	Uploaded     bool   `json:"uploaded"`
 }
 
 type sessionBinding struct {
 	ID                  string `json:"id"`
 	ThreadID            string `json:"threadId"`
 	AgentID             string `json:"agentId"`
+	InstanceID          string `json:"instanceId"`
+	AllocationID        string `json:"allocationId"`
 	NodeID              string `json:"nodeId"`
 	ProviderSessionID   string `json:"providerSessionId"`
 	Status              string `json:"status"`
@@ -193,6 +289,8 @@ type approval struct {
 	TaskID            string            `json:"taskId"`
 	RunID             string            `json:"runId"`
 	NodeID            string            `json:"nodeId"`
+	InstanceID        string            `json:"instanceId"`
+	AllocationID      string            `json:"allocationId"`
 	Status            string            `json:"status"`
 	ResolvedBy        *approvalResolver `json:"resolvedBy"`
 	SelectedOptionID  string            `json:"selectedOptionId"`
@@ -235,10 +333,13 @@ type workspaceLease struct {
 }
 
 type timelineEvent struct {
-	Title    string `json:"title"`
-	Detail   string `json:"detail"`
-	ThreadID string `json:"threadId"`
-	RunID    string `json:"runId"`
+	Title        string `json:"title"`
+	Detail       string `json:"detail"`
+	ThreadID     string `json:"threadId"`
+	RunID        string `json:"runId"`
+	AgentID      string `json:"agentId"`
+	InstanceID   string `json:"instanceId"`
+	AllocationID string `json:"allocationId"`
 }
 
 func (current snapshot) task(id string) (task, bool) {

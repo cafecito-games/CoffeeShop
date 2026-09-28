@@ -48,6 +48,7 @@ tasks:
     desc: Run every test suite
     cmds:
       - pnpm -r test
+      - task: web:snapshot-fixtures:check
       - task: control-agent:test
       - task: capability-pack:test
       - task: system:test
@@ -58,6 +59,13 @@ tasks:
     dir: apps/control-agent
     cmds:
       - go test -tags system -count=1 -timeout 10m ./internal/systemtest/...
+
+  system:test:instances:
+    desc: Run the focused real-Hub/latest-Barista ephemeral-instance lifecycle proof
+    deps: [protocol:build]
+    dir: apps/control-agent
+    cmds:
+      - go test -tags system -count=1 -timeout 5m -run '^Test(Instance|EphemeralInstance|LegacyInstanceMigration|InvalidCurrentInstanceStateFailsBeforeListen$)' ./internal/systemtest/...
 
   capability-pack:build:
     desc: Build the deterministic Coffee Shop capability pack archive
@@ -135,6 +143,13 @@ tasks:
     desc: Run frontend tests
     cmds:
       - pnpm --filter @coffee-shop/web test
+
+  web:snapshot-fixtures:check:
+    desc: Regenerate the Hub-produced current/legacy PWA snapshots and reject stale committed bytes
+    deps: [protocol:build]
+    cmds:
+      - pnpm --filter @coffee-shop/hub exec tsx ../../scripts/generate-web-snapshot-fixtures.mts
+      - git diff --exit-code -- apps/web/src/test/fixtures/hubSnapshot.json apps/web/src/test/fixtures/legacyHubSnapshot.json
 
   frontend:typecheck:
     desc: Type-check the frontend

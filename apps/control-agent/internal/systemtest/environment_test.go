@@ -153,6 +153,8 @@ type environment struct {
 
 type environmentOptions struct {
 	profiles []map[string]any
+	// legacyStatePath is copied to COFFEE_SHOP_DATA before the real Hub first starts.
+	legacyStatePath string
 	// clockOffset loads the hub's test clock so a scenario can move hub time forward.
 	clockOffset bool
 }
@@ -170,6 +172,19 @@ func newEnvironment(t *testing.T, options environmentOptions) *environment {
 	environment := &environment{t: t, root: root, records: filepath.Join(root, "records"), gates: filepath.Join(root, "gates"), nodes: map[string]*baristaNode{}, profiles: options.profiles}
 	for _, directory := range []string{environment.records, environment.gates} {
 		if err := os.MkdirAll(directory, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if options.legacyStatePath != "" {
+		legacy, err := os.ReadFile(options.legacyStatePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		legacyPath := filepath.Join(environment.root, "hub", "state.json")
+		if err := os.MkdirAll(filepath.Dir(legacyPath), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(legacyPath, legacy, 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -691,11 +706,12 @@ type nodeOptions struct {
 	name  string
 	codex bool
 	// claudeAuthMode, when set, installs the Claude ACP adapter under that auth mode.
-	claudeAuthMode string
-	labels         []string
-	nativeFallback []string
-	concurrency    int
-	projects       []string
+	claudeAuthMode   string
+	labels           []string
+	nativeFallback   []string
+	concurrency      int
+	instanceCapacity *int
+	projects         []string
 }
 
 // baristaNode is one real Barista process with its own workspace root, data root, and provider
@@ -759,10 +775,15 @@ func (node *baristaNode) start() {
 	t := node.environment.t
 	t.Helper()
 	options := node.options
+	instanceCapacity := options.concurrency
+	if options.instanceCapacity != nil {
+		instanceCapacity = *options.instanceCapacity
+	}
 	arguments := []string{
 		"--control-endpoint", "http://127.0.0.1:" + strconv.Itoa(node.proxy.port()),
 		"--id", options.id, "--name", options.name, "--kind", "local",
 		"--workspace-root", node.root, "--concurrency", strconv.Itoa(options.concurrency),
+		"--instance-capacity", strconv.Itoa(instanceCapacity),
 		"--data-root", node.dataRoot,
 	}
 	if options.codex {

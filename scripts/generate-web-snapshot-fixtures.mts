@@ -1,11 +1,11 @@
 /*
  * Regenerates the hub-snapshot fixtures the PWA tests load.
  *
- *   pnpm exec tsx scripts/generate-web-snapshot-fixtures.mts
+ *   pnpm --filter @coffee-shop/hub exec tsx ../../scripts/generate-web-snapshot-fixtures.mts
  *
- * The current fixture is whatever `Store.snapshot()` (apps/hub/src/store.ts) publishes for a state
- * built with the hub's own orchestration functions, so the PWA is tested against bytes the hub
- * actually emits. The legacy fixture is the same snapshot reduced to the fields the protocol
+ * The current fixture is whatever `Store.snapshot()` publishes from a real SQLite-backed Store
+ * after the hub's own orchestration services build active, released, and lost instance history, so
+ * the PWA is tested against bytes the hub actually emits. The legacy fixture is the same snapshot reduced to the fields the protocol
  * declared at commit 7334091 — the last commit before external orchestrators — which is what a hub
  * of that vintage publishes to a newer PWA.
  */
@@ -14,22 +14,54 @@ import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { Agent, ComputeNode, Run, Snapshot, Thread } from "../packages/protocol/src/index.js";
+import type { Agent, AgentTemplate, ComputeNode, Run, Snapshot, Thread } from "../packages/protocol/src/index.js";
 import { openApproval, resolveApprovalInState } from "../apps/hub/src/approvals.js";
 import { attachThreadInState, createExternalThreadInState, postOperatorMessageInState } from "../apps/hub/src/externalOrchestrators.js";
-import { mintOrchestratorClient } from "../apps/hub/src/orchestratorClients.js";
-import { Store } from "../apps/hub/src/store.js";
+import { acceptInstanceWorkInState, applyInstanceLifecycle, applyNodeHeartbeatInState, flushPendingInstanceDeliveries, receiveInstanceLifecycleReport, reconcileNodeInstancesInState, reserveInstanceAllocation } from "../apps/hub/src/instances.js";
+import { applyRunLifecycle } from "../apps/hub/src/lifecycle.js";
+import { externalSource } from "../apps/hub/src/mailbox.js";
+import { Store, type StoredOrchestratorClient } from "../apps/hub/src/store.js";
+import { assignTaskAttempt, submitTaskBatchForSource } from "../apps/hub/src/tasks.js";
 import { newThread } from "../apps/hub/src/threads.js";
 
 const legacyProtocolCommit = "7334091";
 const repositoryRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const fixtureDirectory = join(repositoryRoot, "apps/web/src/test/fixtures");
 
+// Hub identities intentionally include wall time and entropy in production. Pin both inputs only in
+// this offline generator so a checked-in producer fixture has a stable byte-for-byte regeneration.
+const fixtureEpoch = Date.parse("2026-09-28T12:00:00.000Z");
+let fixtureIdentity = 0;
+const RealDate = Date;
+class ProducerFixtureDate extends RealDate {
+  constructor(value?: string | number) {
+    if (arguments.length === 0) super(fixtureEpoch + fixtureIdentity);
+    else super(value as string);
+  }
+
+  static now() {
+    return fixtureEpoch + fixtureIdentity;
+  }
+}
+globalThis.Date = ProducerFixtureDate as DateConstructor;
+Math.random = () => {
+  fixtureIdentity += 1;
+  return fixtureIdentity / 1_000_000;
+};
+
 const node: ComputeNode = {
   id: "node-workshop", name: "Workshop", kind: "home-server", platform: "darwin · arm64", status: "online",
-  lastSeen: "2026-09-22T12:00:00.000Z", activeRuns: 1, concurrency: 2, workspaceRoots: ["/srv/workspaces"],
-  harnesses: [{ id: "claude-cli", label: "Claude", description: "Claude Code", available: true, authMode: "local-subscription", models: ["sonnet"] }],
+  lastSeen: "2026-09-22T12:00:00.000Z", activeRuns: 1, concurrency: 2, instanceCapacity: 2, activeInstances: 0,
+  workspaceRoots: ["/srv/workspaces"],
+  harnesses: [{ id: "claude-cli", label: "Claude", description: "Claude Code", available: true, authMode: "local-subscription", models: ["sonnet"], transports: ["native-cli", "acp-v1"] }],
   version: "0.1.0+fixture"
+};
+
+const template: AgentTemplate = {
+  id: "template-reviewer", name: "Reviewer", purpose: { title: "Reviewer", summary: "Reviews exact instance work" },
+  avatarShape: "bean", avatarColor: "sky", instructions: "Review carefully", skills: ["review"], tags: ["quality"],
+  requirements: { harnessIds: ["claude-cli"], models: ["sonnet"], transports: ["acp-v1"] },
+  delegation: { canDelegate: false }
 };
 
 const agent: Agent = {
@@ -56,40 +88,58 @@ function declaredKeys(name: string): Set<string> {
 function reduceToLegacyShape(snapshot: Snapshot): Record<string, unknown> {
   const snapshotKeys = declaredKeys("Snapshot");
   const threadKeys = declaredKeys("Thread");
+  const nodeKeys = declaredKeys("ComputeNode");
+  const harnessKeys = declaredKeys("HarnessProfile");
   const legacy = Object.fromEntries(Object.entries(snapshot).filter(([key]) => snapshotKeys.has(key)));
   legacy.threads = (snapshot.threads ?? [])
     // A hub of that vintage has no external threads: every thread it publishes has an owner agent.
     .filter((thread) => thread.ownerAgentId !== undefined)
     .map((thread) => Object.fromEntries(Object.entries(thread).filter(([key]) => threadKeys.has(key))));
+  legacy.nodes = snapshot.nodes.map((node) => {
+    const reduced = Object.fromEntries(Object.entries(node).filter(([key]) => nodeKeys.has(key)));
+    reduced.harnesses = node.harnesses.map((harness) => Object.fromEntries(Object.entries(harness).filter(([key]) => harnessKeys.has(key))));
+    return reduced;
+  });
   return legacy;
 }
 
 const directory = await mkdtemp(join(tmpdir(), "coffee-shop-fixture-"));
-const store = new Store(join(directory, "state.json"));
+const store = new Store({
+  databasePath: join(directory, "coffee-shop.sqlite"),
+  legacyJsonPath: join(directory, "state.json")
+});
 await store.load();
+let externalThreadId = "";
 
 await store.transact((state) => {
   state.agents = [agent];
   state.nodes = [node];
   state.events = [];
   state.messages = [];
+  state.templates = [template];
 
   const agentThread: Thread = newThread(agent.id, "Ship the login path", "user", "2026-09-22T12:00:00.000Z");
   (state.threads ??= []).push(agentThread);
   state.runs = [{ ...run, threadId: agentThread.id }];
 
-  const orchestrating = mintOrchestratorClient(state, { name: "Christian's laptop", scopes: ["orchestrate", "resolve-approvals"] }, "2026-09-22T12:01:00.000Z");
-  const retired = mintOrchestratorClient(state, { name: "Retired laptop", scopes: ["orchestrate"] }, "2026-09-22T11:00:00.000Z");
-  const retiredRecord = state.orchestratorClients!.find((item) => item.id === retired.client.id)!;
-  retiredRecord.revokedAt = "2026-09-22T11:30:00.000Z";
+  const orchestrating: StoredOrchestratorClient = {
+    id: "orchestrator-client-fixture-active", name: "Christian's laptop", scopes: ["orchestrate", "resolve-approvals"],
+    secretHash: `sha256:${"1".repeat(64)}`, createdAt: "2026-09-22T12:01:00.000Z"
+  };
+  const retired: StoredOrchestratorClient = {
+    id: "orchestrator-client-fixture-retired", name: "Retired laptop", scopes: ["orchestrate"],
+    secretHash: `sha256:${"2".repeat(64)}`, createdAt: "2026-09-22T11:00:00.000Z", revokedAt: "2026-09-22T11:30:00.000Z"
+  };
+  state.orchestratorClients = [orchestrating, retired];
 
   const created = createExternalThreadInState(state, {
-    clientId: orchestrating.client.id,
+    clientId: orchestrating.id,
     connectionId: "connection-1",
     objective: "Rework the checkout funnel",
     title: "Checkout funnel"
   }, "2026-09-22T12:02:00.000Z");
-  attachThreadInState(state, { threadId: created.thread.id, clientId: orchestrating.client.id, connectionId: "connection-2" }, "2026-09-22T12:03:00.000Z");
+  externalThreadId = created.thread.id;
+  attachThreadInState(state, { threadId: created.thread.id, clientId: orchestrating.id, connectionId: "connection-2" }, "2026-09-22T12:03:00.000Z");
   postOperatorMessageInState(state, { threadId: created.thread.id, body: "Please prioritize the login path" }, "2026-09-22T12:04:00.000Z");
 
   const conflict = openApproval(state, state.runs[0], {
@@ -110,12 +160,99 @@ await store.transact((state) => {
     approvalId,
     { idempotencyKey: "fixture-resolution", expectedStatus: "pending", optionId: "opt-once" },
     "2026-09-22T12:06:00.000Z",
-    { kind: "orchestrator", clientId: orchestrating.client.id, attachmentId: created.attachment.id }
+    { kind: "orchestrator", clientId: orchestrating.id, attachmentId: created.attachment.id }
   );
   if (resolution.kind !== "resolved") throw new Error(`the fixture approval was not resolved: ${resolution.kind}`);
 });
 
-const snapshot = store.snapshot();
+const fixtureOperator = { kind: "operator" as const, operatorId: "fixture-generator" };
+const lifecycle = await applyInstanceLifecycle(store, fixtureOperator, {
+  operation: "create",
+  threadId: externalThreadId,
+  idempotency: { caller: fixtureOperator, key: "fixture-instance" },
+  purpose: { name: "Checkout Reviewer", title: "Reviewer", summary: "Reviews the checkout funnel", instructions: "private fixture instructions" },
+  requirements: { templateId: template.id, harnessIds: ["claude-cli"], models: ["sonnet"], transports: ["acp-v1"] },
+  idleTimeoutSeconds: 1800
+}, "2026-09-22T12:07:00.000Z");
+const reservation = await reserveInstanceAllocation(store, lifecycle.instance.id, {
+  nodeId: node.id, harnessId: "claude-cli", model: "sonnet", transport: "acp-v1", workspace: "/srv/workspaces"
+}, "2026-09-22T12:07:01.000Z");
+if (reservation.kind !== "reserved") throw new Error(`fixture instance was not reserved: ${reservation.kind}`);
+await flushPendingInstanceDeliveries(store, () => true);
+const ready = await receiveInstanceLifecycleReport(store, node.id, {
+  type: "instance.ready", instanceId: lifecycle.instance.id, allocationId: reservation.allocation.id,
+  at: "2026-09-22T12:07:02.000Z"
+}, "2026-09-22T12:07:02.000Z");
+if (ready.kind !== "accepted") throw new Error(`fixture instance was not ready: ${ready.reason}`);
+
+const taskBatch = await submitTaskBatchForSource(store, externalSource("connection-2", externalThreadId), {
+  idempotencyKey: "fixture-exact-task",
+  tasks: [{ key: "review", title: "Review checkout", instructions: "Review the exact active allocation", requirements: lifecycle.instance.requirements }]
+}, "2026-09-22T12:07:03.000Z", {
+  placementOverrides: { review: { instanceId: lifecycle.instance.id, authorizedBy: "operator" } }
+});
+await store.transact((state) => {
+  if (acceptInstanceWorkInState(state, lifecycle.instance.id, "2026-09-22T12:07:04.000Z") === undefined) {
+    throw new Error("the fixture instance refused exact work");
+  }
+  const exactRun: Run = {
+    id: "run-instance-review", instanceId: lifecycle.instance.id, allocationId: reservation.allocation.id,
+    nodeId: node.id, harnessId: reservation.allocation.harnessId, model: reservation.allocation.model,
+    transport: reservation.allocation.transport, workspace: reservation.allocation.workspace,
+    prompt: "Review the exact active allocation", status: "queued", output: "", depth: 0,
+    threadId: externalThreadId, taskId: taskBatch.tasks[0].id, createdAt: "2026-09-22T12:07:04.000Z"
+  };
+  assignTaskAttempt(state, taskBatch.tasks[0].id, exactRun, "2026-09-22T12:07:04.000Z");
+  applyRunLifecycle(state, { type: "run.started", runId: exactRun.id, at: "2026-09-22T12:07:05.000Z" });
+});
+
+async function fixtureAllocation(
+  key: string,
+  at: string
+) {
+  const created = await applyInstanceLifecycle(store, fixtureOperator, {
+    operation: "create", threadId: externalThreadId,
+    idempotency: { caller: fixtureOperator, key },
+    purpose: { name: `${key} fixture` }, requirements: { harnessIds: ["claude-cli"], models: ["sonnet"], transports: ["acp-v1"] },
+    idleTimeoutSeconds: 1800
+  }, at);
+  const allocated = await reserveInstanceAllocation(store, created.instance.id, {
+    nodeId: node.id, harnessId: "claude-cli", model: "sonnet", transport: "acp-v1", workspace: "/srv/workspaces"
+  }, new Date(Date.parse(at) + 1_000).toISOString());
+  if (allocated.kind !== "reserved") throw new Error(`${key} fixture was not reserved: ${allocated.kind}`);
+  await flushPendingInstanceDeliveries(store, () => true);
+  const outcome = await receiveInstanceLifecycleReport(store, node.id, {
+    type: "instance.ready", instanceId: created.instance.id, allocationId: allocated.allocation.id,
+    at: new Date(Date.parse(at) + 2_000).toISOString()
+  }, new Date(Date.parse(at) + 2_000).toISOString());
+  if (outcome.kind !== "accepted") throw new Error(`${key} fixture was not ready: ${outcome.reason}`);
+  return { lifecycle: created, allocation: allocated.allocation };
+}
+
+const releasedFixture = await fixtureAllocation("released-instance", "2026-09-22T12:08:00.000Z");
+await applyInstanceLifecycle(store, fixtureOperator, {
+  operation: "release", threadId: externalThreadId, instanceId: releasedFixture.lifecycle.instance.id,
+  idempotency: { caller: fixtureOperator, key: "released-instance-command" }, mode: "drain"
+}, "2026-09-22T12:08:03.000Z");
+await flushPendingInstanceDeliveries(store, () => true);
+const released = await receiveInstanceLifecycleReport(store, node.id, {
+  type: "instance.released", instanceId: releasedFixture.lifecycle.instance.id, allocationId: releasedFixture.allocation.id,
+  at: "2026-09-22T12:08:04.000Z"
+}, "2026-09-22T12:08:04.000Z");
+if (released.kind !== "accepted") throw new Error(`released fixture did not settle: ${released.reason}`);
+
+const lostFixture = await fixtureAllocation("lost-instance", "2026-09-22T12:09:00.000Z");
+await store.transact((state) => {
+  const reconciled = reconcileNodeInstancesInState(state, node.id, [lifecycle.instance.id], "2026-09-22T12:09:03.000Z");
+  const heartbeat = applyNodeHeartbeatInState(state, node.id, 1, 1, "2026-09-22T12:09:04.000Z");
+  return reconciled || heartbeat.capacityChanged;
+});
+
+const snapshot = store.snapshot("2026-09-28T12:10:00.000Z");
+if (snapshot.allocations?.find((item) => item.id === releasedFixture.allocation.id)?.status !== "released"
+  || snapshot.allocations?.find((item) => item.id === lostFixture.allocation.id)?.status !== "lost") {
+  throw new Error("the producer fixture did not retain released and lost allocation history");
+}
 await mkdir(fixtureDirectory, { recursive: true });
 await writeFile(join(fixtureDirectory, "hubSnapshot.json"), `${JSON.stringify(snapshot, undefined, 2)}\n`);
 await writeFile(join(fixtureDirectory, "legacyHubSnapshot.json"), `${JSON.stringify(reduceToLegacyShape(snapshot), undefined, 2)}\n`);

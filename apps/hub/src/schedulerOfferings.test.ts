@@ -397,6 +397,47 @@ test("an explicit instance pin is authorized and exact", () => {
   assert.deepEqual(kinds(ambiguous, "one"), ["agent"]);
 });
 
+test("a lifecycle-requested instance reserves an offering before its exact initial task runs", () => {
+  const requested: AgentInstance = {
+    id: "instance-requested", threadId: "thread-one", creator: { kind: "operator", operatorId: "operator" },
+    delegation: { canDelegate: false }, requirements: { harnessIds: ["claude-cli"], models: ["fable"] },
+    lease: { idleTimeoutSeconds: 1800, expiresAt: later(1800) }, status: "requested", createdAt: at, updatedAt: at
+  };
+  const current = fixture([node("node-alpha")], [task("initial", requested.requirements, {
+    placementOverride: { instanceId: requested.id, authorizedBy: "policy" }
+  })], { instances: [requested] });
+
+  const first = runSchedulingPass(current.state, context(current), at);
+  assert.equal(first.changed, true);
+  assert.equal(instances(current).length, 1, "the lifecycle identity is reused rather than duplicated");
+  assert.equal(instances(current)[0].status, "provisioning");
+  assert.equal(allocations(current).length, 1);
+  assert.equal(allocations(current)[0].instanceId, requested.id);
+  assert.equal(deliveries(current, "provision").length, 1);
+  assert.equal(current.state.runs.length, 0, "dispatch waits for the exact ready acknowledgement");
+  assert.equal(taskById(current, "initial").placementOverride?.instanceId, requested.id);
+
+  const second = runSchedulingPass(current.state, context(current), later(1));
+  assert.equal(second.changed, false);
+  assert.equal(allocations(current).length, 1, "a repeated pass cannot reserve twice");
+});
+
+test("a requested exact pin reports hard offering mismatch without agent fallback", () => {
+  const requested: AgentInstance = {
+    id: "instance-requested", threadId: "thread-one", creator: { kind: "operator", operatorId: "operator" },
+    delegation: { canDelegate: false }, requirements: { models: ["other-model"] },
+    lease: { idleTimeoutSeconds: 1800, expiresAt: later(1800) }, status: "requested", createdAt: at, updatedAt: at
+  };
+  const current = fixture([node("node-alpha")], [task("initial", requested.requirements, {
+    placementOverride: { instanceId: requested.id, authorizedBy: "policy" }
+  })], { instances: [requested] });
+
+  runSchedulingPass(current.state, context(current), at);
+  assert.equal(allocations(current).length, 0);
+  assert.equal(current.state.runs.length, 0);
+  assert.ok(kinds(current, "initial").includes("model"));
+});
+
 test("a failed or draining allocation releases the placement and the retry gets fresh identities", () => {
   const current = fixture([node("node-alpha", { instanceCapacity: 2 })], [task("one")]);
   runSchedulingPass(current.state, context(current), at);
@@ -464,6 +505,12 @@ test("a disconnected, unsynchronized, version-4, or stale node publishes no elig
     assert.equal(allocations(current).length, 0, testCase.label);
     assert.deepEqual(kinds(current, "one"), testCase.expected, testCase.label);
   }
+
+  const realV4Shape = fixture([node("node-alpha", { instanceCapacity: undefined, activeInstances: undefined })], [task("one")]);
+  realV4Shape.connections.set("node-alpha", { protocolVersion: "4", synced: true });
+  runSchedulingPass(realV4Shape.state, context(realV4Shape), at);
+  assert.equal(allocations(realV4Shape).length, 0);
+  assert.ok(kinds(realV4Shape, "one").includes("protocol-version"), "an exact v4 node remains visible as an explicit exclusion");
 
   const stale = fixture([node("node-alpha")], [task("one", { operatingSystems: ["darwin"] })]);
   stale.reports.set("node-alpha", report("node-alpha", [evidence("os", "darwin", { observedAt: "2026-09-20T12:00:00.000Z" })]));
@@ -547,8 +594,9 @@ test("diagnostics for an unplaceable task are deterministic, deduplicated, and c
 test("a task naming a template may be placed only through that template, and the template only narrows", () => {
   const template: AgentTemplate = {
     id: "template-reviewer", name: "Reviewer", skills: ["rust"],
+    purpose: { title: "Quality", summary: "Checks exact work" }, instructions: "Review carefully",
     requirements: { models: ["fable"], labels: ["gpu"] },
-    preferences: { nodeIds: ["node-beta"] }
+    preferences: { nodeIds: ["node-beta"] }, delegation: { canDelegate: true }
   };
   const merged = requirementsThroughTemplate({ models: ["fable", "sonnet"], minimumConcurrency: 1 }, template);
   assert.deepEqual(merged.models, ["fable"], "accepted sets intersect");
@@ -562,6 +610,8 @@ test("a task naming a template may be placed only through that template, and the
   assert.equal(allocations(placed).length, 1);
   assert.equal(instances(placed)[0].requirements.templateId, "template-reviewer");
   assert.deepEqual(instances(placed)[0].requirements.models, ["fable"]);
+  assert.deepEqual(instances(placed)[0].purpose, { title: "Quality", summary: "Checks exact work", instructions: "Review carefully" });
+  assert.deepEqual(instances(placed)[0].delegation, { canDelegate: true });
 
   // The template's own hard requirement is not negotiable.
   const unmet = fixture([node("node-alpha")], [task("one", { templateId: "template-reviewer" })], { templates: [template] });
@@ -763,6 +813,38 @@ test("a resident returns to idle when its attempt settles and carries the thread
   assert.equal(instances(current).length, 1, "the thread's next task reuses the resident rather than overbooking");
   assert.equal(current.state.runs.find((run) => run.taskId === "two")!.instanceId, instanceId);
   assert.equal(instances(current)[0].status, "busy");
+});
+
+test("a reused ACP resident dispatch carries the exact resumable session grant", () => {
+  const acp = { protocolVersion: 1 as const, loadSession: true, resumeSession: true,
+    prompt: { image: false, audio: false, embeddedContext: false }, mcp: { http: false, sse: false } };
+  const current = fixture([node("node-acp", { instanceCapacity: 1, harnesses: [{
+    id: "claude-cli", label: "Claude", description: "", available: true, authMode: "local-subscription",
+    models: ["fable"], transports: ["acp-v1"], acp
+  }] })], [task("one"), task("two")]);
+  runSchedulingPass(current.state, context(current), at);
+  const instanceId = instances(current)[0].id;
+  markReady(current, instanceId);
+  runSchedulingPass(current.state, context(current), later(20));
+  const first = current.state.runs[0];
+  first.status = "completed";
+  first.finishedAt = later(40);
+  taskById(current, "one").status = "completed";
+  current.state.sessionBindings = [{
+    id: "binding-one", threadId: "thread-one", instanceId, allocationId: first.allocationId,
+    nodeId: "node-acp", harnessId: "claude-cli", transport: "acp-v1", workspace: first.workspace,
+    providerSessionId: "provider-session-one", status: "idle", createdByRunId: first.id, lastRunId: first.id,
+    capabilities: acp, createdAt: later(21), updatedAt: later(40)
+  }];
+
+  runSchedulingPass(current.state, context(current), later(50));
+  const second = current.state.runs.find((run) => run.taskId === "two")!;
+  const delivery = deliveries(current, "dispatch").find((record) => record.message.type === "dispatch" && record.message.run.id === second.id)!;
+  assert.equal(second.sessionBindingId, "binding-one");
+  assert.deepEqual(delivery.message.type === "dispatch" ? delivery.message.sessionBinding : undefined, {
+    id: "binding-one", providerSessionId: "provider-session-one"
+  });
+  assert.equal(validateInstanceHubMessage(delivery.message, "5").ok, true);
 });
 
 test("an instance run reports its whole lifecycle and settles its task", () => {
