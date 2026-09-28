@@ -149,7 +149,7 @@ barista setup plan --data-root <path> --out plan.json
 barista setup apply --plan plan.json \
   --allowed-host github.com \
   --allowed-host release-assets.githubusercontent.com
-barista setup activate --component harness/codex-cli --version 0.147.0
+barista setup activate --kind harness --id codex-cli --version 0.147.0
 barista doctor            # activeVersion, rollbackVersion, provenance, authReadiness
 ```
 
@@ -168,10 +168,10 @@ barista setup apply --plan plan.json \
   --manual-checksum claude-cli=<sha256>
 
 # 3. Select it atomically. The previously active version is retained as the rollback target.
-barista setup activate --component harness/claude-cli --version 2.1.231
+barista setup activate --kind harness --id claude-cli --version 2.1.231
 ```
 
-Activation is verified-then-recorded, and the verification now includes the candidate's own claim about itself: **Barista refuses to activate a managed harness whose `--version` output does not report exactly the pinned version.** An output that names another version, carries no parsable version at all, looks secret-like, exits non-zero, cannot start, or exceeds the bounded timeout all refuse the selection — each with a distinct fixed reason naming only the component identity, because raw probe output may carry credentials and is never logged, reported, or surfaced. A refused activation leaves the activation ledger, the ownership ledger, and every installed file byte-identical, so the previously active version stays active and `barista setup rollback --component harness/claude-cli` still returns to the retained one.
+Activation is verified-then-recorded, and the verification now includes the candidate's own claim about itself: **Barista refuses to activate a managed harness whose `--version` output does not report exactly the pinned version.** An output that names another version, carries no parsable version at all, looks secret-like, exits non-zero, cannot start, or exceeds the bounded timeout all refuse the selection — each with a distinct fixed reason naming only the component identity, because raw probe output may carry credentials and is never logged, reported, or surfaced. A refused activation leaves the activation ledger, the ownership ledger, and every installed file byte-identical, so the previously active version stays active and `barista setup rollback --kind harness --id claude-cli` still returns to the retained one.
 
 Bumping a version is never an in-place mutation: the new version installs at its own path, and the old one stays until an explicit `barista setup prune`. Replaying a completed apply or re-activating the current, still-verifying version writes nothing. If the activated bytes later drift from the ownership ledger, the harness is not launched from them — it falls back to the external PATH installation and `barista doctor` reports the demotion (`provenance: external` with a note) rather than hiding it.
 
