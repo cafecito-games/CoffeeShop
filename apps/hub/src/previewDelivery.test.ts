@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { createServer, request, type Server } from "node:http";
 import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -185,7 +186,8 @@ test("checked-in container configuration declares both listeners without a real 
     "PREVIEW_SIGNING_KEYS", "PREVIEW_ACTIVE_SIGNING_KEY_ID", "PREVIEW_ACCESS_DEFAULT_TTL_SECONDS",
     "PREVIEW_ACCESS_MAX_TTL_SECONDS"
   ]) {
-    assert.match(environment, new RegExp(`^${variable}=`, "m"), variable);
+    assert.match(environment, new RegExp(`^# ${variable}=`, "m"), `${variable} is documented but opt-in`);
+    assert.doesNotMatch(environment, new RegExp(`^${variable}=`, "m"), `${variable} does not partially enable delivery`);
     assert.match(compose, new RegExp(`${variable}:`), variable);
   }
   assert.match(compose, /8788/);
@@ -466,6 +468,33 @@ test("the isolated app serves producer bytes under one capability with fixed res
     assert.deepEqual(script.body, await readFile(new URL("site/app.js", producerContentUrl)));
     assert.equal(script.headers["content-type"], "text/javascript; charset=utf-8");
 
+    const opaqueBytes = Buffer.from("verified opaque bytes", "utf8");
+    const opaquePath = "site/download.coffee";
+    const opaqueStorage = {
+      readPreparedFile: async () => ({
+        bytes: opaqueBytes,
+        file: { path: opaquePath, size: opaqueBytes.length, sha256: createHash("sha256").update(opaqueBytes).digest("hex") },
+        manifest: fixture.manifest
+      })
+    } as unknown as PreviewStorage;
+    const attachmentDelivery = await listen(createPreviewDeliveryApp({
+      ...fixture,
+      storage: opaqueStorage,
+      configuration,
+      now: () => currentTime
+    }));
+    try {
+      const attachmentPath = issuedUrl.pathname.replace(/site\/index\.html$/, opaquePath);
+      const attachment = await httpRequest(attachmentDelivery.port, "GET", attachmentPath, "preview.localhost:8788");
+      assert.equal(attachment.status, 200);
+      assert.deepEqual(attachment.body, opaqueBytes);
+      assert.equal(attachment.headers["content-type"], "application/octet-stream");
+      assert.equal(attachment.headers["content-disposition"], "attachment");
+      assert.equal(attachment.headers["x-content-type-options"], "nosniff");
+    } finally {
+      await close(attachmentDelivery.server);
+    }
+
     const head = await httpRequest(delivery.port, "HEAD", issuedUrl.pathname, "preview.localhost:8788");
     assert.equal(head.status, 200);
     assert.equal(head.headers["content-length"], "92");
@@ -538,6 +567,15 @@ test("host, token, state, path, and storage failures are generic and never consu
       headers: { "X-Forwarded-Host": "preview.localhost:8788" }
     });
     assert.equal(wrongHost.status, 421);
+
+    const deniedHead = await httpRequest(delivery.port, "HEAD",
+      `/_coffee-shop/preview/v1/${token.slice(0, -1)}A/site/index.html`, "preview.localhost:8788");
+    assert.equal(deniedHead.status, 404);
+    assert.equal(deniedHead.body.length, 0);
+    assert.equal(deniedHead.headers["content-length"], generic.headers["content-length"]);
+    assert.equal(deniedHead.headers["cache-control"], "private, no-store, max-age=0");
+    assert.equal(deniedHead.headers["set-cookie"], undefined);
+    assert.equal(deniedHead.headers["access-control-allow-origin"], undefined);
 
     currentTime = Date.parse("2026-09-27T12:05:00.000Z");
     assert.equal((await httpRequest(delivery.port, "GET", pathname, "preview.localhost:8788")).status, 404,

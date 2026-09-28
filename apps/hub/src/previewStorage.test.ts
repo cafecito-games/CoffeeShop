@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { chmod, lstat, mkdir, readFile, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, readFile, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
@@ -199,17 +199,23 @@ test("reads producer-derived prepared bytes only through the exact canonical man
   );
 });
 
-test("prepared reads deny changed bytes, links, permissions, and extra tree content", async () => {
-  for (const drift of ["bytes", "link", "permissions", "extra"] as const) {
+test("prepared reads deny changed bytes, symbolic or hard links, permissions, and extra tree content", async () => {
+  for (const drift of ["bytes", "symbolic-link", "hard-link", "permissions", "extra"] as const) {
     const directory = await mkdtemp(join(tmpdir(), `coffee-shop-preview-storage-${drift}-`));
     const storage = new PreviewStorage(directory);
     const manifest = await publishProducerFixture(storage);
     const contentRoot = join(directory, "prepared-previews", manifest.previewId, manifest.artifactSha256, "content");
     const target = join(contentRoot, "site", "index.html");
     if (drift === "bytes") await writeFile(target, "changed", { mode: 0o600 });
-    if (drift === "link") {
-      await import("node:fs/promises").then(({ unlink }) => unlink(target));
+    if (drift === "symbolic-link") {
+      await unlink(target);
       await symlink("app.js", target);
+    }
+    if (drift === "hard-link") {
+      const outside = join(directory, "outside-index.html");
+      await writeFile(outside, await readFile(new URL("site/index.html", producerContentUrl)), { mode: 0o600 });
+      await unlink(target);
+      await link(outside, target);
     }
     if (drift === "permissions") await chmod(target, 0o644);
     if (drift === "extra") await writeFile(join(contentRoot, "site", "extra.txt"), "extra", { mode: 0o600 });

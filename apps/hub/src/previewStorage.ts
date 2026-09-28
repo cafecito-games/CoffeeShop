@@ -176,6 +176,7 @@ async function hashRegularFile(path: string) {
       size: metadata.size,
       sha256: hash.digest("hex"),
       mode: metadata.mode & 0o777,
+      links: metadata.nlink,
       device: metadata.dev,
       inode: metadata.ino
     };
@@ -653,7 +654,8 @@ export class PreviewStorage {
     }
     const manifestPath = join(path, manifestName);
     const manifestMetadata = await lstat(manifestPath);
-    if (!manifestMetadata.isFile() || manifestMetadata.isSymbolicLink() || (manifestMetadata.mode & 0o777) !== 0o600
+    if (!manifestMetadata.isFile() || manifestMetadata.isSymbolicLink() || manifestMetadata.nlink !== 1
+      || (manifestMetadata.mode & 0o777) !== 0o600
       || manifestMetadata.size > previewBundleContract.maximumRegularFiles * (previewBundleContract.maximumPathBytes + 192)) {
       throw new PreviewStorageError("storage-conflict", "Prepared preview manifest has an invalid storage type");
     }
@@ -706,8 +708,8 @@ export class PreviewStorage {
           throw new PreviewStorageError("storage-conflict", "Prepared preview contains a special object");
         }
         const hashed = await hashRegularFile(child);
-        if (hashed.mode !== 0o600) {
-          throw new PreviewStorageError("storage-conflict", "Prepared preview file permissions changed");
+        if (hashed.mode !== 0o600 || hashed.links !== 1) {
+          throw new PreviewStorageError("storage-conflict", "Prepared preview file permissions or links changed");
         }
         inventory.push({ path: logicalPath, size: hashed.size, sha256: hashed.sha256 });
         containsFile = true;
@@ -768,13 +770,13 @@ export class PreviewStorage {
       const path = join(this.preparedPath(identity), "content", ...logicalPath.split("/"));
       handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
       const before = await handle.stat();
-      if (!before.isFile() || (before.mode & 0o777) !== 0o600 || before.size !== file.size) {
+      if (!before.isFile() || before.nlink !== 1 || (before.mode & 0o777) !== 0o600 || before.size !== file.size) {
         throw new PreviewStorageError("storage-conflict", "Prepared preview file metadata changed");
       }
       const bytes = await handle.readFile();
       const after = await handle.stat();
       if (!after.isFile() || after.dev !== before.dev || after.ino !== before.ino
-        || after.size !== before.size || (after.mode & 0o777) !== 0o600
+        || after.size !== before.size || after.nlink !== 1 || (after.mode & 0o777) !== 0o600
         || bytes.length !== file.size || createHash("sha256").update(bytes).digest("hex") !== file.sha256) {
         throw new PreviewStorageError("storage-conflict", "Prepared preview file bytes changed");
       }
