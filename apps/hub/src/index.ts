@@ -29,6 +29,7 @@ import {
 import { createConfiguredAgent, markDisconnectedNodesOffline, updateConfiguredAgent } from "./agentConfiguration.js";
 import { createAgentTemplate, deleteAgentTemplate, updateAgentTemplate } from "./agentTemplateConfiguration.js";
 import { ControlConnectionRegistry, type ControlConnection } from "./controlConnections.js";
+import { clearComponentInventory, receiveComponentInventory } from "./componentInventories.js";
 import { applyRunLifecycle, cancelPersistedRun, coalesceAsync, failLostTaskAttempts, isReportedByOwningNode, queuedRunsForNode, retryAsync, serializeAsync } from "./lifecycle.js";
 import { CoordinationError } from "./coordination.js";
 import { reconsiderLegacyAgentImport } from "./agentTemplates.js";
@@ -927,6 +928,7 @@ wss.on("connection", (socket, request) => {
         const index = state.nodes.findIndex((node) => node.id === nodeId);
         const online: ComputeNode = registeredComputeNode(message.node, new Date().toISOString());
         if (index >= 0) state.nodes[index] = online; else state.nodes.push(online);
+        clearComponentInventory(state, nodeId!);
         state.events.unshift(newEvent({ type: "node", title: `${online.name} connected`, detail: `${online.platform} · ${online.harnesses.filter((h) => h.available).map((h) => h.label).join(" + ")}` }));
       });
       broadcast();
@@ -1090,6 +1092,14 @@ wss.on("connection", (socket, request) => {
         if (outcome.kind === "rejected") console.warn(`rejected session.binding from ${nodeId}: ${outcome.reason}`);
         if (outcome.kind === "created" || outcome.kind === "resumed") broadcast();
       }
+    } else if (message.type === "component.inventory") {
+      const outcome = await receiveComponentInventory(store, {
+        supportsCapability: supportsControlCapability(protocolVersion, "component-inventory"),
+        isCurrent: isCurrentSocket, nodeId
+      }, message.report);
+      if (outcome.kind === "rejected") console.warn(`rejected component.inventory from ${nodeId}: ${outcome.reason}`);
+      if (outcome.changed) broadcast();
+      return;
     } else if (message.type === "capability.report") {
       if (!supportsControlCapability(protocolVersion, "orchestration") || !nodeId || !isCurrentSocket()) return;
       const validated = validateNodeCapabilityReport(message.report);

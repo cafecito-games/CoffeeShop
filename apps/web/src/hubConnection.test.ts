@@ -34,6 +34,18 @@ const v5Triplet = {
   templates: [{ id: "template-reviewer", name: "Reviewer", delegation: { canDelegate: false } }]
 };
 
+const inventoryNode = {
+  id: "node-one", name: "Node", kind: "local", platform: "linux-amd64", status: "online",
+  lastSeen: "2026-09-28T12:00:00Z", activeRuns: 0, concurrency: 1, workspaceRoots: ["/workspace"],
+  harnesses: [], version: "test"
+};
+const componentInventory = {
+  nodeId: "node-one", observedAt: "2026-09-28T12:00:00Z", components: [{
+    kind: "harness", id: "codex-cli", harnessId: "codex-cli", declaredVersion: "1.2.3",
+    installedVersions: [], provenance: "external", readiness: "ready", rollbackAvailable: false, diagnosticCodes: []
+  }]
+};
+
 class FakeSocket {
   onopen: ((event: Event) => void) | null = null;
   onmessage: ((event: MessageEvent) => void) | null = null;
@@ -288,6 +300,18 @@ describe("snapshot validation", () => {
     expect(isSnapshot({ ...snapshot("bad-allocation"), ...v5Triplet, allocations: [{ ...v5Triplet.allocations[0], workspace: "relative" }] })).toBe(false);
     expect(isSnapshot({ ...snapshot("bad-template"), ...v5Triplet, templates: [{ ...v5Triplet.templates[0], legacyAgentId: 42 }] })).toBe(false);
   });
+
+  it("validates component inventories independently from the v5 triplet", () => {
+    const base = { ...snapshot("inventory"), nodes: [inventoryNode] };
+    expect(isSnapshot(base)).toBe(true);
+    expect(isSnapshot({ ...base, ...v5Triplet })).toBe(true);
+    expect(isSnapshot({ ...base, componentInventories: [componentInventory] })).toBe(true);
+    expect(isSnapshot({ ...base, ...v5Triplet, componentInventories: [componentInventory] })).toBe(true);
+    expect(isSnapshot({ ...base, instances: [], componentInventories: [componentInventory] })).toBe(false);
+    expect(isSnapshot({ ...base, ...v5Triplet, componentInventories: [componentInventory, componentInventory] })).toBe(false);
+    expect(isSnapshot({ ...base, ...v5Triplet, componentInventories: [{ ...componentInventory, nodeId: "missing-node" }] })).toBe(false);
+    expect(isSnapshot({ ...base, ...v5Triplet, componentInventories: [{ ...componentInventory, components: [{ ...componentInventory.components[0], diagnosticCodes: ["raw-error"] }] }] })).toBe(false);
+  });
 });
 
 describe("version-4 orchestration snapshot validation", () => {
@@ -519,6 +543,38 @@ describe("HubConnection", () => {
     test.sockets[0].message({ type: "snapshot", data: live });
     test.sockets[0].message({ type: "snapshot", data: { ...snapshot("partial"), instances: [] } });
     expect(states.at(-1)).toMatchObject({ status: "reconnecting", snapshot: { generatedAt: "live-v5" }, canMutate: false });
+    expect(test.timers.size).toBe(1);
+  });
+
+  it("retains the whole last-good snapshot and disables mutation for malformed inventory", async () => {
+    const live = { ...snapshot("live-inventory"), nodes: [inventoryNode], ...v5Triplet, componentInventories: [componentInventory] };
+    const test = harness(async () => response(200, live as Snapshot));
+    const states: ConnectionView[] = [];
+    const connection = new HubConnection("secret", test.environment, (state) => states.push(state));
+    connection.start();
+    await flush();
+    test.sockets[0].message({ type: "snapshot", data: live });
+    test.sockets[0].message({ type: "snapshot", data: { ...live, generatedAt: "bad", componentInventories: [{ ...componentInventory, components: [{ ...componentInventory.components[0], readiness: "guessed" }] }] } });
+    expect(states.at(-1)).toMatchObject({ status: "reconnecting", snapshot: { generatedAt: "live-inventory", componentInventories: [componentInventory] }, canMutate: false });
+  });
+
+  it("retains the whole last-good snapshot when a retry REST response has malformed inventory", async () => {
+    const live = { ...snapshot("live-inventory"), nodes: [inventoryNode], ...v5Triplet, componentInventories: [componentInventory] };
+    const malformed = { ...live, generatedAt: "bad-rest", componentInventories: [{ ...componentInventory, componentPath: "/private/node/path" }] };
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(response(200, live))
+      .mockResolvedValueOnce(response(200, malformed));
+    const test = harness(fetchImpl);
+    const states: ConnectionView[] = [];
+    const connection = new HubConnection("secret", test.environment, (state) => states.push(state));
+    connection.start();
+    await flush();
+    test.sockets[0].message({ type: "snapshot", data: live });
+    test.sockets[0].onclose?.(new CloseEvent("close"));
+    test.runTimer();
+    await flush();
+    await flush();
+    expect(states.at(-1)).toMatchObject({ status: "disconnected", snapshot: { generatedAt: "live-inventory", componentInventories: [componentInventory] }, canMutate: false });
     expect(test.timers.size).toBe(1);
   });
 

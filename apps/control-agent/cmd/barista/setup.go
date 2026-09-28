@@ -322,7 +322,13 @@ func runDoctor(args []string) int {
 	managed, _ := managedHarnesses(manifest, ledger, activation, *dataRoot)
 	resolutions := harness.Resolve(context.Background(), managed)
 	profiles := harness.Profiles(resolutions)
-	report := setup.RunDoctor(context.Background(), manifest, ledger, *dataRoot, currentPlatform(), activation, profiles, *controlEndpoint, dialHubEndpoint)
+	activePack, _ := activeCapabilityPack(manifest, ledger, activation, *dataRoot, version)
+	assessmentOptions := setup.ComponentAssessmentOptions{CapabilityPackResolutionKnown: true}
+	if activePack != nil {
+		resolved := setup.ComponentRef{Kind: setup.ComponentKindCapabilityPack, ID: activePack.ID, Version: activePack.Version}
+		assessmentOptions.ResolvedCapabilityPack = &resolved
+	}
+	report := setup.RunDoctor(context.Background(), manifest, ledger, *dataRoot, currentPlatform(), activation, profiles, *controlEndpoint, dialHubEndpoint, assessmentOptions)
 	addClaudeACPAuthModeNote(report.Components, strings.TrimSpace(*claudeACPAuthMode))
 	report.ApprovalPolicies = map[string]string{}
 	for _, harnessID := range harness.ApprovalPolicyHarnessIDs {

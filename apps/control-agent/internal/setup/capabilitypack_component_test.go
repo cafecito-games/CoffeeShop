@@ -224,3 +224,26 @@ func TestDoctorReportsACapabilityPackWithoutAHarnessGap(t *testing.T) {
 		require.True(t, kind.HasHarnessOfItsOwn(), "kind %s lost its harness association", kind)
 	}
 }
+
+func TestCapabilityPackAssessmentUsesTheRuntimeArchiveResolution(t *testing.T) {
+	entry := capabilityPackEntry("1.0.0")
+	fixture := newActivationFixture(t, entry)
+	_, err := fixture.activate(t, entry, entry.Version, acceptingProbe(nil), nil)
+	require.NoError(t, err)
+	activation := LoadActivationState(fixture.dataRoot)
+
+	rejected := AssessComponents(context.Background(), fixture.manifest, fixture.ledger, fixture.dataRoot, fixture.platform,
+		activation, nil, ComponentAssessmentOptions{CapabilityPackResolutionKnown: true})
+	require.Len(t, rejected, 1)
+	require.Equal(t, entry.Version, rejected[0].ActiveVersion, "the selected version remains visible as diagnostic context")
+	require.Equal(t, ComponentProvenanceNone, rejected[0].Provenance)
+	require.Equal(t, "not-applicable", rejected[0].Readiness)
+	require.Contains(t, rejected[0].DiagnosticCodes, "active-unverified")
+
+	resolved := entry.Ref()
+	accepted := AssessComponents(context.Background(), fixture.manifest, fixture.ledger, fixture.dataRoot, fixture.platform,
+		activation, nil, ComponentAssessmentOptions{CapabilityPackResolutionKnown: true, ResolvedCapabilityPack: &resolved})
+	require.Len(t, accepted, 1)
+	require.Equal(t, ComponentProvenanceManaged, accepted[0].Provenance)
+	require.NotContains(t, accepted[0].DiagnosticCodes, "active-unverified")
+}

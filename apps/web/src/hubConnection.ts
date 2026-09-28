@@ -6,6 +6,7 @@ import {
   toolCallStatuses, workspaceCleanupPolicies, workspaceIsolationPolicies, workspaceLeaseStatuses,
   workspaceRetentionReasons, orchestratorAttachmentStatuses, orchestratorClientScopes, validateAgentInstance,
   validateAgentTemplate, validateArtifactPreview, validateInstanceAllocation, validateProjectProfile,
+  validateComponentInventoryReport,
   type ArtifactPreview, type Snapshot
 } from "@coffee-shop/protocol";
 
@@ -573,6 +574,19 @@ function previewCollectionCorrelates(value: Record<string, unknown>) {
   return true;
 }
 
+function componentInventoryCollectionCorrelates(value: Record<string, unknown>) {
+  if (value.componentInventories === undefined) return true;
+  if (!Array.isArray(value.componentInventories) || !Array.isArray(value.nodes)) return false;
+  const nodeIds = new Set(value.nodes.filter(isObject).map((node) => node.id));
+  const reported = new Set<string>();
+  for (const report of value.componentInventories) {
+    const validated = validateComponentInventoryReport(report);
+    if (!validated.ok || !nodeIds.has(validated.value.nodeId) || reported.has(validated.value.nodeId)) return false;
+    reported.add(validated.value.nodeId);
+  }
+  return true;
+}
+
 export function isSnapshot(value: unknown): value is Snapshot {
   const v5Absent = isObject(value) && value.instances === undefined && value.allocations === undefined && value.templates === undefined;
   const v5Present = isObject(value)
@@ -592,6 +606,7 @@ export function isSnapshot(value: unknown): value is Snapshot {
     && (value.artifactPreviews === undefined
       || isArrayOf(value.artifactPreviews, (preview) => validateArtifactPreview(preview, value.generatedAt).ok))
     && previewCollectionCorrelates(value)
+    && componentInventoryCollectionCorrelates(value)
     && (value.tasks === undefined || isArrayOf(value.tasks, isTask))
     && (value.taskMessages === undefined || isArrayOf(value.taskMessages, isTaskMessage))
     && (value.taskMessageAcknowledgements === undefined || isArrayOf(value.taskMessageAcknowledgements, isTaskMessageAcknowledgement))

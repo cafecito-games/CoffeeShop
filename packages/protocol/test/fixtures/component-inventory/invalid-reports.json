@@ -1,0 +1,83 @@
+[
+  {
+    "name": "local path field",
+    "message": {
+      "type": "component.inventory",
+      "report": {
+        "nodeId": "node-one",
+        "observedAt": "2026-09-28T12:00:00Z",
+        "components": [
+          {
+            "kind": "harness",
+            "id": "codex-cli",
+            "harnessId": "codex-cli",
+            "declaredVersion": "1.2.3",
+            "installedVersions": [],
+            "provenance": "external",
+            "readiness": "ready",
+            "rollbackAvailable": false,
+            "diagnosticCodes": [],
+            "componentPath": "/home/operator/.local/bin/codex"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "name": "unsorted versions",
+    "message": {
+      "type": "component.inventory",
+      "report": {
+        "nodeId": "node-one",
+        "observedAt": "2026-09-28T12:00:00Z",
+        "components": [
+          {
+            "kind": "harness",
+            "id": "codex-cli",
+            "harnessId": "codex-cli",
+            "declaredVersion": "2.0.0",
+            "installedVersions": ["2.0.0", "1.0.0"],
+            "provenance": "managed",
+            "readiness": "ready",
+            "rollbackAvailable": false,
+            "diagnosticCodes": []
+          }
+        ]
+      }
+    }
+  },
+  {
+    "name": "duplicate component key",
+    "message": {
+      "type": "component.inventory",
+      "report": {
+        "nodeId": "node-one",
+        "observedAt": "2026-09-28T12:00:00Z",
+        "components": [
+          {
+            "kind": "harness",
+            "id": "codex-cli",
+            "harnessId": "codex-cli",
+            "declaredVersion": "1.2.3",
+            "installedVersions": [],
+            "provenance": "external",
+            "readiness": "ready",
+            "rollbackAvailable": false,
+            "diagnosticCodes": []
+          },
+          {
+            "kind": "harness",
+            "id": "codex-cli",
+            "harnessId": "codex-cli",
+            "declaredVersion": "1.2.3",
+            "installedVersions": [],
+            "provenance": "external",
+            "readiness": "ready",
+            "rollbackAvailable": false,
+            "diagnosticCodes": []
+          }
+        ]
+      }
+    }
+  }
+]

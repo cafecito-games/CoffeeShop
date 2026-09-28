@@ -16,6 +16,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Agent, AgentTemplate, ComputeNode, Run, Snapshot, Thread } from "../packages/protocol/src/index.js";
 import { openApproval, resolveApprovalInState } from "../apps/hub/src/approvals.js";
+import { applyComponentInventory } from "../apps/hub/src/componentInventories.js";
 import { attachThreadInState, createExternalThreadInState, postOperatorMessageInState } from "../apps/hub/src/externalOrchestrators.js";
 import { acceptInstanceWorkInState, applyInstanceLifecycle, applyNodeHeartbeatInState, flushPendingInstanceDeliveries, receiveInstanceLifecycleReport, reconcileNodeInstancesInState, reserveInstanceAllocation } from "../apps/hub/src/instances.js";
 import { applyRunLifecycle } from "../apps/hub/src/lifecycle.js";
@@ -117,6 +118,18 @@ await store.transact((state) => {
   state.events = [];
   state.messages = [];
   state.templates = [template];
+  const inventory = applyComponentInventory(state, {
+    nodeId: node.id, observedAt: "2026-09-22T12:00:00.000Z", components: [{
+      kind: "acp-adapter", id: "claude-acp", harnessId: "claude-cli", declaredVersion: "2.0.0",
+      installedVersions: ["1.0.0", "2.0.0"], activeVersion: "1.0.0", rollbackVersion: "2.0.0",
+      updateVersion: "2.0.0", rollbackAvailable: true, provenance: "managed", readiness: "ready",
+      diagnosticCodes: ["rollback-available", "update-available"]
+    }, {
+      kind: "capability-pack", id: "coffee-shop-default", declaredVersion: "1.0.0", installedVersions: [],
+      rollbackAvailable: false, provenance: "none", readiness: "not-applicable", diagnosticCodes: []
+    }]
+  });
+  if (!inventory.changed) throw new Error(`the fixture component inventory was not accepted: ${inventory.kind}`);
 
   const agentThread: Thread = newThread(agent.id, "Ship the login path", "user", "2026-09-22T12:00:00.000Z");
   (state.threads ??= []).push(agentThread);
@@ -253,6 +266,7 @@ if (snapshot.allocations?.find((item) => item.id === releasedFixture.allocation.
   || snapshot.allocations?.find((item) => item.id === lostFixture.allocation.id)?.status !== "lost") {
   throw new Error("the producer fixture did not retain released and lost allocation history");
 }
+if (snapshot.componentInventories?.length !== 1) throw new Error("the producer fixture did not publish component inventory");
 await mkdir(fixtureDirectory, { recursive: true });
 await writeFile(join(fixtureDirectory, "hubSnapshot.json"), `${JSON.stringify(snapshot, undefined, 2)}\n`);
 await writeFile(join(fixtureDirectory, "legacyHubSnapshot.json"), `${JSON.stringify(reduceToLegacyShape(snapshot), undefined, 2)}\n`);

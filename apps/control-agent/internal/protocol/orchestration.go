@@ -18,17 +18,19 @@ const LatestVersion = "5"
 var SupportedVersions = []string{"1", "2", "3", "4", "5"}
 
 const (
-	CapabilityReplayBarrier = "replay-barrier"
-	CapabilityHubRPC        = "hub-rpc"
-	CapabilityOrchestration = "orchestration"
-	CapabilityInstances     = "instances"
+	CapabilityReplayBarrier      = "replay-barrier"
+	CapabilityHubRPC             = "hub-rpc"
+	CapabilityOrchestration      = "orchestration"
+	CapabilityInstances          = "instances"
+	CapabilityComponentInventory = "component-inventory"
 )
 
 var capabilityIntroducedIn = map[string]int{
-	CapabilityReplayBarrier: 2,
-	CapabilityHubRPC:        3,
-	CapabilityOrchestration: 4,
-	CapabilityInstances:     5,
+	CapabilityReplayBarrier:      2,
+	CapabilityHubRPC:             3,
+	CapabilityOrchestration:      4,
+	CapabilityInstances:          5,
+	CapabilityComponentInventory: 5,
 }
 
 func IsSupportedVersion(version string) bool {

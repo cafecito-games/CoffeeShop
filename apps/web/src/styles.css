@@ -518,6 +518,20 @@ button:disabled, textarea:disabled, fieldset:disabled button { cursor: not-allow
 .experience-empty strong { color: var(--text); font-size: var(--font-size-11); }
 .experience-empty p { max-width: 380px; margin: 8px 0 0; font-size: var(--font-size-9); line-height: 1.6; }
 .qualification { padding: 12px; border-left: 2px solid var(--danger); display: flex; align-items: center; gap: 8px; color: var(--secondary); background: rgba(200,121,110,.07); font-size: var(--font-size-8); line-height: 1.55; }
+.inventory-observed { margin: 0 0 10px; color: var(--tertiary); font-size: var(--font-size-7); }
+.component-inventory { display: grid; gap: 10px; }
+.component-card { border: 1px solid var(--line); border-radius: 10px; padding: 12px; min-width: 0; }
+.component-card header { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.component-card header strong { overflow-wrap: anywhere; }
+.component-readiness { text-transform: capitalize; font-size: var(--font-size-7); color: var(--secondary); }
+.component-readiness.ready { color: var(--success); }
+.component-readiness.unhealthy, .component-readiness.rejected, .component-readiness.unavailable { color: var(--danger); }
+.component-card dl { margin: 10px 0 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 12px; }
+.component-card dl div { min-width: 0; }
+.component-card dt { color: var(--tertiary); font-size: var(--font-size-7); }
+.component-card dd { margin: 2px 0 0; overflow-wrap: anywhere; font-size: var(--font-size-8); }
+.component-diagnostics { margin: 10px 0 0; padding-left: 18px; color: var(--secondary); font-size: var(--font-size-7); }
+@media (max-width: 520px) { .component-card dl { grid-template-columns: 1fr; } }
 .setup-steps { margin: 0 0 22px; padding: 0; list-style: none; counter-reset: setup; display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 8px; }
 .setup-steps li { min-width: 0; padding: 12px; border: 1px solid var(--line); border-radius: 8px; counter-increment: setup; background: var(--surface-2); }
 .setup-steps li::before { content: counter(setup,decimal-leading-zero); display: block; margin-bottom: 12px; color: var(--accent); font: 600 var(--font-size-8) "DM Mono", monospace; }

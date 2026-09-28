@@ -106,6 +106,18 @@ describe("hub snapshot fixtures", () => {
     expect(snapshot.templates![0]).not.toHaveProperty("sessionBindingId");
   });
 
+  it("carries the Hub producer's path-free component inventory without changing legacy shape", () => {
+    const snapshot = current as Snapshot;
+    expect(snapshot.componentInventories).toHaveLength(1);
+    expect(snapshot.componentInventories?.[0]).toMatchObject({ nodeId: "node-workshop", components: [
+      { id: "claude-acp", provenance: "managed", readiness: "ready", updateVersion: "2.0.0", rollbackAvailable: true },
+      { id: "coffee-shop-default", readiness: "not-applicable" }
+    ] });
+    expect(snapshot.componentInventories?.[0]).not.toHaveProperty("dataRoot");
+    expect(JSON.stringify(snapshot.componentInventories)).not.toMatch(/componentPath|sha256|digest|url|command/i);
+    expect((legacy as Snapshot).componentInventories).toBeUndefined();
+  });
+
   it("accepts ready preview metadata exactly as the Hub projects it", () => {
     const snapshot = preview as Snapshot;
     expect(snapshot.artifactPreviews).toHaveLength(1);

@@ -1,4 +1,4 @@
-import type { ComputeNode } from "@coffee-shop/protocol";
+import type { ComponentInventoryReport, ComputeNode } from "@coffee-shop/protocol";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -21,6 +21,18 @@ const node: ComputeNode = {
   version: "barista-123"
 };
 
+const inventory: ComponentInventoryReport = {
+  nodeId: node.id, observedAt: "2026-09-28T12:00:00Z", components: [{
+    kind: "acp-adapter", id: "claude-acp", harnessId: "claude-cli", declaredVersion: "2.0.0",
+    installedVersions: ["1.0.0", "2.0.0"], activeVersion: "1.0.0", rollbackVersion: "2.0.0",
+    updateVersion: "2.0.0", rollbackAvailable: true, provenance: "managed", readiness: "ready",
+    diagnosticCodes: ["rollback-available", "update-available"]
+  }, {
+    kind: "capability-pack", id: "coffee-shop-default", declaredVersion: "1.0.0", installedVersions: [],
+    rollbackAvailable: false, provenance: "none", readiness: "not-applicable", diagnosticCodes: []
+  }]
+};
+
 describe("compute experience", () => {
   beforeEach(() => {
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: vi.fn().mockResolvedValue(undefined) } });
@@ -38,7 +50,7 @@ describe("compute experience", () => {
     expect(screen.getByText("/opt/bin/codex")).toBeInTheDocument();
     expect(screen.getByText("local-account")).toBeInTheDocument();
     expect(screen.getByText("gpt-5 · gpt-5-mini")).toBeInTheDocument();
-    expect(screen.getByText("Not reported")).toBeInTheDocument();
+    expect(screen.getAllByText("Not reported").length).toBeGreaterThan(0);
     expect(screen.getByText("No models reported")).toBeInTheDocument();
     expect(screen.getByText("Unavailable")).toBeInTheDocument();
     expect(screen.queryByText("node-one")).not.toBeInTheDocument();
@@ -61,12 +73,31 @@ describe("compute experience", () => {
     const trigger = screen.getByRole("button", { name: "View Desk (node-one) compute details" });
     trigger.focus();
     fireEvent.click(trigger);
-    expect(screen.getByText(/inventory is the last report/)).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("Not reported");
     expect(screen.getByRole("button", { name: "Close compute details" })).toHaveFocus();
     fireEvent.keyDown(document, { key: "Escape" });
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(trigger).toHaveFocus();
     await userEvent.tab();
+  });
+
+  it("distinguishes not-reported, live, retained-offline, and app-stale component facts", () => {
+    const rendered = render(<ComputeView nodes={[node]} />);
+    fireEvent.click(screen.getByRole("button", { name: "View Desk (node-one) compute details" }));
+    expect(screen.getByRole("status")).toHaveTextContent("Not reported");
+
+    rendered.rerender(<ComputeView nodes={[node]} componentInventories={[inventory]} connectionStatus="connected" />);
+    expect(screen.getByLabelText("Worker-reported component inventory")).toBeInTheDocument();
+    expect(screen.getByText("claude-acp")).toBeInTheDocument();
+    expect(screen.getByText("The declared version is installed and differs from the active version.")).toBeInTheDocument();
+    expect(screen.getByText("not-applicable")).toBeInTheDocument();
+    expect(screen.getByText(/Worker-reported · observed/)).toBeInTheDocument();
+
+    rendered.rerender(<ComputeView nodes={[{ ...node, status: "offline" }]} componentInventories={[inventory]} connectionStatus="connected" />);
+    expect(screen.getByText(/report is retained by the hub/)).toBeInTheDocument();
+    rendered.rerender(<ComputeView nodes={[{ ...node, status: "offline" }]} componentInventories={[inventory]} connectionStatus="reconnecting" />);
+    expect(screen.getByText(/App snapshot stale/)).toBeInTheDocument();
+    expect(screen.queryByText(/report is retained by the hub/)).not.toBeInTheDocument();
   });
 
   it("keeps an accessible dialog name when a structurally valid node name is empty", () => {
