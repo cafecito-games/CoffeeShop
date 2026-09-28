@@ -183,7 +183,7 @@ describe("snapshot validation", () => {
     expect(isSnapshot({ ...snapshot(generatedAt), artifactPreviews: undefined })).toBe(true);
   });
 
-  it("accepts the Hub producer's unuploaded registration and upload-failure projections only at generation zero", () => {
+  it("accepts the Hub producer's unuploaded registration and generation-zero terminal projections only", () => {
     // These exact artifact/preview bytes are regenerated and byte-checked by apps/hub/src/hubTools.test.ts.
     const produced = JSON.parse(readFileSync(join(process.cwd(), "../../packages/protocol/test/fixtures/hub-tools/publish-preview-created.json"), "utf8")) as {
       artifact: Record<string, unknown>;
@@ -204,10 +204,24 @@ describe("snapshot validation", () => {
       failureCode: "upload-failed"
     };
     expect(isSnapshot({ ...registered, artifactPreviews: [failed] })).toBe(true);
+    expect(isSnapshot({ ...registered, artifactPreviews: [{ ...failed, failureCode: "bundle-invalid" }] })).toBe(true);
+
+    const expired = {
+      ...produced.preview,
+      status: "expired",
+      updatedAt: produced.preview.expiresAt,
+      expiredAt: produced.preview.expiresAt
+    };
+    expect(isSnapshot({
+      ...registered,
+      generatedAt: produced.preview.expiresAt,
+      artifactPreviews: [expired]
+    })).toBe(true);
 
     for (const invalid of [
       { ...produced.preview, status: "processing", processingGeneration: 1, updatedAt: "2026-09-27T12:01:00.000Z" },
       { ...failed, processingGeneration: 1 },
+      { ...expired, processingGeneration: 1 },
       { ...produced.preview, artifactSha256: "b".repeat(64) }
     ]) expect(isSnapshot({ ...registered, artifactPreviews: [invalid] })).toBe(false);
   });
