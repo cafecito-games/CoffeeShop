@@ -268,6 +268,31 @@ func bytesIfPresent(t *testing.T, path string) []byte {
 	return content
 }
 
+type fileEvidence struct {
+	exists  bool
+	content []byte
+}
+
+func captureFileEvidence(t *testing.T, path string) fileEvidence {
+	t.Helper()
+	content, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return fileEvidence{}
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fileEvidence{exists: true, content: content}
+}
+
+func requireFileEvidence(t *testing.T, path, description string, before fileEvidence) {
+	t.Helper()
+	after := captureFileEvidence(t, path)
+	if before.exists != after.exists || !bytes.Equal(before.content, after.content) {
+		t.Fatalf("%s changed across a refused operation", description)
+	}
+}
+
 func buildTarGzip(t *testing.T, entry string, content []byte) []byte {
 	t.Helper()
 	var result bytes.Buffer
@@ -479,6 +504,21 @@ func TestManagedComponentArchiveCLI(t *testing.T) {
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
 			dataRoot := filepath.Join(root, strings.ReplaceAll(testCase.name, " ", "-"))
+			target := managedHarnessTarget(dataRoot, managedVersionA)
+			sentinel := filepath.Join(dataRoot, "operator-owned.keep")
+			var targetBefore, sentinelBefore, ownershipBefore, activationBefore fileEvidence
+			if !testCase.shouldPass {
+				if err := os.MkdirAll(dataRoot, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(sentinel, []byte("plan-independent state\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				targetBefore = captureFileEvidence(t, target)
+				sentinelBefore = captureFileEvidence(t, sentinel)
+				ownershipBefore = captureFileEvidence(t, filepath.Join(dataRoot, "ownership.json"))
+				activationBefore = captureFileEvidence(t, filepath.Join(dataRoot, "activation.json"))
+			}
 			manifest := writeHarnessManifest(t, root, strings.ReplaceAll(testCase.name, " ", "-")+".json", managedVersionA, map[string]any{
 				"kind": "archive", "url": server.URL + testCase.path, "sha256": testCase.digest,
 				"sizeBytes": testCase.size, "executablePath": "bin/claude",
@@ -488,14 +528,15 @@ func TestManagedComponentArchiveCLI(t *testing.T) {
 			result := runSetupCommand(t, home, trust, "setup", "apply", "--data-root", dataRoot, "--manifest", manifest, "--plan", plan)
 			if testCase.shouldPass {
 				requireSetupSuccess(t, result, testCase.name)
-				if !bytes.Equal(artifact, bytesIfPresent(t, managedHarnessTarget(dataRoot, managedVersionA))) {
+				if !bytes.Equal(artifact, bytesIfPresent(t, target)) {
 					t.Fatal("verified archive did not install the producer bytes")
 				}
 			} else {
 				requireSetupFailure(t, result, testCase.name)
-				if bytesIfPresent(t, filepath.Join(dataRoot, "ownership.json")) != nil {
-					t.Fatal("refused archive wrote ownership")
-				}
+				requireFileEvidence(t, target, "candidate install target", targetBefore)
+				requireFileEvidence(t, sentinel, "plan-independent file", sentinelBefore)
+				requireFileEvidence(t, filepath.Join(dataRoot, "ownership.json"), "ownership ledger", ownershipBefore)
+				requireFileEvidence(t, filepath.Join(dataRoot, "activation.json"), "activation ledger", activationBefore)
 			}
 		})
 	}
@@ -509,6 +550,18 @@ func TestManagedComponentArchiveCLI(t *testing.T) {
 		defer redirect.Close()
 		trust := trustEnvironment(t, target, redirect)
 		dataRoot := filepath.Join(root, "redirect")
+		if err := os.MkdirAll(dataRoot, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		sentinel := filepath.Join(dataRoot, "operator-owned.keep")
+		if err := os.WriteFile(sentinel, []byte("plan-independent redirect state\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		candidate := managedHarnessTarget(dataRoot, managedVersionA)
+		candidateBefore := captureFileEvidence(t, candidate)
+		sentinelBefore := captureFileEvidence(t, sentinel)
+		ownershipBefore := captureFileEvidence(t, filepath.Join(dataRoot, "ownership.json"))
+		activationBefore := captureFileEvidence(t, filepath.Join(dataRoot, "activation.json"))
 		manifest := writeHarnessManifest(t, root, "redirect.json", managedVersionA, map[string]any{
 			"kind": "archive", "url": redirect.URL + "/claude.tar.gz", "sha256": hex.EncodeToString(archiveDigest[:]),
 			"sizeBytes": len(archive), "executablePath": "bin/claude",
@@ -516,6 +569,10 @@ func TestManagedComponentArchiveCLI(t *testing.T) {
 		plan := dataRoot + ".plan.json"
 		requireSetupSuccess(t, planSetup(t, home, dataRoot, manifest, plan, trust...), "redirect plan")
 		requireSetupFailure(t, runSetupCommand(t, home, trust, "setup", "apply", "--data-root", dataRoot, "--manifest", manifest, "--plan", plan), "unapproved redirect")
+		requireFileEvidence(t, candidate, "redirect candidate install target", candidateBefore)
+		requireFileEvidence(t, sentinel, "redirect plan-independent file", sentinelBefore)
+		requireFileEvidence(t, filepath.Join(dataRoot, "ownership.json"), "redirect ownership ledger", ownershipBefore)
+		requireFileEvidence(t, filepath.Join(dataRoot, "activation.json"), "redirect activation ledger", activationBefore)
 		approved := append([]string{}, trust...)
 		result := runSetupCommand(t, home, approved, "setup", "apply", "--data-root", dataRoot, "--manifest", manifest, "--plan", plan,
 			"--allowed-host", strings.Split(strings.TrimPrefix(target.URL, "https://"), ":")[0])
@@ -629,7 +686,7 @@ func assertInventoryPrivacy(t *testing.T, raw []byte) {
 		t.Fatal(err)
 	}
 	inventories := document["componentInventories"]
-	for _, forbidden := range []string{"componentPath", "dataRoot", "command", "sha256", "digest", "rawOutput", "notes", "authDocsUrl"} {
+	for _, forbidden := range []string{"componentPath", "dataRoot", "command", "sha256", "digest", "rawOutput", "notes", "authDocsUrl", "url", "http", "://"} {
 		if bytes.Contains(bytes.ToLower(inventories), bytes.ToLower([]byte(forbidden))) {
 			t.Fatalf("component inventory exposed forbidden field category %s", forbidden)
 		}
