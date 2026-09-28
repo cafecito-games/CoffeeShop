@@ -31,7 +31,7 @@ export function TemplateSidebar({ templates, selectedId, canMutate, connectionLa
     <div className="brand-row"><strong>Templates</strong><button className="icon-btn" aria-label="Create template" onClick={onCreate} disabled={!canMutate}><Plus size={17} /></button></div>
     <label className="search"><MagnifyingGlass size={15} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Find a template" /></label>
     <div className="section-label"><span>Reusable defaults</span><small>{templates.length}</small></div>
-    <div className="template-list">{filtered.map((template) => <button key={template.id} className={selectedId === template.id ? "selected" : ""} onClick={() => onSelect(template.id)}>
+    <div className="template-list">{filtered.map((template) => <button key={template.id} aria-pressed={selectedId === template.id} className={selectedId === template.id ? "selected" : ""} onClick={() => onSelect(template.id)}>
       <CoffeeAvatar shape={template.avatarShape ?? "cup"} color={template.avatarColor ?? "amber"} size="sm" label={template.name} />
       <span><strong>{template.name}</strong><small>{template.purpose?.title ?? template.id}</small></span>
       {template.legacyAgentId && <SealCheck size={15} aria-label="Imported template" />}

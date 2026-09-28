@@ -75,7 +75,7 @@ export function InstanceSidebar({ instances, threads, selectedId, connectionLabe
     <div className="instance-list">
       {[...groups, ...(missingThread.length ? [{ thread: undefined, instances: missingThread }] : [])].map((group) => <section key={group.thread?.id ?? "missing"}>
         <div className="section-label"><span>{group.thread?.title ?? "Thread unavailable"}</span><small>{group.instances.length}</small></div>
-        {group.instances.map((instance) => <button key={instance.id} className={`instance-row ${selectedId === instance.id ? "selected" : ""}`} onClick={() => onSelect(instance.id)}>
+        {group.instances.map((instance) => <button key={instance.id} aria-pressed={selectedId === instance.id} className={`instance-row ${selectedId === instance.id ? "selected" : ""}`} onClick={() => onSelect(instance.id)}>
           <span className={`instance-state instance-state-${instance.status}`} aria-hidden="true" />
           <span><strong>{instanceName(instance)}</strong><small>{instance.status} · {instance.id}</small></span><ArrowRight size={14} />
         </button>)}
