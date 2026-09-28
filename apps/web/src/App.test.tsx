@@ -432,6 +432,9 @@ describe("run inspector", () => {
   it("shows delegated children and uploaded artifacts", async () => {
     const parent = testRun("running");
     const child = { ...testRun("completed", "run-child"), parentRunId: parent.id };
+    const previewCreatedAt = new Date(Date.now() - 60_000).toISOString();
+    const previewReadyAt = new Date(Date.now() - 30_000).toISOString();
+    const previewExpiresAt = new Date(Date.now() + 86_340_000).toISOString();
     currentSnapshot.runs = [parent, child];
     currentSnapshot.events = [{ id: "event-one", type: "run", title: "Running", detail: "Working", runId: parent.id, createdAt: "2026-01-01T00:00:00Z" }];
     currentSnapshot.artifacts = [{
@@ -439,12 +442,27 @@ describe("run inspector", () => {
       title: "Test results", kind: "test-results", mediaType: "application/json", summary: "Passed",
       size: 42, sha256: "a".repeat(64), downloadPath: "/api/artifacts/artifact-one/content",
       uploaded: true, idempotencyKey: "results", createdAt: "2026-01-01T00:01:00Z"
+    }, {
+      id: "artifact-preview", threadId: "thread-one", runId: parent.id, agentId: agent.id,
+      relativePath: ".coffee-shop/previews/site.tar.gz", title: "Release preview", kind: "preview-bundle",
+      mediaType: "application/vnd.coffee-shop.preview-bundle+tar+gzip", summary: "Review release", size: 239,
+      sha256: "b".repeat(64), downloadPath: "/api/artifacts/artifact-preview/content",
+      uploaded: true, idempotencyKey: "preview", createdAt: previewCreatedAt
+    }];
+    currentSnapshot.artifactPreviews = [{
+      id: "preview-one", artifactId: "artifact-preview", artifactSha256: "b".repeat(64),
+      threadId: "thread-one", runId: parent.id, agentId: agent.id, entrypoint: "site/index.html",
+      status: "ready", processingGeneration: 1, createdAt: previewCreatedAt,
+      updatedAt: previewReadyAt, expiresAt: previewExpiresAt,
+      readyAt: previewReadyAt, accessState: "eligible"
     }];
     const { default: App } = await import("./App.js");
     render(<App />);
     fireEvent.click(screen.getAllByRole("button", { name: "Activity" })[0]);
     fireEvent.click(screen.getByRole("button", { name: "Inspect run" }));
     expect(screen.getByRole("button", { name: /Test results/ })).toBeInTheDocument();
+    expect(screen.getByText("Ready for isolated access")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Request access to preview Release preview" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /Milo.*Completed/ }));
     expect(screen.getByRole("dialog")).toHaveAccessibleName("Run run-child");
   });

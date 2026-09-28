@@ -151,8 +151,15 @@ describe("snapshot validation", () => {
         ...base, updatedAt: base.expiresAt, expiredAt: base.expiresAt
       }
     };
+    const artifact = {
+      id: "artifact-one", threadId: "thread-one", runId: "run-one", agentId: "agent-one",
+      relativePath: ".coffee-shop/previews/site.tar.gz", title: "Preview", kind: "preview-bundle",
+      mediaType: "application/vnd.coffee-shop.preview-bundle+tar+gzip", summary: "", size: 512,
+      sha256: "a".repeat(64), downloadPath: "/api/artifacts/artifact-one/content", uploaded: true,
+      idempotencyKey: "preview-one", createdAt: base.createdAt
+    };
     for (const [status, preview] of Object.entries(byStatus)) {
-      expect(isSnapshot({ ...snapshot(generatedAt), artifactPreviews: [{ ...preview, status }] })).toBe(true);
+      expect(isSnapshot({ ...snapshot(generatedAt), artifacts: [artifact], artifactPreviews: [{ ...preview, status }] })).toBe(true);
     }
 
     const ready = { ...byStatus.ready, status: "ready" };
@@ -168,9 +175,44 @@ describe("snapshot validation", () => {
       [{ ...ready, signedUrl: "https://preview.invalid/secret" }],
       [{ ...ready, token: "secret" }]
     ]) {
-      expect(isSnapshot({ ...snapshot(generatedAt), artifactPreviews: collection })).toBe(false);
+      expect(isSnapshot({ ...snapshot(generatedAt), artifacts: [artifact], artifactPreviews: collection })).toBe(false);
     }
     expect(isSnapshot({ ...snapshot(generatedAt), artifactPreviews: undefined })).toBe(true);
+  });
+
+  it("rejects duplicate and cross-linked preview records as one snapshot update", () => {
+    const generatedAt = "2026-09-27T12:04:00.000Z";
+    const artifact = {
+      id: "artifact-one", threadId: "thread-one", runId: "run-one", agentId: "agent-one",
+      relativePath: ".coffee-shop/previews/site.tar.gz", title: "Preview", kind: "preview-bundle",
+      mediaType: "application/vnd.coffee-shop.preview-bundle+tar+gzip", summary: "", size: 512,
+      sha256: "a".repeat(64), downloadPath: "/api/artifacts/artifact-one/content", uploaded: true,
+      idempotencyKey: "preview-one", createdAt: "2026-09-27T12:00:00.000Z"
+    };
+    const preview = {
+      id: "preview-one", artifactId: artifact.id, artifactSha256: artifact.sha256,
+      threadId: artifact.threadId, runId: artifact.runId, agentId: artifact.agentId,
+      entrypoint: "site/index.html", status: "ready", processingGeneration: 1,
+      createdAt: artifact.createdAt, updatedAt: "2026-09-27T12:02:00.000Z",
+      expiresAt: "2026-09-28T12:00:00.000Z", readyAt: "2026-09-27T12:02:00.000Z",
+      accessState: "eligible"
+    };
+    const value = { ...snapshot(generatedAt), artifacts: [artifact], artifactPreviews: [preview] };
+    expect(isSnapshot(value)).toBe(true);
+    expect(isSnapshot({ ...value, artifactPreviews: [preview, preview] })).toBe(false);
+    expect(isSnapshot({ ...value, artifactPreviews: [preview, { ...preview, id: "preview-two" }] })).toBe(false);
+    for (const changed of [
+      { artifacts: [] },
+      { artifacts: [{ ...artifact, uploaded: false }] },
+      { artifacts: [{ ...artifact, sha256: "b".repeat(64) }] },
+      { artifacts: [{ ...artifact, threadId: "thread-two" }] },
+      { artifacts: [{ ...artifact, runId: "run-two" }] },
+      { artifacts: [{ ...artifact, agentId: undefined, instanceId: "instance-one", allocationId: "allocation-one" }] }
+    ]) expect(isSnapshot({ ...value, ...changed })).toBe(false);
+
+    const instanceArtifact = { ...artifact, agentId: undefined, instanceId: "instance-one", allocationId: "allocation-one" };
+    const instancePreview = { ...preview, agentId: undefined, instanceId: "instance-one", allocationId: "allocation-one" };
+    expect(isSnapshot({ ...value, artifacts: [instanceArtifact], artifactPreviews: [instancePreview] })).toBe(true);
   });
 
   it("accepts preview-bundle artifact metadata in the shared artifact vocabulary", () => {

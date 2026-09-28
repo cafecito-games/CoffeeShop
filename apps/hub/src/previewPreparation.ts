@@ -11,6 +11,7 @@ import {
   previewBundlePathCollisionKey,
   validatePreviewBundlePath,
   type Artifact,
+  type ArtifactPreview,
   type ArtifactPreviewFailureCode,
   type ArtifactPreviewRecord
 } from "@coffee-shop/protocol";
@@ -712,6 +713,93 @@ async function processPreview(
     }
     throw classified;
   }
+}
+
+function resolvePreviewRetry(store: Store, previewId: string) {
+  return store.read((state) => {
+    const previews = (state.artifactPreviews ?? []).filter((item) => item.id === previewId);
+    if (previews.length === 0) throw new CoordinationError("not_found", "Preview not found");
+    if (previews.length !== 1) throw new CoordinationError("artifact_mismatch", "The preview identity is inconsistent");
+    const preview = previews[0]!;
+    const linkedPreviews = (state.artifactPreviews ?? []).filter((item) => item.artifactId === preview.artifactId);
+    const artifacts = (state.artifacts ?? []).filter((item) => item.id === preview.artifactId);
+    const artifact = artifacts[0];
+    if (linkedPreviews.length !== 1 || artifacts.length !== 1 || artifact === undefined
+      || !artifact.uploaded || artifact.kind !== previewBundleArtifactKind || artifact.mediaType !== previewBundleMediaType
+      || artifact.sha256 !== preview.artifactSha256 || artifact.threadId !== preview.threadId
+      || artifact.runId !== preview.runId || !sameActor(artifact, preview)) {
+      throw new CoordinationError("artifact_mismatch", "The preview artifact is unavailable");
+    }
+    if (preview.status !== "failed" && preview.status !== "processing") {
+      throw new CoordinationError("invalid_transition", "The preview cannot be retried from its current status");
+    }
+    return { artifact: structuredClone(artifact), preview: structuredClone(preview) };
+  });
+}
+
+export interface RetryPreviewPreparationOptions {
+  readonly now?: () => string;
+  readonly onCommitted?: (preview: ArtifactPreview) => void;
+}
+
+/** Retries preparation from the retained immutable artifact without accepting browser-owned identity. */
+export async function retryPreviewPreparation(
+  store: Store,
+  storage: PreviewStorage,
+  previewId: string,
+  options: RetryPreviewPreparationOptions = {}
+) {
+  const now = options.now ?? (() => new Date().toISOString());
+  const resolved = resolvePreviewRetry(store, previewId);
+  const processing = await beginProcessing(store, resolved.preview.id, now());
+  if (processing.replayed) return { preview: processing.preview, replayed: true } as const;
+  options.onCommitted?.(processing.preview);
+  let ready: ArtifactPreview;
+  let readyCommitted = false;
+  try {
+    await preparePreviewBundle(storage, {
+      previewId: resolved.preview.id,
+      artifactId: resolved.artifact.id,
+      artifactSha256: resolved.artifact.sha256,
+      entrypoint: resolved.preview.entrypoint,
+      processingGeneration: processing.generation,
+      compressedSize: resolved.artifact.size
+    });
+    const settled = await settleProcessing(store, {
+      previewId: resolved.preview.id,
+      artifactId: resolved.artifact.id,
+      artifactSha256: resolved.artifact.sha256,
+      processingGeneration: processing.generation,
+      outcome: "ready",
+      at: now()
+    });
+    ready = settled.preview;
+    readyCommitted = !settled.replayed;
+  } catch (error) {
+    const classified = preparationError(error);
+    if (classified.failureCode !== undefined) {
+      try {
+        const settled = await settleProcessing(store, {
+          previewId: resolved.preview.id,
+          artifactId: resolved.artifact.id,
+          artifactSha256: resolved.artifact.sha256,
+          processingGeneration: processing.generation,
+          outcome: "failed",
+          failureCode: classified.failureCode,
+          at: now()
+        });
+        if (!settled.replayed) options.onCommitted?.(settled.preview);
+      } catch (settlementError) {
+        if (!(settlementError instanceof CoordinationError
+          && ["generation_mismatch", "invalid_transition", "preview_expired", "idempotency_conflict"].includes(settlementError.code))) {
+          throw settlementError;
+        }
+      }
+    }
+    throw classified;
+  }
+  if (readyCommitted) options.onCommitted?.(ready);
+  return { preview: ready, replayed: false } as const;
 }
 
 export async function ingestArtifactContent(store: Store, storage: PreviewStorage, input: UploadInput) {

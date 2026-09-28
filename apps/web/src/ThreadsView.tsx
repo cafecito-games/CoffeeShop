@@ -1,11 +1,12 @@
 import { Archive, ArrowCounterClockwise, ChatCircle, FolderOpen, TerminalWindow } from "@phosphor-icons/react";
 import { useMemo, useState } from "react";
 import {
-  isActiveRunStatus, type Agent, type Artifact, type OrchestratorAttachment, type OrchestratorClient,
+  isActiveRunStatus, type Agent, type Artifact, type ArtifactPreview, type OrchestratorAttachment, type OrchestratorClient,
   type Run, type Thread, type ThreadStatus
 } from "@coffee-shop/protocol";
 import { OrchestratorBadge } from "./OrchestratorBadge.js";
 import { actorLabel, describeThreadOrchestrator } from "./orchestratorPresentation.js";
+import { PreviewArtifact, type AuthenticatedFetch } from "./PreviewArtifact.js";
 
 const statusLabels: Record<ThreadStatus, string> = { active: "Active", completed: "Completed", archived: "Archived" };
 
@@ -19,14 +20,16 @@ function timeAgo(date: string) {
   return `${Math.floor(hours / 24)}d`;
 }
 
-export function ThreadsView({ threads, runs, artifacts, agents, orchestratorClients, orchestratorAttachments, canMutate, onContinue, onInspectRun, onSetStatus }: {
+export function ThreadsView({ threads, runs, artifacts, artifactPreviews, agents, orchestratorClients, orchestratorAttachments, canMutate, apiFetch, onContinue, onInspectRun, onSetStatus }: {
   threads: Thread[];
   runs: Run[];
   artifacts: Artifact[];
+  artifactPreviews?: ArtifactPreview[];
   agents: Agent[];
   orchestratorClients: OrchestratorClient[];
   orchestratorAttachments: OrchestratorAttachment[];
   canMutate: boolean;
+  apiFetch: AuthenticatedFetch;
   onContinue: (thread: Thread) => void;
   onInspectRun: (runId: string) => void;
   onSetStatus: (thread: Thread, status: ThreadStatus) => Promise<void>;
@@ -61,6 +64,8 @@ export function ThreadsView({ threads, runs, artifacts, agents, orchestratorClie
       {visible.length ? <div className="thread-list">{visible.map((thread) => {
         const threadRuns = runs.filter((run) => run.threadId === thread.id);
         const threadArtifacts = artifacts.filter((artifact) => artifact.threadId === thread.id && artifact.uploaded);
+        const previewByArtifact = new Map((artifactPreviews ?? []).filter((preview) => preview.threadId === thread.id)
+          .map((preview) => [preview.artifactId, preview]));
         const participantIds = new Set(threadRuns.map((run) => run.agentId));
         const participants = agents.filter((agent) => participantIds.has(agent.id));
         const activeRuns = threadRuns.filter((run) => isActiveRunStatus(run.status));
@@ -79,6 +84,10 @@ export function ThreadsView({ threads, runs, artifacts, agents, orchestratorClie
             <div><dt>Artifacts</dt><dd>{threadArtifacts.length}</dd></div>
           </dl>
           {threadRuns.length > 0 && <div className="thread-runs">{threadRuns.slice(0, 5).map((run) => <button key={run.id} onClick={() => onInspectRun(run.id)}><TerminalWindow size={14} /><span>{actorLabel(run, agents)}</span><small>{run.status}</small></button>)}</div>}
+          {threadArtifacts.some((artifact) => previewByArtifact.has(artifact.id)) && <section className="thread-previews" aria-label={`Previews for ${thread.title}`}>{threadArtifacts.map((artifact) => {
+            const preview = previewByArtifact.get(artifact.id);
+            return preview ? <PreviewArtifact key={artifact.id} artifact={artifact} preview={preview} canMutate={canMutate} apiFetch={apiFetch} compact /> : null;
+          })}</section>}
           <footer>
             {thread.status !== "archived" && <button onClick={() => onContinue(thread)}><ChatCircle size={15} /> {orchestrator.kind === "external" ? "Message orchestrator" : "Continue thread"}</button>}
             {thread.status !== "archived"

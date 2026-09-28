@@ -5,7 +5,8 @@ import {
   sessionBindingStatuses, taskDependencyPolicies, taskMessageKinds, taskStatuses, toolCallKinds,
   toolCallStatuses, workspaceCleanupPolicies, workspaceIsolationPolicies, workspaceLeaseStatuses,
   workspaceRetentionReasons, orchestratorAttachmentStatuses, orchestratorClientScopes, validateAgentInstance,
-  validateAgentTemplate, validateArtifactPreview, validateInstanceAllocation, validateProjectProfile, type Snapshot
+  validateAgentTemplate, validateArtifactPreview, validateInstanceAllocation, validateProjectProfile,
+  type ArtifactPreview, type Snapshot
 } from "@coffee-shop/protocol";
 
 export type ConnectionStatus = "connecting" | "connected" | "reconnecting" | "disconnected" | "authentication-required";
@@ -543,6 +544,33 @@ function isThread(value: unknown): boolean {
     && isOptionalString(value.archivedAt);
 }
 
+function previewCollectionCorrelates(value: Record<string, unknown>) {
+  if (value.artifactPreviews === undefined) return true;
+  if (!Array.isArray(value.artifactPreviews)) return false;
+  if (value.artifactPreviews.length === 0) return true;
+  if (!Array.isArray(value.artifacts)) return false;
+  const previewIds = new Set<string>();
+  const artifactIds = new Set<string>();
+  for (const unknownPreview of value.artifactPreviews) {
+    if (!validateArtifactPreview(unknownPreview, value.generatedAt).ok) return false;
+    const preview = unknownPreview as ArtifactPreview;
+    if (previewIds.has(preview.id) || artifactIds.has(preview.artifactId)) return false;
+    previewIds.add(preview.id);
+    artifactIds.add(preview.artifactId);
+    const artifacts = value.artifacts.filter((candidate) => isObject(candidate) && candidate.id === preview.artifactId);
+    if (artifacts.length !== 1) return false;
+    const artifact = artifacts[0]!;
+    const sameActor = artifact.agentId === preview.agentId
+      && artifact.instanceId === preview.instanceId
+      && artifact.allocationId === preview.allocationId;
+    if (artifact.uploaded !== true || artifact.kind !== "preview-bundle"
+      || artifact.mediaType !== "application/vnd.coffee-shop.preview-bundle+tar+gzip"
+      || artifact.sha256 !== preview.artifactSha256 || artifact.threadId !== preview.threadId
+      || artifact.runId !== preview.runId || !sameActor) return false;
+  }
+  return true;
+}
+
 export function isSnapshot(value: unknown): value is Snapshot {
   const v5Absent = isObject(value) && value.instances === undefined && value.allocations === undefined && value.templates === undefined;
   const v5Present = isObject(value)
@@ -561,6 +589,7 @@ export function isSnapshot(value: unknown): value is Snapshot {
     && (value.artifacts === undefined || isArrayOf(value.artifacts, isArtifact))
     && (value.artifactPreviews === undefined
       || isArrayOf(value.artifactPreviews, (preview) => validateArtifactPreview(preview, value.generatedAt).ok))
+    && previewCollectionCorrelates(value)
     && (value.tasks === undefined || isArrayOf(value.tasks, isTask))
     && (value.taskMessages === undefined || isArrayOf(value.taskMessages, isTaskMessage))
     && (value.taskMessageAcknowledgements === undefined || isArrayOf(value.taskMessageAcknowledgements, isTaskMessageAcknowledgement))
