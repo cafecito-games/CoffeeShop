@@ -1,8 +1,12 @@
-import { defineConfig } from "vite";
+import { defineConfig, loadEnv } from "vite";
 import react from "@vitejs/plugin-react";
 import { VitePWA } from "vite-plugin-pwa";
 
-export default defineConfig({
+export default defineConfig(({ mode }) => {
+  const environment = loadEnv(mode, process.cwd(), "");
+  const hubTarget = environment.COFFEE_SHOP_DEV_PROXY_TARGET || "http://localhost:8787";
+  const hubWebSocketTarget = hubTarget.replace(/^http/, "ws");
+  return {
   plugins: [
     react(),
     VitePWA({
@@ -20,12 +24,13 @@ export default defineConfig({
   ],
   server: {
     proxy: {
-      "/api": "http://localhost:8787",
-      "/events": { target: "ws://localhost:8787", ws: true },
+      "/api": { target: hubTarget, changeOrigin: true },
+      "/events": { target: hubWebSocketTarget, ws: true, changeOrigin: true },
       // The connect dialog builds a bridge hub URL from this app's origin, which is the dev server
       // in development and the hub itself in production. Proxying the endpoint keeps the generated
       // `.mcp.json` correct in both.
-      "/orchestrator-client": { target: "ws://localhost:8787", ws: true }
+      "/orchestrator-client": { target: hubWebSocketTarget, ws: true, changeOrigin: true }
     }
   }
+  };
 });
