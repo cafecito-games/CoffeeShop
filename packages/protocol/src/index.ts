@@ -3247,6 +3247,28 @@ export interface AgentTemplate {
    */
   legacyAgentId?: string;
 }
+
+/**
+ * Operator intent for a thread whose orchestrator is a resident instance. The Hub chooses and
+ * persists the exact allocation; callers describe only the thread and placement requirements.
+ */
+export interface CreateHostedThreadRequest {
+  idempotencyKey: string;
+  title: string;
+  objective: string;
+  orchestrator: {
+    purpose?: InstancePurpose;
+    requirements: ExecutionRequirements;
+    idleTimeoutSeconds?: number;
+  };
+}
+
+export interface CreateHostedThreadResult {
+  thread: Thread<{ kind: "instance"; instanceId: string }>;
+  instance: AgentInstance;
+  allocation: InstanceAllocation;
+  replayed: boolean;
+}
 /** New actor attribution always names both logical identity and the exact allocation. */
 export interface InstanceActor { instanceId: string; allocationId: string }
 export type RuntimeActor = ({ kind: "instance" } & InstanceActor) | { kind: "agent"; agentId: string };

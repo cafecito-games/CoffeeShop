@@ -24,6 +24,7 @@ import {
   isWorkspaceLeaseStatus,
   isOrchestratorAttachmentStatus,
   isOrchestratorClientScope,
+  instanceLimits,
   orchestrationCollections,
   previewBundleArtifactKind,
   previewBundleLimits,
@@ -203,6 +204,18 @@ export interface StoredOrchestratorClient extends OrchestratorClient {
   secretHash: string;
 }
 
+/** Private replay receipt for one atomic operator-created instance-orchestrated thread. */
+export interface HostedThreadCreationReceipt {
+  id: string;
+  operatorId: string;
+  idempotencyKey: string;
+  digest: string;
+  threadId: string;
+  instanceId: string;
+  allocationId: string;
+  createdAt: string;
+}
+
 /** Hub-internal collections that are persisted but never published in snapshots. */
 interface HubOnlyState {
   /** One-time schema marker for canonical, template-materialized instance requirements. */
@@ -229,6 +242,8 @@ interface HubOnlyState {
   legacyTemplateImports?: LegacyTemplateImport[];
   /** Operator-scoped template mutation receipts. Never published to snapshot consumers. */
   agentTemplateConfigurationReceipts?: AgentTemplateConfigurationReceipt[];
+  /** Operator-scoped atomic hosted-thread creation receipts. Never published to snapshots. */
+  hostedThreadCreationReceipts?: HostedThreadCreationReceipt[];
   previewRegistrationReceipts?: PreviewRegistrationReceipt[];
   previewProcessingReceipts?: PreviewProcessingReceipt[];
   /** One-time external upload capabilities. Plaintext tokens are never stored. */
@@ -263,6 +278,7 @@ const emptyState = (): State => withOrchestrationDefaults({
   nodeInstanceResidency: [],
   legacyTemplateImports: [],
   agentTemplateConfigurationReceipts: [],
+  hostedThreadCreationReceipts: [],
   taskSubmissions: [],
   taskUpdates: [],
   taskEventJournal: [],
@@ -346,6 +362,45 @@ export function addAgentTemplateConfigurationDefaults(state: State) {
   if (state.agentTemplateConfigurationReceipts !== undefined) return false;
   state.agentTemplateConfigurationReceipts = [];
   return true;
+}
+
+/** Adds private hosted-thread receipts for states written before PWA-created resident orchestration. */
+export function addHostedThreadDefaults(state: State) {
+  if (state.hostedThreadCreationReceipts !== undefined) return false;
+  state.hostedThreadCreationReceipts = [];
+  return true;
+}
+
+export function assertPersistedHostedThreadState(state: State) {
+  if (!Array.isArray(state.hostedThreadCreationReceipts)) throw new Error("Persisted hosted thread receipt collection is malformed");
+  const keys = new Set<string>();
+  for (const [index, raw] of state.hostedThreadCreationReceipts.entries()) {
+    const context = `Persisted hosted thread receipt ${index}`;
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) throw new Error(`${context} is not an object`);
+    const receipt = raw as HostedThreadCreationReceipt;
+    const fields = Object.keys(receipt).sort();
+    const expected = ["allocationId", "createdAt", "digest", "id", "idempotencyKey", "instanceId", "operatorId", "threadId"].sort();
+    if (JSON.stringify(fields) !== JSON.stringify(expected)
+      || ![receipt.id, receipt.operatorId, receipt.idempotencyKey, receipt.threadId, receipt.instanceId, receipt.allocationId, receipt.createdAt]
+        .every((item) => typeof item === "string" && item.length > 0)
+      || [receipt.id, receipt.operatorId, receipt.threadId, receipt.instanceId, receipt.allocationId]
+        .some((item) => Buffer.byteLength(item, "utf8") > instanceLimits.identifierBytes)
+      || Buffer.byteLength(receipt.idempotencyKey, "utf8") > instanceLimits.idempotencyKeyBytes
+      || !/^[a-f0-9]{64}$/.test(receipt.digest)
+      || !isTimestamp(receipt.createdAt)) {
+      throw new Error(`${context} is invalid`);
+    }
+    const key = `${receipt.operatorId}\u0000${receipt.idempotencyKey}`;
+    if (keys.has(key)) throw new Error(`${context} repeats an operator idempotency key`);
+    keys.add(key);
+    const thread = state.threads?.find((item) => item.id === receipt.threadId);
+    const instance = state.instances?.find((item) => item.id === receipt.instanceId);
+    const allocation = state.allocations?.find((item) => item.id === receipt.allocationId);
+    if (!thread || !instance || !allocation || instance.threadId !== thread.id || allocation.instanceId !== instance.id
+      || thread.orchestrator?.kind !== "instance" || thread.orchestrator.instanceId !== instance.id) {
+      throw new Error(`${context} does not resolve to one instance-orchestrated thread`);
+    }
+  }
 }
 
 /**
@@ -1161,6 +1216,7 @@ export class Store {
     const addedOrchestration = addOrchestrationDefaults(loaded);
     addInstanceDefaults(loaded);
     const addedTemplateConfiguration = addAgentTemplateConfigurationDefaults(loaded);
+    const addedHostedThreads = addHostedThreadDefaults(loaded);
     const migratedInstanceRequirements = migrateLegacyInstanceState(loaded);
     addArtifactPreviewDefaults(loaded);
     const addedArtifactUploadGrants = addArtifactUploadGrantDefaults(loaded);
@@ -1176,6 +1232,7 @@ export class Store {
     assertPersistedInstanceState(loaded);
     assertPersistedTemplateState(loaded);
     assertPersistedAgentTemplateConfigurationState(loaded);
+    assertPersistedHostedThreadState(loaded);
     /*
      * Runs before the actor assertion: a record the previous revision wrote with the borrowed agent
      * key is migrated, and only a genuinely ambiguous one is refused. It deliberately stays *after*
@@ -1203,7 +1260,7 @@ export class Store {
     // persist exactly once, and a new database must always receive its initial row.
     const explicitMigration = removedDemoRecords || addedAgentAvatars || addedCoordination || addedThreads || addedOrchestration
       || addedThreadOrchestrators || addedApprovalResolvers || addedTemplateConfiguration || migratedInstanceRequirements
-      || addedComponentInventories || addedArtifactUploadGrants || droppedBorrowedKeys || importedTemplates;
+      || addedHostedThreads || addedComponentInventories || addedArtifactUploadGrants || droppedBorrowedKeys || importedTemplates;
     if (needsInitialSqliteWrite || explicitMigration || (this.sqlite && JSON.stringify(loaded) !== beforeMigrations)) await this.save(loaded);
     this.state = loaded;
   }
@@ -1226,6 +1283,7 @@ export class Store {
       instanceDeliveries: _instanceDeliveries, remoteReleaseRequests: _remoteReleaseRequests,
       nodeInstanceResidency: _nodeInstanceResidency, instanceRequirementsVersion: _instanceRequirementsVersion,
       agentTemplateConfigurationReceipts: _agentTemplateConfigurationReceipts,
+      hostedThreadCreationReceipts: _hostedThreadCreationReceipts,
       previewRegistrationReceipts: _previewRegistrationReceipts, previewProcessingReceipts: _previewProcessingReceipts,
       artifactUploadGrants: _artifactUploadGrants,
       projectProfilesImported: _projectProfilesImported, orchestratorClients, artifactPreviews, ...published

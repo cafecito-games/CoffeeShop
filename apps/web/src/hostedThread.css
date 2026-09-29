@@ -1,0 +1,36 @@
+.hosted-thread-dialog { width: min(760px,calc(100vw - 30px)); max-height: min(92dvh,880px); border: 1px solid var(--line-strong); border-radius: 12px; overflow: hidden; background: var(--surface-2); box-shadow: 0 24px 80px rgba(0,0,0,.45); }
+.hosted-thread-dialog form { max-height: inherit; display: grid; grid-template-rows: auto minmax(0,1fr) auto; }
+.hosted-thread-dialog > form > header { min-height: 88px; padding: 16px 20px; border-bottom: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.hosted-thread-dialog header small { color: var(--accent); font: var(--font-size-7) "DM Mono",monospace; letter-spacing: .06em; text-transform: uppercase; }
+.hosted-thread-dialog h2 { margin: 4px 0 0; font-size: var(--font-size-17); letter-spacing: -.025em; }
+.hosted-thread-dialog header p { max-width: 560px; margin: 5px 0 0; color: var(--muted); font-size: var(--font-size-8); line-height: 1.5; }
+.hosted-thread-scroll { padding: 20px; overflow-y: auto; overscroll-behavior: contain; }
+.hosted-thread-scroll > section { padding: 0 0 20px; margin: 0 0 20px; border-bottom: 1px solid var(--line); }
+.hosted-thread-scroll > section:last-of-type { margin-bottom: 0; border-bottom: 0; }
+.hosted-section-heading { margin-bottom: 12px; display: grid; gap: 4px; }
+.hosted-section-heading > span { color: var(--muted); font: var(--font-size-8) "DM Mono",monospace; letter-spacing: .04em; text-transform: uppercase; }
+.hosted-section-heading > small { color: var(--secondary); font-size: var(--font-size-9); line-height: 1.5; }
+.hosted-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; }
+.hosted-field { margin-bottom: 12px; display: grid; gap: 6px; color: var(--muted); font-size: var(--font-size-8); }
+.hosted-field > span { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.hosted-field em { color: var(--faint); font-size: var(--font-size-7); font-style: normal; text-transform: uppercase; }
+.hosted-field input, .hosted-field textarea { min-height: 42px; padding: 9px 10px; border: 1px solid var(--line); border-radius: 7px; outline: 0; color: var(--text); background: var(--surface); resize: vertical; transition: border-color 150ms cubic-bezier(.25,1,.5,1),background 150ms cubic-bezier(.25,1,.5,1); }
+.hosted-field input:focus, .hosted-field textarea:focus { border-color: rgba(223,163,76,.55); background: color-mix(in srgb,var(--surface) 92%,var(--accent) 8%); }
+.hosted-field > small { color: var(--faint); font-size: var(--font-size-7); line-height: 1.45; }
+.hosted-capacity, .hosted-placement-preview { padding: 12px; border: 1px solid var(--line); border-radius: 8px; display: flex; align-items: center; gap: 10px; background: var(--surface); }
+.hosted-capacity { margin-bottom: 20px; border-color: rgba(223,163,76,.28); color: var(--accent); }
+.hosted-capacity > span, .hosted-placement-preview > span { display: grid; gap: 3px; }
+.hosted-capacity strong, .hosted-placement-preview strong { color: var(--text); font-size: var(--font-size-9); }
+.hosted-capacity small, .hosted-placement-preview small { color: var(--muted); font-size: var(--font-size-8); line-height: 1.4; }
+.hosted-placement-preview { margin-top: 2px; color: var(--accent); }
+.hosted-thread-dialog footer { padding: 12px 20px; border-top: 1px solid var(--line); display: flex; justify-content: flex-end; gap: 8px; }
+.hosted-thread-dialog footer .primary-action { border-color: var(--accent); display: inline-flex; align-items: center; gap: 7px; color: #171209; background: var(--accent); font-weight: 700; }
+
+@media (max-width:700px) {
+  .hosted-thread-dialog { width: 100%; max-height: 90dvh; }
+  .hosted-thread-dialog > form > header { min-height: 76px; padding: 12px 16px; }
+  .hosted-thread-dialog header p { display: none; }
+  .hosted-thread-scroll { padding: 16px; }
+  .hosted-grid { grid-template-columns: 1fr; }
+  .hosted-thread-dialog button { min-height: 44px; }
+}

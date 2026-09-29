@@ -13,7 +13,7 @@ function newIdempotencyKey(): string {
 
 const participantLabels: Record<TaskMessageParticipant["type"], string> = {
   operator: "You",
-  orchestrator: "Claude Code orchestrator",
+  orchestrator: "Orchestrator",
   task: "Worker task"
 };
 
@@ -22,10 +22,10 @@ function participantLabel(participant: TaskMessageParticipant): string {
 }
 
 /**
- * An externally orchestrated thread has no owner agent, so an operator message cannot start a run
- * here. The hub appends it to the orchestrator's inbox and rings the attached Claude Code session.
+ * A thread without a legacy owner agent is steered through its durable orchestrator inbox. External
+ * sessions receive a doorbell; resident orchestrators are woken on their assigned Barista node.
  */
-export function ExternalThreadDialog({ thread, description, taskMessages, canMutate, apiFetch, onClose }: {
+export function OrchestratorThreadDialog({ thread, description, taskMessages, canMutate, apiFetch, onClose }: {
   thread: Thread;
   description: ThreadOrchestratorDescription;
   taskMessages: TaskMessage[];
@@ -45,6 +45,7 @@ export function ExternalThreadDialog({ thread, description, taskMessages, canMut
     .filter((message) => message.threadId === thread.id)
     .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
   const active = thread.status === "active";
+  const hosted = description.kind === "instance";
 
   async function send(event: FormEvent) {
     event.preventDefault();
@@ -66,7 +67,7 @@ export function ExternalThreadDialog({ thread, description, taskMessages, canMut
         setNotice({ tone: "info", text: `Delivered to ${description.name}'s inbox.` });
         return;
       }
-      if (response.status === 404) throw new Error("This thread is no longer orchestrated externally.");
+      if (response.status === 404) throw new Error("This thread no longer has a messageable orchestrator.");
       throw new Error(payload.error ?? `The message could not be delivered (${response.status})`);
     } catch (cause) {
       setNotice({ tone: "error", text: cause instanceof Error ? cause.message : "The message could not be delivered" });
@@ -78,7 +79,7 @@ export function ExternalThreadDialog({ thread, description, taskMessages, canMut
   return (
     <AccessibleDialog labelledBy={titleId} onClose={onClose} className="experience-dialog external-thread-dialog">
       <header className="experience-header external-thread-header">
-        <div><small>Externally orchestrated</small><h2 id={titleId}>{thread.title}</h2><OrchestratorBadge description={description} /></div>
+        <div><small>{hosted ? "Resident orchestrator" : "External orchestrator"}</small><h2 id={titleId}>{thread.title}</h2><OrchestratorBadge description={description} /></div>
         <button className="icon-btn" onClick={onClose} aria-label="Close thread" data-dialog-initial-focus><X size={17} /></button>
       </header>
       <p className="experience-lede">{thread.summary || thread.objective}</p>
@@ -94,10 +95,11 @@ export function ExternalThreadDialog({ thread, description, taskMessages, canMut
       </section>
       <form className="external-thread-composer" onSubmit={send}>
         <p className="composer-hint">
-          {description.attached
-            ? `${description.name} is attached; this message reaches that Claude Code session as a thread event.`
-            : `${description.name} is not attached right now. The message waits in its inbox and is delivered when the session reconnects.`}
-          {" "}Messaging here never starts a run in Coffee Shop.
+          {hosted
+            ? `${description.name} is ${description.detail || "assigned"}. This message enters its durable inbox and wakes it on its resident compute when ready.`
+            : description.attached
+              ? `${description.name} is attached; this message reaches that Claude Code session as a thread event. Messaging here never starts a run in Coffee Shop.`
+              : `${description.name} is not attached right now. The message waits in its inbox and is delivered when the session reconnects.`}
         </p>
         <div className="composer-box">
           <textarea
@@ -118,3 +120,6 @@ export function ExternalThreadDialog({ thread, description, taskMessages, canMut
     </AccessibleDialog>
   );
 }
+
+/** Compatibility name for callers that still describe only the external variant. */
+export const ExternalThreadDialog = OrchestratorThreadDialog;

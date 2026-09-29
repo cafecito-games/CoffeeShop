@@ -45,6 +45,7 @@ function renderThreads(
     orchestratorAttachments={attachments}
     canMutate
     apiFetch={apiFetch}
+    onCreate={vi.fn()}
     onContinue={onContinue}
     onInspectRun={vi.fn()}
     onSetStatus={vi.fn()}

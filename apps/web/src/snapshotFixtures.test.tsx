@@ -42,6 +42,7 @@ function renderViews(snapshot: Snapshot) {
       orchestratorAttachments={snapshot.orchestratorAttachments ?? []}
       canMutate
       apiFetch={vi.fn()}
+      onCreate={vi.fn()}
       onContinue={vi.fn()}
       onInspectRun={vi.fn()}
       onSetStatus={vi.fn()}

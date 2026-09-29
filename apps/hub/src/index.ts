@@ -78,6 +78,7 @@ import { expireDueApprovals, receiveApprovalUndeliverable, receiveHarnessEvent, 
 import { createRedactor } from "./redaction.js";
 import { dispatchMessageFor, runSchedulingPass, type SchedulingContext, type SchedulingPassResult } from "./scheduler.js";
 import { runContinuationPass, type ContinuationPassResult } from "./orchestratorInbox.js";
+import { createHostedThread } from "./hostedThreads.js";
 import { receiveSessionBinding } from "./sessionBindings.js";
 import { newEvent, newId, newMessage, Store } from "./store.js";
 import { newThread, updateThreadByOperator, updateThreadForRun } from "./threads.js";
@@ -281,6 +282,29 @@ async function queueRun(agent: Agent, prompt: string, options: { threadId: strin
 
 app.get("/api/health", (_req, res) => res.json({ ok: true, service: "coffee-shop-control-plane", controlAgents: controlAgents.size }));
 app.get("/api/snapshot", (_req, res) => res.json(store.snapshot()));
+
+app.post("/api/threads", async (req, res) => {
+  try {
+    const result = await createHostedThread(store, "operator", req.body, {
+      connection: schedulingConnection,
+      capabilityReport: getNodeCapabilityReport,
+      capabilityPackReadiness: getCapabilityPackReadiness,
+      projectProfile: (projectId) => store.read((state) => state.projectProfiles?.find((profile) => profile.id === projectId)),
+      canDeliver: () => false
+    });
+    if (!result.replayed) broadcast();
+    // An exact retry may be the first request that survives long enough to flush the durable
+    // provision outbox, so replay still drives maintenance and scheduling.
+    await runInstanceMaintenance();
+    requestScheduling();
+    res.status(result.replayed ? 200 : 201).json(result);
+  } catch (error) {
+    const failure = error instanceof CoordinationError ? error : new CoordinationError("internal_error", "The hosted thread could not be created", true);
+    const status = failure.code === "idempotency_conflict" || failure.code === "unavailable" ? 409
+      : failure.code === "invalid_arguments" ? 400 : 500;
+    res.status(status).json({ error: failure.message });
+  }
+});
 
 app.post("/api/agents", async (req, res) => {
   let result: ReturnType<typeof createConfiguredAgent> | undefined;

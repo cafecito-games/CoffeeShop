@@ -90,6 +90,8 @@ ACP is local to a compute node: it never crosses the hub↔Barista WebSocket, an
 ### Domain mapping
 
 - **Task** — a durable, schedulable unit in a thread-owned dependency graph, with hard execution requirements, ranked preferences, dependencies, and zero or more attempts. The hub generates its identity.
+- **Agent instance** — a durable identity with a lease and execution requirements. An allocation places one generation of that identity on an exact Barista, harness, model, transport, and workspace; the identity can survive allocation replacement.
+- **Thread orchestrator** — the participant responsible for the thread's durable inbox. It may be a legacy configured agent, an external operator session, or a resident instance. A resident orchestrator receives hub-granted delegation authority, so its runs can create worker instances and submit tasks without allowing a model to grant that authority to itself.
 - **Run** — one immutable execution attempt of a task (or of a direct message) on a concrete agent, harness, transport, model, node, and workspace. Version-4 runs record `taskId` and a one-based `attempt`.
 - **Task message** — an immutable mailbox record ordered by a sequence scoped to its recipient. Acknowledgements are separate records, so messages never change after they are written. Sender identity comes from the authenticated source run.
 - **Harness session binding** — associates an opaque provider session with the agent, node, harness, workspace, and thread it was created for. A failed or unsupported resume marks the binding `replaced` and records the new binding instead of dropping queued context.

@@ -178,7 +178,7 @@ export function MobileInstanceIndex({ instances, threads, canMutate, onSelect, o
   return <main className="mobile-instance-index"><header><div><small>Runtime identities</small><h1>Instances</h1></div><button aria-label="Start instance" onClick={onCreate} disabled={!canMutate}><Plus size={18} /></button></header><div>{active.map((instance) => <button key={instance.id} onClick={() => onSelect(instance.id)}><span className={`instance-state instance-state-${instance.status}`} /><span><strong>{instanceName(instance)}</strong><small>{threads.find((thread) => thread.id === instance.threadId)?.title ?? instance.threadId} · {instance.status}</small></span><ArrowRight size={17} /></button>)}{active.length === 0 && <p>No active instances.</p>}</div></main>;
 }
 
-interface PickerOption {
+export interface PickerOption {
   value: string;
   label: string;
   description?: string;
@@ -198,7 +198,7 @@ function TextField({ label, value, onChange, placeholder, required, multiline, h
     : <input aria-label={label} value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} required={required} />}{helper && <small>{helper}</small>}</label>;
 }
 
-function ChoicePicker({ label, value, onChange, options, placeholder, helper, initialFocus }: {
+export function ChoicePicker({ label, value, onChange, options, placeholder, helper, initialFocus }: {
   label: string;
   value: string;
   onChange: (value: string) => void;
