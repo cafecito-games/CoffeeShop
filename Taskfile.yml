@@ -226,6 +226,22 @@ tasks:
       - mkdir -p ../../bin
       - go build -trimpath -ldflags "-s -w -X main.version={{.BARISTA_VERSION}}" -o ../../bin/barista ./cmd/barista
 
+  control-agent:install:
+    desc: Build Barista and install it to BARISTA_INSTALL_DIR (default ~/.local/bin); restart a running Barista yourself
+    platforms: [linux, darwin]
+    vars:
+      INSTALL_DIR:
+        sh: echo "${BARISTA_INSTALL_DIR:-$HOME/.local/bin}"
+    cmds:
+      - task: control-agent:build
+      - mkdir -p "{{.INSTALL_DIR}}"
+      # Copy beside the target and rename, so a running Barista keeps its
+      # binary and a failed copy never leaves a partial one in place.
+      - cp bin/barista "{{.INSTALL_DIR}}/.barista.new"
+      - chmod 0755 "{{.INSTALL_DIR}}/.barista.new"
+      - mv -f "{{.INSTALL_DIR}}/.barista.new" "{{.INSTALL_DIR}}/barista"
+      - echo "installed Barista {{.BARISTA_VERSION}} to {{.INSTALL_DIR}}/barista"
+
   control-agent:build:all:
     desc: Cross-compile Barista release binaries
     dir: apps/control-agent

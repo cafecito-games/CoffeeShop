@@ -96,7 +96,7 @@ Preview troubleshooting:
 
 ## Bootstrapping a compute node
 
-1. Build and copy the binary: `task control-agent:build` (or `task control-agent:build:all` for cross-compiled release binaries under `dist/barista`). Copy it to a stable location on the node.
+1. Build and copy the binary: `task control-agent:build` (or `task control-agent:build:all` for cross-compiled release binaries under `dist/barista`). Copy it to a stable location on the node. When building on the node itself, `task control-agent:install` does both, installing to `~/.local/bin/barista` (or `BARISTA_INSTALL_DIR`); restart the Barista service afterwards to pick up the new binary.
 2. Create a dedicated service account that can read/write the enrolled workspaces and read the locally authenticated CLI state, and nothing broader. Run Barista under the platform service manager (systemd, launchd, Windows service wrapper) with a protected environment file.
 3. Provide the enrollment token through the environment, `COFFEE_SHOP_TOKEN`, never `--token` — process listings and shell history expose flag values.
 4. Enroll workspace roots with repeated `--workspace-root` flags or `WORKSPACE_ROOTS` (comma-separated). Every root must be absolute and must exist; with no root configured Barista authorizes only its working directory.
