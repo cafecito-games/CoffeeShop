@@ -153,3 +153,14 @@ describe("ThreadConversation", () => {
     expect(screen.getByRole("button", { name: "Reopen" })).toBeInTheDocument();
   });
 });
+
+describe("buildThreadConversation ordering", () => {
+  it("puts an operator message before the turn it woke when both share an instant", () => {
+    const items = buildThreadConversation({
+      thread: thread(), runs: [run({ createdAt: at(5) })], tasks: [], messages: [],
+      taskMessages: [operatorMessage("m2", "Follow up", 5)],
+      events: [{ id: "e2", type: "status", title: "Thread reopened", detail: "", threadId: "thread-1", createdAt: at(5) }]
+    });
+    expect(items.map((item) => item.kind)).toEqual(["divider", "operator", "turn"]);
+  });
+});

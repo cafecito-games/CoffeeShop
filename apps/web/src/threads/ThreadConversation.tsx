@@ -72,7 +72,11 @@ export function ThreadConversation({ thread, snapshot, canMutate, apiFetch, onBa
   // Follow the stream while the reader is at the bottom; leave them where they are once they scroll up.
   useLayoutEffect(() => {
     const element = scroller.current;
-    if (element && pinned.current) element.scrollTop = element.scrollHeight;
+    // Instant, because the container scrolls smoothly: an animated scroll reports intermediate
+    // positions that would read as the reader leaving the bottom.
+    if (!element || !pinned.current) return;
+    if (typeof element.scrollTo === "function") element.scrollTo({ top: element.scrollHeight, behavior: "instant" });
+    else element.scrollTop = element.scrollHeight;
   }, [contentKey]);
   useEffect(() => { pinned.current = true; }, [thread.id]);
 

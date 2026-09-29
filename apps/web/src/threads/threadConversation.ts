@@ -71,8 +71,11 @@ export function buildThreadConversation({ thread, runs, tasks, messages, taskMes
     }
   }
 
-  return items.sort((left, right) => left.at.localeCompare(right.at) || left.id.localeCompare(right.id));
+  return items.sort((left, right) => left.at.localeCompare(right.at) || kindOrder[left.kind] - kindOrder[right.kind] || left.id.localeCompare(right.id));
 }
+
+/** Within one instant, a reopen precedes the message that caused it, and a message the run it wakes. */
+const kindOrder: Record<ConversationItem["kind"], number> = { divider: 0, operator: 1, reply: 2, task: 3, turn: 4 };
 
 /** A rendered transcript block: consecutive message entries read as one reply. */
 export type TranscriptBlock =
