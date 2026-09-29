@@ -307,9 +307,18 @@ describe("version-5 instance and template operator experience", () => {
     render(<App />);
     fireEvent.click(screen.getAllByRole("button", { name: "Start instance" })[0]);
     const dialog = screen.getByRole("dialog", { name: "Start an instance" });
-    expect(within(dialog).getByRole("button", { name: thread.title })).toHaveAttribute("aria-pressed", "true");
-    expect(within(dialog).getByRole("button", { name: "No template" })).toHaveAttribute("aria-pressed", "true");
-    expect(within(dialog).getByRole("button", { name: v5Template.name })).toHaveAttribute("aria-pressed", "false");
+    expect(within(dialog).getByRole("button", { name: `Active thread: ${thread.title}` })).toHaveAttribute("aria-expanded", "false");
+    const templatePicker = within(dialog).getByRole("button", { name: "Template: No template" });
+    fireEvent.click(templatePicker);
+    expect(within(dialog).getByRole("option", { name: /No template/ })).toHaveAttribute("aria-selected", "true");
+    expect(within(dialog).getByRole("option", { name: /Review/ })).toHaveAttribute("aria-selected", "false");
+    fireEvent.click(templatePicker);
+    fireEvent.click(within(dialog).getByRole("button", { name: "Allowed harnesses: Any available harness" }));
+    fireEvent.click(within(dialog).getByRole("option", { name: /^Codex/ }));
+    expect(within(dialog).getByRole("button", { name: "Allowed harnesses: Codex" })).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Allowed models: Any available model" }));
+    fireEvent.click(within(dialog).getByRole("option", { name: "gpt-5" }));
+    expect(within(dialog).getByRole("button", { name: "Allowed models: gpt-5" })).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Fresh worker" } });
     fireEvent.click(within(dialog).getByRole("button", { name: "Start instance" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("network uncertain");
@@ -318,22 +327,36 @@ describe("version-5 instance and template operator experience", () => {
     const bodies = fetchMock.mock.calls.map((call) => JSON.parse(String((call[1] as RequestInit).body)));
     expect(bodies[0].idempotencyKey).toBe(bodies[1].idempotencyKey);
     expect(bodies[0].creator).toBeUndefined();
+    expect(bodies[0].requirements).toEqual({ harnessIds: ["codex-cli"], models: ["gpt-5"] });
   });
 
-  it("surfaces invalid lease and partial initial-task input before sending", async () => {
+  it("explains and validates the optional initial task before sending", async () => {
     const fetchMock = vi.mocked(fetch);
     const { default: App } = await import("./App.js");
     render(<App />);
     fireEvent.click(screen.getAllByRole("button", { name: "Start instance" })[0]);
     const dialog = screen.getByRole("dialog", { name: "Start an instance" });
+    const initialTask = within(dialog).getByRole("switch", { name: /Queue an initial task/ });
+    expect(initialTask).toHaveTextContent("pins it to the new instance");
+    fireEvent.click(initialTask);
     fireEvent.change(screen.getByLabelText("Task title"), { target: { value: "Only a title" } });
     fireEvent.click(within(dialog).getByRole("button", { name: "Start instance" }));
-    expect(screen.getByRole("alert")).toHaveTextContent("title and instructions must be provided together");
-    fireEvent.change(screen.getByLabelText("Task title"), { target: { value: "" } });
-    fireEvent.change(screen.getByLabelText("Idle timeout (seconds)"), { target: { value: "not-a-number" } });
-    fireEvent.click(within(dialog).getByRole("button", { name: "Start instance" }));
-    expect(screen.getByRole("alert")).toHaveTextContent("Idle timeout must be a whole number");
+    expect(screen.getByRole("alert")).toHaveTextContent("both a title and instructions");
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("turns the missing active-thread failure into a guided prerequisite", async () => {
+    currentSnapshot.threads = [thread];
+    const { default: App } = await import("./App.js");
+    render(<App />);
+    fireEvent.click(screen.getAllByRole("button", { name: "Start instance" })[0]);
+    const dialog = screen.getByRole("dialog", { name: "Start an instance" });
+    expect(within(dialog).getByRole("status")).toHaveTextContent("Start with an active thread");
+    expect(within(dialog).queryByText("An active thread is required.")).not.toBeInTheDocument();
+    expect(within(dialog).queryByRole("button", { name: "Start instance" })).not.toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole("button", { name: /Open threads/ }));
+    expect(screen.queryByRole("dialog", { name: "Start an instance" })).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Threads" })).toBeInTheDocument();
   });
 
   it("creates, updates, and reference-safely deletes templates through dedicated routes", async () => {

@@ -1,5 +1,5 @@
 import { useState, type FormEvent, type ReactNode } from "react";
-import { ArrowLeft, ArrowRight, ClockCounterClockwise, MagnifyingGlass, Plus, WarningCircle, X } from "@phosphor-icons/react";
+import { ArrowLeft, ArrowRight, CaretDown, Check, ClockCounterClockwise, Info, MagnifyingGlass, Plus, WarningCircle, X } from "@phosphor-icons/react";
 import {
   defaultInstanceIdleTimeoutSeconds,
   instanceStatuses,
@@ -178,17 +178,112 @@ export function MobileInstanceIndex({ instances, threads, canMutate, onSelect, o
   return <main className="mobile-instance-index"><header><div><small>Runtime identities</small><h1>Instances</h1></div><button aria-label="Start instance" onClick={onCreate} disabled={!canMutate}><Plus size={18} /></button></header><div>{active.map((instance) => <button key={instance.id} onClick={() => onSelect(instance.id)}><span className={`instance-state instance-state-${instance.status}`} /><span><strong>{instanceName(instance)}</strong><small>{threads.find((thread) => thread.id === instance.threadId)?.title ?? instance.threadId} · {instance.status}</small></span><ArrowRight size={17} /></button>)}{active.length === 0 && <p>No active instances.</p>}</div></main>;
 }
 
-function TextField({ label, value, onChange, placeholder, required, multiline }: { label: string; value: string; onChange: (value: string) => void; placeholder?: string; required?: boolean; multiline?: boolean }) {
-  return <label className="instance-field"><span>{label}</span>{multiline
-    ? <textarea value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} rows={3} required={required} />
-    : <input value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} required={required} />}</label>;
+interface PickerOption {
+  value: string;
+  label: string;
+  description?: string;
 }
 
-export function CreateInstanceDialog({ threads, templates, canMutate, onClose, onCreate }: {
+function TextField({ label, value, onChange, placeholder, required, multiline, helper }: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  placeholder?: string;
+  required?: boolean;
+  multiline?: boolean;
+  helper?: string;
+}) {
+  return <label className="instance-field"><span>{label}{required && <em>Required</em>}</span>{multiline
+    ? <textarea aria-label={label} value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} rows={3} required={required} />
+    : <input aria-label={label} value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} required={required} />}{helper && <small>{helper}</small>}</label>;
+}
+
+function ChoicePicker({ label, value, onChange, options, placeholder, helper, initialFocus }: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  options: PickerOption[];
+  placeholder: string;
+  helper?: string;
+  initialFocus?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const selected = options.find((option) => option.value === value);
+  return <div className="instance-picker" onBlur={(event) => {
+    if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setOpen(false);
+  }}>
+    <span className="picker-label">{label}</span>
+    <button
+      type="button"
+      className="picker-trigger"
+      aria-haspopup="listbox"
+      aria-expanded={open}
+      aria-label={`${label}: ${selected?.label ?? placeholder}`}
+      onClick={() => setOpen((current) => !current)}
+      data-dialog-initial-focus={initialFocus || undefined}
+    >
+      <span><strong>{selected?.label ?? placeholder}</strong>{selected?.description && <small>{selected.description}</small>}</span>
+      <CaretDown size={15} aria-hidden="true" />
+    </button>
+    {open && <div className="picker-menu" role="listbox" aria-label={label}>
+      {options.map((option) => <button
+        type="button"
+        role="option"
+        aria-selected={option.value === value}
+        key={option.value}
+        onClick={() => { onChange(option.value); setOpen(false); }}
+      >
+        <span><strong>{option.label}</strong>{option.description && <small>{option.description}</small>}</span>
+        {option.value === value && <Check size={15} weight="bold" aria-hidden="true" />}
+      </button>)}
+    </div>}
+    {helper && <small className="picker-helper">{helper}</small>}
+  </div>;
+}
+
+function MultiChoicePicker({ label, values, onChange, options, placeholder, helper }: {
+  label: string;
+  values: string[];
+  onChange: (values: string[]) => void;
+  options: PickerOption[];
+  placeholder: string;
+  helper?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const selected = options.filter((option) => values.includes(option.value));
+  const summary = selected.length === 0 ? placeholder : selected.length === 1 ? selected[0].label : `${selected.length} selected`;
+  return <div className="instance-picker" onBlur={(event) => {
+    if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setOpen(false);
+  }}>
+    <span className="picker-label">{label}</span>
+    <button type="button" className="picker-trigger" aria-haspopup="listbox" aria-expanded={open} aria-label={`${label}: ${summary}`} onClick={() => setOpen((current) => !current)}>
+      <span><strong>{summary}</strong>{selected.length > 1 && <small>{selected.map((option) => option.label).join(", ")}</small>}</span>
+      <CaretDown size={15} aria-hidden="true" />
+    </button>
+    {open && <div className="picker-menu" role="listbox" aria-label={label} aria-multiselectable="true">
+      {options.length > 0 ? options.map((option) => {
+        const checked = values.includes(option.value);
+        return <button type="button" role="option" aria-selected={checked} key={option.value} onClick={() => onChange(checked ? values.filter((item) => item !== option.value) : [...values, option.value])}>
+          <span><strong>{option.label}</strong>{option.description && <small>{option.description}</small>}</span>
+          <span className={`picker-check ${checked ? "checked" : ""}`}>{checked && <Check size={13} weight="bold" aria-hidden="true" />}</span>
+        </button>;
+      }) : <p>No available options are currently advertised.</p>}
+    </div>}
+    {helper && <small className="picker-helper">{helper}</small>}
+  </div>;
+}
+
+function FieldsetHeading({ title, description }: { title: string; description: string }) {
+  return <legend className="fieldset-heading"><span>{title}</span><small>{description}</small></legend>;
+}
+
+export function CreateInstanceDialog({ threads, templates, nodes, canMutate, onClose, onOpenThreads, onCreate }: {
   threads: Thread[];
   templates: AgentTemplate[];
+  nodes: ComputeNode[];
   canMutate: boolean;
   onClose: () => void;
+  onOpenThreads?: () => void;
   onCreate: (payload: CreateInstancePayload) => Promise<void>;
 }) {
   const activeThreads = threads.filter((thread) => thread.status === "active");
@@ -199,15 +294,69 @@ export function CreateInstanceDialog({ threads, templates, canMutate, onClose, o
   const [summary, setSummary] = useState("");
   const [instructions, setInstructions] = useState("");
   const [skills, setSkills] = useState("");
-  const [harnesses, setHarnesses] = useState("");
-  const [models, setModels] = useState("");
+  const [harnesses, setHarnesses] = useState<string[]>([]);
+  const [models, setModels] = useState<string[]>([]);
   const [labels, setLabels] = useState("");
-  const [preferredNodes, setPreferredNodes] = useState("");
+  const [preferredNodes, setPreferredNodes] = useState<string[]>([]);
   const [idleTimeout, setIdleTimeout] = useState(String(defaultInstanceIdleTimeoutSeconds));
+  const [includeInitialTask, setIncludeInitialTask] = useState(false);
   const [taskTitle, setTaskTitle] = useState("");
   const [taskInstructions, setTaskInstructions] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const selectedTemplate = templates.find((template) => template.id === templateId);
+  const templateHarnesses = selectedTemplate?.requirements?.harnessIds;
+  const templateModels = selectedTemplate?.requirements?.models;
+  const onlineNodes = nodes.filter((node) => node.status !== "offline");
+  const availableHarnesses = [...new Map(onlineNodes.flatMap((node) => node.harnesses)
+    .filter((harness) => harness.available && (!templateHarnesses || templateHarnesses.includes(harness.id)))
+    .map((harness) => [harness.id, harness])).values()];
+  const effectiveHarnessIds = harnesses.length > 0 ? harnesses : templateHarnesses ?? [];
+  const availableModels = [...new Set(onlineNodes.flatMap((node) => node.harnesses)
+    .filter((harness) => harness.available && (effectiveHarnessIds.length === 0 || effectiveHarnessIds.includes(harness.id)))
+    .flatMap((harness) => harness.models.length > 0 ? harness.models : ["default"]))]
+    .filter((model) => !templateModels || templateModels.includes(model)).sort();
+  const threadOptions = activeThreads.map((thread) => ({ value: thread.id, label: thread.title, description: thread.summary || thread.objective || thread.id }));
+  const templateOptions = [
+    { value: "", label: "No template", description: "Configure this instance from scratch" },
+    ...templates.map((template) => ({ value: template.id, label: template.name, description: template.purpose?.summary ?? template.purpose?.title ?? "Reusable role and placement defaults" }))
+  ];
+  const harnessOptions = availableHarnesses.map((harness) => {
+    const count = onlineNodes.filter((node) => node.harnesses.some((candidate) => candidate.id === harness.id && candidate.available)).length;
+    return { value: harness.id, label: harness.label, description: `${harness.description} · ${count} ${count === 1 ? "node" : "nodes"}` };
+  });
+  const modelOptions = availableModels.map((model) => ({ value: model, label: model }));
+  const nodeOptions = onlineNodes.map((node) => ({ value: node.id, label: node.name, description: `${node.platform} · ${node.status}` }));
+  const timeoutOptions = [
+    ["300", "5 minutes"], ["900", "15 minutes"], ["1800", "30 minutes"], ["3600", "1 hour"],
+    ["14400", "4 hours"], ["28800", "8 hours"], ["86400", "24 hours"]
+  ].map(([value, label]) => ({ value, label, description: value === String(defaultInstanceIdleTimeoutSeconds) ? "Default" : undefined }));
+
+  function selectTemplate(nextTemplateId: string) {
+    setTemplateId(nextTemplateId);
+    const template = templates.find((candidate) => candidate.id === nextTemplateId);
+    if (template) {
+      setName((current) => current || template.purpose?.name || template.name);
+      setTitle((current) => current || template.purpose?.title || "");
+      setSummary((current) => current || template.purpose?.summary || "");
+      setInstructions((current) => current || template.purpose?.instructions || template.instructions || "");
+      const allowedHarnesses = template.requirements?.harnessIds;
+      if (allowedHarnesses) setHarnesses((current) => current.filter((harness) => (allowedHarnesses as readonly string[]).includes(harness)));
+      const allowedModels = template.requirements?.models;
+      if (allowedModels) setModels((current) => current.filter((model) => allowedModels.includes(model)));
+    }
+    setError("");
+  }
+
+  function selectHarnesses(nextHarnesses: string[]) {
+    setHarnesses(nextHarnesses);
+    const nextModels = new Set(onlineNodes.flatMap((node) => node.harnesses)
+      .filter((harness) => harness.available && (nextHarnesses.length === 0 || nextHarnesses.includes(harness.id)))
+      .flatMap((harness) => harness.models.length > 0 ? harness.models : ["default"]));
+    setModels((current) => current.filter((model) => nextModels.has(model)));
+    setError("");
+  }
+
   async function submit(event: FormEvent) {
     event.preventDefault();
     if (!canMutate || !threadId) return;
@@ -216,16 +365,19 @@ export function CreateInstanceDialog({ threads, templates, canMutate, onClose, o
       setError(`Idle timeout must be a whole number from ${minimumInstanceIdleTimeoutSeconds} to ${maximumInstanceIdleTimeoutSeconds} seconds`);
       return;
     }
-    if ((taskTitle.trim().length === 0) !== (taskInstructions.trim().length === 0)) {
-      setError("Initial task title and instructions must be provided together");
+    if (includeInitialTask && (!taskTitle.trim() || !taskInstructions.trim())) {
+      setError("Enter both a title and instructions for the initial task");
       return;
     }
+    const selectedHarnessIds = harnesses.filter((harness) => harnessOptions.some((option) => option.value === harness));
+    const selectedModels = models.filter((model) => modelOptions.some((option) => option.value === model));
+    const selectedNodeIds = preferredNodes.filter((nodeId) => nodeOptions.some((option) => option.value === nodeId));
     const purpose = { ...(name.trim() ? { name: name.trim() } : {}), ...(title.trim() ? { title: title.trim() } : {}), ...(summary.trim() ? { summary: summary.trim() } : {}), ...(instructions.trim() ? { instructions: instructions.trim() } : {}) };
-    const preferences: ExecutionPreferences = { ...(commaList(preferredNodes).length ? { nodeIds: commaList(preferredNodes) } : {}) };
+    const preferences: ExecutionPreferences = { ...(selectedNodeIds.length ? { nodeIds: selectedNodeIds } : {}) };
     const requirements: ExecutionRequirements = {
       ...(templateId ? { templateId } : {}), ...(commaList(skills).length ? { skills: commaList(skills) } : {}),
-      ...(commaList(harnesses).length ? { harnessIds: commaList(harnesses) as ExecutionRequirements["harnessIds"] } : {}),
-      ...(commaList(models).length ? { models: commaList(models) } : {}), ...(commaList(labels).length ? { labels: commaList(labels) } : {}),
+      ...(selectedHarnessIds.length ? { harnessIds: selectedHarnessIds as ExecutionRequirements["harnessIds"] } : {}),
+      ...(selectedModels.length ? { models: selectedModels } : {}), ...(commaList(labels).length ? { labels: commaList(labels) } : {}),
       ...(preferences.nodeIds?.length ? { preferences } : {})
     };
     setSaving(true); setError("");
@@ -233,25 +385,62 @@ export function CreateInstanceDialog({ threads, templates, canMutate, onClose, o
       await onCreate({
         threadId, ...(Object.keys(purpose).length ? { purpose } : {}), requirements,
         idleTimeoutSeconds,
-        ...(taskTitle.trim() && taskInstructions.trim() ? { initialTask: { title: taskTitle.trim(), instructions: taskInstructions.trim() } } : {})
+        ...(includeInitialTask ? { initialTask: { title: taskTitle.trim(), instructions: taskInstructions.trim() } } : {})
       });
       onClose();
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not start instance"); }
     finally { setSaving(false); }
   }
   return <AccessibleDialog labelledBy="create-instance-title" onClose={onClose} className="instance-dialog">
-    <form onSubmit={submit}>
-      <header><div><small>Operator lifecycle</small><h2 id="create-instance-title">Start an instance</h2></div><button type="button" className="icon-btn" aria-label="Close instance form" onClick={onClose}><X size={17} /></button></header>
+    <form onSubmit={submit} noValidate>
+      <header><div><small>New runtime identity</small><h2 id="create-instance-title">Start an instance</h2><p>Choose where it belongs, what it can run, and whether it should begin with assigned work.</p></div><button type="button" className="icon-btn" aria-label="Close instance form" onClick={onClose}><X size={17} /></button></header>
       <div className="instance-form-scroll">
-        {activeThreads.length === 0 ? <p className="instance-callout danger">An active thread is required.</p> : <fieldset><legend>Active thread</legend><div className="choice-grid">{activeThreads.map((thread) => <button type="button" key={thread.id} aria-pressed={threadId === thread.id} className={threadId === thread.id ? "selected" : ""} onClick={() => setThreadId(thread.id)}>{thread.title}</button>)}</div></fieldset>}
-        <fieldset><legend>Reusable template</legend><div className="choice-grid"><button type="button" aria-pressed={!templateId} className={!templateId ? "selected" : ""} onClick={() => setTemplateId("")}>No template</button>{templates.map((template) => <button type="button" key={template.id} aria-pressed={templateId === template.id} className={templateId === template.id ? "selected" : ""} onClick={() => setTemplateId(template.id)}>{template.name}</button>)}</div></fieldset>
-        <fieldset><legend>Purpose</legend><div className="form-grid"><TextField label="Name" value={name} onChange={setName} placeholder="Review worker" /><TextField label="Title" value={title} onChange={setTitle} placeholder="Quality review" /></div><TextField label="Summary" value={summary} onChange={setSummary} /><TextField label="Private instructions" value={instructions} onChange={setInstructions} multiline /></fieldset>
-        <fieldset><legend>Hard requirements</legend><div className="form-grid"><TextField label="Skills" value={skills} onChange={setSkills} placeholder="typescript, review" /><TextField label="Harnesses" value={harnesses} onChange={setHarnesses} placeholder="codex-cli" /><TextField label="Models" value={models} onChange={setModels} placeholder="default" /><TextField label="Labels" value={labels} onChange={setLabels} placeholder="linux, trusted" /></div></fieldset>
-        <fieldset><legend>Preferences & lease</legend><div className="form-grid"><TextField label="Preferred nodes" value={preferredNodes} onChange={setPreferredNodes} placeholder="node-one, node-two" /><TextField label="Idle timeout (seconds)" value={idleTimeout} onChange={setIdleTimeout} /></div></fieldset>
-        <fieldset><legend>Optional initial task</legend><TextField label="Task title" value={taskTitle} onChange={setTaskTitle} /><TextField label="Task instructions" value={taskInstructions} onChange={setTaskInstructions} multiline /></fieldset>
-        {error && <p className="form-error" role="alert">{error}</p>}
+        {activeThreads.length === 0 ? <div className="instance-prerequisite" role="status">
+          <span><Info size={18} /></span>
+          <div><strong>Start with an active thread</strong><p>Every instance belongs to a thread so its work, messages, and artifacts stay together. Continue an existing thread or create one through your orchestrator, then return here.</p></div>
+          {onOpenThreads && <button type="button" onClick={() => { onClose(); onOpenThreads(); }} data-dialog-initial-focus>Open threads <ArrowRight size={15} /></button>}
+        </div> : <>
+          <fieldset>
+            <FieldsetHeading title="Context" description="An instance is scoped to one active thread. A template adds reusable role and placement defaults." />
+            <div className="form-grid">
+              <ChoicePicker label="Active thread" value={threadId} onChange={setThreadId} options={threadOptions} placeholder="Choose a thread" initialFocus />
+              <ChoicePicker label="Template" value={templateId} onChange={selectTemplate} options={templateOptions} placeholder="No template" helper={selectedTemplate ? "Template requirements are combined with the choices below." : "Optional. Start without reusable defaults."} />
+            </div>
+          </fieldset>
+          <fieldset>
+            <FieldsetHeading title="Identity & purpose" description="Give operators a clear name and tell the instance how to behave." />
+            <div className="form-grid"><TextField label="Name" value={name} onChange={setName} placeholder="Review worker" helper="A short display name for lists and activity." /><TextField label="Role title" value={title} onChange={setTitle} placeholder="Quality reviewer" helper="The responsibility this instance owns." /></div>
+            <TextField label="Summary" value={summary} onChange={setSummary} placeholder="Reviews release changes for correctness and risk." helper="Visible to operators as a quick description of this instance." />
+            <TextField label="Private instructions" value={instructions} onChange={setInstructions} multiline placeholder="Review carefully. Report blocking issues first…" helper="Used as this instance's system prompt. Other agents and instance tools do not receive it." />
+          </fieldset>
+          <fieldset>
+            <FieldsetHeading title="Runtime & lease" description="Leave runtime choices open to let the Hub place the instance on any compatible capacity." />
+            <div className="form-grid">
+              <MultiChoicePicker label="Allowed harnesses" values={harnesses} onChange={selectHarnesses} options={harnessOptions} placeholder="Any available harness" helper={harnessOptions.length ? "Options come from live, non-offline compute nodes." : "No compatible harness is currently advertised."} />
+              <MultiChoicePicker label="Allowed models" values={models} onChange={setModels} options={modelOptions} placeholder="Any available model" helper="Filtered by the selected harnesses and template." />
+              <MultiChoicePicker label="Preferred nodes" values={preferredNodes} onChange={setPreferredNodes} options={nodeOptions} placeholder="Automatic placement" helper="A preference, not a hard requirement. Offline nodes are excluded." />
+              <ChoicePicker label="Release after idle" value={idleTimeout} onChange={setIdleTimeout} options={timeoutOptions} placeholder="30 minutes" helper="Accepted work renews the lease. Idle instances drain after this period." />
+            </div>
+            <details className="instance-advanced">
+              <summary><span>Advanced placement constraints</span><small>Only use identifiers advertised by your capability packs and node configuration.</small></summary>
+              <div className="form-grid">
+                <TextField label="Required skills" value={skills} onChange={setSkills} placeholder="typescript, review" helper="Comma-separated capability IDs. Every skill must be available." />
+                <TextField label="Required node labels" value={labels} onChange={setLabels} placeholder="linux, trusted" helper="Comma-separated labels. Every label must match." />
+              </div>
+            </details>
+          </fieldset>
+          <fieldset>
+            <FieldsetHeading title="First assignment" description="You can start the instance idle or queue work for it immediately." />
+            <button type="button" role="switch" aria-checked={includeInitialTask} className="initial-task-toggle" onClick={() => { setIncludeInitialTask((current) => !current); setError(""); }}>
+              <span className={includeInitialTask ? "checked" : ""}>{includeInitialTask && <Check size={13} weight="bold" />}</span>
+              <span><strong>Queue an initial task</strong><small>Creates a task in this thread, pins it to the new instance, and runs it when placement is ready.</small></span>
+            </button>
+            {includeInitialTask && <div className="initial-task-fields"><TextField label="Task title" value={taskTitle} onChange={setTaskTitle} placeholder="Review the release candidate" required /><TextField label="Task instructions" value={taskInstructions} onChange={setTaskInstructions} placeholder="Inspect the current changes and report…" multiline required /></div>}
+          </fieldset>
+          {error && <p className="form-error" role="alert">{error}</p>}
+        </>}
       </div>
-      <footer><button type="button" onClick={onClose}>Cancel</button><button className="primary-action" disabled={!canMutate || !threadId || saving}>{saving ? "Starting…" : "Start instance"}</button></footer>
+      <footer><button type="button" onClick={onClose}>Cancel</button>{activeThreads.length > 0 && <button className="primary-action" disabled={!canMutate || !threadId || saving}>{saving ? "Starting…" : "Start instance"}</button>}</footer>
     </form>
   </AccessibleDialog>;
 }

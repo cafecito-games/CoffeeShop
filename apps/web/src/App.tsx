@@ -662,7 +662,7 @@ function CoffeeShopApp() {
         <div className="rail-user">CS</div>
       </nav>
       <BottomNav view={effectiveView} onView={switchView} pendingApprovalCount={pendingApprovalCount} legacy={legacySnapshot} />
-      {creatingInstance && <CreateInstanceDialog threads={snapshot.threads ?? []} templates={snapshot.templates ?? []} canMutate={canMutate} onClose={() => setCreatingInstance(false)} onCreate={createInstance} />}
+      {creatingInstance && <CreateInstanceDialog threads={snapshot.threads ?? []} templates={snapshot.templates ?? []} nodes={snapshot.nodes} canMutate={canMutate} onClose={() => setCreatingInstance(false)} onOpenThreads={() => switchView("threads")} onCreate={createInstance} />}
       {releasingInstanceId && selectedInstance?.id === releasingInstanceId && <ReleaseInstanceDialog instance={selectedInstance} canMutate={canMutate} onClose={() => setReleasingInstanceId(undefined)} onRelease={(mode) => releaseInstance(selectedInstance, mode)} />}
       {editingTemplate && <TemplateEditorDialog template={editingTemplate === "edit" ? selectedTemplate : undefined} canMutate={canMutate} onClose={() => setEditingTemplate(undefined)} onSave={saveTemplate} />}
       {deletingTemplate && selectedTemplate && <DeleteTemplateDialog template={selectedTemplate} canMutate={canMutate} onClose={() => setDeletingTemplate(false)} onDelete={deleteTemplate} />}
