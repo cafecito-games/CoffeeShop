@@ -6,7 +6,7 @@ import {
 } from "@phosphor-icons/react";
 import {
   isActiveRunStatus, threadOwnerAgentId, type Agent, type AgentState, type ApprovalRequest, type Artifact, type ChatMessage,
-  type ArtifactPreview, type ComputeNode, type CreateHostedThreadResult, type HarnessSessionBinding, type Run, type RunActivity, type RunStatus, type Snapshot, type Thread, type ThreadStatus
+  type ArtifactPreview, type ComputeNode, type CreateHostedThreadResult, type HarnessSessionBinding, type Run, type RunActivity, type Snapshot, type Thread, type ThreadStatus
 } from "@coffee-shop/protocol";
 import { AccessibleDialog } from "./AccessibleDialog.js";
 import { useViewportMetrics } from "./useViewportMetrics.js";
@@ -14,9 +14,8 @@ import { ActivityView } from "./ActivityView.js";
 import { AgentConfigurationForm, type AgentConfigurationPayload } from "./AgentConfiguration.js";
 import { CoffeeAvatar } from "./CoffeeAvatar.js";
 import { ComputeView } from "./compute/ComputeView.js";
-import { OrchestratorThreadDialog } from "./ExternalThreadDialog.js";
 import { HostedThreadDialog, type HostedThreadPayload } from "./HostedThreadDialog.js";
-import { actorLabel, describeThreadOrchestrator } from "./orchestratorPresentation.js";
+import { actorLabel } from "./orchestratorPresentation.js";
 import { useHubConnection, type ConnectionStatus } from "./hubConnection.js";
 import { AgentTimelineItem, buildAgentTimeline, type AgentTimelineEntry } from "./orchestration/AgentWorkTimeline.js";
 import { ApprovalDialog } from "./orchestration/ApprovalsView.js";
@@ -26,6 +25,8 @@ import { RunActivityPanel } from "./orchestration/RunActivityPanel.js";
 import { SettingsView } from "./settings/SettingsView.js";
 import { ProjectsView } from "./ProjectsView.js";
 import { ThreadsView } from "./ThreadsView.js";
+import { ThreadConversation } from "./threads/ThreadConversation.js";
+import { runStatusLabels } from "./orchestration/orchestrationLabels.js";
 import { PreviewArtifact } from "./PreviewArtifact.js";
 import { PwaInstallProvider } from "./settings/PwaInstall.js";
 import {
@@ -242,10 +243,6 @@ function Inspector({ agent, nodes, sessions, onClose, onSave, onReconcile, canMu
   );
 }
 
-const runStatusLabels: Record<RunStatus, string> = {
-  queued: "Queued", running: "Running", completed: "Completed", failed: "Failed", cancelled: "Cancelled"
-};
-
 function RunInspector({ selectedRunId, run, runs, threads, artifacts, artifactPreviews, agents, nodes, runActivity, approvals, sessionBindings, onClose, onInspectRun, canMutate }: {
   selectedRunId: string;
   run?: Run;
@@ -418,7 +415,7 @@ function CoffeeShopApp() {
   const selectedInstance = snapshot.instances?.find((instance) => instance.id === selectedInstanceId);
   const selectedTemplate = snapshot.templates?.find((template) => template.id === selectedTemplateId);
   const [reviewingApprovalId, setReviewingApprovalId] = useState<string>();
-  const [orchestratorThreadId, setOrchestratorThreadId] = useState<string>();
+  const [openThreadId, setOpenThreadId] = useState<string>();
   const orchestratorClients = useMemo(() => snapshot.orchestratorClients ?? [], [snapshot.orchestratorClients]);
   const orchestratorAttachments = useMemo(() => snapshot.orchestratorAttachments ?? [], [snapshot.orchestratorAttachments]);
   const selectedThreads = useMemo(() => (snapshot.threads ?? []).filter((thread) => threadOwnerAgentId(thread) === selectedId), [snapshot.threads, selectedId]);
@@ -444,7 +441,7 @@ function CoffeeShopApp() {
     approvals: approvals ?? []
   }) : [], [selectedId, effectiveThreadFilter, agents, messages, runs, tasks, threads, taskMessages, runActivity, approvals]);
   const reviewingApproval = (snapshot.approvals ?? []).find((approval) => approval.id === reviewingApprovalId);
-  const orchestratorThread = (snapshot.threads ?? []).find((thread) => thread.id === orchestratorThreadId);
+  const openThread = (snapshot.threads ?? []).find((thread) => thread.id === openThreadId);
   const orchestratorName = useMemo(() => {
     const ownerId = viewableThreads.map(threadOwnerAgentId).find((owner) => owner !== undefined && owner !== selectedId);
     return ownerId ? snapshot.agents.find((agent) => agent.id === ownerId)?.name ?? ownerId : undefined;
@@ -505,29 +502,13 @@ function CoffeeShopApp() {
   }
 
   function selectAgent(id: string) { setSelectedId(id); setSelectedThreadId(""); setThreadFilter(""); setView("agents"); setInspectorOpen(false); setSelectedRunId(undefined); }
-  /** A non-legacy thread is steered through its durable orchestrator inbox. */
-  function continueThread(thread: Thread) {
-    const orchestrator = describeThreadOrchestrator(thread, {
-      agents: snapshot.agents,
-      clients: orchestratorClients,
-      attachments: orchestratorAttachments,
-      instances: snapshot.instances
-    });
-    if (orchestrator.kind === "external" || orchestrator.kind === "instance") {
-      setOrchestratorThreadId(thread.id);
-      return;
-    }
-    if (!legacySnapshot) {
-      setView("orchestration");
-      return;
-    }
-    setSelectedId(threadOwnerAgentId(thread));
-    setSelectedThreadId(thread.id);
-    setThreadFilter(thread.id);
-    setView("agents");
-    setInspectorOpen(false);
+  /** Every thread is continued from its conversation, which streams each orchestrator turn. */
+  function openThreadConversation(thread: Thread) {
+    setView("threads");
+    setSelectedId(undefined);
+    setOpenThreadId(thread.id);
   }
-  function switchView(next: View) { setView(next); if (next !== "agents") setSelectedId(undefined); }
+  function switchView(next: View) { setView(next); setOpenThreadId(undefined); if (next !== "agents") setSelectedId(undefined); }
   async function createInstance(payload: CreateInstancePayload) {
     setInstanceMutationBusy(true);
     try {
@@ -560,7 +541,7 @@ function CoffeeShopApp() {
         body: JSON.stringify({ ...payload, idempotencyKey })
       }));
       setView("threads");
-      setOrchestratorThreadId(result.thread.id);
+      setOpenThreadId(result.thread.id);
     } finally {
       if (!stableActions.current.pendingKey(action)) snapshotSettlements.current.delete(action);
     }
@@ -647,7 +628,8 @@ function CoffeeShopApp() {
         {effectiveView === "instances" && <InstanceDetail instance={selectedInstance} allocations={snapshot.allocations ?? []} nodes={snapshot.nodes} runs={snapshot.runs} tasks={snapshot.tasks ?? []} threads={snapshot.threads ?? []} canMutate={canMutate} busy={instanceMutationBusy} onRenew={renewInstance} onRelease={(instance) => setReleasingInstanceId(instance.id)} onInspectRun={setSelectedRunId} onBack={() => setSelectedInstanceId(undefined)} />}
         {effectiveView === "templates" && !selectedTemplate && <MobileTemplateIndex templates={snapshot.templates ?? []} canMutate={canMutate} onSelect={setSelectedTemplateId} onCreate={() => setEditingTemplate("create")} />}
         {effectiveView === "templates" && <TemplateDetail template={selectedTemplate} canMutate={canMutate} onEdit={() => setEditingTemplate("edit")} onDelete={() => setDeletingTemplate(true)} onBack={() => setSelectedTemplateId(undefined)} />}
-        {effectiveView === "threads" && <ThreadsView threads={snapshot.threads ?? []} runs={snapshot.runs} artifacts={snapshot.artifacts ?? []} artifactPreviews={snapshot.artifactPreviews} agents={snapshot.agents} instances={snapshot.instances} orchestratorClients={orchestratorClients} orchestratorAttachments={orchestratorAttachments} canMutate={canMutate} apiFetch={apiFetch} onCreate={() => setCreatingHostedThread(true)} onContinue={continueThread} onInspectRun={setSelectedRunId} onSetStatus={setThreadStatus} />}
+        {effectiveView === "threads" && openThread && <ThreadConversation thread={openThread} snapshot={snapshot} canMutate={canMutate && !legacySnapshot} apiFetch={apiFetch} onBack={() => setOpenThreadId(undefined)} onInspectRun={setSelectedRunId} onReviewApproval={setReviewingApprovalId} onSetStatus={setThreadStatus} />}
+        {effectiveView === "threads" && !openThread && <ThreadsView threads={snapshot.threads ?? []} runs={snapshot.runs} artifacts={snapshot.artifacts ?? []} artifactPreviews={snapshot.artifactPreviews} agents={snapshot.agents} instances={snapshot.instances} orchestratorClients={orchestratorClients} orchestratorAttachments={orchestratorAttachments} canMutate={canMutate} apiFetch={apiFetch} onCreate={() => setCreatingHostedThread(true)} onOpen={openThreadConversation} onInspectRun={setSelectedRunId} onSetStatus={setThreadStatus} />}
         {effectiveView === "activity" && <ActivityView events={snapshot.events} agents={snapshot.agents} onInspectRun={setSelectedRunId} />}
         {effectiveView === "orchestration" && (
           <OrchestrationView
@@ -671,7 +653,6 @@ function CoffeeShopApp() {
         {effectiveView === "settings" && <SettingsView connection={connection} nodes={snapshot.nodes} generatedAt={snapshot.generatedAt} orchestratorClients={orchestratorClients} canMutate={canMutate} apiFetch={apiFetch} />}
       </div>
       {legacySnapshot && selected && inspectorOpen && <Inspector agent={selected} nodes={snapshot.nodes} sessions={providerSessionsForAgent(selected.id, snapshot.runs, snapshot.sessionBindings ?? [])} onClose={() => setInspectorOpen(false)} onSave={updateAgent} onReconcile={retry} canMutate={false} />}
-      {orchestratorThread && <OrchestratorThreadDialog thread={orchestratorThread} description={describeThreadOrchestrator(orchestratorThread, { agents: snapshot.agents, clients: orchestratorClients, attachments: orchestratorAttachments, instances: snapshot.instances })} taskMessages={snapshot.taskMessages ?? []} canMutate={canMutate} apiFetch={apiFetch} onClose={() => setOrchestratorThreadId(undefined)} />}
       {reviewingApproval && <ApprovalDialog approval={reviewingApproval} agents={snapshot.agents} nodes={snapshot.nodes} runs={snapshot.runs} tasks={snapshot.tasks ?? []} orchestratorClients={orchestratorClients} canMutate={canMutate} onClose={() => setReviewingApprovalId(undefined)} apiFetch={apiFetch} />}
       {selectedRunId && <RunInspector selectedRunId={selectedRunId} run={snapshot.runs.find((run) => run.id === selectedRunId)} runs={snapshot.runs} threads={snapshot.threads ?? []} artifacts={snapshot.artifacts ?? []} artifactPreviews={snapshot.artifactPreviews} agents={snapshot.agents} nodes={snapshot.nodes} runActivity={snapshot.runActivity ?? []} approvals={snapshot.approvals ?? []} sessionBindings={snapshot.sessionBindings ?? []} onClose={() => setSelectedRunId(undefined)} onInspectRun={setSelectedRunId} canMutate={canMutate} />}
       <nav className="desktop-nav" aria-label="Primary">

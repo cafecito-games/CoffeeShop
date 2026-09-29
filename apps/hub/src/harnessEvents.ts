@@ -9,6 +9,7 @@ import type {
 } from "@coffee-shop/protocol";
 import { applyHarnessResolution, cancelPendingApprovals, openApproval, settleApprovalsForTerminalRun } from "./approvals.js";
 import type { Redactor } from "./redaction.js";
+import { recordRunTranscriptEvent } from "./runTranscripts.js";
 import { settleSessionBindingsForTerminalRun } from "./sessionBindings.js";
 import { newEvent, runAttribution, type State } from "./store.js";
 
@@ -388,6 +389,7 @@ export function acceptHarnessEvent(state: State, source: HarnessEventSource, eve
   if (conflict) return failStream(state, run, stream, activity, conflict, source.receivedAt);
 
   project(activity, redacted);
+  recordRunTranscriptEvent(state, run, redacted, source.receivedAt);
   stream.lastSequence = event.sequence;
   stream.updatedAt = source.receivedAt;
   stream.recentDigests.push({ sequence: event.sequence, digest });

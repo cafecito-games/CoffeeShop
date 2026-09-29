@@ -32,7 +32,7 @@ function attachment(overrides: Partial<OrchestratorAttachment> = {}): Orchestrat
 function renderThreads(
   threads: Thread[],
   attachments: OrchestratorAttachment[] = [],
-  onContinue = vi.fn(),
+  onOpen = vi.fn(),
   artifacts: Artifact[] = [],
   apiFetch = vi.fn()
 ) {
@@ -46,25 +46,25 @@ function renderThreads(
     canMutate
     apiFetch={apiFetch}
     onCreate={vi.fn()}
-    onContinue={onContinue}
+    onOpen={onOpen}
     onInspectRun={vi.fn()}
     onSetStatus={vi.fn()}
   />);
-  return onContinue;
+  return onOpen;
 }
 
 describe("ThreadsView orchestrator badge", () => {
   it("names the orchestrating agent for an agent thread", () => {
     renderThreads([thread({ orchestrator: { kind: "agent", agentId: "agent-one" } })]);
     expect(screen.getAllByText("Milo").length).toBeGreaterThan(0);
-    expect(screen.getByRole("button", { name: /Continue thread/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Open conversation/ })).toBeInTheDocument();
   });
 
   it("shows an attached external orchestrator by client name", () => {
     renderThreads([thread({ orchestrator: { kind: "external", clientId: "orchestrator-client-1" } })], [attachment()]);
     expect(screen.getAllByText("Christian's laptop").length).toBeGreaterThan(0);
     expect(screen.getByText("Attached")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Message orchestrator/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Open conversation/ })).toBeInTheDocument();
   });
 
   it("reports how long a detached external orchestrator has been away", () => {

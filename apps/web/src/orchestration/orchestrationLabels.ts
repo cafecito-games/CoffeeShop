@@ -1,7 +1,11 @@
 import type {
-  ApprovalOptionKind, ApprovalStatus, PlacementRequirementKind, TaskMessageKind, TaskStatus,
+  ApprovalOptionKind, ApprovalStatus, PlacementRequirementKind, RunStatus, TaskMessageKind, TaskStatus,
   ToolCallKind, ToolCallStatus, WorkspaceLeaseStatus, WorkspaceRetentionReason
 } from "@coffee-shop/protocol";
+
+export const runStatusLabels: Record<RunStatus, string> = {
+  queued: "Queued", running: "Running", completed: "Completed", failed: "Failed", cancelled: "Cancelled"
+};
 
 export const taskStatusLabels: Record<TaskStatus, string> = {
   pending: "Pending",

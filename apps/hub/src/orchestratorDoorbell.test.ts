@@ -227,6 +227,31 @@ test("replaying an operator message returns the original, and a conflicting repl
   });
 });
 
+test("an operator message to a completed thread reopens it, while an archived thread stays read-only", async () => {
+  const { store, threadId } = await externalThreadWithBacklog();
+  await store.transact((state) => {
+    const thread = state.threads!.find((item) => item.id === threadId)!;
+    thread.status = "completed";
+    thread.completedAt = later(2);
+  });
+  await store.transact((state) => {
+    assert.equal(postOperatorMessageInState(state, { threadId, body: "One more thing" }, later(3)).created, true);
+  });
+  const reopened = store.snapshot().threads!.find((item) => item.id === threadId)!;
+  assert.equal(reopened.status, "active");
+  assert.equal(reopened.completedAt, undefined);
+  assert.equal(store.snapshot().events.some((event) => event.threadId === threadId && event.title === "Thread reopened"), true);
+  assert.equal(store.read((state) => pendingOrchestratorEvents(state, threadId, 0)).length, 2, "the follow-up waits in the orchestrator's inbox");
+
+  await store.transact((state) => {
+    state.threads!.find((item) => item.id === threadId)!.status = "archived";
+  });
+  await store.transact((state) => {
+    assert.throws(() => postOperatorMessageInState(state, { threadId, body: "Still there?" }, later(4)), /archived/i);
+    return false;
+  });
+});
+
 test("an operator message is refused for a thread no external orchestrator drives", async () => {
   const store = await emptyStore();
   await store.transact((state) => {

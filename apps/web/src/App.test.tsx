@@ -120,10 +120,10 @@ describe("durable threads", () => {
     fireEvent.click(screen.getAllByRole("button", { name: "Threads" })[0]);
     expect(screen.getByRole("heading", { name: thread.title })).toBeInTheDocument();
     expect(screen.getAllByText("1", { selector: ".thread-card dd" })).toHaveLength(2);
-    fireEvent.click(screen.getByRole("button", { name: "Continue thread" }));
-    expect(screen.getByLabelText("Send to")).toHaveValue(thread.id);
+    fireEvent.click(screen.getByRole("button", { name: "Open conversation" }));
+    expect(screen.getByRole("button", { name: "Back to threads" })).toBeInTheDocument();
     expect(screen.getByText("Initial work complete")).toBeInTheDocument();
-    expect(screen.getByPlaceholderText("Reconnect to message Milo")).toBeDisabled();
+    expect(screen.getByLabelText("Message Milo")).toBeDisabled();
     expect(screen.getByText("Read-only legacy agents")).toBeInTheDocument();
     expect(fetchMock).not.toHaveBeenCalled();
   }, 15_000);
@@ -133,8 +133,8 @@ describe("durable threads", () => {
     currentSnapshot.runs = [{ ...testRun("completed"), threadId: thread.id, parentRunId: undefined }];
     const { default: App } = await import("./App.js");
     const { rerender } = render(<App />);
-    fireEvent.click(screen.getAllByRole("button", { name: "Threads" })[0]);
-    fireEvent.click(screen.getByRole("button", { name: "Continue thread" }));
+    fireEvent.click(screen.getAllByRole("button", { name: /Milo/ })[0]);
+    fireEvent.change(screen.getByLabelText("Send to"), { target: { value: thread.id } });
     expect(screen.getByRole("button", { name: thread.title, pressed: true })).toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText("Send to"), { target: { value: "" } });

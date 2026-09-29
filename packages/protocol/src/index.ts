@@ -1431,6 +1431,51 @@ export interface RunActivity {
 }
 
 /*
+ * Run transcripts.
+ *
+ * The hub's bounded, chronological projection of one run's accepted harness events, for
+ * conversation views. `RunActivity` groups a run by kind; a transcript keeps the order the harness
+ * produced it in. Consecutive message, thought, and same-terminal deltas are coalesced into one
+ * entry; a tool call or approval is one entry updated in place; the latest plan moves to where it
+ * last changed. `id` is the sequence of the event that opened the entry and never changes. Past its
+ * budget the transcript drops its oldest entries and counts them in `omittedEntries`. Transcripts
+ * are served by `GET /api/runs/:id/transcript`, never published in snapshots.
+ */
+interface RunTranscriptEntryBase {
+  id: number;
+  at: string;
+  updatedAt: string;
+}
+
+export type RunTranscriptEntry =
+  | RunTranscriptEntryBase & { kind: "message"; text: string; truncatedBytes: number }
+  | RunTranscriptEntryBase & { kind: "thought"; text: string; truncatedBytes: number }
+  | RunTranscriptEntryBase & { kind: "plan"; entries: PlanEntry[] }
+  | RunTranscriptEntryBase & { kind: "tool"; toolCallId: string; status: ToolCallStatus; toolKind: ToolCallKind; title: string; detail?: string }
+  | RunTranscriptEntryBase & { kind: "diff"; toolCallId?: string; path: string; oldText?: string; newText: string; truncated: boolean }
+  | RunTranscriptEntryBase & { kind: "terminal"; terminalId: string; stream: "stdout" | "stderr"; text: string; truncatedBytes: number }
+  /** `approvalId` is the harness identity, matching `ApprovalRequest.harnessApprovalId` of the same run. */
+  | RunTranscriptEntryBase & { kind: "approval"; approvalId: string; toolCallId?: string; title: string; detail?: string; status: ApprovalStatus }
+  | RunTranscriptEntryBase & { kind: "warning"; code: string; message: string };
+
+export type RunTranscriptEntryKind = RunTranscriptEntry["kind"];
+
+export interface RunTranscript {
+  runId: string;
+  threadId?: string;
+  lastSequence: number;
+  entries: RunTranscriptEntry[];
+  omittedEntries: number;
+  updatedAt: string;
+}
+
+/** `transcript` is absent when the hub holds no structured events for the run. */
+export interface RunTranscriptResponse {
+  runId: string;
+  transcript?: RunTranscript;
+}
+
+/*
  * Workspace leases grant one run exclusive use of an isolated workspace. The hub owns lease identity
  * and desired lifecycle; Barista owns what actually exists on disk and enforces containment. A
  * `git-worktree` lease is a dedicated Git worktree and branch beneath a Barista-managed directory of

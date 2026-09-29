@@ -65,7 +65,7 @@ export function newExternalThread(clientId: string, objective: string, title: st
   };
 }
 
-function applyStatus(thread: Thread, status: ThreadStatus, at: string) {
+export function applyThreadStatus(thread: Thread, status: ThreadStatus, at: string) {
   thread.status = status;
   if (status === "active") {
     thread.completedAt = undefined;
@@ -135,7 +135,7 @@ function applyThreadChanges(
   if (changes.title !== undefined) thread.title = changes.title;
   if (changes.objective !== undefined) thread.objective = changes.objective;
   if (changes.summary !== undefined) thread.summary = changes.summary;
-  if (changes.status !== undefined) applyStatus(thread, changes.status, at);
+  if (changes.status !== undefined) applyThreadStatus(thread, changes.status, at);
   thread.updatedAt = at;
   state.events.unshift(newEvent({
     type: "status",

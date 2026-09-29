@@ -20,7 +20,7 @@ function timeAgo(date: string) {
   return `${Math.floor(hours / 24)}d`;
 }
 
-export function ThreadsView({ threads, runs, artifacts, artifactPreviews, agents, instances, orchestratorClients, orchestratorAttachments, canMutate, apiFetch, onCreate, onContinue, onInspectRun, onSetStatus }: {
+export function ThreadsView({ threads, runs, artifacts, artifactPreviews, agents, instances, orchestratorClients, orchestratorAttachments, canMutate, apiFetch, onCreate, onOpen, onInspectRun, onSetStatus }: {
   threads: Thread[];
   runs: Run[];
   artifacts: Artifact[];
@@ -32,7 +32,8 @@ export function ThreadsView({ threads, runs, artifacts, artifactPreviews, agents
   canMutate: boolean;
   apiFetch: AuthenticatedFetch;
   onCreate: () => void;
-  onContinue: (thread: Thread) => void;
+  /** Opens the thread's conversation, where it is followed and continued. */
+  onOpen: (thread: Thread) => void;
   onInspectRun: (runId: string) => void;
   onSetStatus: (thread: Thread, status: ThreadStatus) => Promise<void>;
 }) {
@@ -99,7 +100,7 @@ export function ThreadsView({ threads, runs, artifacts, artifactPreviews, agents
         const orchestrator = describeThreadOrchestrator(thread, { agents, clients: orchestratorClients, attachments: orchestratorAttachments, instances });
         return <article key={thread.id} className="thread-card">
           <header>
-            <div><span className={`thread-status thread-status-${thread.status}`}>{statusLabels[thread.status]}</span><h2>{thread.title}</h2></div>
+            <div><span className={`thread-status thread-status-${thread.status}`}>{statusLabels[thread.status]}</span><h2><button className="thread-title-link" onClick={() => onOpen(thread)}>{thread.title}</button></h2></div>
             <time>{timeAgo(thread.updatedAt)}</time>
           </header>
           <OrchestratorBadge description={orchestrator} />
@@ -123,10 +124,9 @@ export function ThreadsView({ threads, runs, artifacts, artifactPreviews, agents
             </article>)}
           </section>}
           <footer>
-            {thread.status !== "archived" && <button onClick={() => onContinue(thread)}><ChatCircle size={15} /> {orchestrator.kind === "external" ? "Message orchestrator" : "Continue thread"}</button>}
-            {thread.status !== "archived"
-              ? <button disabled={!canMutate || updatingId === thread.id || activeRuns.length > 0} onClick={() => void setStatus(thread, "archived")} title={activeRuns.length ? "Finish or cancel active runs before archiving" : undefined}><Archive size={15} /> Archive</button>
-              : <button disabled={!canMutate || updatingId === thread.id} onClick={() => void setStatus(thread, "active")}><ArrowCounterClockwise size={15} /> Reopen</button>}
+            <button onClick={() => onOpen(thread)}><ChatCircle size={15} /> {activeRuns.length ? "Follow live" : thread.status === "archived" ? "View conversation" : "Open conversation"}</button>
+            {thread.status !== "active" && <button disabled={!canMutate || updatingId === thread.id} onClick={() => void setStatus(thread, "active")}><ArrowCounterClockwise size={15} /> Reopen</button>}
+            {thread.status !== "archived" && <button disabled={!canMutate || updatingId === thread.id || activeRuns.length > 0} onClick={() => void setStatus(thread, "archived")} title={activeRuns.length ? "Finish or cancel active runs before archiving" : undefined}><Archive size={15} /> Archive</button>}
           </footer>
         </article>;
       })}</div> : <div className="threads-empty"><FolderOpen size={24} /><strong>No threads yet</strong><p>Start with an objective. Coffee Shop will place a resident orchestrator to plan and coordinate the work.</p><button className="thread-create" onClick={onCreate} disabled={!canMutate}><Plus size={15} /> Start orchestrated thread</button></div>}

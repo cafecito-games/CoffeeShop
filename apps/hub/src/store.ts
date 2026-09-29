@@ -53,6 +53,7 @@ import {
 } from "./agentTemplateConfiguration.js";
 import { assertPersistedTemplateState, importLegacyAgentTemplates, type LegacyTemplateImport } from "./agentTemplates.js";
 import type { HarnessEventStream, StoredHarnessEvent } from "./harnessEvents.js";
+import type { StoredRunTranscript } from "./runTranscripts.js";
 import {
   assertPersistedInstanceState,
   migrateLegacyInstanceState,
@@ -226,6 +227,8 @@ interface HubOnlyState {
   taskEventStreams?: TaskEventStream[];
   harnessEventStreams?: HarnessEventStream[];
   harnessEvents?: StoredHarnessEvent[];
+  /** Chronological run transcripts, served per run by REST; absent until the first is recorded. */
+  runTranscripts?: StoredRunTranscript[];
   /** Version-5 instance lifecycle idempotency receipts, release intents, and delivery decisions. */
   instanceLifecycleReceipts?: InstanceLifecycleReceipt[];
   instanceReleaseIntents?: InstanceReleaseIntent[];
@@ -1278,7 +1281,7 @@ export class Store {
   snapshot(now = new Date().toISOString()): Snapshot {
     const {
       taskSubmissions: _taskSubmissions, taskUpdates: _taskUpdates, taskEventJournal: _taskEventJournal, taskEventStreams: _taskEventStreams,
-      harnessEventStreams: _harnessEventStreams, harnessEvents: _harnessEvents,
+      harnessEventStreams: _harnessEventStreams, harnessEvents: _harnessEvents, runTranscripts: _runTranscripts,
       instanceLifecycleReceipts: _instanceLifecycleReceipts, instanceReleaseIntents: _instanceReleaseIntents,
       instanceDeliveries: _instanceDeliveries, remoteReleaseRequests: _remoteReleaseRequests,
       nodeInstanceResidency: _nodeInstanceResidency, instanceRequirementsVersion: _instanceRequirementsVersion,

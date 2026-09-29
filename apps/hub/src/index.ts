@@ -24,7 +24,8 @@ import {
   type ControlProtocolVersion,
   type HubToControlAgent,
   type InstanceHubMessage,
-  type Run
+  type Run,
+  type RunTranscriptResponse
 } from "@coffee-shop/protocol";
 import { createConfiguredAgent, markDisconnectedNodesOffline, updateConfiguredAgent } from "./agentConfiguration.js";
 import { createAgentTemplate, deleteAgentTemplate, updateAgentTemplate } from "./agentTemplateConfiguration.js";
@@ -82,6 +83,7 @@ import { createHostedThread } from "./hostedThreads.js";
 import { receiveSessionBinding } from "./sessionBindings.js";
 import { newEvent, newId, newMessage, Store } from "./store.js";
 import { newThread, updateThreadByOperator, updateThreadForRun } from "./threads.js";
+import { runTranscriptFor } from "./runTranscripts.js";
 import { cleanupWorkspaceLeaseByOperator, receiveWorkspaceLeaseUpdate, reconcileWorkspaceLeases, workspaceLeaseConfirmation } from "./workspaceLeases.js";
 
 const previewDeliveryConfiguration = parsePreviewDeliveryConfig(process.env);
@@ -282,6 +284,21 @@ async function queueRun(agent: Agent, prompt: string, options: { threadId: strin
 
 app.get("/api/health", (_req, res) => res.json({ ok: true, service: "coffee-shop-control-plane", controlAgents: controlAgents.size }));
 app.get("/api/snapshot", (_req, res) => res.json(store.snapshot()));
+
+/*
+ * A run's chronological transcript, for conversation views. It is served per run rather than in
+ * snapshots, which every UI receives on every commit; clients refetch when the run's activity
+ * sequence advances.
+ */
+app.get("/api/runs/:id/transcript", (req, res) => {
+  const response = store.read((state): RunTranscriptResponse | undefined => {
+    if (!state.runs.some((run) => run.id === req.params.id)) return undefined;
+    const transcript = runTranscriptFor(state, req.params.id);
+    return { runId: req.params.id, ...(transcript ? { transcript } : {}) };
+  });
+  if (!response) return res.status(404).json({ error: "Run not found" });
+  res.json(response);
+});
 
 app.post("/api/threads", async (req, res) => {
   try {
