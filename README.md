@@ -48,7 +48,7 @@ Build the binary for the current platform:
 task control-agent:build
 ```
 
-Copy `bin/barista` to the compute machine and run it:
+On the compute machine itself, `task control-agent:install` builds and installs it to `~/.local/bin/barista` in one step (override with `BARISTA_INSTALL_DIR`). It replaces a running binary safely but does not restart the service. Otherwise, copy `bin/barista` to the compute machine and run it:
 
 ```bash
 barista \
@@ -87,6 +87,7 @@ task control-plane:dev      hub only
 task control-plane:build    production hub bundle
 task control-agent:run -- … run Barista from source
 task control-agent:build    write the current-platform binary to bin/barista
+task control-agent:install  build and install to ~/.local/bin (or BARISTA_INSTALL_DIR)
 task control-agent:build:all cross-compile release binaries to dist/barista
 task test                   TypeScript, Go, and end-to-end system tests
 task system:test            multi-node end-to-end suite (real hub + Baristas, fake harnesses)
