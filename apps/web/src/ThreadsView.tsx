@@ -1,7 +1,7 @@
-import { Archive, ArrowCounterClockwise, ChatCircle, DownloadSimple, FolderOpen, TerminalWindow } from "@phosphor-icons/react";
+import { Archive, ArrowCounterClockwise, ChatCircle, DownloadSimple, FolderOpen, Plus, TerminalWindow } from "@phosphor-icons/react";
 import { useMemo, useState } from "react";
 import {
-  artifactSource, isActiveRunStatus, type Agent, type Artifact, type ArtifactPreview, type OrchestratorAttachment, type OrchestratorClient,
+  artifactSource, isActiveRunStatus, type Agent, type AgentInstance, type Artifact, type ArtifactPreview, type OrchestratorAttachment, type OrchestratorClient,
   type Run, type Thread, type ThreadStatus
 } from "@coffee-shop/protocol";
 import { OrchestratorBadge } from "./OrchestratorBadge.js";
@@ -20,16 +20,18 @@ function timeAgo(date: string) {
   return `${Math.floor(hours / 24)}d`;
 }
 
-export function ThreadsView({ threads, runs, artifacts, artifactPreviews, agents, orchestratorClients, orchestratorAttachments, canMutate, apiFetch, onContinue, onInspectRun, onSetStatus }: {
+export function ThreadsView({ threads, runs, artifacts, artifactPreviews, agents, instances, orchestratorClients, orchestratorAttachments, canMutate, apiFetch, onCreate, onContinue, onInspectRun, onSetStatus }: {
   threads: Thread[];
   runs: Run[];
   artifacts: Artifact[];
   artifactPreviews?: ArtifactPreview[];
   agents: Agent[];
+  instances?: AgentInstance[];
   orchestratorClients: OrchestratorClient[];
   orchestratorAttachments: OrchestratorAttachment[];
   canMutate: boolean;
   apiFetch: AuthenticatedFetch;
+  onCreate: () => void;
   onContinue: (thread: Thread) => void;
   onInspectRun: (runId: string) => void;
   onSetStatus: (thread: Thread, status: ThreadStatus) => Promise<void>;
@@ -78,7 +80,7 @@ export function ThreadsView({ threads, runs, artifacts, artifactPreviews, agents
     <main className="utility-view threads-view">
       <header className="utility-header">
         <div><small>Durable work across agents and runs</small><h1>Threads</h1></div>
-        <label className="archive-toggle"><input type="checkbox" checked={showArchived} onChange={(event) => setShowArchived(event.target.checked)} /> Show archived</label>
+        <div className="thread-header-actions"><label className="archive-toggle"><input type="checkbox" checked={showArchived} onChange={(event) => setShowArchived(event.target.checked)} /> Show archived</label><button className="thread-create" onClick={onCreate} disabled={!canMutate}><Plus size={15} /> Start thread</button></div>
       </header>
       <div className="thread-summary">{visible.length} {visible.length === 1 ? "thread" : "threads"}</div>
       {notice && <p className="thread-notice" role="alert">{notice}</p>}
@@ -94,7 +96,7 @@ export function ThreadsView({ threads, runs, artifacts, artifactPreviews, agents
         const participantIds = new Set(threadRuns.map((run) => run.agentId));
         const participants = agents.filter((agent) => participantIds.has(agent.id));
         const activeRuns = threadRuns.filter((run) => isActiveRunStatus(run.status));
-        const orchestrator = describeThreadOrchestrator(thread, { agents, clients: orchestratorClients, attachments: orchestratorAttachments });
+        const orchestrator = describeThreadOrchestrator(thread, { agents, clients: orchestratorClients, attachments: orchestratorAttachments, instances });
         return <article key={thread.id} className="thread-card">
           <header>
             <div><span className={`thread-status thread-status-${thread.status}`}>{statusLabels[thread.status]}</span><h2>{thread.title}</h2></div>
@@ -127,7 +129,7 @@ export function ThreadsView({ threads, runs, artifacts, artifactPreviews, agents
               : <button disabled={!canMutate || updatingId === thread.id} onClick={() => void setStatus(thread, "active")}><ArrowCounterClockwise size={15} /> Reopen</button>}
           </footer>
         </article>;
-      })}</div> : <div className="threads-empty"><FolderOpen size={24} /><strong>No threads yet</strong><p>Message an agent to start a durable body of work.</p></div>}
+      })}</div> : <div className="threads-empty"><FolderOpen size={24} /><strong>No threads yet</strong><p>Start with an objective. Coffee Shop will place a resident orchestrator to plan and coordinate the work.</p><button className="thread-create" onClick={onCreate} disabled={!canMutate}><Plus size={15} /> Start orchestrated thread</button></div>}
     </main>
   );
 }

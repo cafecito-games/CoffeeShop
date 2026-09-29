@@ -32,6 +32,7 @@
   "delegations": [],
   "artifacts": [],
   "agentTemplateConfigurationReceipts": [],
+  "hostedThreadCreationReceipts": [],
   "taskSubmissions": [],
   "taskUpdates": [],
   "taskEventJournal": [],

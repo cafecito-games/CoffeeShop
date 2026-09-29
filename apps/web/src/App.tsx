@@ -6,7 +6,7 @@ import {
 } from "@phosphor-icons/react";
 import {
   isActiveRunStatus, threadOwnerAgentId, type Agent, type AgentState, type ApprovalRequest, type Artifact, type ChatMessage,
-  type ArtifactPreview, type ComputeNode, type HarnessSessionBinding, type Run, type RunActivity, type RunStatus, type Snapshot, type Thread, type ThreadStatus
+  type ArtifactPreview, type ComputeNode, type CreateHostedThreadResult, type HarnessSessionBinding, type Run, type RunActivity, type RunStatus, type Snapshot, type Thread, type ThreadStatus
 } from "@coffee-shop/protocol";
 import { AccessibleDialog } from "./AccessibleDialog.js";
 import { useViewportMetrics } from "./useViewportMetrics.js";
@@ -14,7 +14,8 @@ import { ActivityView } from "./ActivityView.js";
 import { AgentConfigurationForm, type AgentConfigurationPayload } from "./AgentConfiguration.js";
 import { CoffeeAvatar } from "./CoffeeAvatar.js";
 import { ComputeView } from "./compute/ComputeView.js";
-import { ExternalThreadDialog } from "./ExternalThreadDialog.js";
+import { OrchestratorThreadDialog } from "./ExternalThreadDialog.js";
+import { HostedThreadDialog, type HostedThreadPayload } from "./HostedThreadDialog.js";
 import { actorLabel, describeThreadOrchestrator } from "./orchestratorPresentation.js";
 import { useHubConnection, type ConnectionStatus } from "./hubConnection.js";
 import { AgentTimelineItem, buildAgentTimeline, type AgentTimelineEntry } from "./orchestration/AgentWorkTimeline.js";
@@ -405,6 +406,7 @@ function CoffeeShopApp() {
   const [threadFilter, setThreadFilter] = useState("");
   const [sending, setSending] = useState(false);
   const [creatingInstance, setCreatingInstance] = useState(false);
+  const [creatingHostedThread, setCreatingHostedThread] = useState(false);
   const [editingTemplate, setEditingTemplate] = useState<"create" | "edit">();
   const [deletingTemplate, setDeletingTemplate] = useState(false);
   const [releasingInstanceId, setReleasingInstanceId] = useState<string>();
@@ -416,7 +418,7 @@ function CoffeeShopApp() {
   const selectedInstance = snapshot.instances?.find((instance) => instance.id === selectedInstanceId);
   const selectedTemplate = snapshot.templates?.find((template) => template.id === selectedTemplateId);
   const [reviewingApprovalId, setReviewingApprovalId] = useState<string>();
-  const [externalThreadId, setExternalThreadId] = useState<string>();
+  const [orchestratorThreadId, setOrchestratorThreadId] = useState<string>();
   const orchestratorClients = useMemo(() => snapshot.orchestratorClients ?? [], [snapshot.orchestratorClients]);
   const orchestratorAttachments = useMemo(() => snapshot.orchestratorAttachments ?? [], [snapshot.orchestratorAttachments]);
   const selectedThreads = useMemo(() => (snapshot.threads ?? []).filter((thread) => threadOwnerAgentId(thread) === selectedId), [snapshot.threads, selectedId]);
@@ -442,7 +444,7 @@ function CoffeeShopApp() {
     approvals: approvals ?? []
   }) : [], [selectedId, effectiveThreadFilter, agents, messages, runs, tasks, threads, taskMessages, runActivity, approvals]);
   const reviewingApproval = (snapshot.approvals ?? []).find((approval) => approval.id === reviewingApprovalId);
-  const externalThread = (snapshot.threads ?? []).find((thread) => thread.id === externalThreadId);
+  const orchestratorThread = (snapshot.threads ?? []).find((thread) => thread.id === orchestratorThreadId);
   const orchestratorName = useMemo(() => {
     const ownerId = viewableThreads.map(threadOwnerAgentId).find((owner) => owner !== undefined && owner !== selectedId);
     return ownerId ? snapshot.agents.find((agent) => agent.id === ownerId)?.name ?? ownerId : undefined;
@@ -503,10 +505,16 @@ function CoffeeShopApp() {
   }
 
   function selectAgent(id: string) { setSelectedId(id); setSelectedThreadId(""); setThreadFilter(""); setView("agents"); setInspectorOpen(false); setSelectedRunId(undefined); }
-  /** An externally orchestrated thread has no agent chat: it is messaged through its orchestrator. */
+  /** A non-legacy thread is steered through its durable orchestrator inbox. */
   function continueThread(thread: Thread) {
-    if (describeThreadOrchestrator(thread, { agents: snapshot.agents, clients: orchestratorClients, attachments: orchestratorAttachments }).kind === "external") {
-      setExternalThreadId(thread.id);
+    const orchestrator = describeThreadOrchestrator(thread, {
+      agents: snapshot.agents,
+      clients: orchestratorClients,
+      attachments: orchestratorAttachments,
+      instances: snapshot.instances
+    });
+    if (orchestrator.kind === "external" || orchestrator.kind === "instance") {
+      setOrchestratorThreadId(thread.id);
       return;
     }
     if (!legacySnapshot) {
@@ -537,6 +545,24 @@ function CoffeeShopApp() {
     } finally {
       if (!stableActions.current.pendingKey(`instance:create:${payload.threadId}`)) snapshotSettlements.current.delete(`instance:create:${payload.threadId}`);
       setInstanceMutationBusy(false);
+    }
+  }
+
+  async function createHostedThread(payload: HostedThreadPayload) {
+    const action = "thread:create-hosted";
+    const before = new Set((snapshot.threads ?? []).map((thread) => thread.id));
+    snapshotSettlements.current.set(action, (next) => (next.threads ?? []).some((thread) => !before.has(thread.id)
+      && thread.title === payload.title && thread.orchestrator?.kind === "instance"));
+    try {
+      const result = await performMutation<CreateHostedThreadResult>(action, payload, (idempotencyKey) => apiFetch("/api/threads", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ...payload, idempotencyKey })
+      }));
+      setView("threads");
+      setOrchestratorThreadId(result.thread.id);
+    } finally {
+      if (!stableActions.current.pendingKey(action)) snapshotSettlements.current.delete(action);
     }
   }
 
@@ -621,7 +647,7 @@ function CoffeeShopApp() {
         {effectiveView === "instances" && <InstanceDetail instance={selectedInstance} allocations={snapshot.allocations ?? []} nodes={snapshot.nodes} runs={snapshot.runs} tasks={snapshot.tasks ?? []} threads={snapshot.threads ?? []} canMutate={canMutate} busy={instanceMutationBusy} onRenew={renewInstance} onRelease={(instance) => setReleasingInstanceId(instance.id)} onInspectRun={setSelectedRunId} onBack={() => setSelectedInstanceId(undefined)} />}
         {effectiveView === "templates" && !selectedTemplate && <MobileTemplateIndex templates={snapshot.templates ?? []} canMutate={canMutate} onSelect={setSelectedTemplateId} onCreate={() => setEditingTemplate("create")} />}
         {effectiveView === "templates" && <TemplateDetail template={selectedTemplate} canMutate={canMutate} onEdit={() => setEditingTemplate("edit")} onDelete={() => setDeletingTemplate(true)} onBack={() => setSelectedTemplateId(undefined)} />}
-        {effectiveView === "threads" && <ThreadsView threads={snapshot.threads ?? []} runs={snapshot.runs} artifacts={snapshot.artifacts ?? []} artifactPreviews={snapshot.artifactPreviews} agents={snapshot.agents} orchestratorClients={orchestratorClients} orchestratorAttachments={orchestratorAttachments} canMutate={canMutate} apiFetch={apiFetch} onContinue={continueThread} onInspectRun={setSelectedRunId} onSetStatus={setThreadStatus} />}
+        {effectiveView === "threads" && <ThreadsView threads={snapshot.threads ?? []} runs={snapshot.runs} artifacts={snapshot.artifacts ?? []} artifactPreviews={snapshot.artifactPreviews} agents={snapshot.agents} instances={snapshot.instances} orchestratorClients={orchestratorClients} orchestratorAttachments={orchestratorAttachments} canMutate={canMutate} apiFetch={apiFetch} onCreate={() => setCreatingHostedThread(true)} onContinue={continueThread} onInspectRun={setSelectedRunId} onSetStatus={setThreadStatus} />}
         {effectiveView === "activity" && <ActivityView events={snapshot.events} agents={snapshot.agents} onInspectRun={setSelectedRunId} />}
         {effectiveView === "orchestration" && (
           <OrchestrationView
@@ -645,7 +671,7 @@ function CoffeeShopApp() {
         {effectiveView === "settings" && <SettingsView connection={connection} nodes={snapshot.nodes} generatedAt={snapshot.generatedAt} orchestratorClients={orchestratorClients} canMutate={canMutate} apiFetch={apiFetch} />}
       </div>
       {legacySnapshot && selected && inspectorOpen && <Inspector agent={selected} nodes={snapshot.nodes} sessions={providerSessionsForAgent(selected.id, snapshot.runs, snapshot.sessionBindings ?? [])} onClose={() => setInspectorOpen(false)} onSave={updateAgent} onReconcile={retry} canMutate={false} />}
-      {externalThread && <ExternalThreadDialog thread={externalThread} description={describeThreadOrchestrator(externalThread, { agents: snapshot.agents, clients: orchestratorClients, attachments: orchestratorAttachments })} taskMessages={snapshot.taskMessages ?? []} canMutate={canMutate} apiFetch={apiFetch} onClose={() => setExternalThreadId(undefined)} />}
+      {orchestratorThread && <OrchestratorThreadDialog thread={orchestratorThread} description={describeThreadOrchestrator(orchestratorThread, { agents: snapshot.agents, clients: orchestratorClients, attachments: orchestratorAttachments, instances: snapshot.instances })} taskMessages={snapshot.taskMessages ?? []} canMutate={canMutate} apiFetch={apiFetch} onClose={() => setOrchestratorThreadId(undefined)} />}
       {reviewingApproval && <ApprovalDialog approval={reviewingApproval} agents={snapshot.agents} nodes={snapshot.nodes} runs={snapshot.runs} tasks={snapshot.tasks ?? []} orchestratorClients={orchestratorClients} canMutate={canMutate} onClose={() => setReviewingApprovalId(undefined)} apiFetch={apiFetch} />}
       {selectedRunId && <RunInspector selectedRunId={selectedRunId} run={snapshot.runs.find((run) => run.id === selectedRunId)} runs={snapshot.runs} threads={snapshot.threads ?? []} artifacts={snapshot.artifacts ?? []} artifactPreviews={snapshot.artifactPreviews} agents={snapshot.agents} nodes={snapshot.nodes} runActivity={snapshot.runActivity ?? []} approvals={snapshot.approvals ?? []} sessionBindings={snapshot.sessionBindings ?? []} onClose={() => setSelectedRunId(undefined)} onInspectRun={setSelectedRunId} canMutate={canMutate} />}
       <nav className="desktop-nav" aria-label="Primary">
@@ -663,6 +689,7 @@ function CoffeeShopApp() {
       </nav>
       <BottomNav view={effectiveView} onView={switchView} pendingApprovalCount={pendingApprovalCount} legacy={legacySnapshot} />
       {creatingInstance && <CreateInstanceDialog threads={snapshot.threads ?? []} templates={snapshot.templates ?? []} nodes={snapshot.nodes} canMutate={canMutate} onClose={() => setCreatingInstance(false)} onOpenThreads={() => switchView("threads")} onCreate={createInstance} />}
+      {creatingHostedThread && <HostedThreadDialog nodes={snapshot.nodes} templates={snapshot.templates ?? []} projectProfiles={snapshot.projectProfiles ?? []} canMutate={canMutate} onClose={() => setCreatingHostedThread(false)} onCreate={createHostedThread} />}
       {releasingInstanceId && selectedInstance?.id === releasingInstanceId && <ReleaseInstanceDialog instance={selectedInstance} canMutate={canMutate} onClose={() => setReleasingInstanceId(undefined)} onRelease={(mode) => releaseInstance(selectedInstance, mode)} />}
       {editingTemplate && <TemplateEditorDialog template={editingTemplate === "edit" ? selectedTemplate : undefined} canMutate={canMutate} onClose={() => setEditingTemplate(undefined)} onSave={saveTemplate} />}
       {deletingTemplate && selectedTemplate && <DeleteTemplateDialog template={selectedTemplate} canMutate={canMutate} onClose={() => setDeletingTemplate(false)} onDelete={deleteTemplate} />}

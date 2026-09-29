@@ -251,6 +251,78 @@ function prepareV5(status: ConnectionStatus = "connected") {
 describe("version-5 instance and template operator experience", () => {
   beforeEach(() => prepareV5());
 
+  it("starts a thread with a resident delegating orchestrator", async () => {
+    const leadTemplate: AgentTemplate = {
+      ...v5Template,
+      id: "template-lead",
+      name: "Engineering lead",
+      purpose: { name: "Lead", instructions: "Delegate and verify." },
+      delegation: { canDelegate: true }
+    };
+    currentSnapshot.templates = [leadTemplate, v5Template];
+    const hostedThread: Thread = {
+      ...thread,
+      id: "thread-hosted",
+      title: "Ship billing export",
+      objective: "Delegate implementation and independent review.",
+      status: "active",
+      completedAt: undefined,
+      orchestrator: { kind: "instance", instanceId: "instance-lead" }
+    };
+    const leadInstance: AgentInstance = {
+      ...v5Instance,
+      id: "instance-lead",
+      threadId: hostedThread.id,
+      purpose: leadTemplate.purpose,
+      delegation: { canDelegate: true },
+      requirements: { templateId: leadTemplate.id, harnessIds: ["codex-cli"], models: ["gpt-5"] },
+      status: "provisioning"
+    };
+    const leadAllocation: InstanceAllocation = {
+      ...v5Allocation,
+      id: "allocation-lead",
+      instanceId: leadInstance.id,
+      status: "reserved"
+    };
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({
+      thread: hostedThread,
+      instance: leadInstance,
+      allocation: leadAllocation,
+      replayed: false
+    }), { status: 201, headers: { "content-type": "application/json" } }));
+
+    const { default: App } = await import("./App.js");
+    render(<App />);
+    fireEvent.click(screen.getAllByRole("button", { name: "Threads" })[0]);
+    fireEvent.click(screen.getByRole("button", { name: "Start thread" }));
+    const dialog = screen.getByRole("dialog", { name: "Start an orchestrated thread" });
+    fireEvent.change(within(dialog).getByLabelText("Thread title"), { target: { value: hostedThread.title } });
+    fireEvent.change(within(dialog).getByLabelText("What should the orchestrator accomplish?"), { target: { value: hostedThread.objective } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Orchestrator template: Built-in orchestrator" }));
+    fireEvent.click(within(dialog).getByRole("option", { name: /Engineering lead/ }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Harness: Automatic" }));
+    fireEvent.click(within(dialog).getByRole("option", { name: /^Codex/ }));
+    expect(within(dialog).getByRole("button", { name: "Model: gpt-5" })).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole("button", { name: /Start thread/ }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+    const [path, init] = fetchMock.mock.calls[0];
+    expect(path).toBe("/api/threads");
+    expect(init).toMatchObject({ method: "POST" });
+    expect(JSON.parse(String((init as RequestInit).body))).toMatchObject({
+      idempotencyKey: expect.stringMatching(/^web-/),
+      title: hostedThread.title,
+      objective: hostedThread.objective,
+      orchestrator: {
+        purpose: { name: "Lead", instructions: "Delegate and verify." },
+        requirements: { templateId: "template-lead", harnessIds: ["codex-cli"], models: ["gpt-5"] }
+      }
+    });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Start an orchestrated thread" })).not.toBeInTheDocument());
+    expect(screen.getByRole("heading", { name: "Threads" })).toBeInTheDocument();
+  });
+
   it("opens on instances, keeps desired constraints separate, and shows exact capacity/work", async () => {
     const { default: App } = await import("./App.js");
     render(<App />);

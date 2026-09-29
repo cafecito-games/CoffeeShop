@@ -374,6 +374,14 @@ Every scheduling pass reconciles open wakes and, for an active thread whose owne
 
 Failure handling: a range already delivered but never acknowledged is redelivered at most twice until new events arrive (`maximumRedeliveries: 2`). Failed continuations back off exponentially from 5 seconds to a maximum of 10 minutes (`retryBaseMilliseconds`/`retryMaximumMilliseconds`), visible as `consecutiveFailures` and `retryAfter` on the inbox. A continuation not dispatched within ten minutes is cancelled so the claim can be retaken. When a wake keeps failing: check the wake's run failure, the node's placement diagnostics, and the session binding's state; the backoff caps retry pressure on its own, so the usual fix is repairing the underlying cause (node offline, adapter broken, model rejected) rather than intervening in the inbox.
 
+## Starting a resident orchestrator in the PWA
+
+Use **Threads → Start thread** when the orchestrator itself should run in a harness on a Barista machine. Enter the outcome in **Objective**; it becomes the first durable inbox instruction. **Private instructions** define how the lead should operate across every wake, while the objective defines what this thread should accomplish. Choose a delegating template when one exists, or use the built-in orchestrator role. Runtime choices are populated only from live version-5 nodes with an available harness and a free resident slot; leaving a choice automatic lets the scheduler select among those offerings.
+
+Creation is one atomic operation: `POST /api/threads` writes the active thread, a hub-authorized delegating instance, its reserved allocation, the provision command, and the objective inbox message together. A placement refusal writes none of them. Reuse the same `idempotencyKey` after an uncertain response; an exact replay returns the original identities, while changed input under the same key conflicts. Once Barista reports the resident ready, the mailbox schedules one orchestrator run. Later messages in the thread and worker events wake that same instance; the run-scoped delegation tools let it create bounded worker instances, submit their tasks, monitor results, and synthesize the thread outcome.
+
+This is distinct from an external orchestrator: the resident lead consumes one `instanceCapacity` slot and runs with the selected node's local provider authentication, while an external Claude Code session stays on the operator's machine and connects through the Bridge. Releasing the resident instance stops future wakes for that lead; the thread history remains durable.
+
 ## Connecting Claude Code as an orchestrator
 
 A Claude Code session on your own machine can orchestrate a thread while the hub keeps dispatching the workers. Install the Coffee Shop plugin, which carries a bundled copy of `apps/orchestrator-bridge` and registers it as both an MCP server and a channel. Node.js 18 or newer is required on the machine running Claude Code.
@@ -438,6 +446,7 @@ Approvals an orchestrator resolves are labelled "Resolved by orchestrator (<cred
 
 - `GET /api/health` — liveness plus the number of connected control agents.
 - `GET /api/snapshot` — full published state. Watch `nodes[].activeRuns`/`concurrency` separately from `activeInstances`/`instanceCapacity`; correlate work only by exact `runs[].instanceId` plus `allocationId`; inspect `instances`, `allocations`, `tasks[].placement.unsatisfied`, approvals, leases, and inbox failures.
+- `POST /api/threads` — atomically create a thread with a resident orchestrator. Supply `idempotencyKey`, `title`, `objective`, and `orchestrator` with execution requirements, optional purpose, and optional idle timeout.
 - `GET /api/threads/:threadId/instances?includeTerminal=true` and `GET /api/threads/:threadId/instances/:instanceId` — thread-scoped lifecycle and retained allocation history. Create with `POST /api/threads/:threadId/instances`; renew and release through the corresponding instance routes using stable idempotency keys. Use `mode: "drain"` to wait for active work and `mode: "cancel"` to terminate it.
 - Instance leases expire at the closed `expiresAt` boundary. Renew before that timestamp with one stable key; the Hub serializes renewal and expiry, so the first committed state wins and an exact renewal replay cannot extend the lease twice. The 15-second maintenance pass begins drain for an idle expired resident and keeps its slot occupied until exact release acknowledgement.
 - `GET /api/runs/:id/events?after=N` — retained harness events plus the `runActivity` projection for a run.

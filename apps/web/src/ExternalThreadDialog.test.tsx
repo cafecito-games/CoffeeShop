@@ -74,6 +74,15 @@ describe("external thread messaging", () => {
     expect(screen.getByText(/is not attached right now/)).toBeInTheDocument();
   });
 
+  it("explains that a resident orchestrator is woken on its assigned compute", () => {
+    renderDialog({
+      thread: { ...thread, orchestrator: { kind: "instance", instanceId: "instance-lead" } },
+      description: { kind: "instance", name: "Release lead", detail: "ready", attached: false }
+    });
+    expect(screen.getByText("Resident orchestrator")).toBeInTheDocument();
+    expect(screen.getByText(/enters its durable inbox and wakes it on its resident compute when ready/)).toBeInTheDocument();
+  });
+
   it("reports a refusal from the hub without clearing the draft", async () => {
     const apiFetch = vi.fn(async () => new Response(JSON.stringify({ error: "The thread's message limit has been reached" }), { status: 409 }));
     renderDialog({ apiFetch });

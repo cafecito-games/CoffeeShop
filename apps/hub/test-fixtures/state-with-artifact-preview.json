@@ -182,6 +182,7 @@
     }
   ],
   "agentTemplateConfigurationReceipts": [],
+  "hostedThreadCreationReceipts": [],
   "taskSubmissions": [],
   "taskUpdates": [],
   "taskEventJournal": [],
