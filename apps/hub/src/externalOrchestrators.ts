@@ -16,7 +16,7 @@ import { CoordinationError } from "./coordinationError.js";
 import { inboxFor, pendingOrchestratorEvents } from "./orchestratorInbox.js";
 import { newEvent, newId, type State } from "./store.js";
 import { participantKey, type TaskEventEntry } from "./taskEvents.js";
-import { newExternalThread, threadObjectiveLimit, threadTitleLimit } from "./threads.js";
+import { applyThreadStatus, newExternalThread, threadObjectiveLimit, threadTitleLimit } from "./threads.js";
 
 /*
  * External orchestrator attachments.
@@ -524,7 +524,8 @@ export interface OperatorMessage {
  * Records an operator's message to a thread's orchestrator mailbox. A thread that does not exist and
  * one a legacy configured agent still orchestrates are refused identically, because neither can
  * receive one: the agent thread takes operator messages through its own entry point.
- * Replaying an idempotency key with the same body returns the original message.
+ * Replaying an idempotency key with the same body returns the original message. A message to a
+ * completed thread reopens it; an archived thread stays read-only until an operator reopens it.
  */
 export function postOperatorMessageInState(state: State, request: OperatorMessageRequest, at: string): OperatorMessage {
   const thread = (state.threads ?? []).find((item) => item.id === request.threadId);
@@ -549,7 +550,7 @@ export function postOperatorMessageInState(state: State, request: OperatorMessag
     if (replay.body !== body) throw new CoordinationError("idempotency_conflict", "The idempotency key was already used with a different message");
     return { created: false, message: replay };
   }
-  if (thread.status !== "active") throw new CoordinationError("thread_inactive", "Messages require an active thread");
+  if (thread.status === "archived") throw new CoordinationError("thread_inactive", "Archived threads are read-only until reopened");
   if (threadMessages.length >= orchestrationToolLimits.messagesPerThread || fromOperator.length >= orchestrationToolLimits.messagesPerSender) {
     throw new CoordinationError("mailbox_full", "The thread's message limit has been reached");
   }
@@ -571,6 +572,11 @@ export function postOperatorMessageInState(state: State, request: OperatorMessag
     createdAt: at
   };
   state.taskMessages.push(message);
+  // Following up on a completed thread reopens it, so its orchestrator is woken for the message.
+  if (thread.status === "completed") {
+    applyThreadStatus(thread, "active", at);
+    state.events.unshift(newEvent({ type: "status", title: "Thread reopened", detail: thread.title, threadId: thread.id }));
+  }
   thread.updatedAt = at;
   return { created: true, message };
 }

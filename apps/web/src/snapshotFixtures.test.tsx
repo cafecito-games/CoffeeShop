@@ -43,7 +43,7 @@ function renderViews(snapshot: Snapshot) {
       canMutate
       apiFetch={vi.fn()}
       onCreate={vi.fn()}
-      onContinue={vi.fn()}
+      onOpen={vi.fn()}
       onInspectRun={vi.fn()}
       onSetStatus={vi.fn()}
     />
