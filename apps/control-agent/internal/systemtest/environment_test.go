@@ -166,6 +166,21 @@ type environmentOptions struct {
 	legacyStatePath string
 	// clockOffset loads the hub's test clock so a scenario can move hub time forward.
 	clockOffset bool
+	// previewDelivery opts this scenario into the real Hub's isolated second listener. A nil value
+	// preserves the historical single-listener environment used by every existing system test.
+	previewDelivery *previewDeliveryOptions
+}
+
+type previewSigningKey struct {
+	id     string
+	secret string
+}
+
+type previewDeliveryOptions struct {
+	keys              []previewSigningKey
+	activeKeyID       string
+	defaultTTLSeconds int
+	maximumTTLSeconds int
 }
 
 func newEnvironment(t *testing.T, options environmentOptions) *environment {
@@ -198,7 +213,7 @@ func newEnvironment(t *testing.T, options environmentOptions) *environment {
 		}
 	}
 	t.Cleanup(environment.teardown)
-	environment.hub = environment.startHub(options.clockOffset)
+	environment.hub = environment.startHub(options.clockOffset, options.previewDelivery)
 	return environment
 }
 
@@ -483,21 +498,68 @@ func (process *ownedProcess) stop(kill bool) {
 
 // hubProcess is the real hub started from source with tsx.
 type hubProcess struct {
-	environment *environment
-	process     *ownedProcess
-	logs        *boundedLog
-	port        int
-	dataPath    string
-	profiles    string
-	clock       string
+	environment      *environment
+	process          *ownedProcess
+	logs             *boundedLog
+	port             int
+	dataPath         string
+	profiles         string
+	clock            string
+	previewPort      int
+	primaryAuthority string
+	previewAuthority string
+	previewDelivery  *previewDeliveryOptions
 }
 
 var listeningPattern = regexp.MustCompile(`Coffee Shop hub listening on http://localhost:(\d+)`)
+var previewListeningPattern = regexp.MustCompile(`Coffee Shop preview delivery listening on 127\.0\.0\.1:(\d+)`)
 
-func (environment *environment) startHub(clockOffset bool) *hubProcess {
+func reserveLoopbackPort(t *testing.T) int {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return port
+}
+
+func clonePreviewDeliveryOptions(options *previewDeliveryOptions) *previewDeliveryOptions {
+	if options == nil {
+		return nil
+	}
+	cloned := *options
+	cloned.keys = append([]previewSigningKey(nil), options.keys...)
+	if cloned.defaultTTLSeconds == 0 {
+		cloned.defaultTTLSeconds = 900
+	}
+	if cloned.maximumTTLSeconds == 0 {
+		cloned.maximumTTLSeconds = 3600
+	}
+	return &cloned
+}
+
+func (environment *environment) startHub(clockOffset bool, previewDelivery *previewDeliveryOptions) *hubProcess {
 	t := environment.t
 	t.Helper()
-	hub := &hubProcess{environment: environment, dataPath: filepath.Join(environment.root, "hub", "coffee-shop.sqlite"), profiles: filepath.Join(environment.root, "hub", "project-profiles.json")}
+	hub := &hubProcess{
+		environment:     environment,
+		dataPath:        filepath.Join(environment.root, "hub", "coffee-shop.sqlite"),
+		profiles:        filepath.Join(environment.root, "hub", "project-profiles.json"),
+		previewDelivery: clonePreviewDeliveryOptions(previewDelivery),
+	}
+	if hub.previewDelivery != nil {
+		hub.port = reserveLoopbackPort(t)
+		hub.previewPort = reserveLoopbackPort(t)
+		for hub.previewPort == hub.port {
+			hub.previewPort = reserveLoopbackPort(t)
+		}
+		hub.primaryAuthority = "hub.localhost:" + strconv.Itoa(hub.port)
+		hub.previewAuthority = "preview.localhost:" + strconv.Itoa(hub.previewPort)
+	}
 	if clockOffset {
 		hub.clock = filepath.Join(environment.root, "hub", "clock-offset")
 	}
@@ -516,16 +578,34 @@ func (environment *environment) startHub(clockOffset bool) *hubProcess {
 	return hub
 }
 
-func (hub *hubProcess) start() {
-	t := hub.environment.t
-	t.Helper()
+func (hub *hubProcess) command() *exec.Cmd {
 	arguments := []string{"--import", "tsx"}
+	port := "0"
+	if hub.previewDelivery != nil {
+		port = strconv.Itoa(hub.port)
+	}
 	environmentVariables := []string{
 		"PATH=" + os.Getenv("PATH"), "HOME=" + filepath.Join(hub.environment.root, "hub"),
-		"NODE_ENV=production", "PORT=0", "COFFEE_SHOP_TOKEN=" + enrollmentToken,
+		"NODE_ENV=production", "PORT=" + port, "COFFEE_SHOP_TOKEN=" + enrollmentToken,
 		"COFFEE_SHOP_DATABASE=" + hub.dataPath,
 		"COFFEE_SHOP_DATA=" + filepath.Join(filepath.Dir(hub.dataPath), "state.json"),
 		"PROJECT_PROFILES_PATH=" + hub.profiles,
+	}
+	if options := hub.previewDelivery; options != nil {
+		keys := make([]string, 0, len(options.keys))
+		for _, key := range options.keys {
+			keys = append(keys, key.id+":"+key.secret)
+		}
+		environmentVariables = append(environmentVariables,
+			"COFFEE_SHOP_PUBLIC_ORIGIN=http://"+hub.primaryAuthority,
+			"PREVIEW_PUBLIC_ORIGIN=http://"+hub.previewAuthority,
+			"PREVIEW_BIND_HOST=127.0.0.1",
+			"PREVIEW_PORT="+strconv.Itoa(hub.previewPort),
+			"PREVIEW_SIGNING_KEYS="+strings.Join(keys, ","),
+			"PREVIEW_ACTIVE_SIGNING_KEY_ID="+options.activeKeyID,
+			"PREVIEW_ACCESS_DEFAULT_TTL_SECONDS="+strconv.Itoa(options.defaultTTLSeconds),
+			"PREVIEW_ACCESS_MAX_TTL_SECONDS="+strconv.Itoa(options.maximumTTLSeconds),
+		)
 	}
 	if hub.clock != "" {
 		arguments = append(arguments, "--import", "file://"+filepath.Join(repositoryRoot, "apps", "control-agent", "internal", "systemtest", "testdata", "hub-clock.mjs"))
@@ -537,17 +617,36 @@ func (hub *hubProcess) start() {
 	hub.logs = newBoundedLog()
 	command.Stdout = hub.logs
 	command.Stderr = hub.logs
+	return command
+}
+
+func (hub *hubProcess) start() {
+	t := hub.environment.t
+	t.Helper()
+	command := hub.command()
 	process, err := startOwned(command)
 	if err != nil {
 		t.Fatalf("start hub: %v", err)
 	}
 	hub.process = process
 	deadline := time.After(processDeadline)
+	mainReady := false
+	previewReady := hub.previewDelivery == nil
 	for {
 		select {
 		case line := <-hub.logs.lines:
 			if match := listeningPattern.FindStringSubmatch(line); match != nil {
 				hub.port, _ = strconv.Atoi(match[1])
+				mainReady = true
+			}
+			if match := previewListeningPattern.FindStringSubmatch(line); match != nil {
+				observed, _ := strconv.Atoi(match[1])
+				if observed != hub.previewPort {
+					t.Fatalf("preview listener bound port %d, want %d", observed, hub.previewPort)
+				}
+				previewReady = true
+			}
+			if mainReady && previewReady {
 				for _, node := range hub.environment.nodes {
 					node.proxy.retarget(hub.port)
 				}
@@ -561,6 +660,39 @@ func (hub *hubProcess) start() {
 	}
 }
 
+// startExpectingRecoveryFailure proves recovery rejected inconsistent durable state before either
+// listener became observable. It is used only at the end of a scenario after the healthy process
+// has already stopped on the same exact database and storage root.
+func (hub *hubProcess) startExpectingRecoveryFailure() string {
+	t := hub.environment.t
+	t.Helper()
+	command := hub.command()
+	process, err := startOwned(command)
+	if err != nil {
+		t.Fatalf("start Hub for expected recovery refusal: %v", err)
+	}
+	hub.process = process
+	select {
+	case <-process.exited:
+		logs := hub.logs.String()
+		if listeningPattern.MatchString(logs) || previewListeningPattern.MatchString(logs) {
+			t.Fatalf("inconsistent preview storage exposed a listener before failing:\n%s", hub.logs.tail(8000))
+		}
+		for _, port := range []int{hub.port, hub.previewPort} {
+			connection, dialErr := net.DialTimeout("tcp", "127.0.0.1:"+strconv.Itoa(port), 250*time.Millisecond)
+			if dialErr == nil {
+				connection.Close()
+				t.Fatalf("inconsistent preview storage left port %d reachable", port)
+			}
+		}
+		return logs
+	case <-time.After(processDeadline):
+		process.stop(true)
+		t.Fatalf("Hub did not reject inconsistent preview storage within %s:\n%s", processDeadline, hub.logs.tail(8000))
+		return ""
+	}
+}
+
 func (hub *hubProcess) stop() { hub.process.stop(false) }
 
 // restart stops the hub and starts it again on the same data file; Baristas reconnect through
@@ -568,6 +700,17 @@ func (hub *hubProcess) stop() { hub.process.stop(false) }
 func (hub *hubProcess) restart() {
 	hub.stop()
 	hub.start()
+}
+
+// rotatePreviewSigningKeys changes only the next Hub process's environmental signing authority.
+// Lifecycle state and prepared bytes remain untouched across the required restart.
+func (hub *hubProcess) rotatePreviewSigningKeys(activeKeyID string, keys ...previewSigningKey) {
+	hub.environment.t.Helper()
+	if hub.previewDelivery == nil {
+		hub.environment.t.Fatal("the environment was started without preview delivery")
+	}
+	hub.previewDelivery.activeKeyID = activeKeyID
+	hub.previewDelivery.keys = append([]previewSigningKey(nil), keys...)
 }
 
 // advanceClock moves the hub's clock forward and waits for the hub to confirm it.
