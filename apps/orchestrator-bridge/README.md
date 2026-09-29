@@ -104,13 +104,39 @@ doorbell. Once a channel event has been delivered without transport error the fi
 ## Tools
 
 `create_thread`, `list_threads`, `attach_thread`, `detach_thread`, `get_thread_context`,
-`get_thread_events`, `submit_tasks`, `update_task`, `send_task_message`, `update_thread`,
-`get_execution_inventory`, and — only when the credential holds the `resolve-approvals` scope —
-`list_approvals` and `resolve_approval`. A scope change observed on reconnect triggers
+`get_thread_events`, `submit_tasks`, `update_task`, `send_task_message`, `post_artifact`,
+`publish_preview`, `update_thread`, `get_execution_inventory`, `spawn_instance`, `get_instance`,
+`renew_instance`, `release_instance`, and — only when the credential holds the
+`resolve-approvals` scope — `list_approvals` and `resolve_approval`. This list follows the shared
+protocol's declared order. A scope change observed on reconnect triggers
 `notifications/tools/list_changed`.
 
 While the bridge is disconnected, tool calls fail immediately with `hub_unavailable`; they are never
 queued. After a revocation every tool fails with `revoked` and the bridge stops reconnecting.
+
+## Publishing local artifacts and previews
+
+The bridge canonicalizes its process working directory once at startup. That directory is the fixed
+local authority for `post_artifact` and `publish_preview`: `relativePath` must be normalized and
+beneath it. `post_artifact` may traverse an intermediate link only when its canonical target remains
+inside that root, and its final target must be a no-follow regular file. A preview source directory,
+its path components, and its captured members may not be symbolic links. Start Claude Code from the
+intended project root; changing directory later does not widen the bridge's authority.
+
+`post_artifact` reads one regular file. `publish_preview` inventories one static directory and
+creates a deterministic gzip/tar bundle. Its `entrypoint` is relative to that directory, must name an
+exact captured regular `.html` file, and all page assets should use bundle-relative URLs. Special
+files, traversal, missing files, changing inventories, and paths outside the startup root are refused
+before a successful Hub registration or upload.
+
+Use one stable `idempotencyKey` for retries of the same semantic publication. An exact retry after a
+disconnect or Hub restart converges on the original artifact and preview; reusing the key after
+changing bytes, path, entrypoint, metadata, TTL, thread, or source conflicts. The bridge receives a
+one-time upload grant from the Hub only long enough to upload the finalized bytes, then confirms the
+Hub's authoritative lifecycle projection. It never returns that grant, the startup root, or an
+operator access URL. `publish_preview` returns only the artifact, preview lifecycle metadata, and
+whether that registration was created. An authenticated operator requests isolated access from the
+PWA after the preview is ready.
 
 ## Test
 

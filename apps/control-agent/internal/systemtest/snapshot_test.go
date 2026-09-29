@@ -18,6 +18,7 @@ type snapshot struct {
 	Tasks               []task               `json:"tasks"`
 	TaskMessages        []taskMessage        `json:"taskMessages"`
 	Artifacts           []artifact           `json:"artifacts"`
+	ArtifactPreviews    []artifactPreview    `json:"artifactPreviews"`
 	SessionBindings     []sessionBinding     `json:"sessionBindings"`
 	OrchestratorInboxes []orchestratorInbox  `json:"orchestratorInboxes"`
 	Approvals           []approval           `json:"approvals"`
@@ -244,6 +245,31 @@ type artifact struct {
 	DownloadPath   string `json:"downloadPath"`
 	Uploaded       bool   `json:"uploaded"`
 	IdempotencyKey string `json:"idempotencyKey"`
+}
+
+// artifactPreview is the Hub's public projection only. System tests deliberately decode its
+// producer-owned fields without duplicating lifecycle validation or signing authority in Go.
+type artifactPreview struct {
+	ID                   string `json:"id"`
+	ArtifactID           string `json:"artifactId"`
+	ArtifactSHA256       string `json:"artifactSha256"`
+	ThreadID             string `json:"threadId"`
+	RunID                string `json:"runId"`
+	SourceKey            string `json:"sourceKey"`
+	AgentID              string `json:"agentId"`
+	InstanceID           string `json:"instanceId"`
+	AllocationID         string `json:"allocationId"`
+	Entrypoint           string `json:"entrypoint"`
+	Status               string `json:"status"`
+	ProcessingGeneration int    `json:"processingGeneration"`
+	CreatedAt            string `json:"createdAt"`
+	UpdatedAt            string `json:"updatedAt"`
+	ExpiresAt            string `json:"expiresAt"`
+	ReadyAt              string `json:"readyAt"`
+	FailedAt             string `json:"failedAt"`
+	FailureCode          string `json:"failureCode"`
+	ExpiredAt            string `json:"expiredAt"`
+	AccessState          string `json:"accessState"`
 }
 
 type sessionBinding struct {

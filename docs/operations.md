@@ -1,10 +1,11 @@
 # Operations runbook
 
-This runbook is for the operator of a Coffee Shop deployment: the person who deploys the hub, installs Barista on compute machines, and answers when something stops working. Three kinds of process are involved:
+This runbook is for the operator of a Coffee Shop deployment: the person who deploys the hub, installs Barista on compute machines, and answers when something stops working. Four kinds of process may be involved:
 
 - the **hub** (`apps/hub`): REST API, WebSocket gateway, scheduler, and durable SQLite store;
 - **Barista** (`apps/control-agent`): one Go binary per compute node, connecting outbound to the hub;
-- **provider harnesses**: the Claude Code and Codex CLIs and their ACP adapters, installed and authenticated on each compute node.
+- **provider harnesses**: the Claude Code and Codex CLIs and their ACP adapters, installed and authenticated on each compute node;
+- the optional **orchestrator Bridge** (`apps/orchestrator-bridge`): a local stdio MCP process started by an operator's Claude Code session and connected outbound to the hub.
 
 Design detail, threat model, and protocol semantics live in [architecture.md](architecture.md) and [control-agent.md](control-agent.md); this document covers operational procedure only.
 
@@ -45,11 +46,28 @@ openssl rand -hex 32
 
 Set `PREVIEW_SIGNING_KEYS=current:<output>` and `PREVIEW_ACTIVE_SIGNING_KEY_ID=current` in the protected deployment environment, then start Compose. Never put the output in `.env.example`, Compose, a support ticket, or a shell command committed to history.
 
+For a fresh local root, install repository dependencies with `task install`, build with `task container:build`, copy `.env.example` to `.env`, replace `COFFEE_SHOP_TOKEN`, and uncomment the complete preview block with the generated key. Leave the two `.localhost` origins distinct, then validate and start in this order:
+
+```sh
+docker compose config --quiet
+docker compose up
+```
+
+For a non-secret configuration check in CI or during documentation review, no `.env` file is needed:
+
+```sh
+COFFEE_SHOP_TOKEN=test-only \
+PREVIEW_SIGNING_KEYS=current:0000000000000000000000000000000000000000000000000000000000000000 \
+docker compose config --quiet
+```
+
 In production, publish two TLS virtual hosts, for example `https://coffee.example.com` and `https://preview.example.com`. Route the former to Hub port 8787 and the latter to preview port 8788. Preserve the original raw `Host` header; do not rewrite it to the upstream address, and do not expect `Forwarded` or `X-Forwarded-Host` to authorize a request. Route `/events`, `/control-agent`, `/orchestrator-client`, and every `/api/*` path only to the Hub host. Route only `/_coffee-shop/preview/v1/...` to the preview host. A swapped route returns `421`, which is the intended topology alarm. Production `PREVIEW_PUBLIC_ORIGIN` must be HTTPS; HTTP is accepted only for `localhost`, a `.localhost` name, `127.0.0.1`, or `[::1]`.
 
 Capabilities are response-only bearer secrets in URL paths. Configure proxy, ingress, CDN, browser-observability, and application logs to redact the complete segment after `/_coffee-shop/preview/v1/`; do not log request targets, query strings, `Referer`, cookies, or authorization headers on the preview virtual host. Do not persist an access response in snapshots, analytics, browser storage, chat, or control messages. `HEAD` performs the same authorization and integrity work as `GET`; `Range`, cookies, Hub bearer headers, and `?token=` never add authority.
 
-The run-scoped `publish_preview` tool returns durable artifact/preview metadata and the lifecycle state observed by that call; it never returns a signed access URL. In particular, an uploaded artifact does not by itself mean the preview is ready. Coffee Shop agents attach the artifact ID to their task and report the returned preview ID/status. Only an authenticated operator uses `POST /api/previews/:id/access` (normally through the preview UI) after the preview is ready. The publication lifecycle TTL and the shorter access-capability TTL are separate policies.
+Run-owned publications use Barista's run-scoped `publish_preview` beneath the run's authorized workspace. External publications use the real Bridge's `publish_preview` beneath the directory the Bridge canonicalized when it started; launch Claude Code from the intended project root, pass only a normalized relative directory and an exact relative `.html` entrypoint, and do not use symlinked components. The Bridge privately consumes the Hub's one-time artifact upload grant. Both paths return durable artifact/preview metadata and the lifecycle state observed by that call; neither returns an upload grant, local root, or signed access URL. An uploaded artifact does not by itself mean the preview is ready. Coffee Shop agents attach the artifact ID to their task; external previews remain visible on their attached thread. Only an authenticated operator uses `POST /api/previews/:id/access` (normally through the preview UI) after the preview is ready. The publication lifecycle TTL and the shorter access-capability TTL are separate policies.
+
+Use one stable idempotency key for one semantic publication. An exact retry in the same session, after a reconnect, or after a Hub restart returns the original identities and generation. Changing bytes, metadata, entrypoint, TTL, thread, or source under that key conflicts; create a new key only for a deliberate new publication.
 
 Rotate keys with add/activate/drain/remove:
 
@@ -59,7 +77,9 @@ Rotate keys with add/activate/drain/remove:
 
 Never reuse a `kid` with different bytes while an old grant can exist. To roll back during the drain window, retain both exact keys and restore the former active ID; no persisted URL migration is needed. A restart with the same ring validates unexpired grants, while a removed/unknown key never falls back to the active or first entry.
 
-Lifecycle expiry and signed expiry are both closed boundaries: access is denied when the clock equals either one. The 15-second expiry sweep persists due lifecycle transitions and broadcasts only on change, but access checks the wall clock independently, so delayed maintenance never extends a grant. Expiry does not delete prepared content. Include `prepared-previews/` in volume snapshots; restore it with the matching database and `artifacts/` directory, then restart so recovery can fail closed on any mismatch.
+Lifecycle expiry and signed expiry are both closed boundaries: access is denied when the clock equals either one. The 15-second expiry sweep persists due lifecycle transitions and broadcasts only on change, but access checks the wall clock independently, so delayed maintenance never extends a grant. Renewal extends only an eligible lifecycle; it never changes an already issued URL. Expiry does not delete prepared content, and there is no automatic garbage collection of valid immutable blobs or prepared trees.
+
+Back up and restore `coffee-shop.sqlite`, `artifacts/`, and `prepared-previews/` as one generation. Stop the Hub before a filesystem snapshot, or use SQLite's backup mechanism and include its WAL/SHM consistently; copying only the main database file is not a backup. Restore all three to their original sibling paths with their exact bytes and permissions before starting the Hub. Startup recovery verifies every ready lifecycle against its blob, manifest, and prepared tree before either listener opens. Missing or drifted ready content stops startup; do not copy from the archive, edit SQLite, rename filesystem entries, or infer readiness from a prior snapshot. Restore the matching backup or repair the deployment from the reviewed exact source, then restart.
 
 Preview troubleshooting:
 
@@ -69,6 +89,7 @@ Preview troubleshooting:
 | `421 Misdirected Request` | The reverse proxy sent a public hostname to the wrong listener, rewrote `Host`, or combined Host headers. Preserve exactly one original Host and correct the virtual-host upstream. |
 | Operator access endpoint returns `503` | Preview delivery is deliberately disabled. Configure the complete two-host topology and restart. |
 | Access issuance returns `409` | The preview is not ready/unexpired or its uploaded artifact/prepared target is not exact. Inspect lifecycle state and bounded Hub storage code; do not regenerate bytes in the delivery path. |
+| Hub stops before either listener after a restore | Ready lifecycle state and immutable storage do not match. Keep the failed root intact, restore the matching database, `artifacts/`, and `prepared-previews/` generation, and restart; do not self-heal from names or archives. |
 | A signed URL returns the generic `404` | The grant, key, lifecycle, generation, path, manifest, or bytes are no longer valid. Request a new URL after confirming readiness; never infer which condition from the public response. |
 | Relative assets work but `/asset.js` does not | Root-relative references intentionally drop the capability prefix. Produce bundle-relative URLs; the server does not rewrite HTML or add a `<base>`. |
 | Old URLs stop immediately after rotation | The old `kid` was removed before the drain interval. Restore both exact keys, restart, then repeat the drain procedure. |
@@ -377,6 +398,8 @@ Mint a credential in the PWA: **Settings → Connected clients → Connect a Cla
 
 The PWA derives the hub URL from the origin it was served from, so a hub reached over `https://` yields `wss://…/orchestrator-client`. All three values are required, and the bridge refuses to start — with a message on stderr, a non-zero exit code, and nothing written to the MCP stream — when one is missing, when the URL is not `ws://` or `wss://`, or when the credential does not satisfy the handshake contract. The secret never appears in the bridge's output.
 
+The Bridge fixes its artifact authority to the canonical process working directory at startup. Start Claude Code in the project tree whose relative files it may publish; reconnecting does not change that root, and neither a tool argument nor a later directory change can widen it. Provider authentication remains in Claude Code. The Hub receives only the Coffee Shop client credential and finalized artifact bytes, never Anthropic credentials.
+
 Start Claude Code with the bridge loaded as a channel, which is what lets Coffee Shop wake an idle session:
 
 ```sh
@@ -472,4 +495,25 @@ These must remain true in any deployment; do not weaken them:
 
 ## Verifying a release
 
-Run `task ci` (format checks, TypeScript, Go, and system tests, typechecks, vet, and builds) before releasing. `task test` includes `task system:test`, which can also be run on its own: a deterministic multi-node end-to-end suite (`apps/control-agent/internal/systemtest`) that starts a real hub and real Barista processes, installs `fakeharness` as the pinned ACP adapters and native CLIs, and proves the orchestration workflow and its failure handling — parallel placement across two nodes and harnesses, dependency blocking, durable messages, approvals (accept, reject, expiry), cancellation, adapter crash, malformed frames, native fallback, partition and crash recovery, hub restart, session resume and replacement, workspace collision and dirty retention, cross-thread isolation, mixed protocol versions, credential canaries, and the version-5 instance lifecycle (replay, exact pins, independent capacities, expiry, drain/cancel, reconnect replacement, migration, and v4 exclusion). `task system:test:instances` runs that focused instance slice. The suite needs Node.js with workspace dependencies (`task install`), Go, and Git, uses no provider account or network, and keeps a failing scenario's temporary directory (logged) for diagnosis. It does not exercise real adapter builds; verify those on each node with the startup probe and `barista doctor`.
+Run `task ci` (format checks, TypeScript, Go, and system tests, typechecks, vet, and builds) before releasing. `task test` includes `task system:test`, which can also be run on its own: a deterministic multi-node end-to-end suite (`apps/control-agent/internal/systemtest`) that starts a real hub and real Barista processes, installs `fakeharness` as the pinned ACP adapters and native CLIs, and proves the orchestration workflow and its failure handling — parallel placement across two nodes and harnesses, dependency blocking, durable messages, approvals (accept, reject, expiry), cancellation, adapter crash, malformed frames, native fallback, partition and crash recovery, hub restart, session resume and replacement, workspace collision and dirty retention, cross-thread isolation, mixed protocol versions, credential canaries, and the version-5 instance lifecycle (replay, exact pins, independent capacities, expiry, drain/cancel, reconnect replacement, migration, and v4 exclusion). `task system:test:instances` runs that focused instance slice; `task system:test:preview` runs the opt-in dual-listener proof with real Barista native Claude/Codex producer paths, the real Bridge, restart/replay/rotation/drift/leakage checks, and exact isolated HTTP delivery. The suite needs Node.js with workspace dependencies (`task install`), Go, and Git, uses no provider account or network, and keeps a failing scenario's temporary directory (logged) for diagnosis. It does not exercise real adapter builds; verify those on each node with the startup probe and `barista doctor`.
+
+On this constrained workspace, keep Go concurrency and scratch under the persistent home volume:
+
+```sh
+mkdir -p "$HOME/.cache/coffee-shop-system/issue-111"
+TMPDIR="$HOME/.cache/coffee-shop-system/issue-111" GOMAXPROCS=8 task system:test:preview
+```
+
+Maintainers capturing release evidence first run `task frontend:build` and provide `playwright` and
+`chromium` on `PATH`, then opt into screenshots from that same producer-backed scenario:
+
+```sh
+mkdir -p "$HOME/.cache/coffee-shop-system/issue-111/evidence"
+COFFEE_SHOP_PREVIEW_EVIDENCE_DIR="$HOME/.cache/coffee-shop-system/issue-111/evidence" \
+TMPDIR="$HOME/.cache/coffee-shop-system/issue-111" GOMAXPROCS=8 task system:test:preview
+sha256sum "$HOME/.cache/coffee-shop-system/issue-111/evidence/"*.png
+```
+
+The evidence hook is opt-in, writes nothing to the repository, and fails if the built PWA or either
+local browser tool is absent. Ordinary `task system:test:preview`, `task system:test`, and CI do not
+depend on a browser installation.

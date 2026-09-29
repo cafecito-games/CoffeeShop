@@ -90,6 +90,7 @@ task control-agent:build    write the current-platform binary to bin/barista
 task control-agent:build:all cross-compile release binaries to dist/barista
 task test                   TypeScript, Go, and end-to-end system tests
 task system:test            multi-node end-to-end suite (real hub + Baristas, fake harnesses)
+task system:test:preview    focused dual-listener preview publication/delivery/recovery proof
 task typecheck              all TypeScript workspaces
 task ci                     format checks, tests, types, vet, and builds
 ```
@@ -122,4 +123,4 @@ go.work                   Go workspace for Go applications in the monorepo
 
 ## Production control plane
 
-Build the web/hub container with `task container:build`, set a strong `COFFEE_SHOP_TOKEN`, and terminate TLS in front of the hub. This injects the same clean source-derived version used by `task control-agent:build`, allowing exact release-policy comparison. Direct `docker compose build` defaults the UI provenance to `dev` and therefore fails closed unless `BARISTA_VERSION` is supplied explicitly. The shared token remains appropriate only for a private, single-user deployment. Per-node enrollment grants, rotation, and revocation are the next security boundary before a public or multi-user rollout. Day-to-day node bootstrap, adapter, upgrade, and recovery procedures are in [docs/operations.md](docs/operations.md).
+Build the web/hub container with `task container:build`, set a strong `COFFEE_SHOP_TOKEN`, and terminate TLS in front of the hub. Isolated previews require a second TLS hostname and listener; the primary host owns the PWA, APIs, and access issuance, while the preview host serves only capability-bearing preview paths. This injects the same clean source-derived version used by `task control-agent:build`, allowing exact release-policy comparison. Direct `docker compose build` defaults the UI provenance to `dev` and therefore fails closed unless `BARISTA_VERSION` is supplied explicitly. The shared token remains appropriate only for a private, single-user deployment. Per-node enrollment grants, rotation, and revocation are the next security boundary before a public or multi-user rollout. Exact two-host setup, key rotation, backup, and recovery procedures are in [docs/operations.md](docs/operations.md#serving-isolated-artifact-previews).
