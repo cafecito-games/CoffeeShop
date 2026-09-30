@@ -50,7 +50,7 @@ function applyHistoryPage(state: State, page: HistoryPage): HostSessionHistoryOu
   if (current && Date.parse(page.at) < Date.parse(current.observedAt)) {
     return { kind: "rejected", changed: false, reason: "host session history observation is stale" };
   }
-  if (current?.cursor !== undefined && page.nextCursor === current.cursor) {
+  if (page.nextCursor !== undefined && current?.receipts.some((item) => item.cursor === page.nextCursor)) {
     return { kind: "rejected", changed: false, reason: "host session history cursor did not advance" };
   }
   if (current && current.receipts.length >= hostHarnessSessionLimits.sessionsPerGeneration) {

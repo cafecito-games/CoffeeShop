@@ -436,7 +436,8 @@ export function assertPersistedHostSessionState(state: State) {
     if (!validated.ok) throw new Error(`Persisted host session observation ${index} is invalid: ${validated.reason}`);
     const observation = validated.value;
     const session = sessions.get(observation.hostHarnessSessionId);
-    if (!session || !sameHostSessionImmutableIdentity(session, observation) || session.revision !== observation.revision) {
+    if (!session || !sameHostSessionImmutableIdentity(session, observation) || session.revision !== observation.revision
+      || Date.parse(session.updatedAt) < Date.parse(observation.updatedAt)) {
       throw new Error(`Persisted host session observation ${index} has a broken session relationship`);
     }
     if (observationIds.has(observation.hostHarnessSessionId)) throw new Error(`Persisted host session observation ${index} repeats session identity`);
@@ -466,6 +467,7 @@ export function assertPersistedHostSessionState(state: State) {
     if (historyIds.has(history.hostHarnessSessionId)) throw new Error(`Persisted host session history ${index} repeats session identity`);
     historyIds.add(history.hostHarnessSessionId);
     const requests = new Set<string>();
+    const cursors = new Set<string>();
     for (const receipt of history.receipts) {
       if (!receipt || typeof receipt !== "object" || Array.isArray(receipt)
         || Object.keys(receipt).some((key) => !["requestId", "digest", "cursor", "acceptedAt"].includes(key))
@@ -481,6 +483,10 @@ export function assertPersistedHostSessionState(state: State) {
       }
       if (requests.has(receipt.requestId)) throw new Error(`Persisted host session history ${index} repeats request identity`);
       requests.add(receipt.requestId);
+      if (receipt.cursor !== undefined) {
+        if (cursors.has(receipt.cursor)) throw new Error(`Persisted host session history ${index} repeats cursor`);
+        cursors.add(receipt.cursor);
+      }
     }
   }
 }

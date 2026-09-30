@@ -67,6 +67,8 @@ const generationDigest = (generation: HostHarnessSessionInventoryGeneration) => 
 const providerKey = (session: Pick<HostHarnessSessionObservation, "nodeId" | "harnessId" | "workspace" | "providerSessionId">) =>
   [session.nodeId, session.harnessId, session.workspace, session.providerSessionId].join("\u0000");
 const connectionKey = (connection: HostSessionInventoryConnection) => `${connection.nodeId}\u0000${connection.connectionGeneration}`;
+const monotonicProjectionTime = (observation: HostHarnessSessionObservation, current?: HostHarnessSession) =>
+  current && Date.parse(current.updatedAt) > Date.parse(observation.updatedAt) ? current.updatedAt : observation.updatedAt;
 
 function stagesFor(store: Store) {
   let stages = staging.get(store);
@@ -90,6 +92,16 @@ export function discardHostSessionConnection(store: Store, connection: HostSessi
   const key = connectionKey(connection);
   staging.get(store)?.delete(key);
   reconciled.get(store)?.delete(key);
+}
+
+/** Volatile staging belongs to the socket even when the registry has already installed its successor. */
+export function discardHostSessionConnectionBeforeRelease<Result>(
+  store: Store,
+  connection: HostSessionInventoryConnection | undefined,
+  release: () => Result
+) {
+  if (connection) discardHostSessionConnection(store, connection);
+  return release();
 }
 
 export function hasReconciledHostSessionInventory(store: Store, connection: HostSessionInventoryConnection) {
@@ -153,6 +165,7 @@ export function applyCommittedHostSessionObservation(
   const next: HostHarnessSession = {
     ...observation,
     operations: [...observation.operations],
+    updatedAt: monotonicProjectionTime(observation, current),
     ...(current.attachedThreadId === undefined ? {} : { attachedThreadId: current.attachedThreadId }),
     ...(current.activeRunId === undefined ? {} : { activeRunId: current.activeRunId }),
     attachmentEpoch: current.attachmentEpoch
@@ -252,6 +265,7 @@ function applyCompletedGeneration(
     return {
       ...observation,
       operations: [...observation.operations],
+      updatedAt: monotonicProjectionTime(observation, current),
       ...(current?.attachedThreadId === undefined ? {} : { attachedThreadId: current.attachedThreadId }),
       ...(current?.activeRunId === undefined ? {} : { activeRunId: current.activeRunId }),
       attachmentEpoch: current?.attachmentEpoch ?? 0

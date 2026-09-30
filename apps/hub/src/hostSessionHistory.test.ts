@@ -80,6 +80,23 @@ test("history rejects wrong session/node/socket and stale cursor without touchin
     at: "2026-09-30T12:02:00Z"
   };
   assert.equal((await receiveHostSessionHistory(store, connection, stale)).kind, "rejected", "a new page must advance its opaque cursor");
+  const forward: HistoryPage = {
+    ...stale,
+    requestId: "request-history-three",
+    nextCursor: "cursor-three",
+    at: "2026-09-30T12:03:00Z"
+  };
+  assert.equal((await receiveHostSessionHistory(store, connection, forward)).kind, "accepted");
+  const rewind: HistoryPage = {
+    ...stale,
+    requestId: "request-history-four",
+    items: [{ ...page.items[0]!, id: "history-four", text: "Rewound" }],
+    nextCursor: "cursor-two",
+    at: "2026-09-30T12:04:00Z"
+  };
+  assert.equal((await receiveHostSessionHistory(store, connection, rewind)).kind, "rejected",
+    "a provider cursor may never rewind to any previously accepted cursor");
+  assert.equal(store.read((state) => state.hostSessionHistories?.[0]?.cursor), "cursor-three");
   assert.equal(store.read((state) => state.runs.length), 0);
   assert.equal(store.read((state) => state.runActivity?.length), 0);
   assert.equal(store.read((state) => state.approvals?.length), 0);

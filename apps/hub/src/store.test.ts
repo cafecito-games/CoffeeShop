@@ -761,6 +761,18 @@ test("host-session load rejects malformed and broken relationships without rewri
     [/unauthorized workspace/, (state) => { state.hostHarnessSessions[0].workspace = "/outside/advertised-roots"; }],
     [/invalid/, (state) => { state.hostHarnessSessions[0].providerEndpoint = "https://secret.invalid"; }],
     [/broken session relationship/, (state) => { state.hostSessionLastObservations[0].providerSessionId = "different-provider"; }],
+    [/broken session relationship/, (state) => { state.hostSessionLastObservations[0].updatedAt = "2026-09-30T12:01:00Z"; }],
+    [/repeats cursor/, (state) => {
+      state.hostSessionHistories = [{
+        hostHarnessSessionId: hostSessionObservation.hostHarnessSessionId,
+        nodeId: hostSessionNode.id,
+        items: [], cursor: "cursor-two", truncated: false, omittedItems: 0,
+        observedAt: "2026-09-30T12:02:00Z",
+        receipts: ["one", "two"].map((suffix) => ({
+          requestId: `history-${suffix}`, digest: "1".repeat(64), cursor: "cursor-two", acceptedAt: "2026-09-30T12:02:00Z"
+        }))
+      }];
+    }],
     [/history collection is malformed/, (state) => { state.hostSessionHistories = null; }]
   ];
   for (const [reason, mutate] of cases) {

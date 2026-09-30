@@ -11,7 +11,7 @@ import type {
   HostHarnessSessionObservation
 } from "@coffee-shop/protocol";
 import {
-  discardHostSessionConnection,
+  discardHostSessionConnectionBeforeRelease,
   hasReconciledHostSessionInventory,
   receiveHostSessionInventory
 } from "./hostSessionInventory.js";
@@ -100,7 +100,8 @@ test("generation ordering, replay conflicts, incomplete replacement, restart, an
   assert.deepEqual(restarted.snapshot().hostHarnessSessions, before, "restart publishes only the last complete generation");
   assert.equal((await receiveHostSessionInventory(restarted, connection, { ...complete, generation: 5 })).kind, "rejected",
     "restart discards partial generation staging");
-  discardHostSessionConnection(store, connection);
+  assert.equal(discardHostSessionConnectionBeforeRelease(store, connection, () => false), false,
+    "a superseded socket still discards its private staging when registry release is stale");
   assert.equal(hasReconciledHostSessionInventory(store, connection), false);
   assert.equal((await receiveHostSessionInventory(store, connection, { ...complete, generation: 5 })).kind, "rejected");
   assert.deepEqual(store.snapshot().hostHarnessSessions, before, "disconnect leaves last complete authority intact");
@@ -143,6 +144,17 @@ test("complete replacement updates reported sessions, marks missing sessions off
     { attachedThreadId: "thread-one", activeRunId: "run-one", attachmentEpoch: 3 }
   );
   assert.equal(sessions.find((session) => session.hostHarnessSessionId === "host-session-two")?.status, "running");
+
+  const resurfaced = nextObservation(firstPage.sessions[0]!, { updatedAt: "2026-09-30T12:01:30Z" });
+  assert.equal((await receiveHostSessionInventory(store, connection, {
+    ...firstPage, generation: 6, sessions: [resurfaced], at: "2026-09-30T12:03:00Z"
+  })).kind, "staged");
+  assert.equal((await receiveHostSessionInventory(store, connection, {
+    ...firstComplete, generation: 6, at: "2026-09-30T12:03:00Z"
+  })).kind, "accepted");
+  assert.equal(store.snapshot().hostHarnessSessions
+    ?.find((session) => session.hostHarnessSessionId === "host-session-one")?.updatedAt, "2026-09-30T12:02:00Z",
+  "resurfacing provider evidence cannot regress the Hub's committed projection timestamp");
 });
 
 test("session updates require the current synchronized v6 connection and an exact next revision", async () => {

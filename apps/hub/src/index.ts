@@ -84,7 +84,12 @@ import { dispatchMessageFor, runSchedulingPass, type SchedulingContext, type Sch
 import { runContinuationPass, type ContinuationPassResult } from "./orchestratorInbox.js";
 import { createHostedThread } from "./hostedThreads.js";
 import { receiveHostSessionHistory } from "./hostSessionHistory.js";
-import { discardHostSessionConnection, receiveHostSessionInventory, type HostSessionInventoryConnection } from "./hostSessionInventory.js";
+import {
+  discardHostSessionConnection,
+  discardHostSessionConnectionBeforeRelease,
+  receiveHostSessionInventory,
+  type HostSessionInventoryConnection
+} from "./hostSessionInventory.js";
 import { registerHostSessionReadRoutes } from "./hostSessionReadRoutes.js";
 import { receiveSessionBinding } from "./sessionBindings.js";
 import { newEvent, newId, newMessage, Store } from "./store.js";
@@ -1291,14 +1296,14 @@ wss.on("connection", (socket, request) => {
     socketClosed.abort();
     if (!nodeId) return;
     const connection = controlAgents.connectionFor(socket);
-    if (!controlAgents.release(socket)) return;
-    if (connection) discardHostSessionConnection(store, {
+    const released = discardHostSessionConnectionBeforeRelease(store, connection && {
       nodeId: connection.nodeId,
       connectionGeneration: connection.generation,
       supportsCapability: supportsControlCapability(connection.protocolVersion, "interactive-sessions"),
       barrierPassed: controlAgents.barrierPassed(connection),
       isCurrent: () => false
-    });
+    }, () => controlAgents.release(socket));
+    if (!released) return;
     forgetCapabilityPackReadiness(nodeId);
     await store.transact((state) => { const node = state.nodes.find((item) => item.id === nodeId); if (node) { node.status = "offline"; node.activeRuns = 0; } });
     broadcast();
