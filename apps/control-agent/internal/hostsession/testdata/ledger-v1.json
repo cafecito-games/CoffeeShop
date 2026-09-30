@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "checksum": "6598386ab4e48e56e82750255bc93386470b1df94cc63ec3c0047397bd2a10bf",
+  "payload": {
+    "commands": [
+      {
+        "commandId": "command-fixture",
+        "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "operation": "create",
+        "requestId": "request-fixture",
+        "harnessId": "codex-cli",
+        "workspace": "/srv/workspaces/project",
+        "state": "pending",
+        "updatedAt": "2026-09-30T12:00:01Z"
+      }
+    ]
+  }
+}
