@@ -253,6 +253,24 @@ test("every hub command has a strict v6-only shape and a verified canonical SHA-
   }
   const emptyPrompt = existingCommand("host-session.turn.start", { runId: "run-one", prompt: "" });
   assert.equal(protocol.validateHostSessionHubMessage(emptyPrompt, "6").ok, true);
+
+  const unicodeDigestCases = [
+    ["line\u2028separator", "8eee57d3f1a2c21da8f8bf30d833a7d3e74110e01fb979f5c59e8b089927fe0f"],
+    ["line\\u2028separator", "cb9994acf757e1a376e7b24828e57f0b7afc7331b88c1a9b7253ee65e3bd1a4f"],
+    ["paragraph\u2029separator", "c32a072210d400027e93fe2b25b4be0ce49e24577c142f28d1d0e48ffb6dcc33"],
+    ["paragraph\\u2029separator", "dabc9357b0e28eb38e4d60140696623f83dd59051756c1b4b02102faba2c32f9"],
+    ["line\\" + String.fromCodePoint(0x2028) + "separator", "1533b0a298ab90d535428bbb9bd2cda81363b56f95717ad76d6de2ca5c457822"]
+  ];
+  for (const [prompt, expected] of unicodeDigestCases) {
+    const digest = protocol.hostHarnessSessionCommandDigest({
+      type: "host-session.turn.start", nodeId: "node-one", commandId: "command-unicode",
+      hostHarnessSessionId: "host-session-one", attachmentEpoch: 3, runId: "run-one", prompt
+    });
+    assert.deepEqual(digest, { ok: true, value: expected });
+  }
+  assert.notEqual(unicodeDigestCases[0][1], unicodeDigestCases[1][1], "a literal escape is distinct from a line separator");
+  assert.notEqual(unicodeDigestCases[2][1], unicodeDigestCases[3][1], "a literal escape is distinct from a paragraph separator");
+  assert.notEqual(unicodeDigestCases[1][1], unicodeDigestCases[4][1], "a literal escape is distinct from backslash plus a line separator");
 });
 
 test("Barista frames are strict, v6-only, and preserve request/session/epoch domains", () => {
@@ -337,12 +355,55 @@ test("complete inventory generations validate atomically across page replay, gap
   assert.equal(protocol.validateHostHarnessSessionInventoryTransition(previous, gap.value).ok, false);
 });
 
+test("inventory and history collection limits accept the exact boundary and reject one over", () => {
+  const sessions = Array.from({ length: protocol.hostHarnessSessionLimits.sessionsPerGeneration }, (_, index) => observation({
+    hostHarnessSessionId: `host-session-${index.toString().padStart(4, "0")}`,
+    providerSessionId: `provider-session-${index.toString().padStart(4, "0")}`
+  }));
+  const pages = Array.from({ length: protocol.hostHarnessSessionLimits.pagesPerGeneration }, (_, pageIndex) => ({
+    type: "host-session.inventory.page", nodeId: "node-one", generation: 8, pageIndex,
+    sessions: sessions.slice(pageIndex * protocol.hostHarnessSessionLimits.sessionsPerInventoryPage,
+      (pageIndex + 1) * protocol.hostHarnessSessionLimits.sessionsPerInventoryPage), at
+  }));
+  const complete = {
+    type: "host-session.inventory.complete", nodeId: "node-one", generation: 8,
+    pageCount: protocol.hostHarnessSessionLimits.pagesPerGeneration,
+    sessionCount: protocol.hostHarnessSessionLimits.sessionsPerGeneration, at
+  };
+  assert.equal(protocol.validateHostSessionControlMessage(pages.at(-1), "6").ok, true);
+  assert.equal(protocol.validateHostSessionControlMessage(complete, "6").ok, true);
+  const assembled = protocol.validateHostHarnessSessionInventoryGeneration(pages, complete);
+  assert.equal(assembled.ok, true, assembled.ok ? "" : assembled.reason);
+  assert.equal(assembled.value.sessions.length, protocol.hostHarnessSessionLimits.sessionsPerGeneration);
+
+  const pageOver = { ...pages[0], sessions: sessions.slice(0, protocol.hostHarnessSessionLimits.sessionsPerInventoryPage + 1) };
+  assert.equal(protocol.validateHostSessionControlMessage(pageOver, "6").ok, false);
+  assert.equal(protocol.validateHostSessionControlMessage({ ...pages[0], pageIndex: protocol.hostHarnessSessionLimits.pagesPerGeneration }, "6").ok, false);
+  assert.equal(protocol.validateHostSessionControlMessage({ ...complete, pageCount: protocol.hostHarnessSessionLimits.pagesPerGeneration + 1 }, "6").ok, false);
+  assert.equal(protocol.validateHostSessionControlMessage({ ...complete, sessionCount: protocol.hostHarnessSessionLimits.sessionsPerGeneration + 1 }, "6").ok, false);
+
+  const items = Array.from({ length: protocol.hostHarnessSessionLimits.historyItemsPerPage }, (_, index) => ({
+    id: `history-${index}`, kind: "assistant", text: "bounded", truncated: false
+  }));
+  const history = { type: "host-session.history.page", nodeId: "node-one", hostHarnessSessionId: "host-session-one",
+    requestId: "request-history", items, truncated: false, at };
+  assert.equal(protocol.validateHostSessionControlMessage(history, "6").ok, true);
+  assert.equal(protocol.validateHostSessionControlMessage({
+    ...history, items: [...items, { id: "history-over", kind: "assistant", text: "bounded", truncated: false }]
+  }, "6").ok, false);
+});
+
 test("command replay and responses keep command, request, session, digest, and epoch correlation independent", () => {
   const command = existingCommand("host-session.turn.start", { runId: "run-one", prompt: "Continue" });
   assert.equal(protocol.classifyHostHarnessSessionCommandReplay(undefined, command), "new");
   assert.equal(protocol.classifyHostHarnessSessionCommandReplay(command, structuredClone(command)), "replay");
   const changed = existingCommand("host-session.turn.start", { commandId: command.commandId, runId: "run-one", prompt: "Different" });
   assert.equal(protocol.classifyHostHarnessSessionCommandReplay(command, changed), "conflict");
+  const differentCommand = existingCommand("host-session.turn.start", {
+    commandId: "command-other", runId: "run-one", prompt: "Continue"
+  });
+  assert.equal(protocol.classifyHostHarnessSessionCommandReplay(command, differentCommand), "conflict",
+    "a lookup collision on a different command ID must fail closed");
 
   const ack = { type: "host-session.command.ack", nodeId: command.nodeId, operation: "start-turn",
     commandId: command.commandId, commandDigest: command.commandDigest, hostHarnessSessionId: command.hostHarnessSessionId,
@@ -420,6 +481,27 @@ test("interactive-session registration is admitted only on v6 with sorted driver
   const malformed = structuredClone(registration);
   malformed.node.harnesses[0].interactiveSessions.operations = ["discover", "create"];
   assert.equal(protocol.canAcceptFromControlAgent(malformed, "6"), false);
+});
+
+test("the shared pre-v6 snapshot migration defaults only an absent host-session collection", () => {
+  // This fixture is byte-for-byte Store output from the producer cited in apps/hub/src/store.test.ts:342.
+  const legacy = JSON.parse(readFileSync(new URL("../../../apps/hub/test-fixtures/state-before-external-orchestrators.json", import.meta.url), "utf8"));
+  const before = structuredClone(legacy);
+  const migrated = protocol.withHostHarnessSessionDefaults(legacy);
+  assert.deepEqual(migrated.hostHarnessSessions, []);
+  delete migrated.hostHarnessSessions;
+  assert.deepEqual(migrated, before, "migration must not synthesize or reclassify existing records");
+
+  const existing = [projectedSession()];
+  const current = protocol.withHostHarnessSessionDefaults({ ...structuredClone(before), hostHarnessSessions: existing });
+  assert.equal(current.hostHarnessSessions, existing, "a valid present collection keeps its identity and contents");
+  assert.throws(() => protocol.withHostHarnessSessionDefaults({ ...structuredClone(before), hostHarnessSessions: null }));
+  assert.throws(() => protocol.withHostHarnessSessionDefaults({
+    ...structuredClone(before), hostHarnessSessions: [{ ...projectedSession(), attachmentEpoch: -1 }]
+  }));
+  assert.throws(() => protocol.withHostHarnessSessionDefaults({
+    ...structuredClone(before), hostHarnessSessions: [projectedSession(), projectedSession()]
+  }), /duplicate/);
 });
 
 const fixtureDirectory = new URL("./fixtures/control-v6/", import.meta.url);

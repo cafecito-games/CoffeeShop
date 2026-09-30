@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -151,6 +152,57 @@ func TestHostSessionHubFixturesValidateDigestAndRouteOnlyOnVersionSix(t *testing
 	}
 }
 
+func TestHostSessionCanonicalDigestsDistinguishUnicodeFromLiteralEscapes(t *testing.T) {
+	epoch := int64(3)
+	base := HostSessionHubMessage{
+		Type: "host-session.turn.start", NodeID: "node-one", CommandID: "command-unicode",
+		HostHarnessSessionID: "host-session-one", AttachmentEpoch: &epoch, RunID: "run-one",
+	}
+	cases := []struct {
+		name     string
+		prompt   string
+		expected string
+	}{
+		{"line separator", "line\u2028separator", "8eee57d3f1a2c21da8f8bf30d833a7d3e74110e01fb979f5c59e8b089927fe0f"},
+		{"literal line separator escape", `line\u2028separator`, "cb9994acf757e1a376e7b24828e57f0b7afc7331b88c1a9b7253ee65e3bd1a4f"},
+		{"paragraph separator", "paragraph\u2029separator", "c32a072210d400027e93fe2b25b4be0ce49e24577c142f28d1d0e48ffb6dcc33"},
+		{"literal paragraph separator escape", `paragraph\u2029separator`, "dabc9357b0e28eb38e4d60140696623f83dd59051756c1b4b02102faba2c32f9"},
+		{"backslash then line separator", `line\` + "\u2028" + "separator", "1533b0a298ab90d535428bbb9bd2cda81363b56f95717ad76d6de2ca5c457822"},
+	}
+	digests := make(map[string]string, len(cases))
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			command := base
+			command.Prompt = testCase.prompt
+			digest, err := HostHarnessSessionCommandDigest(command)
+			require.NoError(t, err)
+			require.Equal(t, testCase.expected, digest)
+			digests[testCase.name] = digest
+		})
+	}
+	require.NotEqual(t, digests["line separator"], digests["literal line separator escape"])
+	require.NotEqual(t, digests["paragraph separator"], digests["literal paragraph separator escape"])
+	require.NotEqual(t, digests["literal line separator escape"], digests["backslash then line separator"])
+}
+
+func TestHostSessionRegistrationMirrorsTheVersionSixInteractiveProfile(t *testing.T) {
+	registration := []byte(`{"type":"register","protocolVersion":"6","node":{"id":"node-one","name":"Local","kind":"local","platform":"linux","status":"online","lastSeen":"2026-09-30T12:00:00Z","activeRuns":0,"concurrency":1,"instanceCapacity":1,"activeInstances":0,"workspaceRoots":["/workspaces"],"harnesses":[{"id":"codex-cli","label":"Codex","description":"Local Codex","available":true,"authMode":"local-subscription","models":["gpt-5"],"interactiveSessions":{"operations":["adopt","create","discover"]}}],"version":"0.1.0"}}`)
+	message, err := DecodeInstanceControlMessage(registration, "6")
+	require.NoError(t, err)
+	roundTrip, err := json.Marshal(message)
+	require.NoError(t, err)
+	require.JSONEq(t, string(registration), string(roundTrip), "the Go wire struct must preserve the TS-valid profile")
+
+	_, err = DecodeInstanceControlMessage(registration, "5")
+	require.Error(t, err, "v5 must reject a v6 registration")
+	declaredV5 := []byte(strings.Replace(string(registration), `"protocolVersion":"6"`, `"protocolVersion":"5"`, 1))
+	_, err = DecodeInstanceControlMessage(declaredV5, "6")
+	require.Error(t, err, "a historical registration cannot advertise a v6-only profile")
+	unsorted := []byte(strings.Replace(string(registration), `"adopt","create","discover"`, `"discover","create","adopt"`, 1))
+	_, err = DecodeInstanceControlMessage(unsorted, "6")
+	require.Error(t, err, "interactive operations must be sorted and unique")
+}
+
 func TestHostSessionControlFixturesAreStrictAndVersionSixOnly(t *testing.T) {
 	for _, name := range hostSessionControlFixtureNames {
 		t.Run(name, func(t *testing.T) {
@@ -227,6 +279,65 @@ func TestHostSessionObservationTransitionsAndInventoryFailClosed(t *testing.T) {
 	require.Error(t, ValidateHostHarnessSessionInventoryTransition(generation, nextGeneration), "generation gaps fail closed")
 }
 
+func TestHostSessionInventoryAndHistoryCollectionLimits(t *testing.T) {
+	pageFixture, err := DecodeHostSessionControlMessage(loadHostSessionFixture(t, "inventory-page"), "6")
+	require.NoError(t, err)
+	base := pageFixture.Sessions[0]
+	sessions := make([]HostHarnessSessionObservation, HostHarnessSessionLimits.SessionsPerGeneration)
+	for index := range sessions {
+		session := base
+		session.HostHarnessSessionID = fmt.Sprintf("host-session-%04d", index)
+		session.ProviderSessionID = fmt.Sprintf("provider-session-%04d", index)
+		sessions[index] = session
+	}
+	pages := make([]HostSessionControlMessage, HostHarnessSessionLimits.PagesPerGeneration)
+	for pageIndex := range pages {
+		start := pageIndex * HostHarnessSessionLimits.SessionsPerInventoryPage
+		end := start + HostHarnessSessionLimits.SessionsPerInventoryPage
+		pages[pageIndex] = HostSessionControlMessage{
+			Type: "host-session.inventory.page", NodeID: "node-one", Generation: 8, PageIndex: int64(pageIndex),
+			Sessions: sessions[start:end], At: "2026-09-30T12:00:00Z",
+		}
+	}
+	complete := HostSessionControlMessage{
+		Type: "host-session.inventory.complete", NodeID: "node-one", Generation: 8,
+		PageCount:    int64(HostHarnessSessionLimits.PagesPerGeneration),
+		SessionCount: int64(HostHarnessSessionLimits.SessionsPerGeneration), At: "2026-09-30T12:00:00Z",
+	}
+	require.NoError(t, validateHostSessionControlMessageValue(pages[len(pages)-1]))
+	require.NoError(t, validateHostSessionControlMessageValue(complete))
+	assembled, err := ValidateHostHarnessSessionInventoryGeneration(pages, complete)
+	require.NoError(t, err)
+	require.Len(t, assembled.Sessions, HostHarnessSessionLimits.SessionsPerGeneration)
+
+	pageOver := pages[0]
+	pageOver.Sessions = sessions[:HostHarnessSessionLimits.SessionsPerInventoryPage+1]
+	require.Error(t, validateHostSessionControlMessageValue(pageOver))
+	pageIndexOver := pages[0]
+	pageIndexOver.PageIndex = int64(HostHarnessSessionLimits.PagesPerGeneration)
+	require.Error(t, validateHostSessionControlMessageValue(pageIndexOver))
+	pageCountOver := complete
+	pageCountOver.PageCount++
+	require.Error(t, validateHostSessionControlMessageValue(pageCountOver))
+	sessionCountOver := complete
+	sessionCountOver.SessionCount++
+	require.Error(t, validateHostSessionControlMessageValue(sessionCountOver))
+
+	items := make([]HostHarnessSessionHistoryItem, HostHarnessSessionLimits.HistoryItemsPerPage)
+	for index := range items {
+		items[index] = HostHarnessSessionHistoryItem{ID: fmt.Sprintf("history-%d", index), Kind: "assistant", Text: "bounded"}
+	}
+	history := HostSessionControlMessage{
+		Type: "host-session.history.page", NodeID: "node-one", HostHarnessSessionID: "host-session-one",
+		RequestID: "request-history", Items: items, At: "2026-09-30T12:00:00Z",
+	}
+	require.NoError(t, validateHostSessionControlMessageValue(history))
+	historyOver := history
+	historyOver.Items = append(append([]HostHarnessSessionHistoryItem(nil), items...),
+		HostHarnessSessionHistoryItem{ID: "history-over", Kind: "assistant", Text: "bounded"})
+	require.Error(t, validateHostSessionControlMessageValue(historyOver))
+}
+
 func TestHostSessionReplayAndCloseOutcomesFailClosed(t *testing.T) {
 	command, err := DecodeHostSessionHubMessage(loadHostSessionFixture(t, "turn-start"), "6")
 	require.NoError(t, err)
@@ -242,6 +353,14 @@ func TestHostSessionReplayAndCloseOutcomesFailClosed(t *testing.T) {
 	changed.CommandDigest, err = HostHarnessSessionCommandDigest(changed)
 	require.NoError(t, err)
 	require.Equal(t, HostHarnessSessionCommandReplayConflict, ClassifyHostHarnessSessionCommandReplay(&command, changed))
+
+	differentCommand := command
+	differentCommand.CommandID = "command-other"
+	differentCommand.CommandDigest = ""
+	differentCommand.CommandDigest, err = HostHarnessSessionCommandDigest(differentCommand)
+	require.NoError(t, err)
+	require.Equal(t, HostHarnessSessionCommandReplayConflict, ClassifyHostHarnessSessionCommandReplay(&command, differentCommand),
+		"a lookup collision on a different command ID must fail closed")
 
 	startResult, err := DecodeHostSessionControlMessage(loadHostSessionFixture(t, "command-result-start"), "6")
 	require.NoError(t, err)

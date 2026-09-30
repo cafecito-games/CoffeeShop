@@ -1943,6 +1943,34 @@ export function withOrchestrationDefaults<T extends Omit<Snapshot, "generatedAt"
   return target;
 }
 
+/**
+ * Shared pre-v6 migration rule for the durable host-session projection. Only an absent collection
+ * defaults to empty; present data is validated without rewriting identity or attachment state.
+ */
+export function withHostHarnessSessionDefaults<T extends Omit<Snapshot, "generatedAt">>(
+  state: T
+): T & Required<Pick<Snapshot, "hostHarnessSessions">> {
+  const target = state as T & Required<Pick<Snapshot, "hostHarnessSessions">>;
+  if (target.hostHarnessSessions === undefined) {
+    target.hostHarnessSessions = [];
+    return target;
+  }
+  if (!Array.isArray(target.hostHarnessSessions)) throw new Error("Persisted host session collection is malformed");
+  const ids = new Set<string>();
+  const providers = new Set<string>();
+  for (const [index, candidate] of target.hostHarnessSessions.entries()) {
+    const session = validateHostHarnessSession(candidate);
+    if (!session.ok) throw new Error(`Persisted host session ${index} is invalid: ${session.reason}`);
+    const provider = [session.value.nodeId, session.value.harnessId, session.value.workspace, session.value.providerSessionId].join("\u0000");
+    if (ids.has(session.value.hostHarnessSessionId) || providers.has(provider)) {
+      throw new Error("Persisted host session collection contains duplicate identity");
+    }
+    ids.add(session.value.hostHarnessSessionId);
+    providers.add(provider);
+  }
+  return target;
+}
+
 /*
  * Runtime validation of untrusted version-4 input. Validators never supply defaults for status or
  * discriminator fields: an unknown or missing value is rejected with a reason for diagnostics.
@@ -2436,7 +2464,7 @@ export function classifyHostHarnessSessionCommandReplay(
   if (!candidate.ok) return "conflict";
   if (recorded === undefined) return "new";
   const original = validateHostSessionHubMessage(recorded, "6");
-  if (!original.ok || original.value.commandId !== candidate.value.commandId) return original.ok ? "new" : "conflict";
+  if (!original.ok || original.value.commandId !== candidate.value.commandId) return "conflict";
   return original.value.commandDigest === candidate.value.commandDigest
     && canonicalHostSessionJSON(original.value) === canonicalHostSessionJSON(candidate.value) ? "replay" : "conflict";
 }

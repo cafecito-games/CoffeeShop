@@ -1347,33 +1347,60 @@ var v5ACP = v5Object(map[string]v5Rule{
 	},
 	"adapterVersion": v5NormalizedVersion,
 })
-var v5Harness = v5Object(map[string]v5Rule{
-	"id": v5Enum(HarnessIDs), "label": v5String(1, identifierBytes), "description": v5String(0, diagnosticBytes), "available": v5Boolean,
-	"authMode": v5Enum([]string{"local-subscription", "local-account", "api", "none"}), "models": v5Names,
-}, map[string]v5Rule{"binary": v5String(0, InstanceWorkspaceBytes), "transports": v5Strings(InstanceRequirementEntries, v5Enum(HarnessTransports)), "acp": v5ACP, "approvalPolicy": v5Enum(ApprovalPolicies)})
-var v5Node = v5Object(map[string]v5Rule{
-	"id": v5ID, "name": v5String(1, identifierBytes), "kind": v5Enum([]string{"local", "home-server", "cloud"}),
-	"platform": v5String(1, identifierBytes), "status": v5Enum([]string{"online", "offline", "busy"}), "lastSeen": v5Time,
-	"activeRuns": v5Count, "concurrency": v5Count, "workspaceRoots": v5Strings(InstanceRequirementEntries, v5Path), "version": v5String(1, identifierBytes),
-	"harnesses": func(value any) bool {
-		items, ok := value.([]any)
-		if !ok || len(items) > InstanceRequirementEntries {
-			return false
-		}
-		seen := map[any]bool{}
-		for _, item := range items {
-			if !v5Harness(item) {
+var v6InteractiveSessionProfile = func(value any) bool {
+	if !v5Object(map[string]v5Rule{
+		"operations": v5Strings(HostHarnessSessionLimits.OperationCapabilities, v5Enum(HostHarnessDriverOperations)),
+	}, nil)(value) {
+		return false
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		return false
+	}
+	var profile HostHarnessSessionInteractiveProfile
+	return json.Unmarshal(data, &profile) == nil && profile.Validate() == nil
+}
+
+func versionedHarnessProfileRule(version string) v5Rule {
+	optional := map[string]v5Rule{
+		"binary": v5String(0, InstanceWorkspaceBytes), "transports": v5Strings(InstanceRequirementEntries, v5Enum(HarnessTransports)),
+		"acp": v5ACP, "approvalPolicy": v5Enum(ApprovalPolicies),
+	}
+	if SupportsCapability(version, CapabilityInteractiveSessions) {
+		optional["interactiveSessions"] = v6InteractiveSessionProfile
+	}
+	return v5Object(map[string]v5Rule{
+		"id": v5Enum(HarnessIDs), "label": v5String(1, identifierBytes), "description": v5String(0, diagnosticBytes), "available": v5Boolean,
+		"authMode": v5Enum([]string{"local-subscription", "local-account", "api", "none"}), "models": v5Names,
+	}, optional)
+}
+
+func versionedNodeRule(version string) v5Rule {
+	harnessRule := versionedHarnessProfileRule(version)
+	return v5Object(map[string]v5Rule{
+		"id": v5ID, "name": v5String(1, identifierBytes), "kind": v5Enum([]string{"local", "home-server", "cloud"}),
+		"platform": v5String(1, identifierBytes), "status": v5Enum([]string{"online", "offline", "busy"}), "lastSeen": v5Time,
+		"activeRuns": v5Count, "concurrency": v5Count, "workspaceRoots": v5Strings(InstanceRequirementEntries, v5Path), "version": v5String(1, identifierBytes),
+		"harnesses": func(value any) bool {
+			items, ok := value.([]any)
+			if !ok || len(items) > InstanceRequirementEntries {
 				return false
 			}
-			id := item.(map[string]any)["id"]
-			if seen[id] {
-				return false
+			seen := map[any]bool{}
+			for _, item := range items {
+				if !harnessRule(item) {
+					return false
+				}
+				id := item.(map[string]any)["id"]
+				if seen[id] {
+					return false
+				}
+				seen[id] = true
 			}
-			seen[id] = true
-		}
-		return true
-	},
-}, map[string]v5Rule{"instanceCapacity": v5Count, "activeInstances": v5Count})
+			return true
+		},
+	}, map[string]v5Rule{"instanceCapacity": v5Count, "activeInstances": v5Count})
+}
 
 func DecodeInstanceControlMessage(data []byte, version string) (InstanceControlMessage, error) {
 	var message InstanceControlMessage
@@ -1389,6 +1416,7 @@ func DecodeInstanceControlMessage(data []byte, version string) (InstanceControlM
 		optional := map[string]v5Rule{}
 		switch object["type"] {
 		case "register":
+			registeredVersion, _ := object["protocolVersion"].(string)
 			required["protocolVersion"] = func(value any) bool {
 				registeredVersion, ok := value.(string)
 				if !ok || !SupportsCapability(registeredVersion, CapabilityInstances) {
@@ -1398,7 +1426,7 @@ func DecodeInstanceControlMessage(data []byte, version string) (InstanceControlM
 				accepted, acceptedError := strconv.Atoi(version)
 				return registeredError == nil && acceptedError == nil && registered <= accepted
 			}
-			required["node"] = v5Node
+			required["node"] = versionedNodeRule(registeredVersion)
 		case "heartbeat":
 			required["nodeId"] = v5ID
 			required["at"] = v5Time
@@ -1766,9 +1794,40 @@ func canonicalHostSessionJSON(value any) ([]byte, error) {
 		return nil, err
 	}
 	encoded := bytes.TrimSuffix(buffer.Bytes(), []byte("\n"))
-	encoded = bytes.ReplaceAll(encoded, []byte(`\u2028`), []byte("\u2028"))
-	encoded = bytes.ReplaceAll(encoded, []byte(`\u2029`), []byte("\u2029"))
-	return encoded, nil
+	return canonicalHostSessionLineSeparators(encoded), nil
+}
+
+// encoding/json escapes U+2028 and U+2029 even with HTML escaping disabled, while JSON.stringify
+// emits the runes literally. Only an odd-length backslash run ends in a JSON Unicode escape; an
+// even run represents literal backslashes and must remain byte-for-byte distinct.
+func canonicalHostSessionLineSeparators(encoded []byte) []byte {
+	result := make([]byte, 0, len(encoded))
+	for index := 0; index < len(encoded); {
+		if encoded[index] != '\\' {
+			result = append(result, encoded[index])
+			index++
+			continue
+		}
+		start := index
+		for index < len(encoded) && encoded[index] == '\\' {
+			index++
+		}
+		slashes := index - start
+		if slashes%2 == 1 && len(encoded)-index >= 5 && encoded[index] == 'u' &&
+			(encoded[index+1] == '2' && encoded[index+2] == '0' && encoded[index+3] == '2') &&
+			(encoded[index+4] == '8' || encoded[index+4] == '9') {
+			result = append(result, encoded[start:start+slashes-1]...)
+			if encoded[index+4] == '8' {
+				result = append(result, []byte("\u2028")...)
+			} else {
+				result = append(result, []byte("\u2029")...)
+			}
+			index += 5
+			continue
+		}
+		result = append(result, encoded[start:index]...)
+	}
+	return result
 }
 
 func hostSessionHubMessageValue(message HostSessionHubMessage, includeDigest bool) (map[string]any, error) {
@@ -2511,7 +2570,7 @@ func ClassifyHostHarnessSessionCommandReplay(recorded *HostSessionHubMessage, in
 		return HostHarnessSessionCommandReplayConflict
 	}
 	if recorded.CommandID != incoming.CommandID {
-		return HostHarnessSessionCommandReplayNew
+		return HostHarnessSessionCommandReplayConflict
 	}
 	if recorded.CommandDigest == incoming.CommandDigest && hostSessionCanonicalEqual(*recorded, incoming) {
 		return HostHarnessSessionCommandReplayReplay
