@@ -54,6 +54,7 @@ type Supervisor struct {
 	providers      map[string]string
 	commands       map[string]*ledgerRecord
 	activeCommands map[string]bool
+	forgetLock     chan struct{}
 	locks          map[string]chan struct{}
 	handles        map[string]operationHandleRecord
 	disabled       error
@@ -118,7 +119,7 @@ func New(options Options) (*Supervisor, error) {
 	root, cancel := context.WithCancel(context.Background())
 	supervisor := &Supervisor{nodeID: options.NodeID, dataRoot: options.DataRoot, workspaceRoots: append([]string(nil), options.WorkspaceRoots...), drivers: drivers,
 		clock: options.Clock, ids: options.IDs, barrier: options.Barrier, maximumCommands: options.MaximumCommands, maximumSessions: options.MaximumSessions,
-		locks: map[string]chan struct{}{}, handles: map[string]operationHandleRecord{}, activeCommands: map[string]bool{}, operationRoot: root, cancel: cancel}
+		locks: map[string]chan struct{}{}, handles: map[string]operationHandleRecord{}, activeCommands: map[string]bool{}, forgetLock: make(chan struct{}, 1), operationRoot: root, cancel: cancel}
 	recoveryErr := recoverForgetTransaction(options.DataRoot)
 	sessions, registryErr := loadRegistry(options.DataRoot)
 	commands, ledgerErr := loadLedger(options.DataRoot)
@@ -475,6 +476,19 @@ func (supervisor *Supervisor) commitSuccessFenced(message protocol.HostSessionHu
 	if expected != nil && !sameSessionRecord(supervisor.sessions[record.Observation.HostHarnessSessionID], expected) {
 		return supervisor.completeRejectedLocked(message, command, ack, "attachment-conflict", "session changed after attachment preflight")
 	}
+	return supervisor.commitSuccessLocked(message, command, ack, record, providerTurnID, events)
+}
+
+func (supervisor *Supervisor) commitReconciledSuccess(message protocol.HostSessionHubMessage, command *ledgerRecord, ack protocol.HostSessionControlMessage, record *sessionRecord, providerTurnID string, events []protocol.HarnessEvent, expected *sessionRecord) CommandResponse {
+	supervisor.mu.Lock()
+	defer supervisor.mu.Unlock()
+	if expected != nil && !sameSessionRecord(supervisor.sessions[record.Observation.HostHarnessSessionID], expected) {
+		return supervisor.completeUncertainLocked(message, command, ack, "reconciliation-conflict", "session changed while provider reconciliation settled")
+	}
+	return supervisor.commitSuccessLocked(message, command, ack, record, providerTurnID, events)
+}
+
+func (supervisor *Supervisor) commitSuccessLocked(message protocol.HostSessionHubMessage, command *ledgerRecord, ack protocol.HostSessionControlMessage, record *sessionRecord, providerTurnID string, events []protocol.HarnessEvent) CommandResponse {
 	key := providerKey(record.Observation.HarnessID, record.Observation.ProviderSessionID, record.Observation.Workspace)
 	if existing := supervisor.providers[key]; existing != "" && existing != record.Observation.HostHarnessSessionID {
 		return supervisor.completeUncertainLocked(message, command, ack, "provider-identity-conflict", ErrIdentityConflict.Error())
@@ -502,6 +516,9 @@ func (supervisor *Supervisor) commitSuccessFenced(message protocol.HostSessionHu
 	if err := supervisor.reach(BarrierAfterRegistry); err != nil {
 		return CommandResponse{Ack: ack, Err: err}
 	}
+	if command.Operation != "start-turn" {
+		providerTurnID = ""
+	}
 	result := supervisor.result(message, command.Operation, "succeeded", "", "", providerTurnID, &record.Observation)
 	command.State, command.Result, command.UpdatedAt = "completed", &result, supervisor.now()
 	if err := saveLedger(supervisor.dataRoot, supervisor.commands); err != nil {
@@ -525,6 +542,22 @@ func (supervisor *Supervisor) saveSession(record *sessionRecord) error {
 		} else {
 			supervisor.sessions[record.Observation.HostHarnessSessionID] = previous
 		}
+		return err
+	}
+	return nil
+}
+
+func (supervisor *Supervisor) saveSessionFenced(record, expected *sessionRecord) error {
+	supervisor.mu.Lock()
+	defer supervisor.mu.Unlock()
+	current := supervisor.sessions[record.Observation.HostHarnessSessionID]
+	if !sameSessionRecord(current, expected) {
+		return ErrInvalidObservation
+	}
+	previous := cloneSession(current)
+	supervisor.sessions[record.Observation.HostHarnessSessionID] = cloneSession(record)
+	if err := saveRegistry(supervisor.dataRoot, supervisor.sessions); err != nil {
+		supervisor.sessions[record.Observation.HostHarnessSessionID] = previous
 		return err
 	}
 	return nil
@@ -776,9 +809,11 @@ func (supervisor *Supervisor) Reconcile(ctx context.Context, commandID string) C
 	if record != nil {
 		workspace, providerID = record.Observation.Workspace, record.Observation.ProviderSessionID
 	}
-	if _, err := supervisor.authorize(workspace); err != nil {
+	canonicalWorkspace, err := supervisor.authorize(workspace)
+	if err != nil {
 		return CommandResponse{Err: err}
 	}
+	workspace = canonicalWorkspace
 	if !supports(driver.Capabilities().LifecycleOperations, "reconcile") {
 		return CommandResponse{Err: ErrUnsupportedCapability}
 	}
@@ -789,16 +824,17 @@ func (supervisor *Supervisor) Reconcile(ctx context.Context, commandID string) C
 	} else if !supportsDriverOperation(driver.Capabilities(), copy.Operation) {
 		return CommandResponse{Err: ErrUnsupportedCapability}
 	}
-	var err error
 	handle := OperationHandle{}
 	if record != nil {
 		handle, err = supervisor.issueHandle(record.Observation.HostHarnessSessionID)
 		if err != nil {
 			return CommandResponse{Err: err}
 		}
-		defer supervisor.retireHandle(handle)
 	}
 	reconciled, err := driver.Reconcile(context.WithoutCancel(ctx), ReconcileRequest{SessionRequest: SessionRequest{Handle: handle, ProviderSessionID: providerID, Workspace: workspace}, CommandID: commandID, Operation: copy.Operation})
+	if handle.Token != "" {
+		supervisor.retireHandle(handle)
+	}
 	if err != nil || !reconciled.Conclusive {
 		if err == nil {
 			err = fmt.Errorf("provider could not conclusively reconcile command")
@@ -809,24 +845,55 @@ func (supervisor *Supervisor) Reconcile(ctx context.Context, commandID string) C
 	if provider.ProviderSessionID == "" {
 		provider = reconciled.Session
 	}
-	if _, err := supervisor.authorize(provider.Workspace); err != nil {
+	canonicalProviderWorkspace, err := supervisor.authorize(provider.Workspace)
+	if err != nil {
 		return CommandResponse{Err: err}
+	}
+	provider.Workspace = canonicalProviderWorkspace
+	workspaceDrift := (copy.Operation == "create" || copy.Operation == "adopt") && provider.Workspace != workspace
+	providerDrift := copy.Operation == "adopt" && provider.ProviderSessionID != providerID
+	if workspaceDrift || providerDrift {
+		return CommandResponse{Err: ErrIdentityConflict}
 	}
 	if err := validateProviderCapabilities(driver, provider); err != nil {
 		return CommandResponse{Err: err}
 	}
 	id := copy.HostHarnessSessionID
+	var resolvedRelease func()
 	if id == "" {
 		supervisor.mu.Lock()
 		id = supervisor.providers[providerKey(driver.HarnessID(), provider.ProviderSessionID, provider.Workspace)]
+		if id != "" {
+			resolvedRelease, err = supervisor.trySessionLockLocked(id)
+			if err == nil {
+				record = cloneSession(supervisor.sessions[id])
+			}
+		}
 		supervisor.mu.Unlock()
+		if err != nil {
+			return CommandResponse{Err: err}
+		}
+		if resolvedRelease != nil {
+			defer resolvedRelease()
+			if record == nil {
+				return CommandResponse{Err: ErrIdentityConflict}
+			}
+		}
 		if id == "" {
 			id, err = supervisor.ids.NewID()
 			if err != nil {
 				return CommandResponse{Err: err}
 			}
 		}
+	} else {
+		supervisor.mu.Lock()
+		record = cloneSession(supervisor.sessions[id])
+		supervisor.mu.Unlock()
+		if record == nil {
+			return CommandResponse{Err: ErrIdentityConflict}
+		}
 	}
+	expected := cloneSession(record)
 	effectiveOutcome := reconciled.Outcome
 	effectiveOutcome.Session = provider
 	runID := ""
@@ -843,6 +910,22 @@ func (supervisor *Supervisor) Reconcile(ctx context.Context, commandID string) C
 		message := protocol.HostSessionHubMessage{NodeID: supervisor.nodeID, CommandID: copy.CommandID, CommandDigest: copy.Digest, RequestID: copy.RequestID, HostHarnessSessionID: copy.HostHarnessSessionID, AttachmentEpoch: &epoch}
 		return supervisor.completeUncertain(message, command, supervisor.ack(message, copy.Operation, "replayed"), "invalid-provider-event", err.Error())
 	}
+	if copy.Operation == "start-turn" && record != nil && record.Observation.Status == "idle" && effectiveOutcome.Session.Status != "running" {
+		running := effectiveOutcome.Session
+		if running.ProviderTurnID == "" {
+			running.ProviderTurnID = effectiveOutcome.ProviderTurnID
+		}
+		running.Status = "running"
+		intermediate, intermediateErr := supervisor.recordFromProvider(id, driver.HarnessID(), running, record)
+		if intermediateErr != nil {
+			return CommandResponse{Err: intermediateErr}
+		}
+		if intermediateErr = supervisor.saveSessionFenced(intermediate, expected); intermediateErr != nil {
+			return CommandResponse{Err: intermediateErr}
+		}
+		record = intermediate
+		expected = cloneSession(intermediate)
+	}
 	updated, err := supervisor.recordDriverOutcome(id, driver.HarnessID(), copy.Operation, effectiveOutcome, record)
 	if err != nil {
 		return CommandResponse{Err: err}
@@ -850,7 +933,7 @@ func (supervisor *Supervisor) Reconcile(ctx context.Context, commandID string) C
 	epoch := copy.AttachmentEpoch
 	message := protocol.HostSessionHubMessage{NodeID: supervisor.nodeID, CommandID: copy.CommandID, CommandDigest: copy.Digest, RequestID: copy.RequestID, HostHarnessSessionID: copy.HostHarnessSessionID, AttachmentEpoch: &epoch}
 	ack := supervisor.ack(message, copy.Operation, "replayed")
-	return supervisor.commitSuccess(message, command, ack, updated, reconciled.Outcome.ProviderTurnID, reconciled.Outcome.Events)
+	return supervisor.commitReconciledSuccess(message, command, ack, updated, reconciled.Outcome.ProviderTurnID, reconciled.Outcome.Events, expected)
 }
 
 func (supervisor *Supervisor) Discover(ctx context.Context, harnessID string, limit int) (DiscoveryResult, error) {
@@ -1054,19 +1137,7 @@ func (supervisor *Supervisor) Acknowledge(commandID string) error {
 	previous := cloneCommands(supervisor.commands)
 	command.Acknowledged = true
 	if len(supervisor.commands) > supervisor.maximumCommands {
-		ids := []string{}
-		for id, record := range supervisor.commands {
-			if record.Acknowledged && record.State == "completed" {
-				ids = append(ids, id)
-			}
-		}
-		sort.Strings(ids)
-		for _, id := range ids {
-			if len(supervisor.commands) <= supervisor.maximumCommands {
-				break
-			}
-			delete(supervisor.commands, id)
-		}
+		supervisor.evictAcknowledgedCommandsLocked(supervisor.maximumCommands)
 	}
 	if err := saveLedger(supervisor.dataRoot, supervisor.commands); err != nil {
 		supervisor.commands = previous
@@ -1078,6 +1149,12 @@ func (supervisor *Supervisor) Acknowledge(commandID string) error {
 // ForgetClosed removes an acknowledged terminal session. Active sessions and any session with a
 // pending, uncertain, or unacknowledged command are never retention candidates.
 func (supervisor *Supervisor) ForgetClosed(id string) error {
+	select {
+	case supervisor.forgetLock <- struct{}{}:
+		defer func() { <-supervisor.forgetLock }()
+	default:
+		return ErrSessionBusy
+	}
 	supervisor.mu.Lock()
 	if err := supervisor.admissionErrorLocked(); err != nil {
 		supervisor.mu.Unlock()
@@ -1210,26 +1287,37 @@ func (supervisor *Supervisor) ensureCommandCapacityLocked() bool {
 	if len(supervisor.commands) < supervisor.maximumCommands {
 		return true
 	}
-	ids := make([]string, 0, len(supervisor.commands))
+	supervisor.evictAcknowledgedCommandsLocked(supervisor.maximumCommands - 1)
+	return len(supervisor.commands) < supervisor.maximumCommands
+}
+
+func (supervisor *Supervisor) evictAcknowledgedCommandsLocked(target int) {
+	type candidate struct {
+		id        string
+		updatedAt time.Time
+	}
+	candidates := make([]candidate, 0, len(supervisor.commands))
 	for id, command := range supervisor.commands {
 		if command.State == "completed" && command.Acknowledged {
-			ids = append(ids, id)
+			updatedAt, err := time.Parse(time.RFC3339Nano, command.UpdatedAt)
+			if err != nil {
+				continue
+			}
+			candidates = append(candidates, candidate{id: id, updatedAt: updatedAt})
 		}
 	}
-	sort.Slice(ids, func(i, j int) bool {
-		left, right := supervisor.commands[ids[i]], supervisor.commands[ids[j]]
-		if left.UpdatedAt == right.UpdatedAt {
-			return ids[i] < ids[j]
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].updatedAt.Equal(candidates[j].updatedAt) {
+			return candidates[i].id < candidates[j].id
 		}
-		return left.UpdatedAt < right.UpdatedAt
+		return candidates[i].updatedAt.Before(candidates[j].updatedAt)
 	})
-	for _, id := range ids {
-		if len(supervisor.commands) < supervisor.maximumCommands {
+	for _, candidate := range candidates {
+		if len(supervisor.commands) <= target {
 			break
 		}
-		delete(supervisor.commands, id)
+		delete(supervisor.commands, candidate.id)
 	}
-	return len(supervisor.commands) < supervisor.maximumCommands
 }
 
 func supportsDriverOperation(capabilities Capabilities, operation string) bool {

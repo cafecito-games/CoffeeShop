@@ -51,6 +51,7 @@ type fakeDriver struct {
 	failures      map[string]error
 	outcomeEvents []protocol.HarnessEvent
 	discovered    []ProviderSession
+	reconcileFn   func(ReconcileRequest) (ReconcileResult, error)
 	startStatus   string
 	closeStatus   string
 }
@@ -217,6 +218,9 @@ func (driver *fakeDriver) Reconcile(_ context.Context, request ReconcileRequest)
 	driver.record("reconcile")
 	if err := driver.failure("reconcile"); err != nil {
 		return ReconcileResult{}, err
+	}
+	if driver.reconcileFn != nil {
+		return driver.reconcileFn(request)
 	}
 	session := driver.session(request.SessionRequest)
 	if session.ProviderSessionID == "" {
