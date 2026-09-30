@@ -6,11 +6,12 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import express from "express";
-import type {
-  ComputeNode,
-  HostHarnessSessionInventoryComplete,
-  HostHarnessSessionInventoryPage,
-  HostSessionControlMessage
+import {
+  hostHarnessSessionLimits,
+  type ComputeNode,
+  type HostHarnessSessionInventoryComplete,
+  type HostHarnessSessionInventoryPage,
+  type HostSessionControlMessage
 } from "@coffee-shop/protocol";
 import { receiveHostSessionHistory } from "./hostSessionHistory.js";
 import { receiveHostSessionInventory } from "./hostSessionInventory.js";
@@ -89,6 +90,7 @@ test("operator-authenticated host-session routes provide bounded list/detail/his
   assert.equal(first.body.sessions[0].hostHarnessSessionId, "host-session-one");
   assert.equal(first.body.sessions[0].providerSessionId, undefined, "list summaries omit provider identity");
   assert.equal(first.body.sessions[0].workspace, undefined, "list summaries omit local paths");
+  assert.equal((await call(`/api/host-sessions?limit=${hostHarnessSessionLimits.historyItemsPerPage}`, "operator-secret")).status, 200);
 
   const pageOne = await call("/api/host-sessions?limit=1", "operator-secret");
   assert.equal(pageOne.body.nextCursor, "host-session-one");
@@ -107,6 +109,10 @@ test("operator-authenticated host-session routes provide bounded list/detail/his
   assert.equal(history.body.items[0].text, "SAFE_HISTORY_BODY");
   assert.equal(history.body.truncated, true);
   assert.equal(history.body.providerCursor, "cursor-two");
+  assert.equal((await call(
+    `/api/host-sessions/host-session-one/history?limit=${hostHarnessSessionLimits.historyItemsPerPage}`,
+    "operator-secret"
+  )).status, 200);
 });
 
 test("read routes reject invalid filters/cursors and use generic unknown-session responses", async (t) => {
@@ -121,7 +127,7 @@ test("read routes reject invalid filters/cursors and use generic unknown-session
 
   for (const path of [
     "/api/host-sessions?status=secret-status",
-    "/api/host-sessions?limit=1000",
+    `/api/host-sessions?limit=${hostHarnessSessionLimits.historyItemsPerPage + 1}`,
     `/api/host-sessions?nodeId=${"a".repeat(257)}`,
     "/api/host-sessions?cursor=missing",
     `/api/host-sessions/host-session-one/history?cursor=${"a".repeat(257)}`,

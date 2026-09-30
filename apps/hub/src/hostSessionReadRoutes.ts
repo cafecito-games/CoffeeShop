@@ -8,7 +8,7 @@ import type { Express, Request, Response } from "express";
 import { hostSessionHistoryFor } from "./hostSessionHistory.js";
 import { publicHostHarnessSession, type Store } from "./store.js";
 
-const maximumPageSize = 100;
+const maximumPageSize = hostHarnessSessionLimits.historyItemsPerPage;
 const defaultPageSize = 50;
 
 export interface HostSessionReadRouteDependencies {
