@@ -37,26 +37,33 @@ func (ids *fakeIDs) NewID() (string, error) {
 }
 
 type fakeDriver struct {
-	mu           sync.Mutex
-	calls        []string
-	sessions     map[string]ProviderSession
-	entered      chan string
-	release      chan struct{}
-	capabilities Capabilities
-	created      int
-	summary      string
-	history      HistoryPage
-	observe      func(OperationHandle, ProviderSession, []protocol.HarnessEvent) error
-	lastHandle   OperationHandle
+	mu            sync.Mutex
+	calls         []string
+	sessions      map[string]ProviderSession
+	entered       chan string
+	release       chan struct{}
+	capabilities  Capabilities
+	created       int
+	summary       string
+	history       HistoryPage
+	observe       func(OperationHandle, ProviderSession, []protocol.HarnessEvent) error
+	lastHandle    OperationHandle
+	failures      map[string]error
+	outcomeEvents []protocol.HarnessEvent
+	discovered    []ProviderSession
+	startStatus   string
+	closeStatus   string
 }
 
 func newFakeDriver() *fakeDriver {
 	return &fakeDriver{
 		sessions: map[string]ProviderSession{},
 		capabilities: Capabilities{
-			DriverOperations:  []string{"adopt", "create", "discover"},
-			SessionOperations: []string{"attach", "close", "detach", "interrupt", "read-history", "resolve-approval", "start-turn", "steer"},
+			DriverOperations:    []string{"adopt", "create", "discover"},
+			SessionOperations:   []string{"attach", "close", "detach", "interrupt", "read-history", "resolve-approval", "start-turn", "steer"},
+			LifecycleOperations: []string{"inspect", "reconcile", "refresh", "resume"},
 		},
+		failures: map[string]error{},
 	}
 }
 
@@ -86,14 +93,20 @@ func (driver *fakeDriver) Discover(context.Context, DiscoverRequest) ([]Provider
 	driver.record("discover")
 	driver.mu.Lock()
 	defer driver.mu.Unlock()
+	if driver.discovered != nil {
+		return append([]ProviderSession(nil), driver.discovered...), driver.failures["discover"]
+	}
 	result := make([]ProviderSession, 0, len(driver.sessions))
 	for _, session := range driver.sessions {
 		result = append(result, session)
 	}
-	return result, nil
+	return result, driver.failures["discover"]
 }
 func (driver *fakeDriver) Inspect(_ context.Context, request SessionRequest) (ProviderSession, error) {
 	driver.record("inspect")
+	if err := driver.failure("inspect"); err != nil {
+		return ProviderSession{}, err
+	}
 	session := driver.session(request)
 	if session.ProviderSessionID == "" {
 		session = providerSession(request.ProviderSessionID, request.Workspace, "provider-history")
@@ -102,6 +115,9 @@ func (driver *fakeDriver) Inspect(_ context.Context, request SessionRequest) (Pr
 }
 func (driver *fakeDriver) Adopt(_ context.Context, request AdoptRequest) (ProviderSession, error) {
 	driver.record("adopt")
+	if err := driver.failure("adopt"); err != nil {
+		return ProviderSession{}, err
+	}
 	session := providerSession(request.ProviderSessionID, request.Workspace, "provider-history")
 	driver.mu.Lock()
 	driver.sessions[session.ProviderSessionID] = session
@@ -110,6 +126,9 @@ func (driver *fakeDriver) Adopt(_ context.Context, request AdoptRequest) (Provid
 }
 func (driver *fakeDriver) Create(_ context.Context, request CreateRequest) (ProviderSession, error) {
 	driver.record("create")
+	if err := driver.failure("create"); err != nil {
+		return ProviderSession{}, err
+	}
 	driver.mu.Lock()
 	driver.created++
 	session := providerSession("provider-created-"+string(rune('0'+driver.created)), request.Workspace, "coffee-shop-managed")
@@ -120,10 +139,16 @@ func (driver *fakeDriver) Create(_ context.Context, request CreateRequest) (Prov
 }
 func (driver *fakeDriver) Resume(_ context.Context, request SessionRequest) (ProviderSession, error) {
 	driver.record("resume")
+	if err := driver.failure("resume"); err != nil {
+		return ProviderSession{}, err
+	}
 	return driver.session(request), nil
 }
 func (driver *fakeDriver) ReadHistory(context.Context, HistoryRequest) (HistoryPage, error) {
 	driver.record("read-history")
+	if err := driver.failure("read-history"); err != nil {
+		return HistoryPage{}, err
+	}
 	if driver.history.Items != nil {
 		return driver.history, nil
 	}
@@ -131,43 +156,68 @@ func (driver *fakeDriver) ReadHistory(context.Context, HistoryRequest) (HistoryP
 }
 func (driver *fakeDriver) StartTurn(_ context.Context, request TurnRequest) (DriverOutcome, error) {
 	driver.record("start-turn")
+	if err := driver.failure("start-turn"); err != nil {
+		return DriverOutcome{}, err
+	}
 	session := driver.session(request.SessionRequest)
 	driver.mu.Lock()
 	driver.lastHandle = request.Handle
 	driver.mu.Unlock()
 	if driver.observe != nil {
 		callback := session
-		callback.Status = "awaiting-approval"
+		callback.Status = "running"
+		callback.ProviderTurnID = request.RunID + "-turn"
 		if err := driver.observe(request.Handle, callback, nil); err != nil {
 			return DriverOutcome{}, err
 		}
 	}
-	session.Status = "idle"
+	session.Status = driver.startStatus
+	if session.Status == "" {
+		session.Status = "idle"
+	}
 	session.ProviderTurnID = request.RunID + "-turn"
-	return DriverOutcome{Session: session, ProviderTurnID: session.ProviderTurnID}, nil
+	driver.store(session)
+	return DriverOutcome{Session: session, ProviderTurnID: session.ProviderTurnID, Events: append([]protocol.HarnessEvent(nil), driver.outcomeEvents...)}, nil
 }
 func (driver *fakeDriver) Steer(_ context.Context, request SteerRequest) (DriverOutcome, error) {
 	driver.record("steer")
+	if err := driver.failure("steer"); err != nil {
+		return DriverOutcome{}, err
+	}
 	return DriverOutcome{Session: driver.session(request.SessionRequest), ProviderTurnID: request.ProviderTurnID}, nil
 }
 func (driver *fakeDriver) Interrupt(_ context.Context, request TurnControlRequest) (DriverOutcome, error) {
 	driver.record("interrupt")
+	if err := driver.failure("interrupt"); err != nil {
+		return DriverOutcome{}, err
+	}
 	session := driver.session(request.SessionRequest)
 	session.Status = "idle"
+	driver.store(session)
 	return DriverOutcome{Session: session, ProviderTurnID: request.ProviderTurnID}, nil
 }
 func (driver *fakeDriver) DecideApproval(_ context.Context, request ApprovalRequest) (DriverOutcome, error) {
 	driver.record("resolve-approval")
+	if err := driver.failure("resolve-approval"); err != nil {
+		return DriverOutcome{}, err
+	}
 	session := driver.session(request.SessionRequest)
 	session.Status = "running"
+	driver.store(session)
 	return DriverOutcome{Session: session, ProviderTurnID: request.ProviderTurnID}, nil
 }
 func (driver *fakeDriver) Refresh(_ context.Context, request SessionRequest) (ProviderSession, error) {
 	driver.record("refresh")
+	if err := driver.failure("refresh"); err != nil {
+		return ProviderSession{}, err
+	}
 	return driver.session(request), nil
 }
 func (driver *fakeDriver) Reconcile(_ context.Context, request ReconcileRequest) (ReconcileResult, error) {
 	driver.record("reconcile")
+	if err := driver.failure("reconcile"); err != nil {
+		return ReconcileResult{}, err
+	}
 	session := driver.session(request.SessionRequest)
 	if session.ProviderSessionID == "" {
 		driver.mu.Lock()
@@ -181,9 +231,16 @@ func (driver *fakeDriver) Reconcile(_ context.Context, request ReconcileRequest)
 }
 func (driver *fakeDriver) Close(_ context.Context, request SessionRequest) (DriverOutcome, error) {
 	driver.record("close")
+	if err := driver.failure("close"); err != nil {
+		return DriverOutcome{}, err
+	}
 	session := driver.session(request)
-	session.Status = "closed"
-	return DriverOutcome{Session: session}, nil
+	session.Status = driver.closeStatus
+	if session.Status == "" {
+		session.Status = "closed"
+	}
+	driver.store(session)
+	return DriverOutcome{Session: session, Events: append([]protocol.HarnessEvent(nil), driver.outcomeEvents...)}, nil
 }
 func (driver *fakeDriver) session(request SessionRequest) ProviderSession {
 	driver.mu.Lock()
@@ -191,9 +248,22 @@ func (driver *fakeDriver) session(request SessionRequest) ProviderSession {
 	return driver.sessions[request.ProviderSessionID]
 }
 
+func (driver *fakeDriver) store(session ProviderSession) {
+	driver.mu.Lock()
+	driver.sessions[session.ProviderSessionID] = session
+	driver.mu.Unlock()
+}
+
+func (driver *fakeDriver) failure(operation string) error {
+	driver.mu.Lock()
+	defer driver.mu.Unlock()
+	return driver.failures[operation]
+}
+
 func providerSession(id, workspace, source string) ProviderSession {
 	return ProviderSession{ProviderSessionID: id, Workspace: workspace, Source: source, Status: "idle", ControlMode: "full",
-		Operations: []string{"attach", "close", "detach", "interrupt", "read-history", "resolve-approval", "start-turn", "steer"}}
+		Operations:          []string{"attach", "close", "detach", "interrupt", "read-history", "resolve-approval", "start-turn", "steer"},
+		LifecycleOperations: []string{"inspect", "reconcile", "refresh", "resume"}}
 }
 
 func newTestSupervisor(t *testing.T, driver *fakeDriver) (*Supervisor, string) {
@@ -300,6 +370,7 @@ func TestIndependentSessionsProgressConcurrently(t *testing.T) {
 	supervisor, workspace := newTestSupervisor(t, driver)
 	first := createSession(t, supervisor, workspace, "create-1").Result.Session.HostHarnessSessionID
 	second := createSession(t, supervisor, workspace, "create-2").Result.Session.HostHarnessSessionID
+	done := make(chan CommandResponse, 2)
 	for index, id := range []string{first, second} {
 		epoch := int64(0)
 		response := supervisor.Execute(context.Background(), signed(t, protocol.HostSessionHubMessage{Type: "host-session.attach", NodeID: "node-1", CommandID: "attach-" + string(rune('1'+index)), HostHarnessSessionID: id,
@@ -312,11 +383,13 @@ func TestIndependentSessionsProgressConcurrently(t *testing.T) {
 	for index, id := range []string{first, second} {
 		message := signed(t, protocol.HostSessionHubMessage{Type: "host-session.turn.start", NodeID: "node-1", CommandID: "turn-" + string(rune('1'+index)), HostHarnessSessionID: id,
 			AttachmentEpoch: &current, RunID: "run-" + string(rune('1'+index)), Prompt: "hello"})
-		go supervisor.Execute(context.Background(), message)
+		go func() { done <- supervisor.Execute(context.Background(), message) }()
 	}
 	require.Equal(t, "start-turn", <-driver.entered)
 	require.Equal(t, "start-turn", <-driver.entered)
 	close(driver.release)
+	require.NoError(t, (<-done).Err)
+	require.NoError(t, (<-done).Err)
 }
 
 func TestUnsupportedOperationAndCallerCancellationDoNotDuplicateEffect(t *testing.T) {
@@ -377,6 +450,7 @@ func TestProtocolVocabularyIsClosedOverEveryCoreConsumer(t *testing.T) {
 	for _, operation := range protocol.HostHarnessDriverOperations {
 		require.Contains(t, []string{"adopt", "create", "discover"}, operation)
 	}
+	require.Equal(t, []string{"inspect", "reconcile", "refresh", "resume"}, LifecycleOperations)
 }
 
 func TestShutdownStopsAdmissionAndBoundsAnInflightProviderOperation(t *testing.T) {

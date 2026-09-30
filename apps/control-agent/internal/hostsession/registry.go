@@ -10,22 +10,25 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"time"
 
 	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/protocol"
 )
 
 const (
-	registryVersion = 1
-	ledgerVersion   = 1
-	registryName    = "host-sessions.json"
-	ledgerName      = "host-session-commands.json"
+	registryVersion             = 1
+	ledgerVersion               = 1
+	registryName                = "host-sessions.json"
+	ledgerName                  = "host-session-commands.json"
+	maximumDurableDocumentBytes = 16 << 20
 )
 
 type sessionRecord struct {
-	Observation      protocol.HostHarnessSessionObservation `json:"observation"`
-	AttachedThreadID string                                 `json:"attachedThreadId,omitempty"`
-	ActiveRunID      string                                 `json:"activeRunId,omitempty"`
-	AttachmentEpoch  int64                                  `json:"attachmentEpoch"`
+	Observation         protocol.HostHarnessSessionObservation `json:"observation"`
+	LifecycleOperations []string                               `json:"lifecycleOperations,omitempty"`
+	AttachedThreadID    string                                 `json:"attachedThreadId,omitempty"`
+	ActiveRunID         string                                 `json:"activeRunId,omitempty"`
+	AttachmentEpoch     int64                                  `json:"attachmentEpoch"`
 }
 type registryPayload struct {
 	Sessions []sessionRecord `json:"sessions"`
@@ -103,6 +106,9 @@ func atomicJSON(destination string, value any) error {
 		return fmt.Errorf("encode durable host-session state: %w", err)
 	}
 	encoded = append(encoded, '\n')
+	if len(encoded) > maximumDurableDocumentBytes {
+		return fmt.Errorf("durable host-session state exceeds the 16 MiB safety bound")
+	}
 	directory := filepath.Dir(destination)
 	temporary, err := os.CreateTemp(directory, ".host-session-*")
 	if err != nil {
@@ -160,12 +166,13 @@ func loadRegistry(dataRoot string) (map[string]*sessionRecord, error) {
 	providers := map[string]bool{}
 	for index := range document.Payload.Sessions {
 		record := document.Payload.Sessions[index]
-		if err := record.Observation.Validate(); err != nil {
+		projection := protocol.HostHarnessSession{HostHarnessSessionObservation: record.Observation, AttachedThreadID: record.AttachedThreadID, ActiveRunID: record.ActiveRunID, AttachmentEpoch: record.AttachmentEpoch}
+		if err := projection.Validate(); err != nil {
 			return nil, fmt.Errorf("registry record is malformed: %w", err)
 		}
 		id := record.Observation.HostHarnessSessionID
 		provider := providerKey(record.Observation.HarnessID, record.Observation.ProviderSessionID, record.Observation.Workspace)
-		if records[id] != nil || providers[provider] || record.AttachmentEpoch < 0 {
+		if records[id] != nil || providers[provider] || !sortedVocabulary(record.LifecycleOperations, LifecycleOperations) {
 			return nil, fmt.Errorf("registry contains conflicting or malformed identity")
 		}
 		copy := record
@@ -193,8 +200,23 @@ func loadLedger(dataRoot string) (map[string]*ledgerRecord, error) {
 	records := make(map[string]*ledgerRecord, len(document.Payload.Commands))
 	for index := range document.Payload.Commands {
 		record := document.Payload.Commands[index]
-		if record.CommandID == "" || len(record.Digest) != 64 || (record.State != "pending" && record.State != "completed" && record.State != "uncertain") || records[record.CommandID] != nil {
+		digest, digestErr := hex.DecodeString(record.Digest)
+		_, timeErr := time.Parse(time.RFC3339Nano, record.UpdatedAt)
+		if record.CommandID == "" || len(record.CommandID) > protocol.HostHarnessSessionLimits.IdentifierBytes || digestErr != nil || len(digest) != sha256.Size ||
+			!supports(protocol.HostHarnessSessionCommandOperations, record.Operation) || (record.State != "pending" && record.State != "completed" && record.State != "uncertain") || records[record.CommandID] != nil || timeErr != nil ||
+			(record.Acknowledged && record.State != "completed") || (record.State == "pending" && record.Result != nil) || (record.State != "pending" && record.Result == nil) {
 			return nil, fmt.Errorf("command ledger record is malformed or conflicting")
+		}
+		if record.Result != nil {
+			encoded, err := json.Marshal(record.Result)
+			if err != nil {
+				return nil, fmt.Errorf("command ledger result is malformed")
+			}
+			decoded, err := protocol.DecodeHostSessionControlMessage(encoded, "6")
+			if err != nil || decoded.Type != "host-session.command.result" || decoded.CommandID != record.CommandID || decoded.CommandDigest != record.Digest || decoded.Operation != record.Operation ||
+				(record.State == "completed" && decoded.Outcome == "uncertain") || (record.State == "uncertain" && decoded.Outcome != "uncertain") {
+				return nil, fmt.Errorf("command ledger result is malformed or conflicts with its record")
+			}
 		}
 		copy := record
 		records[record.CommandID] = &copy
@@ -208,7 +230,14 @@ func decodeDocument(path string, target any) error {
 		return err
 	}
 	defer file.Close()
-	decoder := json.NewDecoder(io.LimitReader(file, 16<<20))
+	info, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	if info.Size() > maximumDurableDocumentBytes {
+		return fmt.Errorf("durable document exceeds the 16 MiB safety bound")
+	}
+	decoder := json.NewDecoder(io.LimitReader(file, maximumDurableDocumentBytes))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {
 		return err

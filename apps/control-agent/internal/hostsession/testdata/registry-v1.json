@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "checksum": "42b97322c910df0a4369e4c8bf6f40c6409f838a24e265cde54f5454dddefb6f",
+  "checksum": "bf10b493f13f689e10f85d29eb566248051e82bdcdd6dfd9c936baa45a4e2bd4",
   "payload": {
     "sessions": [
       {
@@ -27,6 +27,12 @@
           "createdAt": "2026-09-30T12:00:00Z",
           "updatedAt": "2026-09-30T12:00:00Z"
         },
+        "lifecycleOperations": [
+          "inspect",
+          "reconcile",
+          "refresh",
+          "resume"
+        ],
         "attachmentEpoch": 0
       }
     ]

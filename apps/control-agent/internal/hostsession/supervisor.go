@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -47,17 +49,24 @@ type Supervisor struct {
 	maximumCommands  int
 	maximumSessions  int
 
-	mu            sync.Mutex
-	sessions      map[string]*sessionRecord
-	providers     map[string]string
-	commands      map[string]*ledgerRecord
-	locks         map[string]chan struct{}
-	handles       map[string]string
-	disabled      error
-	shuttingDown  bool
-	operations    sync.WaitGroup
-	operationRoot context.Context
-	cancel        context.CancelFunc
+	mu             sync.Mutex
+	sessions       map[string]*sessionRecord
+	providers      map[string]string
+	commands       map[string]*ledgerRecord
+	activeCommands map[string]bool
+	locks          map[string]chan struct{}
+	handles        map[string]operationHandleRecord
+	disabled       error
+	shuttingDown   bool
+	operations     sync.WaitGroup
+	operationRoot  context.Context
+	cancel         context.CancelFunc
+}
+
+type operationHandleRecord struct {
+	SessionID   string
+	Revision    int64
+	Fingerprint string
 }
 
 type wallClock struct{}
@@ -85,7 +94,10 @@ func New(options Options) (*Supervisor, error) {
 		options.IDs = randomIDs{}
 	}
 	if options.MaximumCommands <= 0 {
-		options.MaximumCommands = 4096
+		options.MaximumCommands = 1024
+	}
+	if options.MaximumCommands > 1024 {
+		return nil, fmt.Errorf("maximum host session commands exceeds the durable ledger bound")
 	}
 	if options.MaximumSessions <= 0 {
 		options.MaximumSessions = protocol.HostHarnessSessionLimits.SessionsPerGeneration
@@ -106,7 +118,7 @@ func New(options Options) (*Supervisor, error) {
 	root, cancel := context.WithCancel(context.Background())
 	supervisor := &Supervisor{nodeID: options.NodeID, dataRoot: options.DataRoot, workspaceRoots: append([]string(nil), options.WorkspaceRoots...), drivers: drivers,
 		clock: options.Clock, ids: options.IDs, barrier: options.Barrier, maximumCommands: options.MaximumCommands, maximumSessions: options.MaximumSessions,
-		locks: map[string]chan struct{}{}, handles: map[string]string{}, operationRoot: root, cancel: cancel}
+		locks: map[string]chan struct{}{}, handles: map[string]operationHandleRecord{}, activeCommands: map[string]bool{}, operationRoot: root, cancel: cancel}
 	sessions, registryErr := loadRegistry(options.DataRoot)
 	commands, ledgerErr := loadLedger(options.DataRoot)
 	if registryErr != nil || ledgerErr != nil {
@@ -115,6 +127,9 @@ func New(options Options) (*Supervisor, error) {
 		return supervisor, nil
 	}
 	supervisor.sessions, supervisor.commands, supervisor.providers = sessions, commands, map[string]string{}
+	if len(commands) > supervisor.maximumCommands {
+		supervisor.disabled = fmt.Errorf("command ledger exceeds configured safe capacity; preserve evidence")
+	}
 	for id, record := range sessions {
 		supervisor.providers[providerKey(record.Observation.HarnessID, record.Observation.ProviderSessionID, record.Observation.Workspace)] = id
 	}
@@ -226,7 +241,7 @@ func (supervisor *Supervisor) executeNew(message protocol.HostSessionHubMessage,
 			return CommandResponse{Err: err}
 		}
 		driver = supervisor.drivers[record.Observation.HarnessID]
-		if driver == nil || !supports(record.Observation.Operations, operation) {
+		if driver == nil || !supervisor.supportsSessionOperation(record, operation) {
 			return CommandResponse{Err: ErrUnsupportedCapability}
 		}
 		if _, err := supervisor.authorize(record.Observation.Workspace); err != nil {
@@ -238,6 +253,9 @@ func (supervisor *Supervisor) executeNew(message protocol.HostSessionHubMessage,
 	} else {
 		driver = supervisor.drivers[message.HarnessID]
 		if driver == nil || !supports(driver.Capabilities().DriverOperations, operation) {
+			return CommandResponse{Err: ErrUnsupportedCapability}
+		}
+		if operation == "adopt" && !supports(driver.Capabilities().LifecycleOperations, "inspect") {
 			return CommandResponse{Err: ErrUnsupportedCapability}
 		}
 		if _, err := supervisor.authorize(message.Workspace); err != nil {
@@ -262,13 +280,24 @@ func (supervisor *Supervisor) executeNew(message protocol.HostSessionHubMessage,
 		supervisor.mu.Unlock()
 		return response
 	}
+	previousCommands := cloneCommands(supervisor.commands)
+	if !supervisor.ensureCommandCapacityLocked() {
+		supervisor.mu.Unlock()
+		return CommandResponse{Err: ErrCommandCapacity}
+	}
 	supervisor.commands[message.CommandID] = pending
 	if err := saveLedger(supervisor.dataRoot, supervisor.commands); err != nil {
-		delete(supervisor.commands, message.CommandID)
+		supervisor.commands = previousCommands
 		supervisor.mu.Unlock()
 		return CommandResponse{Err: fmt.Errorf("persist command before provider effect: %w", err)}
 	}
+	supervisor.activeCommands[message.CommandID] = true
 	supervisor.mu.Unlock()
+	defer func() {
+		supervisor.mu.Lock()
+		delete(supervisor.activeCommands, message.CommandID)
+		supervisor.mu.Unlock()
+	}()
 	ack := supervisor.ack(message, operation, "recorded")
 	if err := supervisor.reach(BarrierAfterPending); err != nil {
 		return CommandResponse{Ack: ack, Err: err}
@@ -284,7 +313,7 @@ func (supervisor *Supervisor) executeNew(message protocol.HostSessionHubMessage,
 
 func (supervisor *Supervisor) executeAttachment(message protocol.HostSessionHubMessage, record *sessionRecord, pending *ledgerRecord, ack protocol.HostSessionControlMessage) CommandResponse {
 	if pending.Operation == "attach" {
-		if record.Observation.Status != message.ExpectedStatus || record.AttachedThreadID != "" && record.AttachedThreadID != message.ThreadID {
+		if terminalStatus(record.Observation.Status) || record.Observation.Status != message.ExpectedStatus || record.AttachedThreadID != "" && record.AttachedThreadID != message.ThreadID {
 			return supervisor.completeRejected(message, pending, ack, "attachment-conflict", "attachment identity or expected status does not match")
 		}
 		record.AttachedThreadID = message.ThreadID
@@ -306,9 +335,18 @@ func (supervisor *Supervisor) executeCreation(message protocol.HostSessionHubMes
 	if pending.Operation == "create" {
 		provider, err = driver.Create(supervisor.operationRoot, CreateRequest{Workspace: message.Workspace, Model: message.Model})
 	} else {
+		if !supports(driver.Capabilities().LifecycleOperations, "inspect") {
+			return supervisor.completeRejected(message, pending, ack, "unsupported-capability", ErrUnsupportedCapability.Error())
+		}
 		inspected, inspectErr := driver.Inspect(supervisor.operationRoot, SessionRequest{ProviderSessionID: message.ProviderSessionID, Workspace: message.Workspace})
 		if inspectErr != nil {
 			return supervisor.completeDriverFailure(message, pending, ack, inspectErr)
+		}
+		if inspectErr = validateProviderCapabilities(driver, inspected); inspectErr != nil {
+			return supervisor.completeRejected(message, pending, ack, "invalid-provider-capability", inspectErr.Error())
+		}
+		if _, inspectErr = supervisor.recordFromProvider("inspection", driver.HarnessID(), inspected, nil); inspectErr != nil {
+			return supervisor.completeRejected(message, pending, ack, "invalid-provider-observation", inspectErr.Error())
 		}
 		if inspected.ProviderSessionID != message.ProviderSessionID || inspected.Workspace != message.Workspace {
 			return supervisor.completeRejected(message, pending, ack, "provider-identity-mismatch", "provider inspection did not prove the requested identity")
@@ -336,6 +374,9 @@ func (supervisor *Supervisor) executeCreation(message protocol.HostSessionHubMes
 	if err != nil {
 		return supervisor.completeUncertain(message, pending, ack, "identity-generation-failed", "could not mint host session identity")
 	}
+	if err := validateProviderCapabilities(driver, provider); err != nil {
+		return supervisor.completeUncertain(message, pending, ack, "invalid-provider-capability", err.Error())
+	}
 	record, err := supervisor.recordFromProvider(id, driver.HarnessID(), provider, nil)
 	if err != nil {
 		return supervisor.completeUncertain(message, pending, ack, "invalid-provider-observation", err.Error())
@@ -344,23 +385,27 @@ func (supervisor *Supervisor) executeCreation(message protocol.HostSessionHubMes
 }
 
 func (supervisor *Supervisor) executeDriverMutation(message protocol.HostSessionHubMessage, operation string, driver Driver, record *sessionRecord, pending *ledgerRecord, ack protocol.HostSessionControlMessage) CommandResponse {
-	handle, handleErr := supervisor.issueHandle(record.Observation.HostHarnessSessionID)
-	if handleErr != nil {
-		return supervisor.completeUncertain(message, pending, ack, "handle-generation-failed", "could not issue provider operation handle")
-	}
-	defer supervisor.retireHandle(handle)
-	request := SessionRequest{Handle: handle, ProviderSessionID: record.Observation.ProviderSessionID, Workspace: record.Observation.Workspace}
+	beforeEffect := cloneSession(record)
 	if operation == "start-turn" {
 		if record.AttachedThreadID == "" || record.Observation.Status != "idle" {
 			return supervisor.completeRejected(message, pending, ack, "illegal-state", "session is not attached and idle")
 		}
-		record.Observation.Status, record.ActiveRunID = "running", message.RunID
-		record.Observation.Revision++
-		record.Observation.UpdatedAt = supervisor.now()
+		record.ActiveRunID = message.RunID
 		if err := supervisor.saveSession(record); err != nil {
 			return supervisor.completeUncertain(message, pending, ack, "pre-effect-persist-failed", err.Error())
 		}
 	}
+	handle, handleErr := supervisor.issueHandle(record.Observation.HostHarnessSessionID)
+	if handleErr != nil {
+		if operation == "start-turn" {
+			if restoreErr := supervisor.restoreSession(record.Observation.HostHarnessSessionID, record, beforeEffect); restoreErr != nil {
+				return supervisor.completeUncertain(message, pending, ack, "pre-effect-restore-failed", restoreErr.Error())
+			}
+		}
+		return supervisor.completeRejected(message, pending, ack, "handle-generation-failed", "could not issue provider operation handle")
+	}
+	defer supervisor.retireHandle(handle)
+	request := SessionRequest{Handle: handle, ProviderSessionID: record.Observation.ProviderSessionID, Workspace: record.Observation.Workspace}
 	var outcome DriverOutcome
 	var err error
 	switch operation {
@@ -378,8 +423,15 @@ func (supervisor *Supervisor) executeDriverMutation(message protocol.HostSession
 		return supervisor.completeRejected(message, pending, ack, "unsupported-capability", ErrUnsupportedCapability.Error())
 	}
 	if err != nil {
+		supervisor.retireHandle(handle)
+		if operation == "start-turn" && !isOutcomeUncertain(err) {
+			if restoreErr := supervisor.restoreSession(record.Observation.HostHarnessSessionID, record, beforeEffect); restoreErr != nil {
+				return supervisor.completeUncertain(message, pending, ack, "pre-effect-restore-failed", restoreErr.Error())
+			}
+		}
 		return supervisor.completeDriverFailure(message, pending, ack, err)
 	}
+	supervisor.retireHandle(handle)
 	if err := supervisor.reach(BarrierAfterEffect); err != nil {
 		return CommandResponse{Ack: ack, Err: err}
 	}
@@ -389,7 +441,16 @@ func (supervisor *Supervisor) executeDriverMutation(message protocol.HostSession
 	if latest == nil {
 		latest = record
 	}
-	updated, err := supervisor.recordFromProvider(record.Observation.HostHarnessSessionID, record.Observation.HarnessID, outcome.Session, latest)
+	if err := validateProviderCapabilities(driver, outcome.Session); err != nil {
+		return supervisor.completeUncertain(message, pending, ack, "invalid-provider-capability", err.Error())
+	}
+	if operation == "close" && outcome.Session.Status != "closed" {
+		return supervisor.completeUncertain(message, pending, ack, "invalid-close-outcome", "provider did not conclusively close the session")
+	}
+	if len(outcome.Events) > MaximumOutcomeEvents {
+		return supervisor.completeUncertain(message, pending, ack, "too-many-provider-events", "provider outcome exceeded the event count bound")
+	}
+	updated, err := supervisor.recordDriverOutcome(record.Observation.HostHarnessSessionID, record.Observation.HarnessID, operation, outcome, latest)
 	if err != nil {
 		return supervisor.completeUncertain(message, pending, ack, "invalid-provider-observation", err.Error())
 	}
@@ -460,8 +521,49 @@ func (supervisor *Supervisor) saveSession(record *sessionRecord) error {
 	return nil
 }
 
+func (supervisor *Supervisor) recordDriverOutcome(id, harnessID, operation string, outcome DriverOutcome, previous *sessionRecord) (*sessionRecord, error) {
+	provider := outcome.Session
+	if provider.ProviderTurnID == "" {
+		provider.ProviderTurnID = outcome.ProviderTurnID
+	}
+	if operation == "start-turn" {
+		if provider.ProviderTurnID == "" {
+			return nil, ErrInvalidObservation
+		}
+		if previous != nil && previous.Observation.Status == "idle" && provider.Status != "running" {
+			running := provider
+			running.Status = "running"
+			intermediate, err := supervisor.recordFromProvider(id, harnessID, running, previous)
+			if err != nil {
+				return nil, err
+			}
+			if err := supervisor.saveSession(intermediate); err != nil {
+				return nil, err
+			}
+			previous = intermediate
+		}
+	}
+	return supervisor.recordFromProvider(id, harnessID, provider, previous)
+}
+
+func (supervisor *Supervisor) restoreSession(id string, expected, record *sessionRecord) error {
+	supervisor.mu.Lock()
+	defer supervisor.mu.Unlock()
+	current := supervisor.sessions[id]
+	if current == nil || !sameSessionRecord(current, expected) {
+		return ErrInvalidObservation
+	}
+	previous := cloneSession(current)
+	supervisor.sessions[id] = cloneSession(record)
+	if err := saveRegistry(supervisor.dataRoot, supervisor.sessions); err != nil {
+		supervisor.sessions[id] = previous
+		return err
+	}
+	return nil
+}
+
 func (supervisor *Supervisor) completeDriverFailure(message protocol.HostSessionHubMessage, command *ledgerRecord, ack protocol.HostSessionControlMessage, err error) CommandResponse {
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	if isOutcomeUncertain(err) {
 		return supervisor.completeUncertain(message, command, ack, "provider-outcome-uncertain", "provider operation ended without a conclusive outcome")
 	}
 	return supervisor.completeRejected(message, command, ack, "provider-rejected", "provider operation was rejected")
@@ -517,6 +619,9 @@ func (supervisor *Supervisor) Refresh(ctx context.Context, id string) error {
 		return err
 	}
 	driver := supervisor.drivers[record.Observation.HarnessID]
+	if driver == nil || !supervisor.supportsSessionOperation(record, "refresh") {
+		return ErrUnsupportedCapability
+	}
 	handle, err := supervisor.issueHandle(id)
 	if err != nil {
 		return err
@@ -526,7 +631,14 @@ func (supervisor *Supervisor) Refresh(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	updated, err := supervisor.recordFromProvider(id, record.Observation.HarnessID, provider, record)
+	supervisor.retireHandle(handle)
+	if err := validateProviderCapabilities(driver, provider); err != nil {
+		return err
+	}
+	supervisor.mu.Lock()
+	latest := cloneSession(supervisor.sessions[id])
+	supervisor.mu.Unlock()
+	updated, err := supervisor.recordFromProvider(id, record.Observation.HarnessID, provider, latest)
 	if err != nil {
 		return err
 	}
@@ -572,6 +684,9 @@ func (supervisor *Supervisor) observeSession(ctx context.Context, id, operation 
 	defer supervisor.retireHandle(handle)
 	request := SessionRequest{Handle: handle, ProviderSessionID: record.Observation.ProviderSessionID, Workspace: record.Observation.Workspace}
 	driver := supervisor.drivers[record.Observation.HarnessID]
+	if driver == nil || !supervisor.supportsSessionOperation(record, operation) {
+		return ErrUnsupportedCapability
+	}
 	var provider ProviderSession
 	if operation == "resume" {
 		provider, err = driver.Resume(context.WithoutCancel(ctx), request)
@@ -581,7 +696,14 @@ func (supervisor *Supervisor) observeSession(ctx context.Context, id, operation 
 	if err != nil {
 		return err
 	}
-	updated, err := supervisor.recordFromProvider(id, record.Observation.HarnessID, provider, record)
+	supervisor.retireHandle(handle)
+	if err := validateProviderCapabilities(driver, provider); err != nil {
+		return err
+	}
+	supervisor.mu.Lock()
+	latest := cloneSession(supervisor.sessions[id])
+	supervisor.mu.Unlock()
+	updated, err := supervisor.recordFromProvider(id, record.Observation.HarnessID, provider, latest)
 	if err != nil {
 		return err
 	}
@@ -620,6 +742,21 @@ func (supervisor *Supervisor) Reconcile(ctx context.Context, commandID string) C
 	}
 	defer release()
 	defer supervisor.operations.Done()
+	if copy.State == "pending" {
+		supervisor.mu.Lock()
+		current := supervisor.commands[commandID]
+		if current != nil && current.State == "pending" {
+			previous := cloneCommands(supervisor.commands)
+			result := supervisor.uncertainResult(*current, "recovery-required", "provider effect cannot be proven absent after operation settlement")
+			current.State, current.Result, current.UpdatedAt = "uncertain", &result, supervisor.now()
+			if err := saveLedger(supervisor.dataRoot, supervisor.commands); err != nil {
+				supervisor.commands = previous
+				supervisor.mu.Unlock()
+				return CommandResponse{Err: fmt.Errorf("persist reconciliation uncertainty: %w", err)}
+			}
+		}
+		supervisor.mu.Unlock()
+	}
 	if driver == nil {
 		return CommandResponse{Err: ErrUnsupportedCapability}
 	}
@@ -629,6 +766,16 @@ func (supervisor *Supervisor) Reconcile(ctx context.Context, commandID string) C
 	}
 	if _, err := supervisor.authorize(workspace); err != nil {
 		return CommandResponse{Err: err}
+	}
+	if !supports(driver.Capabilities().LifecycleOperations, "reconcile") {
+		return CommandResponse{Err: ErrUnsupportedCapability}
+	}
+	if record != nil {
+		if !supervisor.supportsSessionOperation(record, "reconcile") || !supervisor.supportsSessionOperation(record, copy.Operation) {
+			return CommandResponse{Err: ErrUnsupportedCapability}
+		}
+	} else if !supportsDriverOperation(driver.Capabilities(), copy.Operation) {
+		return CommandResponse{Err: ErrUnsupportedCapability}
 	}
 	var err error
 	handle := OperationHandle{}
@@ -653,6 +800,9 @@ func (supervisor *Supervisor) Reconcile(ctx context.Context, commandID string) C
 	if _, err := supervisor.authorize(provider.Workspace); err != nil {
 		return CommandResponse{Err: err}
 	}
+	if err := validateProviderCapabilities(driver, provider); err != nil {
+		return CommandResponse{Err: err}
+	}
 	id := copy.HostHarnessSessionID
 	if id == "" {
 		supervisor.mu.Lock()
@@ -665,7 +815,23 @@ func (supervisor *Supervisor) Reconcile(ctx context.Context, commandID string) C
 			}
 		}
 	}
-	updated, err := supervisor.recordFromProvider(id, driver.HarnessID(), provider, record)
+	effectiveOutcome := reconciled.Outcome
+	effectiveOutcome.Session = provider
+	runID := ""
+	if record != nil {
+		runID = record.ActiveRunID
+	}
+	if len(effectiveOutcome.Events) > MaximumOutcomeEvents {
+		epoch := copy.AttachmentEpoch
+		message := protocol.HostSessionHubMessage{NodeID: supervisor.nodeID, CommandID: copy.CommandID, CommandDigest: copy.Digest, RequestID: copy.RequestID, HostHarnessSessionID: copy.HostHarnessSessionID, AttachmentEpoch: &epoch}
+		return supervisor.completeUncertain(message, command, supervisor.ack(message, copy.Operation, "replayed"), "too-many-provider-events", "provider outcome exceeded the event count bound")
+	}
+	if err := validateEvents(effectiveOutcome.Events, runID); err != nil {
+		epoch := copy.AttachmentEpoch
+		message := protocol.HostSessionHubMessage{NodeID: supervisor.nodeID, CommandID: copy.CommandID, CommandDigest: copy.Digest, RequestID: copy.RequestID, HostHarnessSessionID: copy.HostHarnessSessionID, AttachmentEpoch: &epoch}
+		return supervisor.completeUncertain(message, command, supervisor.ack(message, copy.Operation, "replayed"), "invalid-provider-event", err.Error())
+	}
+	updated, err := supervisor.recordDriverOutcome(id, driver.HarnessID(), copy.Operation, effectiveOutcome, record)
 	if err != nil {
 		return CommandResponse{Err: err}
 	}
@@ -675,47 +841,63 @@ func (supervisor *Supervisor) Reconcile(ctx context.Context, commandID string) C
 	return supervisor.commitSuccess(message, command, ack, updated, reconciled.Outcome.ProviderTurnID, reconciled.Outcome.Events)
 }
 
-func (supervisor *Supervisor) Discover(ctx context.Context, harnessID string, limit int) ([]protocol.HostHarnessSessionObservation, error) {
+func (supervisor *Supervisor) Discover(ctx context.Context, harnessID string, limit int) (DiscoveryResult, error) {
 	finish, err := supervisor.beginOperation()
 	if err != nil {
-		return nil, err
+		return DiscoveryResult{}, err
 	}
 	defer finish()
 	if limit < 1 || limit > protocol.HostHarnessSessionLimits.SessionsPerGeneration {
-		return nil, fmt.Errorf("discovery limit is outside protocol bounds")
+		return DiscoveryResult{}, fmt.Errorf("discovery limit is outside protocol bounds")
 	}
 	driver := supervisor.drivers[harnessID]
 	if driver == nil || !supports(driver.Capabilities().DriverOperations, "discover") {
-		return nil, ErrUnsupportedCapability
+		return DiscoveryResult{}, ErrUnsupportedCapability
 	}
 	providers, err := driver.Discover(context.WithoutCancel(ctx), DiscoverRequest{Limit: limit})
 	if err != nil {
-		return nil, err
+		return DiscoveryResult{}, fmt.Errorf("provider discovery failed: %s", boundedDiagnostic(err.Error()))
 	}
 	if len(providers) > limit {
-		return nil, ErrInvalidObservation
+		return DiscoveryResult{}, ErrInvalidObservation
 	}
-	result := make([]protocol.HostHarnessSessionObservation, 0, len(providers))
+	result := DiscoveryResult{Sessions: make([]protocol.HostHarnessSessionObservation, 0, len(providers)), Diagnostics: []string{}}
+	seen := map[string]bool{}
 	for _, provider := range providers {
 		canonical, err := supervisor.authorize(provider.Workspace)
 		if err != nil {
-			return nil, err
+			result.Diagnostics = appendDiscoveryDiagnostic(result.Diagnostics, err)
+			continue
 		}
 		provider.Workspace = canonical
+		if err := validateProviderCapabilities(driver, provider); err != nil {
+			result.Diagnostics = appendDiscoveryDiagnostic(result.Diagnostics, err)
+			continue
+		}
+		if _, err := supervisor.recordFromProvider("discovery-validation", harnessID, provider, nil); err != nil {
+			result.Diagnostics = appendDiscoveryDiagnostic(result.Diagnostics, err)
+			continue
+		}
 		supervisor.mu.Lock()
 		id := supervisor.providers[providerKey(harnessID, provider.ProviderSessionID, provider.Workspace)]
 		supervisor.mu.Unlock()
 		if id == "" {
 			continue
 		}
+		if seen[id] {
+			result.Diagnostics = appendDiscoveryDiagnostic(result.Diagnostics, fmt.Errorf("provider discovery repeated a known session identity"))
+			continue
+		}
+		seen[id] = true
 		supervisor.mu.Lock()
 		previous := cloneSession(supervisor.sessions[id])
 		supervisor.mu.Unlock()
 		record, err := supervisor.recordFromProvider(id, harnessID, provider, previous)
 		if err != nil {
-			return nil, err
+			result.Diagnostics = appendDiscoveryDiagnostic(result.Diagnostics, err)
+			continue
 		}
-		result = append(result, record.Observation)
+		result.Sessions = append(result.Sessions, record.Observation)
 	}
 	return result, nil
 }
@@ -752,7 +934,11 @@ func (supervisor *Supervisor) ReadHistory(ctx context.Context, message protocol.
 		return HistoryPage{}, err
 	}
 	defer supervisor.retireHandle(handle)
-	page, err := supervisor.drivers[record.Observation.HarnessID].ReadHistory(context.WithoutCancel(ctx), HistoryRequest{SessionRequest: SessionRequest{Handle: handle, ProviderSessionID: record.Observation.ProviderSessionID, Workspace: record.Observation.Workspace}, Cursor: message.Cursor, Limit: int(message.Limit)})
+	driver := supervisor.drivers[record.Observation.HarnessID]
+	if driver == nil || !supervisor.supportsSessionOperation(record, "read-history") {
+		return HistoryPage{}, ErrUnsupportedCapability
+	}
+	page, err := driver.ReadHistory(context.WithoutCancel(ctx), HistoryRequest{SessionRequest: SessionRequest{Handle: handle, ProviderSessionID: record.Observation.ProviderSessionID, Workspace: record.Observation.Workspace}, Cursor: message.Cursor, Limit: int(message.Limit)})
 	if err != nil {
 		return HistoryPage{}, err
 	}
@@ -786,10 +972,20 @@ func (supervisor *Supervisor) Shutdown(ctx context.Context) error {
 // handle is active. Late, invented, or cross-session handles cannot select a registry record.
 func (supervisor *Supervisor) AcceptObservation(handle OperationHandle, provider ProviderSession, events []protocol.HarnessEvent) error {
 	supervisor.mu.Lock()
-	id := supervisor.handles[handle.Token]
-	record := cloneSession(supervisor.sessions[id])
+	if err := supervisor.admissionErrorLocked(); err != nil {
+		supervisor.mu.Unlock()
+		return err
+	}
+	issued, found := supervisor.handles[handle.Token]
+	record := cloneSession(supervisor.sessions[issued.SessionID])
+	if !found || issued.SessionID == "" || issued.SessionID != handle.HostHarnessSessionID || record == nil || record.Observation.Revision != issued.Revision || sessionRecordFingerprint(record) != issued.Fingerprint {
+		supervisor.mu.Unlock()
+		return ErrInvalidObservation
+	}
+	supervisor.operations.Add(1)
 	supervisor.mu.Unlock()
-	if id == "" || id != handle.HostHarnessSessionID || record == nil {
+	defer supervisor.operations.Done()
+	if terminalStatus(record.Observation.Status) {
 		return ErrInvalidObservation
 	}
 	if provider.ProviderSessionID != record.Observation.ProviderSessionID || provider.Workspace != record.Observation.Workspace {
@@ -798,14 +994,37 @@ func (supervisor *Supervisor) AcceptObservation(handle OperationHandle, provider
 	if _, err := supervisor.authorize(provider.Workspace); err != nil {
 		return err
 	}
+	if len(events) > MaximumOutcomeEvents {
+		return ErrInvalidObservation
+	}
 	if err := validateEvents(events, record.ActiveRunID); err != nil {
 		return err
 	}
-	updated, err := supervisor.recordFromProvider(id, record.Observation.HarnessID, provider, record)
+	driver := supervisor.drivers[record.Observation.HarnessID]
+	if driver == nil {
+		return ErrUnsupportedCapability
+	}
+	if err := validateProviderCapabilities(driver, provider); err != nil {
+		return err
+	}
+	updated, err := supervisor.recordFromProvider(issued.SessionID, record.Observation.HarnessID, provider, record)
 	if err != nil {
 		return err
 	}
-	return supervisor.saveSession(updated)
+	supervisor.mu.Lock()
+	defer supervisor.mu.Unlock()
+	currentHandle, stillActive := supervisor.handles[handle.Token]
+	current := supervisor.sessions[issued.SessionID]
+	if !stillActive || currentHandle != issued || current == nil || !sameSessionRecord(current, record) {
+		return ErrInvalidObservation
+	}
+	previous := cloneSession(current)
+	supervisor.sessions[issued.SessionID] = cloneSession(updated)
+	if err := saveRegistry(supervisor.dataRoot, supervisor.sessions); err != nil {
+		supervisor.sessions[issued.SessionID] = previous
+		return err
+	}
+	return nil
 }
 
 func (supervisor *Supervisor) Acknowledge(commandID string) error {
@@ -853,16 +1072,6 @@ func (supervisor *Supervisor) ForgetClosed(id string) error {
 			return fmt.Errorf("host session has an unacknowledged or uncertain command")
 		}
 	}
-	previousCommands := cloneCommands(supervisor.commands)
-	for commandID, command := range supervisor.commands {
-		if command.HostHarnessSessionID == id {
-			delete(supervisor.commands, commandID)
-		}
-	}
-	if err := saveLedger(supervisor.dataRoot, supervisor.commands); err != nil {
-		supervisor.commands = previousCommands
-		return err
-	}
 	previousProvider := supervisor.providers[providerKey(record.Observation.HarnessID, record.Observation.ProviderSessionID, record.Observation.Workspace)]
 	delete(supervisor.sessions, id)
 	delete(supervisor.providers, providerKey(record.Observation.HarnessID, record.Observation.ProviderSessionID, record.Observation.Workspace))
@@ -871,6 +1080,22 @@ func (supervisor *Supervisor) ForgetClosed(id string) error {
 		supervisor.providers[providerKey(record.Observation.HarnessID, record.Observation.ProviderSessionID, record.Observation.Workspace)] = previousProvider
 		return err
 	}
+	remainingCommands := cloneCommands(supervisor.commands)
+	for commandID, command := range remainingCommands {
+		if command.HostHarnessSessionID == id {
+			delete(remainingCommands, commandID)
+		}
+	}
+	if err := saveLedger(supervisor.dataRoot, remainingCommands); err != nil {
+		supervisor.sessions[id] = record
+		supervisor.providers[providerKey(record.Observation.HarnessID, record.Observation.ProviderSessionID, record.Observation.Workspace)] = previousProvider
+		if restoreErr := saveRegistry(supervisor.dataRoot, supervisor.sessions); restoreErr != nil {
+			supervisor.disabled = errors.Join(err, restoreErr)
+			return fmt.Errorf("compact ledger and restore registry: %w", supervisor.disabled)
+		}
+		return err
+	}
+	supervisor.commands = remainingCommands
 	return nil
 }
 
@@ -894,6 +1119,16 @@ func (supervisor *Supervisor) replayLocked(message protocol.HostSessionHubMessag
 	ack := supervisor.ack(message, command.Operation, "replayed")
 	if command.State == "completed" && command.Result != nil {
 		return CommandResponse{Ack: ack, Result: *command.Result}
+	}
+	if command.State == "pending" {
+		code, detail := "recovery-required", "provider effect cannot be proven absent after operation settlement"
+		err := fmt.Errorf("command outcome is uncertain; manual reconciliation is required")
+		if supervisor.activeCommands[command.CommandID] {
+			code, detail, err = "operation-pending", "the accepted operation is still settling", ErrSessionBusy
+		}
+		result := supervisor.result(message, command.Operation, "uncertain", code, detail, "", nil)
+		result.At = command.UpdatedAt
+		return CommandResponse{Ack: ack, Result: result, Err: err}
 	}
 	var result protocol.HostSessionControlMessage
 	if command.Result != nil {
@@ -923,6 +1158,87 @@ func (supervisor *Supervisor) beginOperation() (func(), error) {
 	supervisor.operations.Add(1)
 	return supervisor.operations.Done, nil
 }
+
+func (supervisor *Supervisor) ensureCommandCapacityLocked() bool {
+	if len(supervisor.commands) < supervisor.maximumCommands {
+		return true
+	}
+	ids := make([]string, 0, len(supervisor.commands))
+	for id, command := range supervisor.commands {
+		if command.State == "completed" && command.Acknowledged {
+			ids = append(ids, id)
+		}
+	}
+	sort.Slice(ids, func(i, j int) bool {
+		left, right := supervisor.commands[ids[i]], supervisor.commands[ids[j]]
+		if left.UpdatedAt == right.UpdatedAt {
+			return ids[i] < ids[j]
+		}
+		return left.UpdatedAt < right.UpdatedAt
+	})
+	for _, id := range ids {
+		if len(supervisor.commands) < supervisor.maximumCommands {
+			break
+		}
+		delete(supervisor.commands, id)
+	}
+	return len(supervisor.commands) < supervisor.maximumCommands
+}
+
+func supportsDriverOperation(capabilities Capabilities, operation string) bool {
+	switch {
+	case supports(protocol.HostHarnessDriverOperations, operation):
+		return supports(capabilities.DriverOperations, operation)
+	case supports(protocol.HostHarnessSessionOperations, operation):
+		return supports(capabilities.SessionOperations, operation)
+	case supports(LifecycleOperations, operation):
+		return supports(capabilities.LifecycleOperations, operation)
+	default:
+		return false
+	}
+}
+
+func (supervisor *Supervisor) supportsSessionOperation(record *sessionRecord, operation string) bool {
+	if record == nil {
+		return false
+	}
+	driver := supervisor.drivers[record.Observation.HarnessID]
+	if driver == nil || !supportsDriverOperation(driver.Capabilities(), operation) {
+		return false
+	}
+	if supports(protocol.HostHarnessSessionOperations, operation) {
+		return supports(record.Observation.Operations, operation)
+	}
+	return supports(record.LifecycleOperations, operation)
+}
+
+func validateProviderCapabilities(driver Driver, provider ProviderSession) error {
+	if !sortedVocabulary(provider.Operations, protocol.HostHarnessSessionOperations) || !sortedVocabulary(provider.LifecycleOperations, LifecycleOperations) {
+		return ErrInvalidObservation
+	}
+	capabilities := driver.Capabilities()
+	for _, operation := range provider.Operations {
+		if !supports(capabilities.SessionOperations, operation) {
+			return ErrUnsupportedCapability
+		}
+	}
+	for _, operation := range provider.LifecycleOperations {
+		if !supports(capabilities.LifecycleOperations, operation) {
+			return ErrUnsupportedCapability
+		}
+	}
+	return nil
+}
+
+func appendDiscoveryDiagnostic(diagnostics []string, err error) []string {
+	if len(diagnostics) >= protocol.HostHarnessSessionLimits.SessionsPerInventoryPage {
+		return diagnostics
+	}
+	return append(diagnostics, boundedDiagnostic(err.Error()))
+}
+
+func terminalStatus(status string) bool { return status == "closed" || status == "failed" }
+
 func (supervisor *Supervisor) trySessionLockLocked(id string) (func(), error) {
 	lock := supervisor.locks[id]
 	if lock == nil {
@@ -938,7 +1254,7 @@ func (supervisor *Supervisor) trySessionLockLocked(id string) (func(), error) {
 }
 
 func (supervisor *Supervisor) recordFromProvider(id, harnessID string, provider ProviderSession, previous *sessionRecord) (*sessionRecord, error) {
-	if provider.ProviderSessionID == "" || provider.Workspace == "" || !supports(protocol.HostHarnessSessionSources, provider.Source) || !supports(protocol.HostHarnessSessionStatuses, provider.Status) || !supports(protocol.HostHarnessSessionControlModes, provider.ControlMode) || !sortedVocabulary(provider.Operations, protocol.HostHarnessSessionOperations) {
+	if provider.ProviderSessionID == "" || provider.Workspace == "" || !supports(protocol.HostHarnessSessionSources, provider.Source) || !supports(protocol.HostHarnessSessionStatuses, provider.Status) || !supports(protocol.HostHarnessSessionControlModes, provider.ControlMode) || !sortedVocabulary(provider.Operations, protocol.HostHarnessSessionOperations) || !sortedVocabulary(provider.LifecycleOperations, LifecycleOperations) {
 		return nil, ErrInvalidObservation
 	}
 	now := supervisor.clock.Now().UTC()
@@ -968,10 +1284,20 @@ func (supervisor *Supervisor) recordFromProvider(id, harnessID string, provider 
 		}
 		created, _ = time.Parse(time.RFC3339Nano, previous.Observation.CreatedAt)
 		revision, epoch, attached, active = previous.Observation.Revision+1, previous.AttachmentEpoch, previous.AttachedThreadID, previous.ActiveRunID
-		if sameStatus {
+		unchanged := sameStatus && previous.Observation.ControlMode == provider.ControlMode &&
+			previous.Observation.ProviderTurnID == provider.ProviderTurnID && previous.Observation.Summary == boundedDiagnostic(provider.Summary) &&
+			slices.Equal(previous.Observation.Operations, provider.Operations)
+		if unchanged {
 			revision = previous.Observation.Revision
 			updated, _ = time.Parse(time.RFC3339Nano, previous.Observation.UpdatedAt)
 		}
+	}
+	if provider.Status != "running" && provider.Status != "awaiting-approval" {
+		active = ""
+	}
+	if terminalStatus(provider.Status) && attached != "" {
+		attached = ""
+		epoch++
 	}
 	observation := protocol.HostHarnessSessionObservation{HostHarnessSessionID: id, NodeID: supervisor.nodeID, HarnessID: harnessID, ProviderSessionID: provider.ProviderSessionID, Workspace: provider.Workspace,
 		Source: provider.Source, Status: provider.Status, ControlMode: provider.ControlMode, Operations: append([]string(nil), provider.Operations...), Revision: revision,
@@ -984,7 +1310,7 @@ func (supervisor *Supervisor) recordFromProvider(id, harnessID string, provider 
 			return nil, fmt.Errorf("%w: %v", ErrInvalidObservation, err)
 		}
 	}
-	return &sessionRecord{Observation: observation, AttachedThreadID: attached, ActiveRunID: active, AttachmentEpoch: epoch}, nil
+	return &sessionRecord{Observation: observation, LifecycleOperations: append([]string(nil), provider.LifecycleOperations...), AttachedThreadID: attached, ActiveRunID: active, AttachmentEpoch: epoch}, nil
 }
 
 func validateEvents(events []protocol.HarnessEvent, runID string) error {
@@ -1015,7 +1341,12 @@ func (supervisor *Supervisor) issueHandle(id string) (OperationHandle, error) {
 		return OperationHandle{}, err
 	}
 	supervisor.mu.Lock()
-	supervisor.handles[token] = id
+	record := supervisor.sessions[id]
+	if record == nil {
+		supervisor.mu.Unlock()
+		return OperationHandle{}, fmt.Errorf("host session does not exist")
+	}
+	supervisor.handles[token] = operationHandleRecord{SessionID: id, Revision: record.Observation.Revision, Fingerprint: sessionRecordFingerprint(record)}
 	supervisor.mu.Unlock()
 	return OperationHandle{HostHarnessSessionID: id, Token: token}, nil
 }
@@ -1036,7 +1367,23 @@ func cloneSession(record *sessionRecord) *sessionRecord {
 	}
 	copy := *record
 	copy.Observation.Operations = append([]string(nil), record.Observation.Operations...)
+	copy.LifecycleOperations = append([]string(nil), record.LifecycleOperations...)
 	return &copy
+}
+
+func sameSessionRecord(left, right *sessionRecord) bool {
+	if left == nil || right == nil || left.AttachedThreadID != right.AttachedThreadID || left.ActiveRunID != right.ActiveRunID || left.AttachmentEpoch != right.AttachmentEpoch ||
+		!slices.Equal(left.LifecycleOperations, right.LifecycleOperations) || !slices.Equal(left.Observation.Operations, right.Observation.Operations) {
+		return false
+	}
+	leftObservation, rightObservation := left.Observation, right.Observation
+	leftObservation.Operations, rightObservation.Operations = nil, nil
+	return reflect.DeepEqual(leftObservation, rightObservation)
+}
+
+func sessionRecordFingerprint(record *sessionRecord) string {
+	digest, _ := checksum(record)
+	return digest
 }
 func cloneCommands(records map[string]*ledgerRecord) map[string]*ledgerRecord {
 	cloned := make(map[string]*ledgerRecord, len(records))
@@ -1063,6 +1410,9 @@ func checkEpoch(got *int64, expected int64) error {
 func preflightExisting(message protocol.HostSessionHubMessage, record *sessionRecord, operation string) error {
 	switch operation {
 	case "attach":
+		if terminalStatus(record.Observation.Status) {
+			return ErrInvalidTransition
+		}
 		if record.Observation.Status != message.ExpectedStatus || record.AttachedThreadID != "" && record.AttachedThreadID != message.ThreadID {
 			return fmt.Errorf("attachment identity or expected status does not match")
 		}

@@ -17,10 +17,10 @@ func requireTransition(from, to string) error {
 func supports(values []string, operation string) bool { return slices.Contains(values, operation) }
 
 func validateCapabilities(capabilities Capabilities) error {
-	if len(capabilities.DriverOperations) > len(protocol.HostHarnessDriverOperations) || len(capabilities.SessionOperations) > protocol.HostHarnessSessionLimits.OperationCapabilities {
+	if len(capabilities.DriverOperations) > len(protocol.HostHarnessDriverOperations) || len(capabilities.SessionOperations) > protocol.HostHarnessSessionLimits.OperationCapabilities || len(capabilities.LifecycleOperations) > len(LifecycleOperations) {
 		return ErrInvalidObservation
 	}
-	if !sortedVocabulary(capabilities.DriverOperations, protocol.HostHarnessDriverOperations) || !sortedVocabulary(capabilities.SessionOperations, protocol.HostHarnessSessionOperations) {
+	if !sortedVocabulary(capabilities.DriverOperations, protocol.HostHarnessDriverOperations) || !sortedVocabulary(capabilities.SessionOperations, protocol.HostHarnessSessionOperations) || !sortedVocabulary(capabilities.LifecycleOperations, LifecycleOperations) {
 		return ErrInvalidObservation
 	}
 	return nil

@@ -23,7 +23,15 @@ var (
 	ErrUnauthorizedWorkspace = errors.New("host session workspace is not authorized")
 	ErrInvalidObservation    = errors.New("host session driver observation is invalid")
 	ErrShuttingDown          = errors.New("host session supervisor is shutting down")
+	ErrCommandCapacity       = errors.New("host session command ledger has no safe capacity")
 )
+
+// LifecycleOperations are provider-local methods that are intentionally absent from the
+// protocol-v6 wire capability vocabulary. Drivers and individual provider sessions must both
+// advertise them before the supervisor calls the corresponding method.
+var LifecycleOperations = []string{"inspect", "reconcile", "refresh", "resume"}
+
+const MaximumOutcomeEvents = 100
 
 type Clock interface{ Now() time.Time }
 type IDGenerator interface{ NewID() (string, error) }
@@ -36,21 +44,47 @@ const (
 )
 
 type Capabilities struct {
-	DriverOperations  []string
-	SessionOperations []string
+	DriverOperations    []string
+	SessionOperations   []string
+	LifecycleOperations []string
 }
 
 type ProviderSession struct {
-	ProviderSessionID string
-	Workspace         string
-	Source            string
-	Status            string
-	ControlMode       string
-	Operations        []string
-	ProviderTurnID    string
-	Summary           string
-	CreatedAt         time.Time
-	UpdatedAt         time.Time
+	ProviderSessionID   string
+	Workspace           string
+	Source              string
+	Status              string
+	ControlMode         string
+	Operations          []string
+	LifecycleOperations []string
+	ProviderTurnID      string
+	Summary             string
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
+}
+
+type DiscoveryResult struct {
+	Sessions    []protocol.HostHarnessSessionObservation
+	Diagnostics []string
+}
+
+type uncertainOutcomeError struct{ cause error }
+
+func (err uncertainOutcomeError) Error() string { return err.cause.Error() }
+func (err uncertainOutcomeError) Unwrap() error { return err.cause }
+
+// OutcomeUncertain marks a driver error as ambiguous after dispatch. The supervisor durably
+// records uncertainty and never interprets it as permission to repeat the effect.
+func OutcomeUncertain(err error) error {
+	if err == nil {
+		return nil
+	}
+	return uncertainOutcomeError{cause: err}
+}
+
+func isOutcomeUncertain(err error) bool {
+	var uncertain uncertainOutcomeError
+	return errors.As(err, &uncertain) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 type DiscoverRequest struct{ Limit int }

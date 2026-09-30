@@ -70,7 +70,7 @@ func TestCheckedInPersistenceFixturesAreByteFaithfulRealProducerOutput(t *testin
 		Workspace: "/srv/workspaces/project", Source: "provider-history", Status: "idle", ControlMode: "full",
 		Operations: []string{"attach", "close", "detach", "interrupt", "read-history", "resolve-approval", "start-turn", "steer"}, Revision: 1,
 		CreatedAt: "2026-09-30T12:00:00Z", UpdatedAt: "2026-09-30T12:00:00Z"}
-	require.NoError(t, saveRegistry(dataRoot, map[string]*sessionRecord{"hs-fixture": {Observation: observation}}))
+	require.NoError(t, saveRegistry(dataRoot, map[string]*sessionRecord{"hs-fixture": {Observation: observation, LifecycleOperations: append([]string(nil), LifecycleOperations...)}}))
 	require.NoError(t, saveLedger(dataRoot, map[string]*ledgerRecord{"command-fixture": {CommandID: "command-fixture", Digest: strings.Repeat("a", 64), Operation: "create",
 		RequestID: "request-fixture", HarnessID: "codex-cli", Workspace: "/srv/workspaces/project", State: "pending", UpdatedAt: "2026-09-30T12:00:01Z"}}))
 	producedRegistry, err := os.ReadFile(filepath.Join(dataRoot, registryName))
@@ -207,7 +207,7 @@ func TestAdoptionThreeTurnsHistoryCloseAndSecretExclusion(t *testing.T) {
 func TestHistoryBoundsAndRetentionKeepUncertainCommands(t *testing.T) {
 	driver := newFakeDriver()
 	supervisor, workspace := newTestSupervisor(t, driver)
-	supervisor.maximumCommands = 1
+	supervisor.maximumCommands = 2
 	created := createSession(t, supervisor, workspace, "create-1")
 	id := created.Result.Session.HostHarnessSessionID
 	epoch := int64(0)
@@ -257,4 +257,25 @@ func TestClosedAcknowledgedSessionCanBeForgottenWithoutBreakingRestart(t *testin
 	require.NoError(t, err)
 	usable, diagnostic := restarted.Usable()
 	require.True(t, usable, diagnostic)
+}
+
+func TestForgetClosedRegistryFailurePreservesAcknowledgedReplayEvidence(t *testing.T) {
+	driver := newFakeDriver()
+	supervisor, workspace := newTestSupervisor(t, driver)
+	created := createSession(t, supervisor, workspace, "create-1")
+	id := created.Result.Session.HostHarnessSessionID
+	epoch := int64(0)
+	require.NoError(t, supervisor.Execute(context.Background(), signed(t, protocol.HostSessionHubMessage{Type: "host-session.close", NodeID: "node-1", CommandID: "close-1", HostHarnessSessionID: id, AttachmentEpoch: &epoch})).Err)
+	require.NoError(t, supervisor.Acknowledge("create-1"))
+	require.NoError(t, supervisor.Acknowledge("close-1"))
+	registryPath := filepath.Join(supervisor.dataRoot, registryName)
+	require.NoError(t, os.Remove(registryPath))
+	require.NoError(t, os.Mkdir(registryPath, 0o700))
+	require.Error(t, supervisor.ForgetClosed(id))
+	require.Contains(t, supervisor.commands, "close-1")
+	loaded, err := loadLedger(supervisor.dataRoot)
+	require.NoError(t, err)
+	require.Contains(t, loaded, "close-1")
+	require.NoError(t, os.Remove(registryPath))
+	require.NoError(t, saveRegistry(supervisor.dataRoot, supervisor.sessions))
 }
