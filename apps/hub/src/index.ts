@@ -83,6 +83,9 @@ import { createRedactor } from "./redaction.js";
 import { dispatchMessageFor, runSchedulingPass, type SchedulingContext, type SchedulingPassResult } from "./scheduler.js";
 import { runContinuationPass, type ContinuationPassResult } from "./orchestratorInbox.js";
 import { createHostedThread } from "./hostedThreads.js";
+import { receiveHostSessionHistory } from "./hostSessionHistory.js";
+import { discardHostSessionConnection, receiveHostSessionInventory, type HostSessionInventoryConnection } from "./hostSessionInventory.js";
+import { registerHostSessionReadRoutes } from "./hostSessionReadRoutes.js";
 import { receiveSessionBinding } from "./sessionBindings.js";
 import { newEvent, newId, newMessage, Store } from "./store.js";
 import { newThread, updateThreadByOperator, updateThreadForRun } from "./threads.js";
@@ -714,6 +717,7 @@ registerPreviewOperatorRoutes(app, {
   configuration: previewDeliveryConfiguration,
   broadcast
 });
+registerHostSessionReadRoutes(app, { store });
 
 app.get("/api/runs/:id/events", (req, res) => {
   if (!store.getRun(req.params.id)) return res.status(404).json({ error: "Run not found" });
@@ -928,6 +932,17 @@ wss.on("connection", (socket, request) => {
     const connection = controlAgents.connectionFor(socket);
     return connection !== undefined && controlAgents.isCurrent(connection);
   };
+  const hostSessionConnection = (): HostSessionInventoryConnection | undefined => {
+    const connection = controlAgents.connectionFor(socket);
+    if (!connection) return undefined;
+    return {
+      nodeId: connection.nodeId,
+      connectionGeneration: connection.generation,
+      supportsCapability: supportsControlCapability(connection.protocolVersion, "interactive-sessions"),
+      barrierPassed: controlAgents.barrierPassed(connection),
+      isCurrent: () => controlAgents.isCurrent(connection)
+    };
+  };
   const dispatchQueuedRuns = async (connection: ControlConnection<WebSocket>, activeRunIds: readonly string[] = []) => {
     const queued = queuedRunsForNode(store.snapshot(), nodeId, activeRunIds, protocolVersion);
     for (const run of queued) {
@@ -982,6 +997,14 @@ wss.on("connection", (socket, request) => {
         if (!registration.ok) return socket.close(1002, "invalid v5 registration");
       }
       nodeId = message.node.id;
+      const previousConnection = controlAgents.connectionFor(socket);
+      if (previousConnection) discardHostSessionConnection(store, {
+        nodeId: previousConnection.nodeId,
+        connectionGeneration: previousConnection.generation,
+        supportsCapability: supportsControlCapability(previousConnection.protocolVersion, "interactive-sessions"),
+        barrierPassed: controlAgents.barrierPassed(previousConnection),
+        isCurrent: () => false
+      });
       controlAgents.register(nodeId, socket, protocolVersion);
       // Acknowledges the registration: Barista replays its queued lifecycle messages only after this,
       // so nothing it queued is ever written to a socket the hub refused.
@@ -1187,9 +1210,25 @@ wss.on("connection", (socket, request) => {
         console.warn(`withheld invalid or unauthenticated ${decodedType} frame`);
         return;
       }
-      // #159/#160 own durable inventory and command application. Until those consumers exist, a
-      // valid v6 frame is deliberately withheld rather than falling through to run lifecycle state.
-      console.warn(`withheld ${decodedType} from ${nodeId}: interactive-session state is not enabled`);
+      const connection = hostSessionConnection();
+      if (!connection) return;
+      if (validated.value.type === "host-session.inventory.page"
+        || validated.value.type === "host-session.inventory.complete"
+        || validated.value.type === "host-session.update") {
+        const outcome = await receiveHostSessionInventory(store, connection, validated.value);
+        if (outcome.kind === "rejected") console.warn(`rejected ${decodedType} from ${nodeId}: host-session-inventory-invalid`);
+        if (outcome.changed) broadcast();
+        return;
+      }
+      if (validated.value.type === "host-session.history.page") {
+        const outcome = await receiveHostSessionHistory(store, connection, validated.value);
+        if (outcome.kind === "rejected") console.warn(`rejected ${decodedType} from ${nodeId}: host-session-history-invalid`);
+        if (outcome.changed) broadcast();
+        return;
+      }
+      // #160 owns command acknowledgements/results and attached-session harness events. A valid
+      // frame for that sibling remains withheld rather than falling through to Run lifecycle state.
+      console.warn(`withheld ${decodedType} from ${nodeId}: host-session-command-authority-not-enabled`);
       return;
     } else if (message.type.startsWith("run.")) {
       const runId = message.runId;
@@ -1251,7 +1290,15 @@ wss.on("connection", (socket, request) => {
     clearInterval(keepalive);
     socketClosed.abort();
     if (!nodeId) return;
+    const connection = controlAgents.connectionFor(socket);
     if (!controlAgents.release(socket)) return;
+    if (connection) discardHostSessionConnection(store, {
+      nodeId: connection.nodeId,
+      connectionGeneration: connection.generation,
+      supportsCapability: supportsControlCapability(connection.protocolVersion, "interactive-sessions"),
+      barrierPassed: controlAgents.barrierPassed(connection),
+      isCurrent: () => false
+    });
     forgetCapabilityPackReadiness(nodeId);
     await store.transact((state) => { const node = state.nodes.find((item) => item.id === nodeId); if (node) { node.status = "offline"; node.activeRuns = 0; } });
     broadcast();

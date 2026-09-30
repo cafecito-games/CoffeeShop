@@ -5,10 +5,10 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
-import { recordSourceKey, runSourceKey, threadOrchestrator, threadOwnerAgentId } from "@coffee-shop/protocol";
+import { hostHarnessSessionStatuses, recordSourceKey, runSourceKey, threadOrchestrator, threadOwnerAgentId, type ComputeNode, type HostHarnessSession } from "@coffee-shop/protocol";
 import { submitTasks, updateTask } from "./coordination.js";
 import { sendTaskMessage } from "./mailbox.js";
-import { assertPersistedHarnessState, newEvent, Store, type State } from "./store.js";
+import { assertPersistedHarnessState, assertPersistedHostSessionState, newEvent, Store, type State } from "./store.js";
 
 test("starts empty, persists state atomically, and loads it again", async () => {
   const directory = await mkdtemp(join(tmpdir(), "coffee-shop-store-"));
@@ -594,7 +594,7 @@ async function loadAttachedFixture(mutate: (state: Record<string, any>) => void 
   return { store: new Store(path), persisted };
 }
 
-test("loads a snapshot written by a live orchestrator-client connection byte for byte", async () => {
+test("loads a snapshot written by a live orchestrator-client connection and migrates host-session absence once", async () => {
   const directory = await mkdtemp(join(tmpdir(), "coffee-shop-store-"));
   const path = join(directory, "state.json");
   const bytes = await readFile(attachedFixturePath);
@@ -602,7 +602,11 @@ test("loads a snapshot written by a live orchestrator-client connection byte for
   const store = new Store(path);
   await store.load();
 
-  assert.deepEqual(await readFile(path), bytes, "a snapshot the hub just wrote is never rewritten on load");
+  const migrated = await readFile(path);
+  assert.notDeepEqual(migrated, bytes, "the pre-v6 snapshot receives host-session collections once");
+  const restarted = new Store(path);
+  await restarted.load();
+  assert.deepEqual(await readFile(path), migrated, "current host-session state is never rewritten on load");
   const snapshot = store.snapshot();
   assert.equal(snapshot.orchestratorAttachments!.length, 1);
   assert.equal(snapshot.orchestratorAttachments![0].status, "attached");
@@ -690,4 +694,123 @@ test("replays a submission, a message, and a task update persisted before source
   assert.equal(message.created, false, "a persisted message still replays");
   assert.equal(update.created, false, "a persisted task update still replays");
   assert.equal(persisted(), before, "a replay writes nothing");
+});
+
+const hostSessionNode: ComputeNode = {
+  id: "node-host", name: "Host node", kind: "local", platform: "linux-amd64", status: "online",
+  lastSeen: "2026-09-30T12:00:00Z", activeRuns: 0, concurrency: 1,
+  workspaceRoots: ["/workspaces"], harnesses: [], version: "test"
+};
+const hostSessionObservation = {
+  hostHarnessSessionId: "host-session-persisted",
+  nodeId: hostSessionNode.id,
+  harnessId: "codex-cli" as const,
+  providerSessionId: "provider-session-persisted",
+  workspace: "/workspaces/project",
+  source: "provider-history" as const,
+  status: "idle" as const,
+  controlMode: "full" as const,
+  operations: ["attach", "close", "read-history", "start-turn"] as const,
+  revision: 1,
+  summary: "Safe summary",
+  createdAt: "2026-09-30T12:00:00Z",
+  updatedAt: "2026-09-30T12:00:00Z"
+};
+const persistedHostSession: HostHarnessSession = {
+  ...hostSessionObservation,
+  operations: [...hostSessionObservation.operations],
+  attachmentEpoch: 0
+};
+
+test("host-session collections default only when absent and private history never enters snapshots", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "coffee-shop-host-state-"));
+  const path = join(directory, "state.json");
+  await writeFile(path, JSON.stringify({ agents: [], nodes: [], runs: [], events: [], messages: [] }));
+  const store = new Store(path);
+  await store.load();
+  assert.deepEqual(store.snapshot().hostHarnessSessions, []);
+  store.read((state) => {
+    assert.deepEqual(state.hostSessionInventoryGenerations, []);
+    assert.deepEqual(state.hostSessionLastObservations, []);
+    assert.deepEqual(state.hostSessionHistories, []);
+  });
+  const persisted = JSON.parse(await readFile(path, "utf8"));
+  for (const collection of ["hostHarnessSessions", "hostSessionInventoryGenerations", "hostSessionLastObservations", "hostSessionHistories"]) {
+    assert.deepEqual(persisted[collection], [], `${collection} receives the absence-only default`);
+  }
+});
+
+test("host-session load rejects malformed and broken relationships without rewriting bytes", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "coffee-shop-host-state-"));
+  const path = join(directory, "state.json");
+  const store = new Store(path);
+  await store.load();
+  await store.transact((state) => {
+    state.nodes.push(hostSessionNode);
+    state.hostHarnessSessions = [persistedHostSession];
+    state.hostSessionLastObservations = [{ ...hostSessionObservation, operations: [...hostSessionObservation.operations] }];
+    state.hostSessionInventoryGenerations = [{
+      nodeId: hostSessionNode.id, generation: 4, digest: "0".repeat(64), completedAt: "2026-09-30T12:00:00Z"
+    }];
+  });
+  const valid = JSON.parse(await readFile(path, "utf8")) as Record<string, any>;
+  const cases: Array<[RegExp, (state: Record<string, any>) => void]> = [
+    [/host session collection is malformed/, (state) => { state.hostHarnessSessions = null; }],
+    [/repeats session identity/, (state) => { state.hostHarnessSessions.push(structuredClone(state.hostHarnessSessions[0])); }],
+    [/unknown node/, (state) => { state.hostHarnessSessions[0].nodeId = "unknown-node"; }],
+    [/unauthorized workspace/, (state) => { state.hostHarnessSessions[0].workspace = "/outside/advertised-roots"; }],
+    [/invalid/, (state) => { state.hostHarnessSessions[0].providerEndpoint = "https://secret.invalid"; }],
+    [/broken session relationship/, (state) => { state.hostSessionLastObservations[0].providerSessionId = "different-provider"; }],
+    [/history collection is malformed/, (state) => { state.hostSessionHistories = null; }]
+  ];
+  for (const [reason, mutate] of cases) {
+    const candidate = structuredClone(valid);
+    mutate(candidate);
+    const bytes = JSON.stringify(candidate);
+    await writeFile(path, bytes);
+    await assert.rejects(new Store(path).load(), reason);
+    assert.equal(await readFile(path, "utf8"), bytes, "refused host-session state is not repaired");
+  }
+});
+
+test("reopening current SQLite host-session state performs no migration write", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "coffee-shop-host-state-sqlite-"));
+  const databasePath = join(directory, "coffee-shop.sqlite");
+  const legacyJsonPath = join(directory, "absent.json");
+  const first = new Store({ databasePath, legacyJsonPath });
+  await first.load();
+  await first.transact((state) => {
+    state.nodes.push(hostSessionNode);
+    state.hostHarnessSessions = [persistedHostSession];
+    state.hostSessionLastObservations = [{ ...hostSessionObservation, operations: [...hostSessionObservation.operations] }];
+    state.hostSessionInventoryGenerations = [{
+      nodeId: hostSessionNode.id, generation: 4, digest: "0".repeat(64), completedAt: "2026-09-30T12:00:00Z"
+    }];
+  });
+  const marker = "2000-01-01T00:00:00.000Z";
+  const probe = new DatabaseSync(databasePath);
+  const before = probe.prepare("SELECT state_json FROM hub_state WHERE singleton = 1").get() as { state_json: string };
+  probe.prepare("UPDATE hub_state SET updated_at = ? WHERE singleton = 1").run(marker);
+  probe.close();
+
+  const reopened = new Store({ databasePath, legacyJsonPath });
+  await reopened.load();
+  assert.equal(reopened.snapshot().hostHarnessSessions?.[0]?.hostHarnessSessionId, persistedHostSession.hostHarnessSessionId);
+  const after = new DatabaseSync(databasePath);
+  const row = after.prepare("SELECT state_json, updated_at FROM hub_state WHERE singleton = 1").get() as { state_json: string; updated_at: string };
+  assert.equal(row.state_json, before.state_json);
+  assert.equal(row.updated_at, marker);
+  after.close();
+});
+
+test("strict host-session assertion accepts every stored status through the shared protocol vocabulary", () => {
+  for (const status of hostHarnessSessionStatuses) {
+    const observation = { ...hostSessionObservation, status, operations: [...hostSessionObservation.operations] };
+    const state = {
+      agents: [], nodes: [hostSessionNode], runs: [], events: [], messages: [], threads: [],
+      hostHarnessSessions: [{ ...observation, attachmentEpoch: 0 }],
+      hostSessionInventoryGenerations: [], hostSessionLastObservations: [observation], hostSessionHistories: []
+    } as unknown as State;
+    assert.doesNotThrow(() => assertPersistedHostSessionState(state), status);
+  }
 });

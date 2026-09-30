@@ -145,6 +145,7 @@
   "approvals": [],
   "workspaceLeases": [],
   "orchestratorClients": [],
+  "hostHarnessSessions": [],
   "artifactPreviews": [
     {
       "id": "preview_mujrnuo0_009bx8",

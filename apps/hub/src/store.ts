@@ -23,6 +23,7 @@ import {
   isWorkspaceIsolationPolicy,
   isWorkspaceLeaseStatus,
   isOrchestratorAttachmentStatus,
+  hostHarnessSessionLimits,
   isOrchestratorClientScope,
   instanceLimits,
   orchestrationCollections,
@@ -34,11 +35,17 @@ import {
   validateArtifact,
   validateArtifactPreviewRecord,
   validateComponentInventoryReport,
+  validateHostHarnessSession,
+  validateHostHarnessSessionObservation,
+  validateHostSessionControlMessage,
   validateProjectProfile,
   withOrchestrationDefaults,
   type ArtifactPreviewFailureCode,
   type ArtifactPreviewRecord,
   type ChatMessage,
+  type HostHarnessSession,
+  type HostHarnessSessionHistoryItem,
+  type HostHarnessSessionObservation,
   type OrchestratorClient,
   type ProjectProfile,
   type Run,
@@ -52,6 +59,7 @@ import {
   type AgentTemplateConfigurationReceipt
 } from "./agentTemplateConfiguration.js";
 import { assertPersistedTemplateState, importLegacyAgentTemplates, type LegacyTemplateImport } from "./agentTemplates.js";
+import { isWorkspaceWithinRoot } from "./agentConfiguration.js";
 import type { HarnessEventStream, StoredHarnessEvent } from "./harnessEvents.js";
 import type { StoredRunTranscript } from "./runTranscripts.js";
 import {
@@ -217,6 +225,34 @@ export interface HostedThreadCreationReceipt {
   createdAt: string;
 }
 
+/** Durable identity of the last atomically accepted inventory generation for one node. */
+export interface HostSessionInventoryGenerationRecord {
+  nodeId: string;
+  generation: number;
+  digest: string;
+  completedAt: string;
+}
+
+/** Bounded replay evidence for one imported provider-history response. */
+export interface HostSessionHistoryReceipt {
+  requestId: string;
+  digest: string;
+  cursor?: string;
+  acceptedAt: string;
+}
+
+/** Provider-neutral imported history. It is private Store state, never a Coffee Shop transcript. */
+export interface StoredHostSessionHistory {
+  hostHarnessSessionId: string;
+  nodeId: string;
+  items: HostHarnessSessionHistoryItem[];
+  cursor?: string;
+  truncated: boolean;
+  omittedItems: number;
+  observedAt: string;
+  receipts: HostSessionHistoryReceipt[];
+}
+
 /** Hub-internal collections that are persisted but never published in snapshots. */
 interface HubOnlyState {
   /** One-time schema marker for canonical, template-materialized instance requirements. */
@@ -251,6 +287,12 @@ interface HubOnlyState {
   previewProcessingReceipts?: PreviewProcessingReceipt[];
   /** One-time external upload capabilities. Plaintext tokens are never stored. */
   artifactUploadGrants?: ArtifactUploadGrantRecord[];
+  /** Last complete generation identity for each node; partial generations are intentionally volatile. */
+  hostSessionInventoryGenerations?: HostSessionInventoryGenerationRecord[];
+  /** Last Barista-authored observation, retained separately from Hub-derived offline projection. */
+  hostSessionLastObservations?: HostHarnessSessionObservation[];
+  /** Imported provider history is served only by the authorized detail route. */
+  hostSessionHistories?: StoredHostSessionHistory[];
 }
 
 /** The persisted state. `orchestratorClients` holds the stored records, secret hash included. */
@@ -293,7 +335,11 @@ const emptyState = (): State => withOrchestrationDefaults({
   orchestratorClients: [],
   orchestratorAttachments: [],
   projectProfiles: [],
-  componentInventories: []
+  componentInventories: [],
+  hostHarnessSessions: [],
+  hostSessionInventoryGenerations: [],
+  hostSessionLastObservations: [],
+  hostSessionHistories: []
 });
 
 /** Adds the informational inventory collection to states written before component reporting. */
@@ -313,6 +359,129 @@ export function assertPersistedComponentInventories(state: State) {
     if (!nodeIds.has(validated.value.nodeId)) throw new Error(`Persisted component inventory ${index} names an unknown node`);
     if (reported.has(validated.value.nodeId)) throw new Error(`Persisted component inventory ${index} repeats node ${validated.value.nodeId}`);
     reported.add(validated.value.nodeId);
+  }
+}
+
+/** Adds only absent v6 collections. Present null or malformed values reach strict assertions. */
+export function addHostSessionDefaults(state: State) {
+  let changed = false;
+  for (const collection of [
+    "hostHarnessSessions",
+    "hostSessionInventoryGenerations",
+    "hostSessionLastObservations",
+    "hostSessionHistories"
+  ] as const) {
+    if (state[collection] === undefined) {
+      (state as unknown as Record<string, unknown>)[collection] = [];
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+const hostSessionProviderKey = (session: Pick<HostHarnessSessionObservation, "nodeId" | "harnessId" | "workspace" | "providerSessionId">) =>
+  [session.nodeId, session.harnessId, session.workspace, session.providerSessionId].join("\u0000");
+
+const sameHostSessionImmutableIdentity = (left: HostHarnessSession, right: HostHarnessSessionObservation) =>
+  left.hostHarnessSessionId === right.hostHarnessSessionId && left.nodeId === right.nodeId
+  && left.harnessId === right.harnessId && left.providerSessionId === right.providerSessionId
+  && left.workspace === right.workspace && left.source === right.source && left.createdAt === right.createdAt;
+
+/** Refuses malformed, duplicate, unknown-vocabulary, or broken-relation durable host-session state. */
+export function assertPersistedHostSessionState(state: State) {
+  if (!Array.isArray(state.hostHarnessSessions)) throw new Error("Persisted host session collection is malformed");
+  if (!Array.isArray(state.hostSessionInventoryGenerations)) throw new Error("Persisted host session inventory generation collection is malformed");
+  if (!Array.isArray(state.hostSessionLastObservations)) throw new Error("Persisted host session observation collection is malformed");
+  if (!Array.isArray(state.hostSessionHistories)) throw new Error("Persisted host session history collection is malformed");
+  const nodes = new Map(state.nodes.map((node) => [node.id, node]));
+  const sessionIds = new Set<string>();
+  const providers = new Set<string>();
+  const sessions = new Map<string, HostHarnessSession>();
+  for (const [index, candidate] of state.hostHarnessSessions.entries()) {
+    const validated = validateHostHarnessSession(candidate);
+    if (!validated.ok) throw new Error(`Persisted host session ${index} is invalid: ${validated.reason}`);
+    const session = validated.value;
+    const node = nodes.get(session.nodeId);
+    if (!node) throw new Error(`Persisted host session ${index} names an unknown node`);
+    if (!node.workspaceRoots.some((root) => isWorkspaceWithinRoot(session.workspace, root))) {
+      throw new Error(`Persisted host session ${index} names an unauthorized workspace`);
+    }
+    if (sessionIds.has(session.hostHarnessSessionId)) throw new Error(`Persisted host session ${index} repeats session identity`);
+    const provider = hostSessionProviderKey(session);
+    if (providers.has(provider)) throw new Error(`Persisted host session ${index} repeats provider identity`);
+    if (session.attachedThreadId !== undefined && !state.threads?.some((thread) => thread.id === session.attachedThreadId)) {
+      throw new Error(`Persisted host session ${index} names an unknown attached thread`);
+    }
+    if (session.activeRunId !== undefined && !state.runs.some((run) => run.id === session.activeRunId)) {
+      throw new Error(`Persisted host session ${index} names an unknown active run`);
+    }
+    sessionIds.add(session.hostHarnessSessionId);
+    providers.add(provider);
+    sessions.set(session.hostHarnessSessionId, session);
+  }
+  const generationNodes = new Set<string>();
+  for (const [index, record] of state.hostSessionInventoryGenerations.entries()) {
+    if (!record || typeof record !== "object" || Array.isArray(record)
+      || Object.keys(record).some((key) => !["nodeId", "generation", "digest", "completedAt"].includes(key))
+      || typeof record.nodeId !== "string" || !nodes.has(record.nodeId)
+      || !Number.isSafeInteger(record.generation) || record.generation < 1
+      || typeof record.digest !== "string" || !/^[a-f0-9]{64}$/.test(record.digest)
+      || !isTimestamp(record.completedAt)) throw new Error(`Persisted host session inventory generation ${index} is malformed`);
+    if (generationNodes.has(record.nodeId)) throw new Error(`Persisted host session inventory generation ${index} repeats node identity`);
+    generationNodes.add(record.nodeId);
+  }
+  const observationIds = new Set<string>();
+  for (const [index, candidate] of state.hostSessionLastObservations.entries()) {
+    const validated = validateHostHarnessSessionObservation(candidate);
+    if (!validated.ok) throw new Error(`Persisted host session observation ${index} is invalid: ${validated.reason}`);
+    const observation = validated.value;
+    const session = sessions.get(observation.hostHarnessSessionId);
+    if (!session || !sameHostSessionImmutableIdentity(session, observation) || session.revision !== observation.revision) {
+      throw new Error(`Persisted host session observation ${index} has a broken session relationship`);
+    }
+    if (observationIds.has(observation.hostHarnessSessionId)) throw new Error(`Persisted host session observation ${index} repeats session identity`);
+    observationIds.add(observation.hostHarnessSessionId);
+  }
+  for (const id of sessionIds) if (!observationIds.has(id)) throw new Error(`Persisted host session ${id} has no last observation`);
+  const historyIds = new Set<string>();
+  for (const [index, history] of state.hostSessionHistories.entries()) {
+    if (!history || typeof history !== "object" || Array.isArray(history)
+      || Object.keys(history).some((key) => !["hostHarnessSessionId", "nodeId", "items", "cursor", "truncated", "omittedItems", "observedAt", "receipts"].includes(key))
+      || typeof history.hostHarnessSessionId !== "string" || typeof history.nodeId !== "string"
+      || !Array.isArray(history.items) || history.items.length > hostHarnessSessionLimits.historyItemsPerPage
+      || typeof history.truncated !== "boolean" || !Number.isSafeInteger(history.omittedItems) || history.omittedItems < 0
+      || !isTimestamp(history.observedAt) || !Array.isArray(history.receipts)
+      || history.receipts.length > hostHarnessSessionLimits.sessionsPerGeneration) {
+      throw new Error(`Persisted host session history ${index} is malformed`);
+    }
+    const session = sessions.get(history.hostHarnessSessionId);
+    if (!session || session.nodeId !== history.nodeId) throw new Error(`Persisted host session history ${index} has a broken session relationship`);
+    const page = validateHostSessionControlMessage({
+      type: "host-session.history.page", nodeId: history.nodeId,
+      hostHarnessSessionId: history.hostHarnessSessionId, requestId: "persisted-history-validation",
+      items: history.items, ...(history.cursor === undefined ? {} : { nextCursor: history.cursor }),
+      truncated: history.truncated, at: history.observedAt
+    }, "6");
+    if (!page.ok) throw new Error(`Persisted host session history ${index} has invalid items or cursor: ${page.reason}`);
+    if (historyIds.has(history.hostHarnessSessionId)) throw new Error(`Persisted host session history ${index} repeats session identity`);
+    historyIds.add(history.hostHarnessSessionId);
+    const requests = new Set<string>();
+    for (const receipt of history.receipts) {
+      if (!receipt || typeof receipt !== "object" || Array.isArray(receipt)
+        || Object.keys(receipt).some((key) => !["requestId", "digest", "cursor", "acceptedAt"].includes(key))
+        || typeof receipt.digest !== "string" || !/^[a-f0-9]{64}$/.test(receipt.digest)
+        || !isTimestamp(receipt.acceptedAt)
+        || !validateHostSessionControlMessage({
+          type: "host-session.history.page", nodeId: history.nodeId,
+          hostHarnessSessionId: history.hostHarnessSessionId, requestId: receipt.requestId,
+          items: [], ...(receipt.cursor === undefined ? {} : { nextCursor: receipt.cursor }),
+          truncated: false, at: receipt.acceptedAt
+        }, "6").ok) {
+        throw new Error(`Persisted host session history ${index} has a malformed replay receipt`);
+      }
+      if (requests.has(receipt.requestId)) throw new Error(`Persisted host session history ${index} repeats request identity`);
+      requests.add(receipt.requestId);
+    }
   }
 }
 
@@ -1152,6 +1321,27 @@ export const publicOrchestratorClient = (client: StoredOrchestratorClient): Orch
   ...(client.revokedAt === undefined ? {} : { revokedAt: client.revokedAt })
 });
 
+/** Explicit allowlist for the authenticated snapshot; imported history remains route-only. */
+export const publicHostHarnessSession = (session: HostHarnessSession): HostHarnessSession => ({
+  hostHarnessSessionId: session.hostHarnessSessionId,
+  nodeId: session.nodeId,
+  harnessId: session.harnessId,
+  providerSessionId: session.providerSessionId,
+  workspace: session.workspace,
+  source: session.source,
+  status: session.status,
+  controlMode: session.controlMode,
+  operations: [...session.operations],
+  revision: session.revision,
+  ...(session.providerTurnId === undefined ? {} : { providerTurnId: session.providerTurnId }),
+  ...(session.summary === undefined ? {} : { summary: session.summary }),
+  createdAt: session.createdAt,
+  updatedAt: session.updatedAt,
+  ...(session.attachedThreadId === undefined ? {} : { attachedThreadId: session.attachedThreadId }),
+  ...(session.activeRunId === undefined ? {} : { activeRunId: session.activeRunId }),
+  attachmentEpoch: session.attachmentEpoch
+});
+
 export interface SqliteStoreOptions {
   databasePath: string;
   /** A legacy JSON snapshot imported only when the database has no state yet. */
@@ -1224,6 +1414,7 @@ export class Store {
     addArtifactPreviewDefaults(loaded);
     const addedArtifactUploadGrants = addArtifactUploadGrantDefaults(loaded);
     const addedComponentInventories = addComponentInventoryDefaults(loaded);
+    const addedHostSessions = addHostSessionDefaults(loaded);
     if (this.sqlite) loaded.projectProfiles ??= [];
     const addedApprovalResolvers = addApprovalResolverDefaults(loaded);
     assertPersistedTaskState(loaded);
@@ -1252,6 +1443,7 @@ export class Store {
     assertPersistedArtifactPreviewState(loaded);
     assertPersistedArtifactUploadGrantState(loaded);
     assertPersistedComponentInventories(loaded);
+    assertPersistedHostSessionState(loaded);
     /*
      * The legacy import runs after every assertion, so it never writes on top of state the hub could
      * not interpret, and it is decided from its own persisted records rather than from a timestamp:
@@ -1263,7 +1455,7 @@ export class Store {
     // persist exactly once, and a new database must always receive its initial row.
     const explicitMigration = removedDemoRecords || addedAgentAvatars || addedCoordination || addedThreads || addedOrchestration
       || addedThreadOrchestrators || addedApprovalResolvers || addedTemplateConfiguration || migratedInstanceRequirements
-      || addedHostedThreads || addedComponentInventories || addedArtifactUploadGrants || droppedBorrowedKeys || importedTemplates;
+      || addedHostedThreads || addedComponentInventories || addedHostSessions || addedArtifactUploadGrants || droppedBorrowedKeys || importedTemplates;
     if (needsInitialSqliteWrite || explicitMigration || (this.sqlite && JSON.stringify(loaded) !== beforeMigrations)) await this.save(loaded);
     this.state = loaded;
   }
@@ -1289,11 +1481,15 @@ export class Store {
       hostedThreadCreationReceipts: _hostedThreadCreationReceipts,
       previewRegistrationReceipts: _previewRegistrationReceipts, previewProcessingReceipts: _previewProcessingReceipts,
       artifactUploadGrants: _artifactUploadGrants,
-      projectProfilesImported: _projectProfilesImported, orchestratorClients, artifactPreviews, ...published
+      hostSessionInventoryGenerations: _hostSessionInventoryGenerations,
+      hostSessionLastObservations: _hostSessionLastObservations,
+      hostSessionHistories: _hostSessionHistories,
+      projectProfilesImported: _projectProfilesImported, orchestratorClients, artifactPreviews, hostHarnessSessions, ...published
     } = this.state;
     return structuredClone({
       ...published,
       ...(orchestratorClients === undefined ? {} : { orchestratorClients: orchestratorClients.map(publicOrchestratorClient) }),
+      ...(hostHarnessSessions === undefined ? {} : { hostHarnessSessions: hostHarnessSessions.map(publicHostHarnessSession) }),
       ...(artifactPreviews === undefined ? {} : {
         artifactPreviews: artifactPreviews.map((preview) => ({
           ...preview,
