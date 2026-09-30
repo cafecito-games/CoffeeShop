@@ -1,0 +1,29 @@
+{
+  "type": "host-session.inventory.page",
+  "nodeId": "node-one",
+  "generation": 4,
+  "pageIndex": 0,
+  "sessions": [
+    {
+      "hostHarnessSessionId": "host-session-one",
+      "nodeId": "node-one",
+      "harnessId": "codex-cli",
+      "providerSessionId": "provider-session-one",
+      "workspace": "/workspaces/coffee-shop",
+      "source": "provider-history",
+      "status": "idle",
+      "controlMode": "full",
+      "operations": [
+        "attach",
+        "close",
+        "read-history",
+        "start-turn"
+      ],
+      "revision": 1,
+      "summary": "Existing provider conversation",
+      "createdAt": "2026-09-30T12:00:00Z",
+      "updatedAt": "2026-09-30T12:00:00Z"
+    }
+  ],
+  "at": "2026-09-30T12:00:00Z"
+}

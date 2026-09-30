@@ -278,6 +278,45 @@ test("a malformed actor identity is refused as invalid and never read as an abse
   assert.throws(() => recordActor({ allocationId: "alloc-one" }, "Run run-one"), /without the other half/);
   assert.throws(() => recordActor({ agentId: "worker-a", instanceId: "instance-one", allocationId: "alloc-one" }, "Run run-one"),
     /names both a configured agent and an instance actor/);
+  assert.throws(() => recordActor({ agentId: "worker-a", hostHarnessSessionId: "host-session-one" }, "Run run-one"),
+    /names a host session together with another runtime actor/);
+  assert.throws(() => recordActor({ instanceId: "instance-one", allocationId: "alloc-one", hostHarnessSessionId: "host-session-one" }, "Run run-one"),
+    /names a host session together with another runtime actor/);
+  assert.deepEqual(recordActor({ hostHarnessSessionId: "host-session-one" }, "Run run-host"),
+    { kind: "host-session", hostHarnessSessionId: "host-session-one" });
+});
+
+test("a host-session run is recorded but cannot inherit Hub tool or legacy session authority", async () => {
+  const store = await instanceWorld();
+  const state = store.read((current) => structuredClone(current));
+  const run = state.runs.find((item) => item.id === "run-one")!;
+  delete run.instanceId;
+  delete run.allocationId;
+  run.hostHarnessSessionId = "host-session-one";
+  state.threads!.find((item) => item.id === "thread-one")!.orchestrator = {
+    kind: "host-session",
+    hostHarnessSessionId: "host-session-one"
+  };
+
+  assert.throws(() => resolveCaller(state, run.id),
+    (error: unknown) => error instanceof CoordinationError && error.code === "forbidden"
+      && /not Hub tool principals/.test(error.message));
+  assert.equal(bindingActorMatches({
+    id: "binding-one",
+    threadId: "thread-one",
+    instanceId: "instance-one",
+    allocationId: "alloc-one",
+    nodeId: "node-alpha",
+    harnessId: "codex-cli",
+    transport: "acp-v1",
+    workspace: "/workspace",
+    providerSessionId: "provider-one",
+    status: "idle",
+    createdByRunId: "run-one",
+    lastRunId: "run-one",
+    createdAt: at,
+    updatedAt: at
+  }, run), false, "a legacy run binding never matches a host session actor");
 });
 
 test("the display helper never answers an authorization question", async () => {
@@ -298,6 +337,9 @@ test("the display helper never answers an authorization question", async () => {
     assert.deepEqual(describeHistoricalActor(state, { instanceId: "instance-gone", allocationId: "alloc-gone" }),
       { kind: "instance", id: "instance-gone", name: "instance-gone" });
     assert.equal(authorizeInstance(state, { instanceId: "instance-gone", allocationId: "alloc-gone" }, "Record"), undefined);
+    assert.deepEqual(describeHistoricalActor(state, { hostHarnessSessionId: "host-session-one" }),
+      { kind: "host-session", id: "host-session-one", name: "host-session-one" });
+    assert.equal(authorizeInstance(state, { hostHarnessSessionId: "host-session-one" }, "Record"), undefined);
 
     // A malformed identity is named as malformed for display, and is never a principal.
     assert.deepEqual(describeHistoricalActor(state, { instanceId: "instance-one" }), { kind: "unknown", name: "Malformed actor" });
@@ -707,11 +749,11 @@ test("closing legacy sessions leaves an instance session and a settled legacy se
  * failure this table exists to prevent.
  */
 test("every thread orchestrator kind is handled or explicitly refused by every hub consumer", async () => {
-  assert.deepEqual([...threadOrchestratorKinds], ["agent", "external", "instance"], "one definition of the vocabulary");
+  assert.deepEqual([...threadOrchestratorKinds], ["agent", "external", "instance", "host-session"], "one definition of the vocabulary");
   const { store, context } = await promotableWorld();
   const thread = () => store.read((state) => state.threads!.find((item) => item.id === "thread-one")!);
 
-  const asKind = async (kind: "agent" | "external" | "instance") => {
+  const asKind = async (kind: typeof threadOrchestratorKinds[number]) => {
     await store.transact((state) => {
       const current = state.threads!.find((item) => item.id === "thread-one")!;
       if (kind === "agent") {
@@ -719,7 +761,9 @@ test("every thread orchestrator kind is handled or explicitly refused by every h
         current.ownerAgentId = "orchestrator";
         return true;
       }
-      current.orchestrator = kind === "external" ? { kind: "external", clientId: "client-one" } : { kind: "instance", instanceId: "instance-one" };
+      current.orchestrator = kind === "external" ? { kind: "external", clientId: "client-one" }
+        : kind === "instance" ? { kind: "instance", instanceId: "instance-one" }
+          : { kind: "host-session", hostHarnessSessionId: "host-session-one" };
       delete current.ownerAgentId;
       return true;
     });
@@ -753,13 +797,13 @@ test("every thread orchestrator kind is handled or explicitly refused by every h
   }
 
   assert.deepEqual(Object.fromEntries(promotion), {
-    agent: "promoted", external: "not-eligible", instance: "not-eligible"
+    agent: "promoted", external: "not-eligible", instance: "not-eligible", "host-session": "not-eligible"
   }, "only an agent-orchestrated thread is promotable; the other kinds are refused by name");
   assert.deepEqual(Object.fromEntries(operatorMessage), {
-    agent: "not_found", external: "accepted", instance: "accepted"
+    agent: "not_found", external: "accepted", instance: "accepted", "host-session": "not_found"
   }, "an agent thread takes operator messages through its own entry point, never the orchestrator mailbox");
-  assert.deepEqual(Object.fromEntries(continuations), { agent: false, external: false, instance: false });
-  assert.equal(threadOrchestrator(thread())?.kind, "instance", "every probe rolled back to the kind it was set to");
+  assert.deepEqual(Object.fromEntries(continuations), { agent: false, external: false, instance: false, "host-session": false });
+  assert.equal(threadOrchestrator(thread())?.kind, "host-session", "every probe rolled back to the kind it was set to");
 });
 
 /*

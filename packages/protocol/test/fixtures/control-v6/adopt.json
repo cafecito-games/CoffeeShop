@@ -1,0 +1,10 @@
+{
+  "type": "host-session.adopt",
+  "nodeId": "node-one",
+  "requestId": "request-adopt",
+  "commandId": "command-adopt",
+  "commandDigest": "960125df32a9b65722d0ad56afdc589ce6d80b75062c85fa600771fae8fcf20f",
+  "harnessId": "claude-cli",
+  "providerSessionId": "provider-session-two",
+  "workspace": "/workspaces/coffee-shop"
+}

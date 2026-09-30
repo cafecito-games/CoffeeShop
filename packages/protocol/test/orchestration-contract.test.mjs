@@ -44,7 +44,7 @@ import {
 } from "../dist/index.js";
 
 const at = "2026-09-21T12:00:00Z";
-const versions = ["1", "2", "3", "4", "5"];
+const versions = ["1", "2", "3", "4", "5", "6"];
 const sendableVersions = (message) => versions.filter((version) => canSendToControlAgent(message, version));
 const acceptableVersions = (message) => versions.filter((version) => canAcceptFromControlAgent(message, version));
 
@@ -62,8 +62,8 @@ const reachesTerminalStatus = (statuses, expectedTransitions, terminals) => (fro
 };
 
 test("orchestration vocabularies keep their exact contents and order", () => {
-  assert.deepEqual(controlProtocolVersions, ["1", "2", "3", "4", "5"]);
-  assert.deepEqual(controlProtocolCapabilities, ["replay-barrier", "hub-rpc", "orchestration", "instances", "component-inventory", "capability-pack-readiness"]);
+  assert.deepEqual(controlProtocolVersions, ["1", "2", "3", "4", "5", "6"]);
+  assert.deepEqual(controlProtocolCapabilities, ["replay-barrier", "hub-rpc", "orchestration", "instances", "component-inventory", "capability-pack-readiness", "interactive-sessions"]);
   assert.deepEqual(harnessTransports, ["native-cli", "acp-v1"]);
   assert.deepEqual(taskStatuses, ["pending", "ready", "assigned", "running", "completed", "failed", "cancelled", "blocked"]);
   assert.deepEqual(terminalTaskStatuses, ["completed", "failed", "cancelled", "blocked"]);
@@ -261,11 +261,12 @@ test("dependency outcomes cover every policy for every task status", () => {
 
 test("capabilities are supported exactly from the version that introduced them", () => {
   const expectedSupport = {
-    "1": { "replay-barrier": false, "hub-rpc": false, orchestration: false, instances: false, "component-inventory": false, "capability-pack-readiness": false },
-    "2": { "replay-barrier": true, "hub-rpc": false, orchestration: false, instances: false, "component-inventory": false, "capability-pack-readiness": false },
-    "3": { "replay-barrier": true, "hub-rpc": true, orchestration: false, instances: false, "component-inventory": false, "capability-pack-readiness": false },
-    "4": { "replay-barrier": true, "hub-rpc": true, orchestration: true, instances: false, "component-inventory": false, "capability-pack-readiness": false },
-    "5": { "replay-barrier": true, "hub-rpc": true, orchestration: true, instances: true, "component-inventory": true, "capability-pack-readiness": true }
+    "1": { "replay-barrier": false, "hub-rpc": false, orchestration: false, instances: false, "component-inventory": false, "capability-pack-readiness": false, "interactive-sessions": false },
+    "2": { "replay-barrier": true, "hub-rpc": false, orchestration: false, instances: false, "component-inventory": false, "capability-pack-readiness": false, "interactive-sessions": false },
+    "3": { "replay-barrier": true, "hub-rpc": true, orchestration: false, instances: false, "component-inventory": false, "capability-pack-readiness": false, "interactive-sessions": false },
+    "4": { "replay-barrier": true, "hub-rpc": true, orchestration: true, instances: false, "component-inventory": false, "capability-pack-readiness": false, "interactive-sessions": false },
+    "5": { "replay-barrier": true, "hub-rpc": true, orchestration: true, instances: true, "component-inventory": true, "capability-pack-readiness": true, "interactive-sessions": false },
+    "6": { "replay-barrier": true, "hub-rpc": true, orchestration: true, instances: true, "component-inventory": true, "capability-pack-readiness": true, "interactive-sessions": true }
   };
   for (const version of versions) {
     for (const capability of controlProtocolCapabilities) {
@@ -273,7 +274,7 @@ test("capabilities are supported exactly from the version that introduced them",
     }
   }
   for (const accepted of versions) assert.equal(isControlProtocolVersion(accepted), true);
-  for (const rejected of ["6", "", 4, undefined]) assert.equal(isControlProtocolVersion(rejected), false);
+  for (const rejected of ["7", "", 4, undefined]) assert.equal(isControlProtocolVersion(rejected), false);
 });
 
 const agent = () => ({
@@ -290,10 +291,10 @@ const plainRun = () => ({
 
 test("hub messages reach exactly the versions their capability requires", () => {
   const plainDispatch = { type: "dispatch", run: plainRun(), agent: agent() };
-  assert.deepEqual(sendableVersions(plainDispatch), ["1", "2", "3", "4", "5"]);
+  assert.deepEqual(sendableVersions(plainDispatch), ["1", "2", "3", "4", "5", "6"]);
 
   const executionDispatch = { type: "dispatch", run: plainRun(), agent: agent(), execution: { transport: "native-cli" } };
-  assert.deepEqual(sendableVersions(executionDispatch), ["4", "5"]);
+  assert.deepEqual(sendableVersions(executionDispatch), ["4", "5", "6"]);
 
   const version4RunFieldValues = {
     taskId: "task-one",
@@ -304,20 +305,20 @@ test("hub messages reach exactly the versions their capability requires", () => 
   };
   for (const [field, value] of Object.entries(version4RunFieldValues)) {
     const dispatch = { type: "dispatch", run: { ...plainRun(), [field]: value }, agent: agent() };
-    assert.deepEqual(sendableVersions(dispatch), ["4", "5"], `dispatch carrying ${field}`);
+    assert.deepEqual(sendableVersions(dispatch), ["4", "5", "6"], `dispatch carrying ${field}`);
   }
 
   const approvalDecision = {
     type: "approval.decision",
     decision: { approvalId: "approval-one", runId: "run-one", status: "approved", selectedOptionId: "allow-once" }
   };
-  assert.deepEqual(sendableVersions(approvalDecision), ["4", "5"]);
+  assert.deepEqual(sendableVersions(approvalDecision), ["4", "5", "6"]);
 
   const hubRpcResponse = { type: "hub.rpc.response", requestId: "request-one", runId: "run-one", result: null };
-  assert.deepEqual(sendableVersions(hubRpcResponse), ["3", "4", "5"]);
+  assert.deepEqual(sendableVersions(hubRpcResponse), ["3", "4", "5", "6"]);
 
-  assert.deepEqual(sendableVersions({ type: "cancel", runId: "run-one" }), ["1", "2", "3", "4", "5"]);
-  assert.deepEqual(sendableVersions({ type: "ping" }), ["1", "2", "3", "4", "5"]);
+  assert.deepEqual(sendableVersions({ type: "cancel", runId: "run-one" }), ["1", "2", "3", "4", "5", "6"]);
+  assert.deepEqual(sendableVersions({ type: "ping" }), ["1", "2", "3", "4", "5", "6"]);
 });
 
 test("control agent messages are accepted exactly by the versions their capability requires", () => {
@@ -325,7 +326,7 @@ test("control agent messages are accepted exactly by the versions their capabili
     type: "harness.event",
     event: { type: "message.delta", runId: "run-one", sequence: 1, at, text: "hello" }
   };
-  assert.deepEqual(acceptableVersions(harnessEvent), ["4", "5"]);
+  assert.deepEqual(acceptableVersions(harnessEvent), ["4", "5", "6"]);
 
   const sessionBinding = {
     type: "session.binding",
@@ -333,7 +334,7 @@ test("control agent messages are accepted exactly by the versions their capabili
     binding: { providerSessionId: "provider-session-7", harnessId: "codex-cli", transport: "acp-v1", status: "active" },
     at
   };
-  assert.deepEqual(acceptableVersions(sessionBinding), ["4", "5"]);
+  assert.deepEqual(acceptableVersions(sessionBinding), ["4", "5", "6"]);
 
   const workspaceLease = {
     type: "workspace.lease",
@@ -341,12 +342,12 @@ test("control agent messages are accepted exactly by the versions their capabili
     lease: { leaseId: "lease-one", status: "active" },
     at
   };
-  assert.deepEqual(acceptableVersions(workspaceLease), ["4", "5"]);
+  assert.deepEqual(acceptableVersions(workspaceLease), ["4", "5", "6"]);
 
-  assert.deepEqual(acceptableVersions({ type: "sync.complete", nodeId: "node-one", at }), ["2", "3", "4", "5"]);
+  assert.deepEqual(acceptableVersions({ type: "sync.complete", nodeId: "node-one", at }), ["2", "3", "4", "5", "6"]);
   assert.deepEqual(acceptableVersions({
     type: "hub.rpc.request", requestId: "request-one", runId: "run-one", operation: "get_task_context", arguments: {}, at
-  }), ["3", "4", "5"]);
+  }), ["3", "4", "5", "6"]);
 
   const lifecycleMessages = [
     { type: "register", node: { id: "node-one" } },
@@ -358,7 +359,7 @@ test("control agent messages are accepted exactly by the versions their capabili
     { type: "run.cancelled", runId: "run-one", at }
   ];
   for (const message of lifecycleMessages) {
-    assert.deepEqual(acceptableVersions(message), ["1", "2", "3", "4", "5"], `${message.type} must reach every version`);
+    assert.deepEqual(acceptableVersions(message), ["1", "2", "3", "4", "5", "6"], `${message.type} must reach every version`);
   }
 });
 

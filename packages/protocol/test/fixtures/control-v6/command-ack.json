@@ -1,0 +1,11 @@
+{
+  "type": "host-session.command.ack",
+  "nodeId": "node-one",
+  "operation": "start-turn",
+  "commandId": "command-start",
+  "commandDigest": "879d51b7c1d2cdd54f125cc90de1741fee44fe3feba32b828b03925c39a5acc6",
+  "hostHarnessSessionId": "host-session-one",
+  "attachmentEpoch": 4,
+  "disposition": "recorded",
+  "at": "2026-09-30T12:00:01Z"
+}

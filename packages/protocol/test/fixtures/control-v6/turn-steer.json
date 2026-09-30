@@ -1,0 +1,11 @@
+{
+  "type": "host-session.turn.steer",
+  "nodeId": "node-one",
+  "commandId": "command-steer",
+  "commandDigest": "267cf43ffe74fdc46a9f2393942c6d1128b1e093fb3a8973ead58698281f11f5",
+  "hostHarnessSessionId": "host-session-one",
+  "attachmentEpoch": 4,
+  "runId": "run-one",
+  "providerTurnId": "provider-turn-one",
+  "text": "Focus on tests"
+}

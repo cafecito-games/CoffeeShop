@@ -7,6 +7,7 @@ import express from "express";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
 import {
   canSendToControlAgent,
+  isHostSessionControlMessageType,
   isControlProtocolVersion,
   isTerminalTaskStatus,
   isTerminalWorkspaceLeaseStatus,
@@ -17,11 +18,13 @@ import {
   validateProjectProfile,
   validateNodeCapabilityReport,
   validateInstanceControlMessage,
+  validateHostSessionControlMessage,
   validateOrchestrationControlAgentMessage,
   type Agent,
   type ComputeNode,
   type ControlAgentToHub,
   type ControlProtocolVersion,
+  type HostSessionControlMessage,
   type HubToControlAgent,
   type InstanceHubMessage,
   type Run,
@@ -85,6 +88,9 @@ import { newEvent, newId, newMessage, Store } from "./store.js";
 import { newThread, updateThreadByOperator, updateThreadForRun } from "./threads.js";
 import { runTranscriptFor } from "./runTranscripts.js";
 import { cleanupWorkspaceLeaseByOperator, receiveWorkspaceLeaseUpdate, reconcileWorkspaceLeases, workspaceLeaseConfirmation } from "./workspaceLeases.js";
+
+const isHostSessionControlMessage = (message: ControlAgentToHub): message is HostSessionControlMessage =>
+  isHostSessionControlMessageType(message.type);
 
 const previewDeliveryConfiguration = parsePreviewDeliveryConfig(process.env);
 const app = express();
@@ -1174,6 +1180,16 @@ wss.on("connection", (socket, request) => {
       if (!validated.ok || validated.value.nodeId !== nodeId) return;
       recordNodeCapabilityReport(validated.value);
       requestScheduling();
+      return;
+    } else if (isHostSessionControlMessage(message)) {
+      const validated = validateHostSessionControlMessage(decoded, protocolVersion);
+      if (!validated.ok || !nodeId || !isCurrentSocket() || validated.value.nodeId !== nodeId) {
+        console.warn(`withheld invalid or unauthenticated ${decodedType} frame`);
+        return;
+      }
+      // #159/#160 own durable inventory and command application. Until those consumers exist, a
+      // valid v6 frame is deliberately withheld rather than falling through to run lifecycle state.
+      console.warn(`withheld ${decodedType} from ${nodeId}: interactive-session state is not enabled`);
       return;
     } else if (message.type.startsWith("run.")) {
       const runId = message.runId;

@@ -1,0 +1,14 @@
+{
+  "type": "host-session.harness-event",
+  "nodeId": "node-one",
+  "hostHarnessSessionId": "host-session-one",
+  "attachmentEpoch": 4,
+  "providerTurnId": "provider-turn-one",
+  "event": {
+    "type": "message.delta",
+    "runId": "run-one",
+    "sequence": 1,
+    "at": "2026-09-30T12:01:00Z",
+    "text": "hello"
+  }
+}

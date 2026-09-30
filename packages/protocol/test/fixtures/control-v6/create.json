@@ -1,0 +1,10 @@
+{
+  "type": "host-session.create",
+  "nodeId": "node-one",
+  "requestId": "request-create",
+  "commandId": "command-create",
+  "commandDigest": "a310f481ea9a5377de8e4764f6a53ee03ca818d24468ff10f5f823e6a03a60ba",
+  "harnessId": "codex-cli",
+  "workspace": "/workspaces/coffee-shop",
+  "model": "gpt-5"
+}

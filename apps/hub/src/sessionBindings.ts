@@ -65,7 +65,7 @@ const isContinuable = (state: Readonly<State>, run: Run) => {
  * malformed identity never matches a binding and never continues a session: the resume paths below
  * are fail-closed, and the load-time assertion is what surfaces the malformed record itself.
  */
-const actorOf = (record: { agentId?: string; instanceId?: string; allocationId?: string }) => {
+const actorOf = (record: { agentId?: string; instanceId?: string; allocationId?: string; hostHarnessSessionId?: string }) => {
   try {
     return recordActor(record, "Record");
   } catch {
@@ -82,6 +82,7 @@ const sameActor = (left: HarnessSessionBinding, right: HarnessSessionBinding) =>
   const [first, second] = [actorOf(left), actorOf(right)];
   if (first === undefined || second === undefined) return false;
   if (first.kind !== second.kind) return false;
+  if (first.kind === "host-session") return false;
   return first.kind === "agent" ? first.agentId === (second as { agentId: string }).agentId
     : first.instanceId === (second as { instanceId: string }).instanceId;
 };
@@ -96,9 +97,12 @@ const sameContext = (left: HarnessSessionBinding, right: HarnessSessionBinding) 
  * lives in a process the replacement allocation does not own, so it can never be resumed. An actor
  * that is absent or half-written on either side never matches.
  */
-export function bindingActorMatches(binding: HarnessSessionBinding, record: { agentId?: string; instanceId?: string; allocationId?: string }) {
+export function bindingActorMatches(binding: HarnessSessionBinding, record: {
+  agentId?: string; instanceId?: string; allocationId?: string; hostHarnessSessionId?: string;
+}) {
   const [bindingActor, recordedActor] = [actorOf(binding), actorOf(record)];
   if (bindingActor === undefined || recordedActor === undefined || bindingActor.kind !== recordedActor.kind) return false;
+  if (bindingActor.kind === "host-session") return false;
   return bindingActor.kind === "agent"
     ? bindingActor.agentId === (recordedActor as { agentId: string }).agentId
     : bindingActor.instanceId === (recordedActor as { instanceId: string }).instanceId

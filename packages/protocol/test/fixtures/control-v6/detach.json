@@ -1,0 +1,9 @@
+{
+  "type": "host-session.detach",
+  "nodeId": "node-one",
+  "commandId": "command-detach",
+  "commandDigest": "1cbab6d39be545b0e32061264e1e099c4f95496ec7bb966434f36ec525b3684d",
+  "hostHarnessSessionId": "host-session-one",
+  "attachmentEpoch": 4,
+  "threadId": "thread-one"
+}

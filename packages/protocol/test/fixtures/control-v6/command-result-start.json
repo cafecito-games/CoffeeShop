@@ -1,0 +1,33 @@
+{
+  "type": "host-session.command.result",
+  "nodeId": "node-one",
+  "operation": "start-turn",
+  "commandId": "command-start",
+  "commandDigest": "879d51b7c1d2cdd54f125cc90de1741fee44fe3feba32b828b03925c39a5acc6",
+  "hostHarnessSessionId": "host-session-one",
+  "attachmentEpoch": 4,
+  "outcome": "succeeded",
+  "providerTurnId": "provider-turn-one",
+  "session": {
+    "hostHarnessSessionId": "host-session-one",
+    "nodeId": "node-one",
+    "harnessId": "codex-cli",
+    "providerSessionId": "provider-session-one",
+    "workspace": "/workspaces/coffee-shop",
+    "source": "provider-history",
+    "status": "running",
+    "controlMode": "full",
+    "operations": [
+      "attach",
+      "close",
+      "read-history",
+      "start-turn"
+    ],
+    "revision": 2,
+    "providerTurnId": "provider-turn-one",
+    "summary": "Existing provider conversation",
+    "createdAt": "2026-09-30T12:00:00Z",
+    "updatedAt": "2026-09-30T12:01:00Z"
+  },
+  "at": "2026-09-30T12:01:00Z"
+}

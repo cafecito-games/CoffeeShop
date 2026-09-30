@@ -92,6 +92,7 @@ export function promoteThreadToInstanceInState(state: State, threadId: string, c
   // The deterministic marker: a thread that already names an instance has been promoted exactly once.
   if (orchestrator.kind === "instance") return ineligible("the thread is already orchestrated by an instance");
   if (orchestrator.kind === "external") return ineligible("an externally orchestrated thread has no hub-hosted orchestrator");
+  if (orchestrator.kind === "host-session") return ineligible("a host-session thread is not a legacy agent promotion candidate");
   if (hasActiveLegacyRun(state, thread.id)) return ineligible("an active legacy run must finish through its original path first");
   const template = templateForLegacyAgent(state, orchestrator.agentId);
   if (!template) return ineligible(`agent ${orchestrator.agentId} has no imported template, so no authority can be created for it`);
