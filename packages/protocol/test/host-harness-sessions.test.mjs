@@ -487,6 +487,21 @@ test("interactive-session registration is admitted only on v6 with sorted driver
   assert.doesNotThrow(() => protocol.canAcceptFromControlAgent({ type: "register", protocolVersion: "6" }, "6"));
   assert.equal(protocol.canAcceptFromControlAgent({ type: "register", protocolVersion: "6" }, "6"), false,
     "a malformed register must make the boolean gate fail closed");
+  for (const invalidHarness of [null, false, 7, "codex-cli"]) {
+    // Keep the exact v6 registration producer shape and vary only the untrusted array element.
+    const invalidRegistration = structuredClone(registration);
+    invalidRegistration.node.harnesses = [invalidHarness];
+    assert.doesNotThrow(() => protocol.requiredCapabilityForControlAgentMessage(invalidRegistration),
+      `capability detection must fail closed for ${JSON.stringify(invalidHarness)}`);
+    assert.doesNotThrow(() => protocol.canAcceptFromControlAgent(invalidRegistration, "6"),
+      `the boolean gate must fail closed for ${JSON.stringify(invalidHarness)}`);
+    assert.equal(protocol.canAcceptFromControlAgent(invalidRegistration, "6"), false);
+    const sparseInvalidRegistration = {
+      type: "register", protocolVersion: "6", node: { id: "node-one", harnesses: [invalidHarness] }
+    };
+    assert.equal(protocol.canAcceptFromControlAgent(sparseInvalidRegistration, "6"), false,
+      "an invalid harness element cannot fall through as a capability-free legacy register");
+  }
   const malformed = structuredClone(registration);
   malformed.node.harnesses[0].interactiveSessions.operations = ["discover", "create"];
   assert.equal(protocol.canAcceptFromControlAgent(malformed, "6"), false);
@@ -543,6 +558,18 @@ test("every host-session byte limit accepts its exact boundary", () => {
     nextCursor: "c".repeat(protocol.hostHarnessSessionLimits.historyCursorBytes), truncated: true, at
   };
   assert.equal(protocol.validateHostSessionControlMessage(history, "6").ok, true);
+});
+
+test("turn prompt fields accept 65,536 UTF-8 bytes and reject 65,537", () => {
+  const exact = "é".repeat(protocol.hostHarnessSessionLimits.promptBytes / 2);
+  const over = exact + "a";
+  for (const [fixtureName, field] of [["turn-start", "prompt"], ["turn-steer", "text"]]) {
+    // These are the exact language-neutral command producer shapes with only the bounded field changed.
+    const atLimit = seal({ ...readFixture(fixtureName), [field]: exact });
+    assert.equal(protocol.validateHostSessionHubMessage(atLimit, "6").ok, true, `${fixtureName} at limit`);
+    assert.equal(protocol.hostHarnessSessionCommandDigest({ ...atLimit, [field]: over }).ok, false,
+      `${fixtureName} one byte over`);
+  }
 });
 
 test("checked-in v6 fixtures are exact language-neutral producer bytes", () => {

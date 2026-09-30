@@ -479,6 +479,39 @@ func TestHostSessionBoundsAndSecretScreeningUseUTF8Bytes(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestHostSessionTurnPromptFieldsUseExactUTF8ByteBoundary(t *testing.T) {
+	exact := strings.Repeat("é", HostHarnessSessionLimits.PromptBytes/2)
+	over := exact + "a"
+	tests := []struct {
+		fixture string
+		set     func(*HostSessionHubMessage, string)
+	}{
+		{fixture: "turn-start", set: func(message *HostSessionHubMessage, value string) { message.Prompt = value }},
+		{fixture: "turn-steer", set: func(message *HostSessionHubMessage, value string) { message.Text = value }},
+	}
+	for _, test := range tests {
+		t.Run(test.fixture, func(t *testing.T) {
+			// Start from the exact language-neutral command producer shape and vary only its bounded field.
+			var message HostSessionHubMessage
+			require.NoError(t, json.Unmarshal(loadHostSessionFixture(t, test.fixture), &message))
+			test.set(&message, exact)
+			message.CommandDigest = ""
+			digest, err := HostHarnessSessionCommandDigest(message)
+			require.NoError(t, err)
+			message.CommandDigest = digest
+			data, err := json.Marshal(message)
+			require.NoError(t, err)
+			_, err = DecodeHostSessionHubMessage(data, "6")
+			require.NoError(t, err, "65,536 UTF-8 bytes must be accepted")
+
+			test.set(&message, over)
+			message.CommandDigest = ""
+			_, err = HostHarnessSessionCommandDigest(message)
+			require.Error(t, err, "65,537 UTF-8 bytes must be rejected")
+		})
+	}
+}
+
 func slicesContain(values []string, target string) bool {
 	for _, value := range values {
 		if value == target {

@@ -669,7 +669,9 @@ export function requiredCapabilityForControlAgentMessage(message: ControlAgentTo
     case "register":
       if (!isRecord(message.node)) return undefined;
       if (Array.isArray(message.node?.harnesses)
-        && message.node.harnesses.some((harness) => harness.interactiveSessions !== undefined)) return "interactive-sessions";
+        && message.node.harnesses.some((harness) => isRecord(harness) && harness.interactiveSessions !== undefined)) {
+        return "interactive-sessions";
+      }
       return message.node.instanceCapacity !== undefined || message.node.activeInstances !== undefined ? "instances" : undefined;
     case "heartbeat":
       return message.activeInstances !== undefined || message.activeInstanceIds !== undefined ? "instances" : undefined;
@@ -712,7 +714,8 @@ export const canSendToControlAgent = (message: HubToControlAgent | InstanceHubMe
 
 export const canAcceptFromControlAgent = (message: ControlAgentToHub | InstanceControlMessage, version: ControlProtocolVersion) => {
   if (!knownMessageType(message.type, controlAgentToHubMessageTypes, instanceControlMessageTypes)) return false;
-  if (message.type === "register" && !isRecord(message.node)) return false;
+  if (message.type === "register" && (!isRecord(message.node) || (Array.isArray(message.node.harnesses)
+    && !message.node.harnesses.every(isRecord)))) return false;
   const capability = requiredCapabilityForControlAgentMessage(message);
   if (capability === "interactive-sessions") {
     if (message.type === "register") return validateHostSessionRegistration(message, version).ok;
