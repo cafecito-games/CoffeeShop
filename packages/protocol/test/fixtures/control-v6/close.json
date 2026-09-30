@@ -1,0 +1,8 @@
+{
+  "type": "host-session.close",
+  "nodeId": "node-one",
+  "commandId": "command-close",
+  "commandDigest": "edea933765af84fbf408296b1f9dbe06854f3f3b0d90183c0048fb62ec1cf310",
+  "hostHarnessSessionId": "host-session-one",
+  "attachmentEpoch": 4
+}

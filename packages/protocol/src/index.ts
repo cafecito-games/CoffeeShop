@@ -36,6 +36,8 @@ export interface HarnessProfile {
   transports?: HarnessTransport[];
   /** Version-4 inventory: capabilities negotiated with an explicitly installed ACP adapter. */
   acp?: AcpAgentCapabilities;
+  /** Version-6 provider-neutral interactive-session operations implemented by this harness. */
+  interactiveSessions?: HostHarnessSessionInteractiveProfile;
   /** The node administrator's approval policy for this harness; absent means `manual`. Read-only to the hub. */
   approvalPolicy?: ApprovalPolicy;
   /**
@@ -344,6 +346,10 @@ export interface Run {
    * Coffee Shop never resumes it; ACP sessions are identified by their session binding instead.
    */
   providerSessionId?: string;
+  /** Version-6: the stable Barista-minted principal for an adopted or managed host session. */
+  hostHarnessSessionId?: HostHarnessSessionId;
+  /** Version-6: the provider turn accepted for this Run, fixed at most once after acceptance. */
+  providerTurnId?: string;
 }
 
 export const timelineEventTypes = ["run", "status", "handoff", "node", "message"] as const;
@@ -388,17 +394,18 @@ export type ThreadStatus = typeof threadStatuses[number];
  * `ownerAgentId` has always described. An `external` thread is orchestrated by an operator's own
  * Claude Code session through an orchestrator client, and has no owner agent.
  */
-export const threadOrchestratorKinds = ["agent", "external", "instance"] as const;
+export const threadOrchestratorKinds = ["agent", "external", "instance", "host-session"] as const;
 export type ThreadOrchestratorKind = typeof threadOrchestratorKinds[number];
 
 export type ThreadOrchestrator =
   | { kind: "instance"; instanceId: string }
+  | { kind: "host-session"; hostHarnessSessionId: HostHarnessSessionId }
   /** Compatibility-only persisted input. */
   | { kind: "agent"; agentId: string }
   | { kind: "external"; clientId: string };
 
 /** Existing consumers remain explicitly legacy until their instance migration. */
-export type LegacyThreadOrchestrator = Exclude<ThreadOrchestrator, { kind: "instance" }>;
+export type LegacyThreadOrchestrator = Exclude<ThreadOrchestrator, { kind: "instance" } | { kind: "host-session" }>;
 export interface Thread<Orchestrator extends ThreadOrchestrator = ThreadOrchestrator> {
   id: string;
   title: string;
@@ -436,6 +443,8 @@ export interface Snapshot {
   taskMessages?: TaskMessage[];
   taskMessageAcknowledgements?: TaskMessageAcknowledgement[];
   sessionBindings?: HarnessSessionBinding[];
+  /** Version-6 durable host-session projection; absence is the only pre-v6 migration default. */
+  hostHarnessSessions?: HostHarnessSession[];
   /** Per-thread orchestrator inbox delivery state; see `OrchestratorInbox`. */
   orchestratorInboxes?: OrchestratorInbox[];
   /** Public view of the minted orchestrator credentials; never carries a secret or its hash. */
@@ -530,7 +539,8 @@ export type HubToControlAgent =
   | { type: "approval.decision"; decision: ApprovalDecision }
   | { type: "workspace.cleanup"; runId: string; lease: WorkspaceLeaseGrant; mode: WorkspaceCleanupMode }
   | { type: "workspace.lease.confirmed"; runId: string; leaseId: string; status: WorkspaceLeaseStatus }
-  | { type: "ping" };
+  | { type: "ping" }
+  | HostSessionHubMessage;
 
 export type ControlAgentToHub =
   | { type: "register"; protocolVersion?: ControlProtocolVersion; node: ComputeNode }
@@ -553,7 +563,8 @@ export type ControlAgentToHub =
   | { type: "capability.report"; report: NodeCapabilityReport }
   | { type: "component.inventory"; report: ComponentInventoryReport }
   | { type: "capability-pack.readiness"; report: CapabilityPackReadinessReport }
-  | { type: "approval.undeliverable"; runId: string; approvalId: string; reason: string; at: string };
+  | { type: "approval.undeliverable"; runId: string; approvalId: string; reason: string; at: string }
+  | HostSessionControlMessage;
 
 /** @deprecated Use HubToControlAgent. */
 export type HubToWorker = HubToControlAgent;
@@ -567,11 +578,11 @@ export type WorkerToHub = ControlAgentToHub;
  * upgrades, but a message may only be sent to a peer whose version supports the capability that
  * message requires. Unknown versions are rejected before any dispatch.
  */
-export const controlProtocolVersions = ["1", "2", "3", "4", "5"] as const;
+export const controlProtocolVersions = ["1", "2", "3", "4", "5", "6"] as const;
 export type ControlProtocolVersion = typeof controlProtocolVersions[number];
-export const latestControlProtocolVersion: ControlProtocolVersion = "5";
+export const latestControlProtocolVersion: ControlProtocolVersion = "6";
 
-export const controlProtocolCapabilities = ["replay-barrier", "hub-rpc", "orchestration", "instances", "component-inventory", "capability-pack-readiness"] as const;
+export const controlProtocolCapabilities = ["replay-barrier", "hub-rpc", "orchestration", "instances", "component-inventory", "capability-pack-readiness", "interactive-sessions"] as const;
 export type ControlProtocolCapability = typeof controlProtocolCapabilities[number];
 
 const capabilityIntroducedIn: Readonly<Record<ControlProtocolCapability, ControlProtocolVersion>> = {
@@ -580,7 +591,8 @@ const capabilityIntroducedIn: Readonly<Record<ControlProtocolCapability, Control
   orchestration: "4",
   instances: "5",
   "component-inventory": "5",
-  "capability-pack-readiness": "5"
+  "capability-pack-readiness": "5",
+  "interactive-sessions": "6"
 };
 
 const isOneOf = <T extends string>(values: readonly T[]) => (value: unknown): value is T =>
@@ -596,6 +608,17 @@ export const supportsControlCapability = (version: ControlProtocolVersion, capab
 /** The capability a hub→Barista message needs, or undefined when every version accepts it. */
 export function requiredCapabilityForHubMessage(message: HubToControlAgent | InstanceHubMessage): ControlProtocolCapability | undefined {
   switch (message.type) {
+    case "host-session.create":
+    case "host-session.adopt":
+    case "host-session.attach":
+    case "host-session.detach":
+    case "host-session.history.read":
+    case "host-session.turn.start":
+    case "host-session.turn.steer":
+    case "host-session.turn.interrupt":
+    case "host-session.approval.decision":
+    case "host-session.close":
+      return "interactive-sessions";
     case "instance.provision":
     case "instance.release":
       return "instances";
@@ -617,6 +640,14 @@ export function requiredCapabilityForHubMessage(message: HubToControlAgent | Ins
 /** The capability a Barista→hub message needs, or undefined when every version may send it. */
 export function requiredCapabilityForControlAgentMessage(message: ControlAgentToHub | InstanceControlMessage): ControlProtocolCapability | undefined {
   switch (message.type) {
+    case "host-session.inventory.page":
+    case "host-session.inventory.complete":
+    case "host-session.update":
+    case "host-session.history.page":
+    case "host-session.harness-event":
+    case "host-session.command.ack":
+    case "host-session.command.result":
+      return "interactive-sessions";
     case "instance.ready":
     case "instance.failed":
     case "instance.released":
@@ -636,6 +667,11 @@ export function requiredCapabilityForControlAgentMessage(message: ControlAgentTo
     case "capability-pack.readiness":
       return "capability-pack-readiness";
     case "register":
+      if (!isRecord(message.node)) return undefined;
+      if (Array.isArray(message.node?.harnesses)
+        && message.node.harnesses.some((harness) => isRecord(harness) && harness.interactiveSessions !== undefined)) {
+        return "interactive-sessions";
+      }
       return message.node.instanceCapacity !== undefined || message.node.activeInstances !== undefined ? "instances" : undefined;
     case "heartbeat":
       return message.activeInstances !== undefined || message.activeInstanceIds !== undefined ? "instances" : undefined;
@@ -653,21 +689,38 @@ export function requiredCapabilityForControlAgentMessage(message: ControlAgentTo
  * refused before any capability is resolved, so a message shape this build does not know is never
  * forwarded on the strength of its remaining fields.
  */
-const hubToControlAgentMessageTypes = ["dispatch", "cancel", "hub.rpc.response", "approval.decision", "workspace.cleanup", "workspace.lease.confirmed", "ping"] as const;
-const controlAgentToHubMessageTypes = ["register", "sync.complete", "heartbeat", "run.started", "run.output", "run.completed", "run.failed", "run.cancelled", "hub.rpc.request", "harness.event", "session.binding", "workspace.lease", "capability.report", "component.inventory", "capability-pack.readiness", "approval.undeliverable"] as const;
+export const hostSessionHubMessageTypes = [
+  "host-session.create", "host-session.adopt", "host-session.attach", "host-session.detach",
+  "host-session.history.read", "host-session.turn.start", "host-session.turn.steer",
+  "host-session.turn.interrupt", "host-session.approval.decision", "host-session.close"
+] as const;
+export const hostSessionControlMessageTypes = [
+  "host-session.inventory.page", "host-session.inventory.complete", "host-session.update",
+  "host-session.history.page", "host-session.harness-event", "host-session.command.ack",
+  "host-session.command.result"
+] as const;
+const hubToControlAgentMessageTypes = ["dispatch", "cancel", "hub.rpc.response", "approval.decision", "workspace.cleanup", "workspace.lease.confirmed", "ping", ...hostSessionHubMessageTypes] as const;
+const controlAgentToHubMessageTypes = ["register", "sync.complete", "heartbeat", "run.started", "run.output", "run.completed", "run.failed", "run.cancelled", "hub.rpc.request", "harness.event", "session.binding", "workspace.lease", "capability.report", "component.inventory", "capability-pack.readiness", "approval.undeliverable", ...hostSessionControlMessageTypes] as const;
 const knownMessageType = (type: string, legacy: readonly string[], instance: readonly string[]) =>
   legacy.includes(type) || instance.includes(type);
 
 export const canSendToControlAgent = (message: HubToControlAgent | InstanceHubMessage, version: ControlProtocolVersion) => {
   if (!knownMessageType(message.type, hubToControlAgentMessageTypes, instanceHubMessageTypes)) return false;
   const capability = requiredCapabilityForHubMessage(message);
+  if (capability === "interactive-sessions") return validateHostSessionHubMessage(message, version).ok;
   if (capability === "instances") return validateInstanceHubMessage(message, version).ok;
   return isControlProtocolVersion(version) && (capability === undefined || supportsControlCapability(version, capability));
 };
 
 export const canAcceptFromControlAgent = (message: ControlAgentToHub | InstanceControlMessage, version: ControlProtocolVersion) => {
   if (!knownMessageType(message.type, controlAgentToHubMessageTypes, instanceControlMessageTypes)) return false;
+  if (message.type === "register" && (!isRecord(message.node) || (Array.isArray(message.node.harnesses)
+    && !message.node.harnesses.every(isRecord)))) return false;
   const capability = requiredCapabilityForControlAgentMessage(message);
+  if (capability === "interactive-sessions") {
+    if (message.type === "register") return validateHostSessionRegistration(message, version).ok;
+    return validateHostSessionControlMessage(message, version).ok;
+  }
   if (capability === "instances") return validateInstanceControlMessage(message, version).ok;
   if (capability === "component-inventory") return supportsControlCapability(version, capability)
     && message.type === "component.inventory" && validateComponentInventoryReport(message.report).ok;
@@ -1111,6 +1164,214 @@ export interface HarnessSessionBindingUpdate {
  * `protocol.SessionResumePromptMaximumBytes`.
  */
 export const sessionResumePromptMaximumBytes = 64 * 1024;
+
+/*
+ * Host-resident interactive harness sessions (control protocol v6).
+ *
+ * Barista alone mints `hostHarnessSessionId`. The hub persists that opaque identity and owns the
+ * attachment epoch, Thread/Run authority, and command intent without rewriting provider identity.
+ * These records are deliberately separate from run-scoped HarnessSessionBinding records above.
+ */
+export type HostHarnessSessionId = string;
+
+export const hostHarnessSessionSources = ["coffee-shop-managed", "provider-history", "external-live"] as const;
+export type HostHarnessSessionSource = typeof hostHarnessSessionSources[number];
+export const isHostHarnessSessionSource = isOneOf(hostHarnessSessionSources);
+
+export const hostHarnessSessionStatuses = ["idle", "running", "awaiting-approval", "active-elsewhere", "offline", "closed", "failed"] as const;
+export type HostHarnessSessionStatus = typeof hostHarnessSessionStatuses[number];
+export const isHostHarnessSessionStatus = isOneOf(hostHarnessSessionStatuses);
+
+export const hostHarnessSessionControlModes = ["observe", "resume", "full"] as const;
+export type HostHarnessSessionControlMode = typeof hostHarnessSessionControlModes[number];
+export const isHostHarnessSessionControlMode = isOneOf(hostHarnessSessionControlModes);
+
+export const hostHarnessSessionOperations = ["read-history", "attach", "detach", "start-turn", "steer", "interrupt", "resolve-approval", "close"] as const;
+export type HostHarnessSessionOperation = typeof hostHarnessSessionOperations[number];
+export const isHostHarnessSessionOperation = isOneOf(hostHarnessSessionOperations);
+
+export const hostHarnessDriverOperations = ["discover", "create", "adopt"] as const;
+export type HostHarnessDriverOperation = typeof hostHarnessDriverOperations[number];
+export const isHostHarnessDriverOperation = isOneOf(hostHarnessDriverOperations);
+
+export const hostHarnessSessionCommandOperations = ["create", "adopt", "attach", "detach", "start-turn", "steer", "interrupt", "resolve-approval", "close"] as const;
+export type HostHarnessSessionCommandOperation = typeof hostHarnessSessionCommandOperations[number];
+export const isHostHarnessSessionCommandOperation = isOneOf(hostHarnessSessionCommandOperations);
+
+export const hostHarnessSessionCommandDispositions = ["recorded", "replayed"] as const;
+export type HostHarnessSessionCommandDisposition = typeof hostHarnessSessionCommandDispositions[number];
+export const isHostHarnessSessionCommandDisposition = isOneOf(hostHarnessSessionCommandDispositions);
+
+export const hostHarnessSessionCommandOutcomes = ["succeeded", "rejected", "uncertain"] as const;
+export type HostHarnessSessionCommandOutcome = typeof hostHarnessSessionCommandOutcomes[number];
+export const isHostHarnessSessionCommandOutcome = isOneOf(hostHarnessSessionCommandOutcomes);
+
+export const hostHarnessSessionHistoryKinds = ["user", "assistant", "system", "summary"] as const;
+export type HostHarnessSessionHistoryKind = typeof hostHarnessSessionHistoryKinds[number];
+export const isHostHarnessSessionHistoryKind = isOneOf(hostHarnessSessionHistoryKinds);
+
+export const hostHarnessSessionLimits = {
+  identifierBytes: 256,
+  workspaceBytes: 4_096,
+  diagnosticBytes: 2_000,
+  promptBytes: 65_536,
+  operationCapabilities: 16,
+  sessionsPerInventoryPage: 64,
+  pagesPerGeneration: 64,
+  sessionsPerGeneration: 4_096,
+  historyItemsPerPage: 100,
+  historyItemTextBytes: 32_768,
+  historyCursorBytes: 512
+} as const;
+
+export const hostHarnessSessionTransitions: Readonly<Record<HostHarnessSessionStatus, readonly HostHarnessSessionStatus[]>> = {
+  idle: ["running", "active-elsewhere", "offline", "closed", "failed"],
+  running: ["awaiting-approval", "idle", "active-elsewhere", "offline", "closed", "failed"],
+  "awaiting-approval": ["running", "idle", "active-elsewhere", "offline", "closed", "failed"],
+  "active-elsewhere": ["idle", "offline", "closed", "failed"],
+  offline: ["idle", "running", "awaiting-approval", "active-elsewhere", "closed", "failed"],
+  closed: [],
+  failed: []
+};
+
+export const canTransitionHostHarnessSession = (from: HostHarnessSessionStatus, to: HostHarnessSessionStatus) =>
+  hostHarnessSessionTransitions[from].includes(to);
+
+/** Capability/status preflight only; identity, epoch, and writer correlation remain mandatory. */
+export function canOperateHostHarnessSession(value: unknown, operation: HostHarnessSessionOperation): boolean {
+  const session = validateHostHarnessSessionObservation(value);
+  if (!session.ok || !isHostHarnessSessionOperation(operation) || !session.value.operations.includes(operation)) return false;
+  return operation !== "close" || (session.value.status !== "closed" && session.value.status !== "failed");
+}
+
+export interface HostHarnessSessionInteractiveProfile {
+  operations: HostHarnessDriverOperation[];
+}
+
+/** Provider-neutral evidence authored by Barista. Hub-owned attachment fields never appear here. */
+export interface HostHarnessSessionObservation {
+  hostHarnessSessionId: HostHarnessSessionId;
+  nodeId: string;
+  harnessId: HarnessId;
+  providerSessionId: string;
+  workspace: string;
+  source: HostHarnessSessionSource;
+  status: HostHarnessSessionStatus;
+  controlMode: HostHarnessSessionControlMode;
+  operations: HostHarnessSessionOperation[];
+  revision: number;
+  providerTurnId?: string;
+  summary?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Durable hub projection. One attachment epoch fences the sole writer. */
+export interface HostHarnessSession extends HostHarnessSessionObservation {
+  attachedThreadId?: string;
+  activeRunId?: string;
+  attachmentEpoch: number;
+}
+
+export interface HostHarnessSessionHistoryItem {
+  id: string;
+  kind: HostHarnessSessionHistoryKind;
+  text: string;
+  providerTurnId?: string;
+  at?: string;
+  truncated: boolean;
+}
+
+interface HostSessionCommandBase {
+  nodeId: string;
+  commandId: string;
+  commandDigest: string;
+}
+
+interface ExistingHostSessionCommandBase extends HostSessionCommandBase {
+  hostHarnessSessionId: HostHarnessSessionId;
+  attachmentEpoch: number;
+}
+
+export type HostSessionHubMessage =
+  | HostSessionCommandBase & { type: "host-session.create"; requestId: string; harnessId: HarnessId; workspace: string; model?: string }
+  | HostSessionCommandBase & { type: "host-session.adopt"; requestId: string; harnessId: HarnessId; providerSessionId: string; workspace: string }
+  | ExistingHostSessionCommandBase & { type: "host-session.attach"; threadId: string; expectedStatus: HostHarnessSessionStatus }
+  | ExistingHostSessionCommandBase & { type: "host-session.detach"; threadId: string }
+  | ExistingHostSessionCommandBase & { type: "host-session.history.read"; requestId: string; cursor?: string; limit: number }
+  | ExistingHostSessionCommandBase & { type: "host-session.turn.start"; runId: string; prompt: string }
+  | ExistingHostSessionCommandBase & { type: "host-session.turn.steer"; runId: string; providerTurnId: string; text: string }
+  | ExistingHostSessionCommandBase & { type: "host-session.turn.interrupt"; runId: string; providerTurnId: string }
+  | ExistingHostSessionCommandBase & { type: "host-session.approval.decision"; runId: string; providerTurnId?: string; decision: ApprovalDecision }
+  | ExistingHostSessionCommandBase & { type: "host-session.close" };
+
+export type HostHarnessSessionInventoryPage = {
+  type: "host-session.inventory.page";
+  nodeId: string;
+  generation: number;
+  pageIndex: number;
+  sessions: HostHarnessSessionObservation[];
+  at: string;
+};
+
+export type HostHarnessSessionInventoryComplete = {
+  type: "host-session.inventory.complete";
+  nodeId: string;
+  generation: number;
+  pageCount: number;
+  sessionCount: number;
+  at: string;
+};
+
+/** One fully validated, atomically committable inventory generation. */
+export interface HostHarnessSessionInventoryGeneration {
+  nodeId: string;
+  generation: number;
+  pages: HostHarnessSessionInventoryPage[];
+  complete: HostHarnessSessionInventoryComplete;
+  sessions: HostHarnessSessionObservation[];
+}
+
+export type HostHarnessSessionCommandAck = {
+  type: "host-session.command.ack";
+  nodeId: string;
+  operation: HostHarnessSessionCommandOperation;
+  commandId: string;
+  commandDigest: string;
+  disposition: HostHarnessSessionCommandDisposition;
+  at: string;
+} & (
+  | { operation: "create" | "adopt"; requestId: string; hostHarnessSessionId?: never; attachmentEpoch?: never }
+  | { operation: Exclude<HostHarnessSessionCommandOperation, "create" | "adopt">; requestId?: never; hostHarnessSessionId: HostHarnessSessionId; attachmentEpoch: number }
+);
+
+export type HostHarnessSessionCommandResult = {
+  type: "host-session.command.result";
+  nodeId: string;
+  operation: HostHarnessSessionCommandOperation;
+  commandId: string;
+  commandDigest: string;
+  outcome: HostHarnessSessionCommandOutcome;
+  code?: string;
+  detail?: string;
+  providerTurnId?: string;
+  session?: HostHarnessSessionObservation;
+  at: string;
+} & (
+  | { operation: "create" | "adopt"; requestId: string; hostHarnessSessionId?: never; attachmentEpoch?: never }
+  | { operation: Exclude<HostHarnessSessionCommandOperation, "create" | "adopt">; requestId?: never; hostHarnessSessionId: HostHarnessSessionId; attachmentEpoch: number }
+);
+
+export type HostSessionControlMessage =
+  | HostHarnessSessionInventoryPage
+  | HostHarnessSessionInventoryComplete
+  | { type: "host-session.update"; nodeId: string; session: HostHarnessSessionObservation; at: string }
+  | { type: "host-session.history.page"; nodeId: string; hostHarnessSessionId: HostHarnessSessionId; requestId: string;
+      items: HostHarnessSessionHistoryItem[]; nextCursor?: string; truncated: boolean; at: string }
+  | { type: "host-session.harness-event"; nodeId: string; hostHarnessSessionId: HostHarnessSessionId;
+      attachmentEpoch: number; providerTurnId?: string; event: HarnessEvent }
+  | HostHarnessSessionCommandAck
+  | HostHarnessSessionCommandResult;
 
 /*
  * Orchestrator inboxes.
@@ -1687,6 +1948,34 @@ export function withOrchestrationDefaults<T extends Omit<Snapshot, "generatedAt"
   return target;
 }
 
+/**
+ * Shared pre-v6 migration rule for the durable host-session projection. Only an absent collection
+ * defaults to empty; present data is validated without rewriting identity or attachment state.
+ */
+export function withHostHarnessSessionDefaults<T extends Omit<Snapshot, "generatedAt">>(
+  state: T
+): T & Required<Pick<Snapshot, "hostHarnessSessions">> {
+  const target = state as T & Required<Pick<Snapshot, "hostHarnessSessions">>;
+  if (target.hostHarnessSessions === undefined) {
+    target.hostHarnessSessions = [];
+    return target;
+  }
+  if (!Array.isArray(target.hostHarnessSessions)) throw new Error("Persisted host session collection is malformed");
+  const ids = new Set<string>();
+  const providers = new Set<string>();
+  for (const [index, candidate] of target.hostHarnessSessions.entries()) {
+    const session = validateHostHarnessSession(candidate);
+    if (!session.ok) throw new Error(`Persisted host session ${index} is invalid: ${session.reason}`);
+    const provider = [session.value.nodeId, session.value.harnessId, session.value.workspace, session.value.providerSessionId].join("\u0000");
+    if (ids.has(session.value.hostHarnessSessionId) || providers.has(provider)) {
+      throw new Error("Persisted host session collection contains duplicate identity");
+    }
+    ids.add(session.value.hostHarnessSessionId);
+    providers.add(provider);
+  }
+  return target;
+}
+
 /*
  * Runtime validation of untrusted version-4 input. Validators never supply defaults for status or
  * discriminator fields: an unknown or missing value is rejected with a reason for diagnostics.
@@ -1712,6 +2001,540 @@ const isDiagnostic = (value: unknown) => isBoundedString(value, harnessEventLimi
 
 const accept = <T>(value: T): Validation<T> => ({ ok: true, value });
 const reject = <T>(reason: string): Validation<T> => ({ ok: false, reason });
+
+const hostSessionObservationKeys = [
+  "hostHarnessSessionId", "nodeId", "harnessId", "providerSessionId", "workspace", "source",
+  "status", "controlMode", "operations", "revision", "providerTurnId", "summary", "createdAt", "updatedAt"
+] as const;
+const hostSessionProjectionKeys = [...hostSessionObservationKeys, "attachedThreadId", "activeRunId", "attachmentEpoch"] as const;
+const hostSessionDigestPattern = /^[0-9a-f]{64}$/;
+const hostSessionCodePattern = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+
+const hasValidUnicode = (value: string) => {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return false;
+      index += 1;
+    } else if (code >= 0xdc00 && code <= 0xdfff) return false;
+  }
+  return true;
+};
+
+const isHostSessionString = (value: unknown, limit: number, nonEmpty = false): value is string =>
+  typeof value === "string" && hasValidUnicode(value) && byteLength(value) <= limit && (!nonEmpty || value.length > 0);
+const isHostSessionIdentifier = (value: unknown): value is string =>
+  isHostSessionString(value, hostHarnessSessionLimits.identifierBytes, true) && !containsSecretLikeValue(value);
+const isHostSessionDiagnostic = (value: unknown): value is string =>
+  isHostSessionString(value, hostHarnessSessionLimits.diagnosticBytes) && !containsSecretLikeValue(value);
+const isHostSessionPrompt = (value: unknown): value is string =>
+  isHostSessionString(value, hostHarnessSessionLimits.promptBytes) && !containsSecretLikeValue(value);
+const isPositiveSafeInteger = (value: unknown): value is number => isNonNegativeInteger(value) && value > 0;
+
+const isCanonicalHostSessionWorkspace = (value: unknown): value is string => {
+  if (!isHostSessionString(value, hostHarnessSessionLimits.workspaceBytes, true) || containsSecretLikeValue(value)
+    || /[\u0000-\u001f]/.test(value)) return false;
+  let path = value;
+  if (/^[A-Za-z]:[\\/]/.test(path)) path = path.slice(2).replaceAll("\\", "/");
+  else if (!path.startsWith("/")) return false;
+  if (path !== "/" && path.endsWith("/")) return false;
+  if (path === "/") return true;
+  const segments = path.split("/").slice(1);
+  return segments.every((segment) => segment.length > 0 && segment !== "." && segment !== "..");
+};
+
+const isSortedUniqueHostSessionStrings = <T extends string>(
+  value: unknown,
+  limit: number,
+  guard: (item: unknown) => item is T
+): value is T[] => Array.isArray(value) && value.length <= limit && value.every(guard)
+  && value.every((entry, index) => index === 0 || value[index - 1] < entry);
+
+export function validateHostHarnessSessionInteractiveProfile(value: unknown): Validation<HostHarnessSessionInteractiveProfile> {
+  if (!isRecord(value) || !hasOnlyKeys(value, ["operations"])
+    || !isSortedUniqueHostSessionStrings(value.operations, hostHarnessSessionLimits.operationCapabilities, isHostHarnessDriverOperation)) {
+    return reject("interactive session profile is malformed");
+  }
+  return accept(value as unknown as HostHarnessSessionInteractiveProfile);
+}
+
+export function validateHostHarnessSessionObservation(value: unknown): Validation<HostHarnessSessionObservation> {
+  if (containsSecretLikeValue(value)) return reject("host session observation contains a secret-like value");
+  if (!isRecord(value) || !hasOnlyKeys(value, hostSessionObservationKeys)) return reject("host session observation contains undeclared fields");
+  if (!isHostSessionIdentifier(value.hostHarnessSessionId) || !isHostSessionIdentifier(value.nodeId)
+    || !isHarnessId(value.harnessId) || !isHostSessionIdentifier(value.providerSessionId)
+    || !isCanonicalHostSessionWorkspace(value.workspace)) return reject("host session observation identity is malformed");
+  if (!isHostHarnessSessionSource(value.source) || !isHostHarnessSessionStatus(value.status)
+    || !isHostHarnessSessionControlMode(value.controlMode)
+    || !isSortedUniqueHostSessionStrings(value.operations, hostHarnessSessionLimits.operationCapabilities, isHostHarnessSessionOperation)) {
+    return reject("host session observation vocabulary is malformed");
+  }
+  if (!isPositiveSafeInteger(value.revision) || !isOptional(value.providerTurnId, isHostSessionIdentifier)
+    || !isOptional(value.summary, isHostSessionDiagnostic) || !isTimestamp(value.createdAt) || !isTimestamp(value.updatedAt)
+    || Date.parse(value.updatedAt) < Date.parse(value.createdAt)) return reject("host session observation metadata is malformed");
+  return accept(value as unknown as HostHarnessSessionObservation);
+}
+
+export function validateHostHarnessSession(value: unknown): Validation<HostHarnessSession> {
+  if (!isRecord(value) || !hasOnlyKeys(value, hostSessionProjectionKeys)) return reject("host session projection contains undeclared fields");
+  const { attachedThreadId, activeRunId, attachmentEpoch, ...observation } = value;
+  const valid = validateHostHarnessSessionObservation(observation);
+  if (!valid.ok) return reject(valid.reason);
+  if (!isNonNegativeInteger(attachmentEpoch) || !isOptional(attachedThreadId, isHostSessionIdentifier)
+    || !isOptional(activeRunId, isHostSessionIdentifier)) return reject("host session attachment projection is malformed");
+  return accept(value as unknown as HostHarnessSession);
+}
+
+const canonicalHostSessionValue = (value: unknown): unknown => {
+  if (Array.isArray(value)) return value.map(canonicalHostSessionValue);
+  if (!isRecord(value)) return value;
+  return Object.fromEntries(Object.keys(value).sort().filter((key) => value[key] !== undefined)
+    .map((key) => [key, canonicalHostSessionValue(value[key])]));
+};
+const canonicalHostSessionJSON = (value: unknown) => JSON.stringify(canonicalHostSessionValue(value));
+
+export function validateHostHarnessSessionObservationTransition(
+  previous: unknown,
+  next: unknown
+): Validation<HostHarnessSessionObservation> {
+  const oldValue = validateHostHarnessSessionObservation(previous);
+  if (!oldValue.ok) return reject(`previous observation is invalid: ${oldValue.reason}`);
+  const newValue = validateHostHarnessSessionObservation(next);
+  if (!newValue.ok) return reject(`next observation is invalid: ${newValue.reason}`);
+  const immutableKeys = ["hostHarnessSessionId", "nodeId", "harnessId", "providerSessionId", "workspace", "source", "createdAt"] as const;
+  if (!immutableKeys.every((key) => oldValue.value[key] === newValue.value[key])) return reject("host session identity changed");
+  if (newValue.value.revision < oldValue.value.revision) return reject("host session revision regressed");
+  if (newValue.value.revision === oldValue.value.revision) {
+    return canonicalHostSessionJSON(oldValue.value) === canonicalHostSessionJSON(newValue.value)
+      ? accept(newValue.value) : reject("host session revision replay changed payload");
+  }
+  if (!canTransitionHostHarnessSession(oldValue.value.status, newValue.value.status)) return reject("host session status transition is not legal");
+  if (Date.parse(newValue.value.updatedAt) < Date.parse(oldValue.value.updatedAt)) return reject("host session timestamp regressed");
+  return accept(newValue.value);
+}
+
+const hostSessionCommandTypeOperation: Readonly<Record<typeof hostSessionHubMessageTypes[number], HostHarnessSessionCommandOperation | "read-history">> = {
+  "host-session.create": "create",
+  "host-session.adopt": "adopt",
+  "host-session.attach": "attach",
+  "host-session.detach": "detach",
+  "host-session.history.read": "read-history",
+  "host-session.turn.start": "start-turn",
+  "host-session.turn.steer": "steer",
+  "host-session.turn.interrupt": "interrupt",
+  "host-session.approval.decision": "resolve-approval",
+  "host-session.close": "close"
+};
+
+export const isHostSessionHubMessageType = isOneOf(hostSessionHubMessageTypes);
+export const isHostSessionControlMessageType = isOneOf(hostSessionControlMessageTypes);
+
+const hostSessionCommandShape = (value: Record<string, unknown>, requireDigest: boolean): Validation<Record<string, unknown>> => {
+  if (containsSecretLikeValue(value)) return reject("host session command contains a secret-like value");
+  if (!isHostSessionHubMessageType(value.type)) return reject("host session command type is missing or unknown");
+  const common = ["type", "nodeId", "commandId", ...(requireDigest ? ["commandDigest"] : [])];
+  const existing = ["hostHarnessSessionId", "attachmentEpoch"];
+  const keys: Readonly<Record<typeof value.type, readonly string[]>> = {
+    "host-session.create": [...common, "requestId", "harnessId", "workspace", "model"],
+    "host-session.adopt": [...common, "requestId", "harnessId", "providerSessionId", "workspace"],
+    "host-session.attach": [...common, ...existing, "threadId", "expectedStatus"],
+    "host-session.detach": [...common, ...existing, "threadId"],
+    "host-session.history.read": [...common, ...existing, "requestId", "cursor", "limit"],
+    "host-session.turn.start": [...common, ...existing, "runId", "prompt"],
+    "host-session.turn.steer": [...common, ...existing, "runId", "providerTurnId", "text"],
+    "host-session.turn.interrupt": [...common, ...existing, "runId", "providerTurnId"],
+    "host-session.approval.decision": [...common, ...existing, "runId", "providerTurnId", "decision"],
+    "host-session.close": [...common, ...existing]
+  };
+  if (!hasOnlyKeys(value, keys[value.type])) return reject("host session command contains undeclared fields");
+  if (!isHostSessionIdentifier(value.nodeId) || !isHostSessionIdentifier(value.commandId)
+    || (requireDigest && (typeof value.commandDigest !== "string" || !hostSessionDigestPattern.test(value.commandDigest)))) {
+    return reject("host session command correlation is malformed");
+  }
+  if (value.type === "host-session.create" || value.type === "host-session.adopt") {
+    if (!isHostSessionIdentifier(value.requestId) || !isHarnessId(value.harnessId)
+      || !isCanonicalHostSessionWorkspace(value.workspace)) return reject("host session create/adopt identity is malformed");
+    if (value.type === "host-session.create") {
+      if (!isOptional(value.model, isHostSessionIdentifier)) return reject("host session create model is malformed");
+    } else if (!isHostSessionIdentifier(value.providerSessionId)) return reject("host session adoption provider identity is malformed");
+    return accept(value);
+  }
+  if (!isHostSessionIdentifier(value.hostHarnessSessionId) || !isNonNegativeInteger(value.attachmentEpoch)) {
+    return reject("host session command session identity or epoch is malformed");
+  }
+  switch (value.type) {
+    case "host-session.attach":
+      if (!isHostSessionIdentifier(value.threadId) || !isHostHarnessSessionStatus(value.expectedStatus)) return reject("host session attach is malformed");
+      break;
+    case "host-session.detach":
+      if (!isHostSessionIdentifier(value.threadId)) return reject("host session detach is malformed");
+      break;
+    case "host-session.history.read":
+      if (!isHostSessionIdentifier(value.requestId)
+        || !isOptional(value.cursor, (cursor) => isHostSessionString(cursor, hostHarnessSessionLimits.historyCursorBytes, true) && !containsSecretLikeValue(cursor))
+        || !isPositiveSafeInteger(value.limit) || value.limit > hostHarnessSessionLimits.historyItemsPerPage) return reject("host session history read is malformed");
+      break;
+    case "host-session.turn.start":
+      if (!isHostSessionIdentifier(value.runId) || !isHostSessionPrompt(value.prompt)) return reject("host session start turn is malformed");
+      break;
+    case "host-session.turn.steer":
+      if (!isHostSessionIdentifier(value.runId) || !isHostSessionIdentifier(value.providerTurnId) || !isHostSessionPrompt(value.text)) return reject("host session steer is malformed");
+      break;
+    case "host-session.turn.interrupt":
+      if (!isHostSessionIdentifier(value.runId) || !isHostSessionIdentifier(value.providerTurnId)) return reject("host session interrupt is malformed");
+      break;
+    case "host-session.approval.decision": {
+      const decision = validateApprovalDecision(value.decision);
+      if (!isHostSessionIdentifier(value.runId) || !isOptional(value.providerTurnId, isHostSessionIdentifier)
+        || !decision.ok || decision.value.runId !== value.runId) return reject("host session approval decision is malformed or mismatched");
+      break;
+    }
+    case "host-session.close":
+      break;
+  }
+  return accept(value);
+};
+
+export function hostHarnessSessionCommandDigestInput(value: unknown): Validation<string> {
+  if (!isRecord(value)) return reject("host session command must be an object");
+  const { commandDigest: _commandDigest, ...command } = value;
+  const valid = hostSessionCommandShape(command, false);
+  if (!valid.ok) return reject(valid.reason);
+  return accept(canonicalHostSessionJSON(command));
+}
+
+const rotateRight = (value: number, bits: number) => (value >>> bits) | (value << (32 - bits));
+const sha256Constants = [
+  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+  0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+  0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+  0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+  0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+  0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+];
+
+const sha256Hex = (text: string) => {
+  const input = encoder.encode(text);
+  const paddedLength = Math.ceil((input.length + 9) / 64) * 64;
+  const bytes = new Uint8Array(paddedLength);
+  bytes.set(input);
+  bytes[input.length] = 0x80;
+  const view = new DataView(bytes.buffer);
+  const bitLength = BigInt(input.length) * 8n;
+  view.setUint32(paddedLength - 8, Number((bitLength >> 32n) & 0xffffffffn));
+  view.setUint32(paddedLength - 4, Number(bitLength & 0xffffffffn));
+  const hash = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
+  const words = new Uint32Array(64);
+  for (let offset = 0; offset < bytes.length; offset += 64) {
+    for (let index = 0; index < 16; index += 1) words[index] = view.getUint32(offset + index * 4);
+    for (let index = 16; index < 64; index += 1) {
+      const left = words[index - 15];
+      const right = words[index - 2];
+      const small0 = rotateRight(left, 7) ^ rotateRight(left, 18) ^ (left >>> 3);
+      const small1 = rotateRight(right, 17) ^ rotateRight(right, 19) ^ (right >>> 10);
+      words[index] = (words[index - 16] + small0 + words[index - 7] + small1) >>> 0;
+    }
+    let [a, b, c, d, e, f, g, h] = hash;
+    for (let index = 0; index < 64; index += 1) {
+      const big1 = rotateRight(e, 6) ^ rotateRight(e, 11) ^ rotateRight(e, 25);
+      const choice = (e & f) ^ (~e & g);
+      const temporary1 = (h + big1 + choice + sha256Constants[index] + words[index]) >>> 0;
+      const big0 = rotateRight(a, 2) ^ rotateRight(a, 13) ^ rotateRight(a, 22);
+      const majority = (a & b) ^ (a & c) ^ (b & c);
+      const temporary2 = (big0 + majority) >>> 0;
+      h = g; g = f; f = e; e = (d + temporary1) >>> 0; d = c; c = b; b = a; a = (temporary1 + temporary2) >>> 0;
+    }
+    for (const [index, value] of [a, b, c, d, e, f, g, h].entries()) hash[index] = (hash[index] + value) >>> 0;
+  }
+  return hash.map((value) => value.toString(16).padStart(8, "0")).join("");
+};
+
+export function hostHarnessSessionCommandDigest(value: unknown): Validation<string> {
+  const input = hostHarnessSessionCommandDigestInput(value);
+  return input.ok ? accept(sha256Hex(input.value)) : input;
+}
+
+export function validateHostSessionHubMessage(value: unknown, version: ControlProtocolVersion): Validation<HostSessionHubMessage> {
+  if (!supportsControlCapability(version, "interactive-sessions")) return reject("host sessions require control protocol version 6");
+  if (!isRecord(value)) return reject("host session command must be an object");
+  const valid = hostSessionCommandShape(value, true);
+  if (!valid.ok) return reject(valid.reason);
+  const digest = hostHarnessSessionCommandDigest(value);
+  if (!digest.ok || digest.value !== value.commandDigest) return reject("host session command digest does not match canonical payload");
+  return accept(value as unknown as HostSessionHubMessage);
+}
+
+const validateHostSessionHistoryItem = (value: unknown): value is HostHarnessSessionHistoryItem => isRecord(value)
+  && hasOnlyKeys(value, ["id", "kind", "text", "providerTurnId", "at", "truncated"])
+  && isHostSessionIdentifier(value.id) && isHostHarnessSessionHistoryKind(value.kind)
+  && isHostSessionString(value.text, hostHarnessSessionLimits.historyItemTextBytes) && !containsSecretLikeValue(value.text)
+  && isOptional(value.providerTurnId, isHostSessionIdentifier) && isOptional(value.at, isTimestamp)
+  && typeof value.truncated === "boolean";
+
+const validateHostSessionCommandResponseIdentity = (value: Record<string, unknown>) => {
+  if (!isHostHarnessSessionCommandOperation(value.operation) || !isHostSessionIdentifier(value.commandId)
+    || typeof value.commandDigest !== "string" || !hostSessionDigestPattern.test(value.commandDigest)) return false;
+  const requestOperation = value.operation === "create" || value.operation === "adopt";
+  return requestOperation
+    ? isHostSessionIdentifier(value.requestId) && value.hostHarnessSessionId === undefined && value.attachmentEpoch === undefined
+    : value.requestId === undefined && isHostSessionIdentifier(value.hostHarnessSessionId) && isNonNegativeInteger(value.attachmentEpoch);
+};
+
+export function validateHostSessionControlMessage(value: unknown, version: ControlProtocolVersion): Validation<HostSessionControlMessage> {
+  if (!supportsControlCapability(version, "interactive-sessions")) return reject("host sessions require control protocol version 6");
+  if (containsSecretLikeValue(value)) return reject("host session control message contains a secret-like value");
+  if (!isRecord(value) || !isHostSessionControlMessageType(value.type)) return reject("host session control message type is missing or unknown");
+  if (!isHostSessionIdentifier(value.nodeId)) return reject("host session control message node is malformed");
+  switch (value.type) {
+    case "host-session.inventory.page": {
+      if (!hasOnlyKeys(value, ["type", "nodeId", "generation", "pageIndex", "sessions", "at"])
+        || !isPositiveSafeInteger(value.generation) || !isNonNegativeInteger(value.pageIndex)
+        || value.pageIndex >= hostHarnessSessionLimits.pagesPerGeneration || !Array.isArray(value.sessions)
+        || value.sessions.length > hostHarnessSessionLimits.sessionsPerInventoryPage || !isTimestamp(value.at)) return reject("host session inventory page is malformed");
+      const ids = new Set<string>();
+      const providers = new Set<string>();
+      for (const session of value.sessions) {
+        const valid = validateHostHarnessSessionObservation(session);
+        if (!valid.ok || valid.value.nodeId !== value.nodeId || ids.has(valid.value.hostHarnessSessionId)) return reject("host session inventory page contains an invalid or duplicate session");
+        const provider = [valid.value.nodeId, valid.value.harnessId, valid.value.workspace, valid.value.providerSessionId].join("\u0000");
+        if (providers.has(provider)) return reject("host session inventory page contains a duplicate provider identity");
+        ids.add(valid.value.hostHarnessSessionId);
+        providers.add(provider);
+      }
+      break;
+    }
+    case "host-session.inventory.complete":
+      if (!hasOnlyKeys(value, ["type", "nodeId", "generation", "pageCount", "sessionCount", "at"])
+        || !isPositiveSafeInteger(value.generation) || !isNonNegativeInteger(value.pageCount)
+        || value.pageCount > hostHarnessSessionLimits.pagesPerGeneration || !isNonNegativeInteger(value.sessionCount)
+        || value.sessionCount > hostHarnessSessionLimits.sessionsPerGeneration || !isTimestamp(value.at)) return reject("host session inventory completion is malformed");
+      break;
+    case "host-session.update": {
+      if (!hasOnlyKeys(value, ["type", "nodeId", "session", "at"]) || !isTimestamp(value.at)) return reject("host session update is malformed");
+      const valid = validateHostHarnessSessionObservation(value.session);
+      if (!valid.ok || valid.value.nodeId !== value.nodeId) return reject("host session update identity is malformed or mismatched");
+      break;
+    }
+    case "host-session.history.page": {
+      if (!hasOnlyKeys(value, ["type", "nodeId", "hostHarnessSessionId", "requestId", "items", "nextCursor", "truncated", "at"])
+        || !isHostSessionIdentifier(value.hostHarnessSessionId) || !isHostSessionIdentifier(value.requestId)
+        || !Array.isArray(value.items) || value.items.length > hostHarnessSessionLimits.historyItemsPerPage
+        || !value.items.every(validateHostSessionHistoryItem)
+        || new Set(value.items.map((item: HostHarnessSessionHistoryItem) => item.id)).size !== value.items.length
+        || !isOptional(value.nextCursor, (cursor) => isHostSessionString(cursor, hostHarnessSessionLimits.historyCursorBytes, true) && !containsSecretLikeValue(cursor))
+        || typeof value.truncated !== "boolean" || !isTimestamp(value.at)) return reject("host session history page is malformed");
+      break;
+    }
+    case "host-session.harness-event": {
+      if (!hasOnlyKeys(value, ["type", "nodeId", "hostHarnessSessionId", "attachmentEpoch", "providerTurnId", "event"])
+        || !isHostSessionIdentifier(value.hostHarnessSessionId) || !isNonNegativeInteger(value.attachmentEpoch)
+        || !isOptional(value.providerTurnId, isHostSessionIdentifier) || !validateHarnessEvent(value.event).ok) return reject("host session harness event is malformed");
+      break;
+    }
+    case "host-session.command.ack":
+      if (!hasOnlyKeys(value, ["type", "nodeId", "operation", "commandId", "commandDigest", "hostHarnessSessionId", "requestId", "attachmentEpoch", "disposition", "at"])
+        || !validateHostSessionCommandResponseIdentity(value) || !isHostHarnessSessionCommandDisposition(value.disposition)
+        || !isTimestamp(value.at)) return reject("host session command acknowledgement is malformed");
+      break;
+    case "host-session.command.result": {
+      if (!hasOnlyKeys(value, ["type", "nodeId", "operation", "commandId", "commandDigest", "hostHarnessSessionId", "requestId", "attachmentEpoch", "outcome", "code", "detail", "providerTurnId", "session", "at"])
+        || !validateHostSessionCommandResponseIdentity(value) || !isHostHarnessSessionCommandOutcome(value.outcome)
+        || !isOptional(value.code, (code) => isHostSessionIdentifier(code) && hostSessionCodePattern.test(code))
+        || !isOptional(value.detail, isHostSessionDiagnostic) || !isTimestamp(value.at)) return reject("host session command result is malformed");
+      const session = value.session === undefined ? undefined : validateHostHarnessSessionObservation(value.session);
+      if (session !== undefined && (!session.ok || session.value.nodeId !== value.nodeId
+        || (value.hostHarnessSessionId !== undefined && session.value.hostHarnessSessionId !== value.hostHarnessSessionId))) {
+        return reject("host session command result observation is malformed or mismatched");
+      }
+      const createsIdentity = value.operation === "create" || value.operation === "adopt";
+      if (createsIdentity && (value.outcome === "succeeded" ? session === undefined : session !== undefined)) return reject("host session create/adopt result fabricates or omits identity");
+      const startsTurn = value.operation === "start-turn";
+      if (startsTurn && value.outcome === "succeeded" ? !isHostSessionIdentifier(value.providerTurnId) : value.providerTurnId !== undefined) {
+        return reject("host session command result provider turn does not match operation/outcome");
+      }
+      if (value.operation === "close") {
+        if (value.outcome === "succeeded" ? (session === undefined || !session.ok || session.value.status !== "closed")
+          : (session !== undefined && session.ok && session.value.status === "closed")) {
+          return reject("host session close outcome and observation conflict");
+        }
+      }
+      break;
+    }
+  }
+  return accept(value as unknown as HostSessionControlMessage);
+}
+
+export function validateHostHarnessSessionInventoryGeneration(
+  pages: unknown,
+  complete: unknown
+): Validation<HostHarnessSessionInventoryGeneration> {
+  const completion = validateHostSessionControlMessage(complete, "6");
+  if (!completion.ok || completion.value.type !== "host-session.inventory.complete") return reject("host session inventory has no valid completion");
+  if (!Array.isArray(pages)) return reject("host session inventory pages are missing");
+  const byIndex = new Map<number, HostHarnessSessionInventoryPage>();
+  for (const candidate of pages) {
+    const page = validateHostSessionControlMessage(candidate, "6");
+    if (!page.ok || page.value.type !== "host-session.inventory.page") return reject("host session inventory contains an invalid page");
+    if (page.value.nodeId !== completion.value.nodeId || page.value.generation !== completion.value.generation) {
+      return reject("host session inventory mixes node or generation identity");
+    }
+    const prior = byIndex.get(page.value.pageIndex);
+    if (prior !== undefined) {
+      if (canonicalHostSessionJSON(prior) !== canonicalHostSessionJSON(page.value)) return reject("host session inventory page replay changed payload");
+      continue;
+    }
+    byIndex.set(page.value.pageIndex, page.value);
+  }
+  if (byIndex.size !== completion.value.pageCount) return reject("host session inventory page count does not match completion");
+  const ordered: HostHarnessSessionInventoryPage[] = [];
+  const sessions: HostHarnessSessionObservation[] = [];
+  const ids = new Set<string>();
+  const providers = new Set<string>();
+  for (let index = 0; index < completion.value.pageCount; index += 1) {
+    const page = byIndex.get(index);
+    if (page === undefined) return reject("host session inventory pages are not contiguous");
+    ordered.push(page);
+    for (const session of page.sessions) {
+      const provider = [session.nodeId, session.harnessId, session.workspace, session.providerSessionId].join("\u0000");
+      if (ids.has(session.hostHarnessSessionId) || providers.has(provider)) return reject("host session inventory generation contains ambiguous identity");
+      ids.add(session.hostHarnessSessionId);
+      providers.add(provider);
+      sessions.push(session);
+    }
+  }
+  if (sessions.length !== completion.value.sessionCount || sessions.length > hostHarnessSessionLimits.sessionsPerGeneration) {
+    return reject("host session inventory session count does not match completion");
+  }
+  return accept({
+    nodeId: completion.value.nodeId,
+    generation: completion.value.generation,
+    pages: ordered,
+    complete: completion.value,
+    sessions
+  });
+}
+
+const validateInventoryGenerationValue = (value: unknown): Validation<HostHarnessSessionInventoryGeneration> => {
+  if (!isRecord(value) || !hasOnlyKeys(value, ["nodeId", "generation", "pages", "complete", "sessions"])) {
+    return reject("host session inventory generation contains undeclared fields");
+  }
+  const assembled = validateHostHarnessSessionInventoryGeneration(value.pages, value.complete);
+  if (!assembled.ok || value.nodeId !== assembled.value.nodeId || value.generation !== assembled.value.generation
+    || canonicalHostSessionJSON(value.sessions) !== canonicalHostSessionJSON(assembled.value.sessions)) {
+    return reject("host session inventory generation projection is inconsistent");
+  }
+  return accept(value as unknown as HostHarnessSessionInventoryGeneration);
+};
+
+export function validateHostHarnessSessionInventoryTransition(
+  previous: unknown,
+  next: unknown
+): Validation<HostHarnessSessionInventoryGeneration> {
+  const oldValue = validateInventoryGenerationValue(previous);
+  if (!oldValue.ok) return reject(`previous inventory is invalid: ${oldValue.reason}`);
+  const newValue = validateInventoryGenerationValue(next);
+  if (!newValue.ok) return reject(`next inventory is invalid: ${newValue.reason}`);
+  if (newValue.value.nodeId !== oldValue.value.nodeId) return reject("host session inventory node changed");
+  if (newValue.value.generation < oldValue.value.generation) return reject("host session inventory generation regressed");
+  if (newValue.value.generation === oldValue.value.generation) {
+    return canonicalHostSessionJSON(oldValue.value) === canonicalHostSessionJSON(newValue.value)
+      ? accept(newValue.value) : reject("host session inventory generation replay changed payload");
+  }
+  if (newValue.value.generation !== oldValue.value.generation + 1) return reject("host session inventory generation has a gap");
+  const oldByID = new Map(oldValue.value.sessions.map((session) => [session.hostHarnessSessionId, session]));
+  const oldByProvider = new Map(oldValue.value.sessions.map((session) => [
+    [session.nodeId, session.harnessId, session.workspace, session.providerSessionId].join("\u0000"), session.hostHarnessSessionId
+  ]));
+  for (const session of newValue.value.sessions) {
+    const previousSession = oldByID.get(session.hostHarnessSessionId);
+    if (previousSession !== undefined && !validateHostHarnessSessionObservationTransition(previousSession, session).ok) {
+      return reject("host session inventory contains an invalid observation transition");
+    }
+    const provider = [session.nodeId, session.harnessId, session.workspace, session.providerSessionId].join("\u0000");
+    const priorID = oldByProvider.get(provider);
+    if (priorID !== undefined && priorID !== session.hostHarnessSessionId) return reject("provider identity maps to a different host session");
+  }
+  return accept(newValue.value);
+}
+
+export type HostHarnessSessionCommandReplayClassification = "new" | "replay" | "conflict";
+
+export function classifyHostHarnessSessionCommandReplay(
+  recorded: unknown,
+  incoming: unknown
+): HostHarnessSessionCommandReplayClassification {
+  const candidate = validateHostSessionHubMessage(incoming, "6");
+  if (!candidate.ok) return "conflict";
+  if (recorded === undefined) return "new";
+  const original = validateHostSessionHubMessage(recorded, "6");
+  if (!original.ok || original.value.commandId !== candidate.value.commandId) return "conflict";
+  return original.value.commandDigest === candidate.value.commandDigest
+    && canonicalHostSessionJSON(original.value) === canonicalHostSessionJSON(candidate.value) ? "replay" : "conflict";
+}
+
+export function validateHostHarnessSessionCommandResponse(
+  command: unknown,
+  response: unknown
+): Validation<HostSessionControlMessage> {
+  const request = validateHostSessionHubMessage(command, "6");
+  if (!request.ok) return reject(`host session command is invalid: ${request.reason}`);
+  const reply = validateHostSessionControlMessage(response, "6");
+  if (!reply.ok) return reject(`host session response is invalid: ${reply.reason}`);
+  if (request.value.type === "host-session.history.read") {
+    if (reply.value.type !== "host-session.history.page" || reply.value.nodeId !== request.value.nodeId
+      || reply.value.hostHarnessSessionId !== request.value.hostHarnessSessionId
+      || reply.value.requestId !== request.value.requestId) return reject("host session history response correlation mismatch");
+    return accept(reply.value);
+  }
+  if (reply.value.type !== "host-session.command.ack" && reply.value.type !== "host-session.command.result") {
+    return reject("host session command requires an acknowledgement or result");
+  }
+  const expectedOperation = hostSessionCommandTypeOperation[request.value.type];
+  if (expectedOperation === "read-history" || reply.value.nodeId !== request.value.nodeId
+    || reply.value.operation !== expectedOperation || reply.value.commandId !== request.value.commandId
+    || reply.value.commandDigest !== request.value.commandDigest) return reject("host session command response correlation mismatch");
+  if (request.value.type === "host-session.create" || request.value.type === "host-session.adopt") {
+    if (reply.value.requestId !== request.value.requestId) return reject("host session request correlation mismatch");
+    if (reply.value.type === "host-session.command.result" && reply.value.session !== undefined) {
+      const session = reply.value.session;
+      if (session.nodeId !== request.value.nodeId || session.harnessId !== request.value.harnessId
+        || session.workspace !== request.value.workspace
+        || (request.value.type === "host-session.adopt" && session.providerSessionId !== request.value.providerSessionId)
+        || (request.value.type === "host-session.create" && session.source !== "coffee-shop-managed")) {
+        return reject("host session create/adopt result identity mismatch");
+      }
+    }
+  } else if (reply.value.hostHarnessSessionId !== request.value.hostHarnessSessionId
+    || reply.value.attachmentEpoch !== request.value.attachmentEpoch) return reject("host session/epoch response correlation mismatch");
+  return accept(reply.value);
+}
+
+export function validateHostHarnessSessionEventCorrelation(
+  message: unknown,
+  session: unknown,
+  run: unknown
+): Validation<Extract<HostSessionControlMessage, { type: "host-session.harness-event" }>> {
+  const event = validateHostSessionControlMessage(message, "6");
+  if (!event.ok || event.value.type !== "host-session.harness-event") return reject("host session event is invalid");
+  const projection = validateHostHarnessSession(session);
+  if (!projection.ok) return reject(`host session projection is invalid: ${projection.reason}`);
+  const candidateRun = validateHostHarnessSessionRun(run, {
+    kind: "host-session", hostHarnessSessionId: projection.value.hostHarnessSessionId
+  });
+  if (!candidateRun.ok) return reject(`host session Run is invalid: ${candidateRun.reason}`);
+  if (candidateRun.value.status !== "running" || !["running", "awaiting-approval"].includes(projection.value.status)
+    || event.value.nodeId !== projection.value.nodeId || event.value.hostHarnessSessionId !== projection.value.hostHarnessSessionId
+    || event.value.attachmentEpoch !== projection.value.attachmentEpoch
+    || projection.value.attachedThreadId !== candidateRun.value.threadId || projection.value.activeRunId !== candidateRun.value.id
+    || event.value.event.runId !== candidateRun.value.id || candidateRun.value.nodeId !== projection.value.nodeId
+    || candidateRun.value.harnessId !== projection.value.harnessId || candidateRun.value.workspace !== projection.value.workspace
+    || event.value.providerTurnId !== candidateRun.value.providerTurnId
+    || projection.value.providerTurnId !== candidateRun.value.providerTurnId) return reject("host session event identity, writer, Run, or provider turn mismatch");
+  return accept(event.value);
+}
 
 const artifactKeys = [
   "id", "threadId", "runId", "sourceKey", "agentId", "instanceId", "allocationId", "relativePath", "title", "kind",
@@ -3316,9 +4139,20 @@ export interface CreateHostedThreadResult {
 }
 /** New actor attribution always names both logical identity and the exact allocation. */
 export interface InstanceActor { instanceId: string; allocationId: string }
-export type RuntimeActor = ({ kind: "instance" } & InstanceActor) | { kind: "agent"; agentId: string };
+export interface HostHarnessSessionActor { hostHarnessSessionId: HostHarnessSessionId }
+export const runtimeActorKinds = ["agent", "instance", "host-session"] as const;
+export type RuntimeActor =
+  | ({ kind: "instance" } & InstanceActor)
+  | { kind: "agent"; agentId: string }
+  | ({ kind: "host-session" } & HostHarnessSessionActor);
 type InstanceRecord<T> = Omit<T, "agentId" | "fromAgentId" | "toAgentId"> & InstanceActor & { agentId?: never };
 export type InstanceRun = InstanceRecord<Run> & { threadId: string; transport: HarnessTransport };
+export type HostHarnessSessionRun = Omit<Run, "agentId" | "instanceId" | "allocationId"> & HostHarnessSessionActor & {
+  threadId: string;
+  agentId?: never;
+  instanceId?: never;
+  allocationId?: never;
+};
 export type InstanceTaskAssignment = InstanceRecord<TaskAssignment>;
 export type InstanceSessionBinding = InstanceRecord<HarnessSessionBinding>;
 export type InstanceChatMessage = InstanceRecord<ChatMessage>;
@@ -3330,7 +4164,7 @@ export type InstanceDelegation = Omit<Delegation, "fromAgentId" | "toAgentId"> &
 export type InstanceSessionBindingUpdate = HarnessSessionBindingUpdate & InstanceActor;
 export type InstanceTaskMessage = TaskMessage & { actor: InstanceActor };
 /** Decoding unions are compatibility inputs, never permission to emit legacy data as v5. */
-export type RuntimeRun = Run | InstanceRun;
+export type RuntimeRun = Run | InstanceRun | HostHarnessSessionRun;
 export type RuntimeThread = Thread<ThreadOrchestrator>;
 export type RuntimeSnapshot = Omit<Snapshot, "runs" | "artifacts" | "messages" | "events" | "sessionBindings" | "approvals" | "tasks" | "threads"> & {
   threads?: RuntimeThread[];
@@ -3483,7 +4317,74 @@ export function validateRuntimeActor(value: unknown): Validation<RuntimeActor> {
   if (!isRecord(value)) return reject("invalid actor");
   if (value.kind === "agent" && hasOnlyKeys(value, ["kind", "agentId"]) && instanceID(value.agentId)) return accept(value as unknown as RuntimeActor);
   if (value.kind === "instance" && hasOnlyKeys(value, ["kind", "instanceId", "allocationId"]) && instanceID(value.instanceId) && instanceID(value.allocationId)) return accept(value as unknown as RuntimeActor);
+  if (value.kind === "host-session" && hasOnlyKeys(value, ["kind", "hostHarnessSessionId"])
+    && isHostSessionIdentifier(value.hostHarnessSessionId)) return accept(value as unknown as RuntimeActor);
   return reject("invalid or ambiguous actor");
+}
+export function validateThreadOrchestrator(value: unknown): Validation<ThreadOrchestrator> {
+  if (!isRecord(value)) return reject("invalid thread orchestrator");
+  if (value.kind === "agent" && hasOnlyKeys(value, ["kind", "agentId"]) && instanceID(value.agentId)) return accept(value as unknown as ThreadOrchestrator);
+  if (value.kind === "external" && hasOnlyKeys(value, ["kind", "clientId"]) && instanceID(value.clientId)) return accept(value as unknown as ThreadOrchestrator);
+  if (value.kind === "instance" && hasOnlyKeys(value, ["kind", "instanceId"]) && instanceID(value.instanceId)) return accept(value as unknown as ThreadOrchestrator);
+  if (value.kind === "host-session" && hasOnlyKeys(value, ["kind", "hostHarnessSessionId"])
+    && isHostSessionIdentifier(value.hostHarnessSessionId)) return accept(value as unknown as ThreadOrchestrator);
+  return reject("invalid or ambiguous thread orchestrator");
+}
+export function validateHostHarnessSessionRun(value: unknown, orchestrator: unknown): Validation<HostHarnessSessionRun> {
+  if (!isRecord(value)) return reject("host session Run must be an object");
+  const thread = validateThreadOrchestrator(orchestrator);
+  if (!thread.ok || thread.value.kind !== "host-session") return reject("host session Run requires a host-session thread orchestrator");
+  if (!hasOnlyKeys(value, [
+    "id", "threadId", "nodeId", "harnessId", "model", "workspace", "prompt", "status", "output", "error", "depth",
+    "parentRunId", "dispatchedAt", "startedAt", "finishedAt", "createdAt", "taskId", "attempt", "transport",
+    "fallbackTransport", "transportSelection", "sessionBindingId", "workspaceLeaseId", "providerSessionId",
+    "hostHarnessSessionId", "providerTurnId"
+  ])) return reject("host session Run contains undeclared or conflicting fields");
+  if (!isHostSessionIdentifier(value.id) || !isHostSessionIdentifier(value.threadId)
+    || !isHostSessionIdentifier(value.hostHarnessSessionId) || value.hostHarnessSessionId !== thread.value.hostHarnessSessionId
+  ) {
+    return reject("host session Run has missing, conflicting, or mismatched actor attribution");
+  }
+  if (!isHostSessionIdentifier(value.nodeId) || !isHarnessId(value.harnessId)
+    || !isHostSessionIdentifier(value.model)
+    || !isCanonicalHostSessionWorkspace(value.workspace) || !isHostSessionPrompt(value.prompt)
+    || !isOneOf(runStatuses)(value.status) || !isHostSessionPrompt(value.output)
+    || !isNonNegativeInteger(value.depth) || !isTimestamp(value.createdAt)
+    || !isOptional(value.error, isHostSessionDiagnostic)
+    || !["parentRunId", "taskId", "sessionBindingId", "workspaceLeaseId", "providerSessionId"]
+      .every((key) => isOptional(value[key], isHostSessionIdentifier))
+    || !["dispatchedAt", "startedAt", "finishedAt"].every((key) => isOptional(value[key], isTimestamp))
+    || !isOptional(value.attempt, isPositiveSafeInteger)
+    || !isOptional(value.transport, isHarnessTransport)
+    || !isOptional(value.fallbackTransport, (item) => value.transport === "acp-v1" && item === "native-cli")
+    || !isOptional(value.transportSelection, (item) => validateRunTransportSelection(item).ok)
+    || !isOptional(value.providerTurnId, isHostSessionIdentifier)
+    || (value.status === "queued" && value.providerTurnId !== undefined)
+    || (["running", "completed"].includes(value.status as string) && value.providerTurnId === undefined)) {
+    return reject("host session Run payload is malformed");
+  }
+  return accept(value as unknown as HostHarnessSessionRun);
+}
+export function validateHostHarnessSessionRunTransition(
+  previous: unknown,
+  next: unknown,
+  orchestrator: unknown
+): Validation<HostHarnessSessionRun> {
+  const oldValue = validateHostHarnessSessionRun(previous, orchestrator);
+  if (!oldValue.ok) return reject(`previous host session Run is invalid: ${oldValue.reason}`);
+  const newValue = validateHostHarnessSessionRun(next, orchestrator);
+  if (!newValue.ok) return reject(`next host session Run is invalid: ${newValue.reason}`);
+  const immutableKeys = [
+    "id", "threadId", "hostHarnessSessionId", "nodeId", "harnessId", "model", "workspace", "prompt", "depth", "parentRunId",
+    "createdAt", "taskId", "attempt", "transport", "fallbackTransport", "sessionBindingId", "workspaceLeaseId", "providerSessionId"
+  ] as const;
+  if (!immutableKeys.every((key) => canonicalHostSessionJSON(oldValue.value[key]) === canonicalHostSessionJSON(newValue.value[key]))) {
+    return reject("host session Run identity or immutable input changed");
+  }
+  if (oldValue.value.providerTurnId !== undefined && newValue.value.providerTurnId !== oldValue.value.providerTurnId) {
+    return reject("host session Run provider turn changed or disappeared");
+  }
+  return accept(newValue.value);
 }
 export function validateInstanceHarnessEvent(value: unknown): Validation<InstanceHarnessEvent> {
   if (!isRecord(value) || !instanceID(value.instanceId) || !instanceID(value.allocationId)) return reject("missing instance event identity");
@@ -3548,14 +4449,18 @@ export function validateInstanceControlMessage(value: unknown, version: ControlP
   if (!supportsControlCapability(version, "instances") || !isRecord(value)) return reject("instances require protocol v5");
   if (value.type === "register") {
     const node = value.node;
-    if (!hasOnlyKeys(value, ["type", "protocolVersion", "node"]) || value.protocolVersion !== version || !isRecord(node)
+    const registeredVersion = value.protocolVersion;
+    if (!hasOnlyKeys(value, ["type", "protocolVersion", "node"]) || !isControlProtocolVersion(registeredVersion)
+      || !supportsControlCapability(registeredVersion, "instances")
+      || controlProtocolVersions.indexOf(registeredVersion) > controlProtocolVersions.indexOf(version) || !isRecord(node)
       || !hasOnlyKeys(node, ["id", "name", "kind", "platform", "status", "lastSeen", "activeRuns", "concurrency", "instanceCapacity", "activeInstances", "workspaceRoots", "harnesses", "version"])
       || !instanceID(node.id) || !isIdentifier(node.name) || !isOneOf(nodeKinds)(node.kind) || !isIdentifier(node.platform)
       || !isOneOf(["online", "offline", "busy"])(node.status) || !isTimestamp(node.lastSeen) || !isIdentifier(node.version)
       || !instanceCount(node.activeRuns) || !instanceCount(node.concurrency) || !isOptional(node.instanceCapacity, instanceCount) || !isOptional(node.activeInstances, instanceCount)
       || (typeof node.activeInstances === "number" && typeof node.instanceCapacity === "number" && node.activeInstances > node.instanceCapacity)
       || !instanceStrings(node.workspaceRoots, absoluteInstancePath) || !Array.isArray(node.harnesses) || node.harnesses.length > instanceLimits.requirementEntries
-      || !node.harnesses.every(instanceHarnessProfile) || new Set(node.harnesses.map((harness) => harness.id)).size !== node.harnesses.length) return reject("invalid v5 registration");
+      || !node.harnesses.every((harness) => instanceHarnessProfile(harness, registeredVersion))
+      || new Set(node.harnesses.map((harness) => harness.id)).size !== node.harnesses.length) return reject("invalid versioned registration");
   } else if (value.type === "heartbeat") {
     if (!hasOnlyKeys(value, ["type", "nodeId", "activeRuns", "activeInstances", "activeInstanceIds", "at"]) || !instanceID(value.nodeId) || !isTimestamp(value.at)
       || !instanceCount(value.activeRuns) || !isOptional(value.activeInstances, instanceCount) || !isOptional(value.activeInstanceIds, instanceIDs)) return reject("invalid v5 heartbeat");
@@ -3570,13 +4475,25 @@ export function validateInstanceControlMessage(value: unknown, version: ControlP
   }
   return accept(value as unknown as InstanceControlMessage);
 }
-const instanceHarnessProfile = (value: unknown): value is HarnessProfile => isRecord(value)
-  && hasOnlyKeys(value, ["id", "label", "description", "binary", "available", "authMode", "models", "transports", "acp", "approvalPolicy"])
+const instanceHarnessProfile = (value: unknown, version: ControlProtocolVersion): value is HarnessProfile => isRecord(value)
+  && hasOnlyKeys(value, ["id", "label", "description", "binary", "available", "authMode", "models", "transports", "acp", "approvalPolicy",
+    ...(version === "6" ? ["interactiveSessions"] : [])])
   && isHarnessId(value.id) && isIdentifier(value.label) && isDiagnostic(value.description) && typeof value.available === "boolean"
   && isOneOf(["local-subscription", "local-account", "api", "none"])(value.authMode)
   && instanceStrings(value.models) && isOptional(value.binary, (item) => isBoundedString(item, instanceLimits.workspaceBytes))
   && isOptional(value.transports, (items) => instanceStrings(items, isHarnessTransport)) && isOptional(value.approvalPolicy, isApprovalPolicy)
-  && isOptional(value.acp, (item) => isAcpAgentCapabilities(item));
+  && isOptional(value.acp, (item) => isAcpAgentCapabilities(item))
+  && isOptional(value.interactiveSessions, (item) => version === "6" && validateHostHarnessSessionInteractiveProfile(item).ok);
+
+export function validateHostSessionRegistration(value: unknown, version: ControlProtocolVersion): Validation<Extract<ControlAgentToHub, { type: "register" }>> {
+  if (version !== "6" || !isRecord(value) || value.type !== "register" || !isRecord(value.node)
+    || !Array.isArray(value.node.harnesses)
+    || !value.node.harnesses.some((harness) => isRecord(harness) && harness.interactiveSessions !== undefined)) {
+    return reject("interactive session registration requires protocol v6 and advertised operations");
+  }
+  const valid = validateInstanceControlMessage(value, version);
+  return valid.ok ? accept(value as unknown as Extract<ControlAgentToHub, { type: "register" }>) : reject(valid.reason);
+}
 export function validateInstanceLifecycleRequest(value: unknown): Validation<InstanceLifecycleRequest> {
   if (!isRecord(value) || !instanceID(value.threadId) || !isRecord(value.idempotency)
     || !hasOnlyKeys(value.idempotency, ["caller", "key"]) || !instanceCreator(value.idempotency.caller)

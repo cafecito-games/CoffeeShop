@@ -27,7 +27,7 @@ import type { State } from "./store.js";
  */
 
 /** An actor identity carried by a persisted record. */
-export type ActorKeyed = { agentId?: string; instanceId?: string; allocationId?: string };
+export type ActorKeyed = { agentId?: string; instanceId?: string; allocationId?: string; hostHarnessSessionId?: string };
 
 /** The live instance and the exact allocation a record names. */
 export interface InstancePrincipal {
@@ -43,7 +43,15 @@ const malformed = (context: string, field: string) =>
  * instance identity: a malformed actor is never treated as absent.
  */
 export function recordActor(record: ActorKeyed, context: string): RuntimeActor | undefined {
-  const { agentId, instanceId, allocationId } = record;
+  const { agentId, instanceId, allocationId, hostHarnessSessionId } = record;
+  if (hostHarnessSessionId !== undefined) {
+    if (agentId !== undefined || instanceId !== undefined || allocationId !== undefined) {
+      throw new CoordinationError("invalid_arguments", `${context} names a host session together with another runtime actor`);
+    }
+    const validated = validateRuntimeActor({ kind: "host-session", hostHarnessSessionId });
+    if (!validated.ok) throw new CoordinationError("invalid_arguments", `${context} has an invalid host-session actor: ${validated.reason}`);
+    return validated.value;
+  }
   if (instanceId !== undefined || allocationId !== undefined) {
     if (agentId !== undefined) {
       throw new CoordinationError("invalid_arguments", `${context} names both a configured agent and an instance actor`);
@@ -131,6 +139,9 @@ export function isThreadOrchestratorActor(thread: Pick<Thread, "orchestrator" | 
   if (orchestrator === undefined) return false;
   if (orchestrator.kind === "agent") return actor.kind === "agent" && orchestrator.agentId === actor.agentId;
   if (orchestrator.kind === "instance") return actor.kind === "instance" && orchestrator.instanceId === actor.instanceId;
+  if (orchestrator.kind === "host-session") {
+    return actor.kind === "host-session" && orchestrator.hostHarnessSessionId === actor.hostHarnessSessionId;
+  }
   return false;
 }
 
@@ -152,7 +163,7 @@ export function authorizeThreadInstance(state: Readonly<State>, thread: Thread, 
 
 /** How a record's actor is named to an operator. Display only; never an authorization answer. */
 export interface HistoricalActor {
-  kind: "instance" | "agent" | "unknown";
+  kind: "instance" | "agent" | "host-session" | "unknown";
   id?: string;
   name: string;
 }
@@ -174,6 +185,9 @@ export function describeHistoricalActor(state: Readonly<State>, record: ActorKey
   if (actor.kind === "instance") {
     const instance = (state.instances ?? []).find((item) => item.id === actor!.instanceId);
     return { kind: "instance", id: actor.instanceId, name: instance?.purpose?.name ?? actor.instanceId };
+  }
+  if (actor.kind === "host-session") {
+    return { kind: "host-session", id: actor.hostHarnessSessionId, name: actor.hostHarnessSessionId };
   }
   const agent = state.agents.find((item) => item.id === actor!.agentId);
   return { kind: "agent", id: actor.agentId, name: agent?.name ?? actor.agentId };

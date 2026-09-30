@@ -77,7 +77,7 @@ func instanceFixtureProducer() map[string]any {
 		// ActiveRuns is a pointer, so the fixture carried three top-level keys and passed the v5
 		// validator, while Outbound's non-pointer ActiveRuns put a fourth key on every real frame
 		// and a v5 hub refused it. A fixture must come from the producer it claims to represent.
-		"register": Outbound{Type: "register", ProtocolVersion: LatestVersion, Node: &ComputeNode{
+		"register": Outbound{Type: "register", ProtocolVersion: Version, Node: &ComputeNode{
 			ID: a.NodeID, Name: "Build Mac", Kind: "local", Platform: "darwin/arm64", Status: "online", LastSeen: instanceAt,
 			ActiveRuns: 0, Concurrency: 2, InstanceCapacity: instancePointer(4), ActiveInstances: instancePointer(1),
 			WorkspaceRoots: []string{"/workspace"}, Harnesses: []HarnessProfile{{ID: "claude-cli", Label: "Claude", Description: "Local account", Available: true, AuthMode: "local-subscription", Models: []string{"fable"}}}, Version: "0.1.0",
@@ -114,9 +114,11 @@ func TestInstanceProducerFixtures(t *testing.T) {
 			switch name {
 			case "provision", "provision-pack", "dispatch", "dispatch-pack", "dispatch-resume", "release":
 				decoded, err = DecodeInstanceHubMessage(data, "5")
+				_, compatibleError := DecodeInstanceHubMessage(data, "6")
+				require.NoError(t, compatibleError, "v6 must accept a historical v5 hub frame")
 				_, legacyError := DecodeInbound(data)
 				require.Error(t, legacyError, "the legacy decoder must not erase instance identity")
-				for _, version := range []string{"1", "2", "3", "4", "6", ""} {
+				for _, version := range []string{"1", "2", "3", "4", ""} {
 					_, rejected := DecodeInstanceHubMessage(data, version)
 					require.Error(t, rejected)
 				}
@@ -126,7 +128,9 @@ func TestInstanceProducerFixtures(t *testing.T) {
 				decoded, err = DecodeAgentTemplate(data)
 			default:
 				decoded, err = DecodeInstanceControlMessage(data, "5")
-				for _, version := range []string{"1", "2", "3", "4", "6", ""} {
+				_, compatibleError := DecodeInstanceControlMessage(data, "6")
+				require.NoError(t, compatibleError, "v6 must accept a historical v5 control frame")
+				for _, version := range []string{"1", "2", "3", "4", ""} {
 					_, rejected := DecodeInstanceControlMessage(data, version)
 					require.Error(t, rejected)
 				}

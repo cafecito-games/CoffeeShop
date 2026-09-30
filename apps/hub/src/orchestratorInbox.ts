@@ -66,7 +66,7 @@ export interface ContinuationPassResult {
 }
 
 /** The actor a record names, or `undefined` for none or a malformed half of one. */
-const actorOf = (record: { agentId?: string; instanceId?: string; allocationId?: string }) => {
+const actorOf = (record: { agentId?: string; instanceId?: string; allocationId?: string; hostHarnessSessionId?: string }) => {
   try {
     return recordActor(record, "Record");
   } catch {
@@ -113,8 +113,11 @@ function ensureInbox(state: State, threadId: string, at: string) {
  * thread's orchestrator record decides it, so an instance-orchestrated thread is recognized exactly
  * as an agent-orchestrated one was, and a worker resident of the same thread never counts.
  */
-const isOrchestratorRun = (run: Run, thread: Thread) =>
-  run.threadId === thread.id && run.taskId === undefined && isThreadOrchestratorActor(thread, actorOf(run));
+const isOrchestratorRun = (run: Run, thread: Thread) => {
+  const actor = actorOf(run);
+  return actor?.kind !== "host-session" && run.threadId === thread.id && run.taskId === undefined
+    && isThreadOrchestratorActor(thread, actor);
+};
 
 export const activeOrchestratorRun = (state: Readonly<State>, thread: Thread) =>
   state.runs.find((run) => isOrchestratorRun(run, thread) && isActiveRunStatus(run.status));
@@ -459,7 +462,7 @@ export function runContinuationPass(state: State, context: SchedulingContext, at
   for (const thread of state.threads ?? []) {
     if (thread.status !== "active") continue;
     const orchestrator = threadOrchestrator(thread);
-    if (orchestrator === undefined || orchestrator.kind === "external") continue;
+    if (orchestrator === undefined || orchestrator.kind === "external" || orchestrator.kind === "host-session") continue;
     const window = continuationWindow(state, thread, at);
     if (!window) continue;
     if (orchestrator.kind === "instance") {

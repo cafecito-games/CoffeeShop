@@ -79,6 +79,19 @@ describe("describeThreadOrchestrator", () => {
     expect(described).toMatchObject({ kind: "external", name: "Christian's laptop", detail: "Attached", attached: true, clientId: "orchestrator-client-1" });
   });
 
+  it("names a host session by a bounded opaque identity without inferring attachment state", () => {
+    const described = describeThreadOrchestrator(
+      thread({ orchestrator: { kind: "host-session", hostHarnessSessionId: "h".repeat(80) } }),
+      { agents, clients, attachments: [attachment({})], now }
+    );
+    expect(described).toEqual({
+      kind: "host-session",
+      name: `Host session ${"h".repeat(31)}…`,
+      detail: "",
+      attached: false
+    });
+  });
+
   it.each([
     ["detached" as const, "2026-09-22T09:45:00Z", "Detached since 15m ago"],
     ["replaced" as const, "2026-09-21T10:00:00Z", "Detached since 1d ago"]

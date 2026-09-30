@@ -1,0 +1,14 @@
+{
+  "id": "run-one",
+  "threadId": "thread-one",
+  "hostHarnessSessionId": "host-session-one",
+  "nodeId": "node-one",
+  "harnessId": "codex-cli",
+  "model": "gpt-5",
+  "workspace": "/workspaces/coffee-shop",
+  "prompt": "Continue",
+  "status": "queued",
+  "output": "",
+  "depth": 0,
+  "createdAt": "2026-09-30T12:00:00Z"
+}

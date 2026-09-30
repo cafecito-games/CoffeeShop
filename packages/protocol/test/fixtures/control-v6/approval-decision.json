@@ -1,0 +1,16 @@
+{
+  "type": "host-session.approval.decision",
+  "nodeId": "node-one",
+  "commandId": "command-approval",
+  "commandDigest": "9aef9b18ad081b34a6f2cf5f618e0ca11a8ebff353c7b1c30f1a3cffb123adba",
+  "hostHarnessSessionId": "host-session-one",
+  "attachmentEpoch": 4,
+  "runId": "run-one",
+  "providerTurnId": "provider-turn-one",
+  "decision": {
+    "approvalId": "approval-one",
+    "runId": "run-one",
+    "status": "approved",
+    "selectedOptionId": "allow-once"
+  }
+}

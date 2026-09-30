@@ -1,0 +1,10 @@
+{
+  "type": "host-session.attach",
+  "nodeId": "node-one",
+  "commandId": "command-attach",
+  "commandDigest": "c299ba5dc5e604cbbe9fd86185ecd38b1655ed2b9cdf339f2ddf5cf8678ea6bf",
+  "hostHarnessSessionId": "host-session-one",
+  "attachmentEpoch": 3,
+  "threadId": "thread-one",
+  "expectedStatus": "idle"
+}

@@ -44,7 +44,7 @@ export function sinceLabel(timestamp: string, now: number = Date.now()): string 
   return `${Math.floor(hours / 24)}d ago`;
 }
 
-export type ThreadOrchestratorDescriptionKind = "agent" | "instance" | "external" | "unknown";
+export type ThreadOrchestratorDescriptionKind = "agent" | "instance" | "external" | "host-session" | "unknown";
 
 export interface ThreadOrchestratorDescription {
   kind: ThreadOrchestratorDescriptionKind;
@@ -86,6 +86,14 @@ export function describeThreadOrchestrator(
       kind: "instance",
       name: instance?.purpose?.name ?? orchestrator.instanceId,
       detail: instance === undefined ? "" : instance.status,
+      attached: false
+    };
+  }
+  if (orchestrator.kind === "host-session") {
+    return {
+      kind: "host-session",
+      name: `Host session ${boundedIdentity(orchestrator.hostHarnessSessionId)}`,
+      detail: "",
       attached: false
     };
   }

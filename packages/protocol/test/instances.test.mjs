@@ -15,12 +15,12 @@ export const allocation = {
   transport: "native-cli", workspace: "/workspace", lease: instance.lease, status: "provisioning", createdAt: at, updatedAt: at
 };
 
-test("v5 gates instance lifecycle and excludes every older version", () => {
+test("v5 introduces instance lifecycle and v6 remains backward-compatible", () => {
   const value = { type: "instance.provision", instance, allocation };
-  assert.equal(protocol.latestControlProtocolVersion, "5");
+  assert.equal(protocol.latestControlProtocolVersion, "6");
   for (const version of protocol.controlProtocolVersions) {
-    assert.equal(protocol.validateInstanceHubMessage(value, version).ok, version === "5");
-    assert.equal(protocol.canSendToControlAgent(value, version), version === "5");
+    assert.equal(protocol.validateInstanceHubMessage(value, version).ok, version === "5" || version === "6");
+    assert.equal(protocol.canSendToControlAgent(value, version), version === "5" || version === "6");
   }
 });
 
@@ -100,9 +100,11 @@ test("Go-produced fixtures validate and round-trip byte-for-byte through the Typ
     assert.equal(result.ok, true, `${name}: ${result.reason}`);
     assert.equal(JSON.stringify(result.value, null, 2) + "\n", bytes);
     if (["provision", "provision-pack", "dispatch", "dispatch-pack", "dispatch-resume", "release"].includes(name)) {
-      for (const version of ["1", "2", "3", "4", "6", ""]) assert.equal(protocol.canSendToControlAgent(value, version), false);
+      for (const version of ["1", "2", "3", "4", ""]) assert.equal(protocol.canSendToControlAgent(value, version), false);
+      assert.equal(protocol.canSendToControlAgent(value, "6"), true);
     } else if (!["create", "template", "sync-absent"].includes(name)) {
-      for (const version of ["1", "2", "3", "4", "6", ""]) assert.equal(protocol.canAcceptFromControlAgent(value, version), false, `${name}/${version}`);
+      for (const version of ["1", "2", "3", "4", ""]) assert.equal(protocol.canAcceptFromControlAgent(value, version), false, `${name}/${version}`);
+      assert.equal(protocol.canAcceptFromControlAgent(value, "6"), true, `${name}/6`);
     }
   }
 });

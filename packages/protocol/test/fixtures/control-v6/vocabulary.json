@@ -1,0 +1,156 @@
+{
+  "controlProtocolVersions": [
+    "1",
+    "2",
+    "3",
+    "4",
+    "5",
+    "6"
+  ],
+  "hostHarnessSessionSources": [
+    "coffee-shop-managed",
+    "provider-history",
+    "external-live"
+  ],
+  "hostHarnessSessionStatuses": [
+    "idle",
+    "running",
+    "awaiting-approval",
+    "active-elsewhere",
+    "offline",
+    "closed",
+    "failed"
+  ],
+  "hostHarnessSessionControlModes": [
+    "observe",
+    "resume",
+    "full"
+  ],
+  "hostHarnessSessionOperations": [
+    "read-history",
+    "attach",
+    "detach",
+    "start-turn",
+    "steer",
+    "interrupt",
+    "resolve-approval",
+    "close"
+  ],
+  "hostHarnessDriverOperations": [
+    "discover",
+    "create",
+    "adopt"
+  ],
+  "hostHarnessSessionCommandOperations": [
+    "create",
+    "adopt",
+    "attach",
+    "detach",
+    "start-turn",
+    "steer",
+    "interrupt",
+    "resolve-approval",
+    "close"
+  ],
+  "hostHarnessSessionCommandDispositions": [
+    "recorded",
+    "replayed"
+  ],
+  "hostHarnessSessionCommandOutcomes": [
+    "succeeded",
+    "rejected",
+    "uncertain"
+  ],
+  "hostHarnessSessionHistoryKinds": [
+    "user",
+    "assistant",
+    "system",
+    "summary"
+  ],
+  "runtimeActorKinds": [
+    "agent",
+    "instance",
+    "host-session"
+  ],
+  "threadOrchestratorKinds": [
+    "agent",
+    "external",
+    "instance",
+    "host-session"
+  ],
+  "hostSessionHubMessageTypes": [
+    "host-session.create",
+    "host-session.adopt",
+    "host-session.attach",
+    "host-session.detach",
+    "host-session.history.read",
+    "host-session.turn.start",
+    "host-session.turn.steer",
+    "host-session.turn.interrupt",
+    "host-session.approval.decision",
+    "host-session.close"
+  ],
+  "hostSessionControlMessageTypes": [
+    "host-session.inventory.page",
+    "host-session.inventory.complete",
+    "host-session.update",
+    "host-session.history.page",
+    "host-session.harness-event",
+    "host-session.command.ack",
+    "host-session.command.result"
+  ],
+  "hostHarnessSessionTransitions": {
+    "idle": [
+      "running",
+      "active-elsewhere",
+      "offline",
+      "closed",
+      "failed"
+    ],
+    "running": [
+      "awaiting-approval",
+      "idle",
+      "active-elsewhere",
+      "offline",
+      "closed",
+      "failed"
+    ],
+    "awaiting-approval": [
+      "running",
+      "idle",
+      "active-elsewhere",
+      "offline",
+      "closed",
+      "failed"
+    ],
+    "active-elsewhere": [
+      "idle",
+      "offline",
+      "closed",
+      "failed"
+    ],
+    "offline": [
+      "idle",
+      "running",
+      "awaiting-approval",
+      "active-elsewhere",
+      "closed",
+      "failed"
+    ],
+    "closed": [],
+    "failed": []
+  },
+  "hostHarnessSessionLimits": {
+    "identifierBytes": 256,
+    "workspaceBytes": 4096,
+    "diagnosticBytes": 2000,
+    "promptBytes": 65536,
+    "operationCapabilities": 16,
+    "sessionsPerInventoryPage": 64,
+    "pagesPerGeneration": 64,
+    "sessionsPerGeneration": 4096,
+    "historyItemsPerPage": 100,
+    "historyItemTextBytes": 32768,
+    "historyCursorBytes": 512
+  }
+}

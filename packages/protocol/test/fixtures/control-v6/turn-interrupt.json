@@ -1,0 +1,10 @@
+{
+  "type": "host-session.turn.interrupt",
+  "nodeId": "node-one",
+  "commandId": "command-interrupt",
+  "commandDigest": "ba4878f3b0c62619acd60b4378ba592631edbcd50816eeddb6139e5bf17b05e7",
+  "hostHarnessSessionId": "host-session-one",
+  "attachmentEpoch": 4,
+  "runId": "run-one",
+  "providerTurnId": "provider-turn-one"
+}

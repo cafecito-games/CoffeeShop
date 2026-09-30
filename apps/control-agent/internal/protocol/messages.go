@@ -23,6 +23,9 @@ type HarnessProfile struct {
 	Models      []string              `json:"models"`
 	Transports  []string              `json:"transports,omitempty"`
 	ACP         *AcpAgentCapabilities `json:"acp,omitempty"`
+	// InteractiveSessions is a version-6 wire capability. Version keeps Barista's deployed
+	// registration on v5, so this remains absent until the local runtime implements the feature.
+	InteractiveSessions *HostHarnessSessionInteractiveProfile `json:"interactiveSessions,omitempty"`
 	// ApprovalPolicy is the node administrator's approval policy for this harness. Barista omits
 	// ApprovalPolicyManual, so an absent value means manual and older hubs see an unchanged profile.
 	ApprovalPolicy string `json:"approvalPolicy,omitempty"`

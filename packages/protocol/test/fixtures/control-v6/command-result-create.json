@@ -1,0 +1,29 @@
+{
+  "type": "host-session.command.result",
+  "nodeId": "node-one",
+  "operation": "create",
+  "commandId": "command-create",
+  "commandDigest": "a310f481ea9a5377de8e4764f6a53ee03ca818d24468ff10f5f823e6a03a60ba",
+  "requestId": "request-create",
+  "outcome": "succeeded",
+  "session": {
+    "hostHarnessSessionId": "host-session-created",
+    "nodeId": "node-one",
+    "harnessId": "codex-cli",
+    "providerSessionId": "provider-session-created",
+    "workspace": "/workspaces/coffee-shop",
+    "source": "coffee-shop-managed",
+    "status": "idle",
+    "controlMode": "full",
+    "operations": [
+      "attach",
+      "close",
+      "read-history",
+      "start-turn"
+    ],
+    "revision": 1,
+    "createdAt": "2026-09-30T12:00:00Z",
+    "updatedAt": "2026-09-30T12:00:00Z"
+  },
+  "at": "2026-09-30T12:00:02Z"
+}

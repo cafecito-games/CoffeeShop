@@ -1,0 +1,19 @@
+{
+  "type": "host-session.history.page",
+  "nodeId": "node-one",
+  "hostHarnessSessionId": "host-session-one",
+  "requestId": "request-history",
+  "items": [
+    {
+      "id": "history-one",
+      "kind": "assistant",
+      "text": "Prior answer",
+      "providerTurnId": "provider-turn-zero",
+      "at": "2026-09-30T11:59:00Z",
+      "truncated": false
+    }
+  ],
+  "nextCursor": "cursor-two",
+  "truncated": true,
+  "at": "2026-09-30T12:00:00Z"
+}

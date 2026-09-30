@@ -1,0 +1,11 @@
+{
+  "type": "host-session.history.read",
+  "nodeId": "node-one",
+  "commandId": "command-history",
+  "commandDigest": "c046e3b7071716cd7b662118910f273939325aeaba9d0dd14a0290801e071d64",
+  "hostHarnessSessionId": "host-session-one",
+  "attachmentEpoch": 4,
+  "requestId": "request-history",
+  "cursor": "cursor-one",
+  "limit": 100
+}

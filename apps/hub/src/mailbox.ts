@@ -102,7 +102,9 @@ export const callerActor = (caller: Caller): RuntimeActor | undefined =>
 export const callerAttribution = (caller: Caller): { agentId?: string; instanceId?: string; allocationId?: string } => {
   const actor = callerActor(caller);
   if (actor === undefined) return {};
-  return actor.kind === "agent" ? { agentId: actor.agentId } : { instanceId: actor.instanceId, allocationId: actor.allocationId };
+  if (actor.kind === "agent") return { agentId: actor.agentId };
+  if (actor.kind === "instance") return { instanceId: actor.instanceId, allocationId: actor.allocationId };
+  return {};
 };
 
 /** A run for a tool that can only be served to a hub-hosted caller. */
@@ -171,6 +173,9 @@ export const resolveCallerFor = (state: Readonly<State>, source: CallerSource): 
 function runPrincipal(state: Readonly<State>, run: Run, threadId: string): Extract<CallerPrincipal, { kind: "run" }> {
   const actor = recordActor(run, `Run ${run.id}`);
   if (actor === undefined) throw new CoordinationError("forbidden", "The source run names no runtime actor");
+  if (actor.kind === "host-session") {
+    throw new CoordinationError("forbidden", "Host-session runs are not Hub tool principals until interactive-session authority is enabled");
+  }
   if (actor.kind === "instance") {
     const principal = authorizeInstance(state, run, `Run ${run.id}`, threadId);
     if (!principal) throw new CoordinationError("forbidden", "The source run's instance is no longer a live resident of this thread");

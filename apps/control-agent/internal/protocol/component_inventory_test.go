@@ -35,7 +35,7 @@ func TestComponentInventoryProducerFixtureIsByteFaithful(t *testing.T) {
 	decoded, err := DecodeComponentInventoryMessage(fixture, "5")
 	require.NoError(t, err)
 	require.Equal(t, componentInventoryProducer(), decoded)
-	for _, version := range []string{"1", "2", "3", "4", "6", ""} {
+	for _, version := range []string{"1", "2", "3", "4", ""} {
 		_, err := DecodeComponentInventoryMessage(fixture, version)
 		require.Error(t, err)
 	}
