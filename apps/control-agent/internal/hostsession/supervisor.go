@@ -119,11 +119,12 @@ func New(options Options) (*Supervisor, error) {
 	supervisor := &Supervisor{nodeID: options.NodeID, dataRoot: options.DataRoot, workspaceRoots: append([]string(nil), options.WorkspaceRoots...), drivers: drivers,
 		clock: options.Clock, ids: options.IDs, barrier: options.Barrier, maximumCommands: options.MaximumCommands, maximumSessions: options.MaximumSessions,
 		locks: map[string]chan struct{}{}, handles: map[string]operationHandleRecord{}, activeCommands: map[string]bool{}, operationRoot: root, cancel: cancel}
+	recoveryErr := recoverForgetTransaction(options.DataRoot)
 	sessions, registryErr := loadRegistry(options.DataRoot)
 	commands, ledgerErr := loadLedger(options.DataRoot)
-	if registryErr != nil || ledgerErr != nil {
+	if recoveryErr != nil || registryErr != nil || ledgerErr != nil {
 		supervisor.sessions, supervisor.commands, supervisor.providers = map[string]*sessionRecord{}, map[string]*ledgerRecord{}, map[string]string{}
-		supervisor.disabled = errors.Join(registryErr, ledgerErr)
+		supervisor.disabled = errors.Join(recoveryErr, registryErr, ledgerErr)
 		return supervisor, nil
 	}
 	supervisor.sessions, supervisor.commands, supervisor.providers = sessions, commands, map[string]string{}
@@ -312,6 +313,7 @@ func (supervisor *Supervisor) executeNew(message protocol.HostSessionHubMessage,
 }
 
 func (supervisor *Supervisor) executeAttachment(message protocol.HostSessionHubMessage, record *sessionRecord, pending *ledgerRecord, ack protocol.HostSessionControlMessage) CommandResponse {
+	expected := cloneSession(record)
 	if pending.Operation == "attach" {
 		if terminalStatus(record.Observation.Status) || record.Observation.Status != message.ExpectedStatus || record.AttachedThreadID != "" && record.AttachedThreadID != message.ThreadID {
 			return supervisor.completeRejected(message, pending, ack, "attachment-conflict", "attachment identity or expected status does not match")
@@ -326,7 +328,7 @@ func (supervisor *Supervisor) executeAttachment(message protocol.HostSessionHubM
 	record.AttachmentEpoch++
 	record.Observation.Revision++
 	record.Observation.UpdatedAt = supervisor.now()
-	return supervisor.commitSuccess(message, pending, ack, record, "", nil)
+	return supervisor.commitSuccessFenced(message, pending, ack, record, "", nil, expected)
 }
 
 func (supervisor *Supervisor) executeCreation(message protocol.HostSessionHubMessage, driver Driver, pending *ledgerRecord, ack protocol.HostSessionControlMessage) CommandResponse {
@@ -464,8 +466,15 @@ func (supervisor *Supervisor) executeDriverMutation(message protocol.HostSession
 }
 
 func (supervisor *Supervisor) commitSuccess(message protocol.HostSessionHubMessage, command *ledgerRecord, ack protocol.HostSessionControlMessage, record *sessionRecord, providerTurnID string, events []protocol.HarnessEvent) CommandResponse {
+	return supervisor.commitSuccessFenced(message, command, ack, record, providerTurnID, events, nil)
+}
+
+func (supervisor *Supervisor) commitSuccessFenced(message protocol.HostSessionHubMessage, command *ledgerRecord, ack protocol.HostSessionControlMessage, record *sessionRecord, providerTurnID string, events []protocol.HarnessEvent, expected *sessionRecord) CommandResponse {
 	supervisor.mu.Lock()
 	defer supervisor.mu.Unlock()
+	if expected != nil && !sameSessionRecord(supervisor.sessions[record.Observation.HostHarnessSessionID], expected) {
+		return supervisor.completeRejectedLocked(message, command, ack, "attachment-conflict", "session changed after attachment preflight")
+	}
 	key := providerKey(record.Observation.HarnessID, record.Observation.ProviderSessionID, record.Observation.Workspace)
 	if existing := supervisor.providers[key]; existing != "" && existing != record.Observation.HostHarnessSessionID {
 		return supervisor.completeUncertainLocked(message, command, ack, "provider-identity-conflict", ErrIdentityConflict.Error())
@@ -571,6 +580,9 @@ func (supervisor *Supervisor) completeDriverFailure(message protocol.HostSession
 func (supervisor *Supervisor) completeRejected(message protocol.HostSessionHubMessage, command *ledgerRecord, ack protocol.HostSessionControlMessage, code, detail string) CommandResponse {
 	supervisor.mu.Lock()
 	defer supervisor.mu.Unlock()
+	return supervisor.completeRejectedLocked(message, command, ack, code, detail)
+}
+func (supervisor *Supervisor) completeRejectedLocked(message protocol.HostSessionHubMessage, command *ledgerRecord, ack protocol.HostSessionControlMessage, code, detail string) CommandResponse {
 	result := supervisor.result(message, command.Operation, "rejected", code, detail, "", nil)
 	command.State, command.Result, command.UpdatedAt = "completed", &result, supervisor.now()
 	if err := saveLedger(supervisor.dataRoot, supervisor.commands); err != nil {
@@ -942,13 +954,18 @@ func (supervisor *Supervisor) ReadHistory(ctx context.Context, message protocol.
 	if err != nil {
 		return HistoryPage{}, err
 	}
-	if len(page.Items) > int(message.Limit) || len(page.NextCursor) > protocol.HostHarnessSessionLimits.HistoryCursorBytes {
+	if len(page.Items) > int(message.Limit) || len(page.NextCursor) > protocol.HostHarnessSessionLimits.HistoryCursorBytes || !utf8.ValidString(page.NextCursor) || protocol.LooksSecretLike(page.NextCursor) {
 		return HistoryPage{}, ErrInvalidObservation
 	}
+	identities := make(map[string]bool, len(page.Items))
 	for _, item := range page.Items {
-		if item.ID == "" || !utf8.ValidString(item.Text) || len(item.Text) > protocol.HostHarnessSessionLimits.HistoryItemTextBytes || !supports(protocol.HostHarnessSessionHistoryKinds, item.Kind) || protocol.LooksSecretLike(item.Text) {
+		_, timestampErr := time.Parse(time.RFC3339Nano, item.At)
+		invalidTimestamp := item.At != "" && (len(item.At) > protocol.HostHarnessSessionLimits.IdentifierBytes || timestampErr != nil)
+		invalidTurn := item.ProviderTurnID != "" && (len(item.ProviderTurnID) > protocol.HostHarnessSessionLimits.IdentifierBytes || !utf8.ValidString(item.ProviderTurnID) || protocol.LooksSecretLike(item.ProviderTurnID))
+		if item.ID == "" || len(item.ID) > protocol.HostHarnessSessionLimits.IdentifierBytes || !utf8.ValidString(item.ID) || protocol.LooksSecretLike(item.ID) || identities[item.ID] || invalidTurn || invalidTimestamp || !utf8.ValidString(item.Text) || len(item.Text) > protocol.HostHarnessSessionLimits.HistoryItemTextBytes || !supports(protocol.HostHarnessSessionHistoryKinds, item.Kind) || protocol.LooksSecretLike(item.Text) {
 			return HistoryPage{}, ErrInvalidObservation
 		}
+		identities[item.ID] = true
 	}
 	return page, nil
 }
@@ -1062,15 +1079,37 @@ func (supervisor *Supervisor) Acknowledge(commandID string) error {
 // pending, uncertain, or unacknowledged command are never retention candidates.
 func (supervisor *Supervisor) ForgetClosed(id string) error {
 	supervisor.mu.Lock()
+	if err := supervisor.admissionErrorLocked(); err != nil {
+		supervisor.mu.Unlock()
+		return err
+	}
+	release, err := supervisor.trySessionLockLocked(id)
+	if err != nil {
+		supervisor.mu.Unlock()
+		return err
+	}
+	supervisor.operations.Add(1)
+	supervisor.mu.Unlock()
+	defer supervisor.operations.Done()
+	defer release()
+
+	supervisor.mu.Lock()
 	defer supervisor.mu.Unlock()
 	record := supervisor.sessions[id]
 	if record == nil || record.Observation.Status != "closed" {
 		return fmt.Errorf("only a closed host session can be forgotten")
 	}
 	for _, command := range supervisor.commands {
-		if command.HostHarnessSessionID == id && (command.State != "completed" || !command.Acknowledged) {
+		if ledgerSessionID(command) == id && (command.State != "completed" || !command.Acknowledged) {
 			return fmt.Errorf("host session has an unacknowledged or uncertain command")
 		}
+	}
+	if err := saveForgetTransaction(supervisor.dataRoot, record); err != nil {
+		return fmt.Errorf("stage forget transaction: %w", err)
+	}
+	if err := supervisor.reach(BarrierAfterForgetIntent); err != nil {
+		supervisor.disabled = err
+		return err
 	}
 	previousProvider := supervisor.providers[providerKey(record.Observation.HarnessID, record.Observation.ProviderSessionID, record.Observation.Workspace)]
 	delete(supervisor.sessions, id)
@@ -1078,24 +1117,32 @@ func (supervisor *Supervisor) ForgetClosed(id string) error {
 	if err := saveRegistry(supervisor.dataRoot, supervisor.sessions); err != nil {
 		supervisor.sessions[id] = record
 		supervisor.providers[providerKey(record.Observation.HarnessID, record.Observation.ProviderSessionID, record.Observation.Workspace)] = previousProvider
+		supervisor.disabled = err
+		return err
+	}
+	if err := supervisor.reach(BarrierAfterForgetRegistry); err != nil {
+		supervisor.disabled = err
 		return err
 	}
 	remainingCommands := cloneCommands(supervisor.commands)
 	for commandID, command := range remainingCommands {
-		if command.HostHarnessSessionID == id {
+		if ledgerSessionID(command) == id {
 			delete(remainingCommands, commandID)
 		}
 	}
 	if err := saveLedger(supervisor.dataRoot, remainingCommands); err != nil {
-		supervisor.sessions[id] = record
-		supervisor.providers[providerKey(record.Observation.HarnessID, record.Observation.ProviderSessionID, record.Observation.Workspace)] = previousProvider
-		if restoreErr := saveRegistry(supervisor.dataRoot, supervisor.sessions); restoreErr != nil {
-			supervisor.disabled = errors.Join(err, restoreErr)
-			return fmt.Errorf("compact ledger and restore registry: %w", supervisor.disabled)
-		}
+		supervisor.disabled = err
 		return err
 	}
 	supervisor.commands = remainingCommands
+	if err := supervisor.reach(BarrierAfterForgetLedger); err != nil {
+		supervisor.disabled = err
+		return err
+	}
+	if err := removeDurableFile(filepath.Join(supervisor.dataRoot, forgetTransactionName)); err != nil {
+		supervisor.disabled = err
+		return fmt.Errorf("commit forget transaction: %w", err)
+	}
 	return nil
 }
 

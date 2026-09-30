@@ -249,6 +249,7 @@ func TestClosedAcknowledgedSessionCanBeForgottenWithoutBreakingRestart(t *testin
 	epoch = 1
 	require.NoError(t, supervisor.Execute(context.Background(), signed(t, protocol.HostSessionHubMessage{Type: "host-session.close", NodeID: "node-1", CommandID: "close-1", HostHarnessSessionID: id, AttachmentEpoch: &epoch})).Err)
 	require.Error(t, supervisor.ForgetClosed(id))
+	require.NoError(t, supervisor.Acknowledge("create-1"))
 	require.NoError(t, supervisor.Acknowledge("attach-1"))
 	require.NoError(t, supervisor.Acknowledge("close-1"))
 	require.NoError(t, supervisor.ForgetClosed(id))

@@ -38,9 +38,12 @@ type IDGenerator interface{ NewID() (string, error) }
 type DurabilityBarrier interface{ Reach(point string) error }
 
 const (
-	BarrierAfterPending  = "after-pending"
-	BarrierAfterEffect   = "after-provider-effect"
-	BarrierAfterRegistry = "after-registry"
+	BarrierAfterPending        = "after-pending"
+	BarrierAfterEffect         = "after-provider-effect"
+	BarrierAfterRegistry       = "after-registry"
+	BarrierAfterForgetIntent   = "after-forget-intent"
+	BarrierAfterForgetRegistry = "after-forget-registry"
+	BarrierAfterForgetLedger   = "after-forget-ledger"
 )
 
 type Capabilities struct {
