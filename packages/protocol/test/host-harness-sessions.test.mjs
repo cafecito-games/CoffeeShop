@@ -130,6 +130,7 @@ test("interactive harness profiles and observations are strict, bounded, and sec
     { ...observation(), extra: true },
     { ...observation(), hostHarnessSessionId: "" },
     { ...observation(), hostHarnessSessionId: identifierOver },
+    { ...observation(), hostHarnessSessionId: "\ud800" },
     { ...observation(), providerSessionId: "sk-live_123456789012345" },
     { ...observation(), workspace: "relative/path" },
     { ...observation(), workspace: "/workspaces/../secret" },
@@ -193,6 +194,8 @@ test("host-session runtime actors, thread orchestrators, and Runs are mutually e
   };
   const thread = { kind: "host-session", hostHarnessSessionId: "host-session-one" };
   assert.equal(protocol.validateHostHarnessSessionRun(run, thread).ok, true);
+  assert.equal(protocol.validateHostHarnessSessionRun({ ...run, workspace: "/" }, thread).ok, true,
+    "the canonical POSIX root must match Go workspace validation");
   for (const invalid of [
     [{ ...run, threadId: undefined }, thread],
     [{ ...run, agentId: "agent-one" }, thread],
@@ -204,6 +207,7 @@ test("host-session runtime actors, thread orchestrators, and Runs are mutually e
   for (const invalid of [
     { ...run, extra: true },
     { ...run, agentId: "agent-one" },
+    { ...run, model: "sk-live_123456789012345" },
     { ...run, status: "queued", providerTurnId: "provider-turn-one" },
     { ...run, output: "Bearer abcdefghijklmnopqrstuvwxyz" }
   ]) assert.equal(protocol.validateHostHarnessSessionRun(invalid, thread).ok, false);
@@ -478,6 +482,11 @@ test("interactive-session registration is admitted only on v6 with sorted driver
   assert.equal(protocol.validateHostSessionRegistration(registration, "6").ok, true);
   assert.equal(protocol.canAcceptFromControlAgent(registration, "6"), true);
   assert.equal(protocol.canAcceptFromControlAgent({ ...registration, protocolVersion: "5" }, "5"), false);
+  assert.equal(protocol.canAcceptFromControlAgent({ ...registration, protocolVersion: "5" }, "6"), false,
+    "a v6 link cannot grant v6-only fields to a peer declaring v5");
+  assert.doesNotThrow(() => protocol.canAcceptFromControlAgent({ type: "register", protocolVersion: "6" }, "6"));
+  assert.equal(protocol.canAcceptFromControlAgent({ type: "register", protocolVersion: "6" }, "6"), false,
+    "a malformed register must make the boolean gate fail closed");
   const malformed = structuredClone(registration);
   malformed.node.harnesses[0].interactiveSessions.operations = ["discover", "create"];
   assert.equal(protocol.canAcceptFromControlAgent(malformed, "6"), false);
@@ -509,6 +518,32 @@ const readFixtureBytes = (name) => readFileSync(new URL(`${name}.json`, fixtureD
 const readFixture = (name) => JSON.parse(readFixtureBytes(name));
 const hubFixtureNames = ["create", "adopt", "attach", "detach", "history-read", "turn-start", "turn-steer", "turn-interrupt", "approval-decision", "close"];
 const controlFixtureNames = ["inventory-page", "inventory-complete", "update", "history-page", "harness-event", "command-ack", "command-result-start", "command-result-create", "command-result-close"];
+
+test("JSON numeric spellings are normalized to the same semantic command digest", () => {
+  const bytes = readFixtureBytes("attach");
+  for (const spelling of ["3.0", "3e0"]) {
+    const changed = bytes.replace('"attachmentEpoch": 3', `"attachmentEpoch": ${spelling}`);
+    assert.notEqual(changed, bytes);
+    const parsed = JSON.parse(changed);
+    assert.equal(protocol.validateHostSessionHubMessage(parsed, "6").ok, true, spelling);
+  }
+});
+
+test("every host-session byte limit accepts its exact boundary", () => {
+  assert.equal(protocol.validateHostHarnessSessionObservation(observation({
+    hostHarnessSessionId: "i".repeat(protocol.hostHarnessSessionLimits.identifierBytes),
+    providerSessionId: "p".repeat(protocol.hostHarnessSessionLimits.identifierBytes),
+    workspace: "/" + "w".repeat(protocol.hostHarnessSessionLimits.workspaceBytes - 1),
+    summary: "d".repeat(protocol.hostHarnessSessionLimits.diagnosticBytes)
+  })).ok, true);
+  const history = {
+    type: "host-session.history.page", nodeId: "node-one", hostHarnessSessionId: "host-session-one",
+    requestId: "request-history", items: [{ id: "history-one", kind: "assistant",
+      text: "t".repeat(protocol.hostHarnessSessionLimits.historyItemTextBytes), truncated: false }],
+    nextCursor: "c".repeat(protocol.hostHarnessSessionLimits.historyCursorBytes), truncated: true, at
+  };
+  assert.equal(protocol.validateHostSessionControlMessage(history, "6").ok, true);
+});
 
 test("checked-in v6 fixtures are exact language-neutral producer bytes", () => {
   for (const name of hubFixtureNames) {

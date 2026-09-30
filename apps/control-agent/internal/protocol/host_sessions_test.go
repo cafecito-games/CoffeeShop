@@ -112,6 +112,17 @@ func TestHostSessionActorThreadAndRunFixturesAreStrictAndVersionSixOnly(t *testi
 		value["providerTurnId"] = "provider-turn-one"
 	}), "6", orchestrator)
 	require.Error(t, err, "queued Runs cannot claim provider acceptance")
+	_, err = DecodeHostHarnessSessionRun(mutateHostSessionFixture(t, "runtime-run", func(value map[string]any) {
+		value["workspace"] = "/"
+	}), "6", orchestrator)
+	require.NoError(t, err, "the canonical POSIX root must match TypeScript workspace validation")
+
+	_, err = DecodeHostHarnessSessionActor([]byte(`{"kind":"host-session","hostHarnessSessionId":"\ud800"}`), "6")
+	require.Error(t, err, "a lone surrogate escape must not be normalized into a replacement character")
+	_, err = DecodeHostHarnessSessionActor([]byte(`{"kind":"host-session","hostHarnessSessionId":"\ud83d\ude00"}`), "6")
+	require.NoError(t, err, "a paired surrogate escape is valid Unicode")
+	_, err = DecodeHostHarnessSessionActor([]byte(`{"kind":"host-session","hostHarnessSessionId":"literal-\\ud800"}`), "6")
+	require.NoError(t, err, "an escaped backslash followed by surrogate text is not a Unicode escape")
 
 	providerTurn := "provider-turn-one"
 	accepted := run
@@ -148,6 +159,20 @@ func TestHostSessionHubFixturesValidateDigestAndRouteOnlyOnVersionSix(t *testing
 			require.Error(t, err)
 			_, err = DecodeHostSessionHubMessage(mutateHostSessionFixture(t, name, func(value map[string]any) { value["commandDigest"] = strings.Repeat("0", 64) }), "6")
 			require.Error(t, err)
+		})
+	}
+}
+
+func TestHostSessionJSONIntegerSpellingsShareTheSemanticDigest(t *testing.T) {
+	data := string(loadHostSessionFixture(t, "attach"))
+	for _, spelling := range []string{"3.0", "3e0"} {
+		t.Run(spelling, func(t *testing.T) {
+			changed := strings.Replace(data, `"attachmentEpoch": 3`, `"attachmentEpoch": `+spelling, 1)
+			require.NotEqual(t, data, changed)
+			message, err := DecodeHostSessionHubMessage([]byte(changed), "6")
+			require.NoError(t, err)
+			require.NotNil(t, message.AttachmentEpoch)
+			require.Equal(t, int64(3), *message.AttachmentEpoch)
 		})
 	}
 }
@@ -226,6 +251,8 @@ func TestHostSessionControlFixturesAreStrictAndVersionSixOnly(t *testing.T) {
 
 	_, err := DecodeHostSessionControlMessage([]byte{'{', '"', 't', 'y', 'p', 'e', '"', ':', '"', 0xff, '"', '}'}, "6")
 	require.Error(t, err)
+	_, err = DecodeHostSessionControlMessage(append(loadHostSessionFixture(t, "inventory-complete"), []byte(` {}`)...), "6")
+	require.Error(t, err, "a second JSON value must not be ignored during normalized decoding")
 }
 
 func TestHostSessionObservationTransitionsAndInventoryFailClosed(t *testing.T) {
@@ -369,6 +396,9 @@ func TestHostSessionReplayAndCloseOutcomesFailClosed(t *testing.T) {
 	wrongEpochValue := *startResult.AttachmentEpoch + 1
 	wrongEpoch.AttachmentEpoch = &wrongEpochValue
 	require.Error(t, ValidateHostHarnessSessionCommandResponse(command, wrongEpoch))
+	wrongCommand := startResult
+	wrongCommand.CommandID = "command-other"
+	require.Error(t, ValidateHostHarnessSessionCommandResponse(command, wrongCommand))
 
 	emptyPrompt := command
 	emptyPrompt.Prompt = ""

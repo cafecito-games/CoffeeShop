@@ -667,6 +667,7 @@ export function requiredCapabilityForControlAgentMessage(message: ControlAgentTo
     case "capability-pack.readiness":
       return "capability-pack-readiness";
     case "register":
+      if (!isRecord(message.node)) return undefined;
       if (Array.isArray(message.node?.harnesses)
         && message.node.harnesses.some((harness) => harness.interactiveSessions !== undefined)) return "interactive-sessions";
       return message.node.instanceCapacity !== undefined || message.node.activeInstances !== undefined ? "instances" : undefined;
@@ -711,6 +712,7 @@ export const canSendToControlAgent = (message: HubToControlAgent | InstanceHubMe
 
 export const canAcceptFromControlAgent = (message: ControlAgentToHub | InstanceControlMessage, version: ControlProtocolVersion) => {
   if (!knownMessageType(message.type, controlAgentToHubMessageTypes, instanceControlMessageTypes)) return false;
+  if (message.type === "register" && !isRecord(message.node)) return false;
   const capability = requiredCapabilityForControlAgentMessage(message);
   if (capability === "interactive-sessions") {
     if (message.type === "register") return validateHostSessionRegistration(message, version).ok;
@@ -2034,6 +2036,7 @@ const isCanonicalHostSessionWorkspace = (value: unknown): value is string => {
   if (/^[A-Za-z]:[\\/]/.test(path)) path = path.slice(2).replaceAll("\\", "/");
   else if (!path.startsWith("/")) return false;
   if (path !== "/" && path.endsWith("/")) return false;
+  if (path === "/") return true;
   const segments = path.split("/").slice(1);
   return segments.every((segment) => segment.length > 0 && segment !== "." && segment !== "..");
 };
@@ -4340,7 +4343,7 @@ export function validateHostHarnessSessionRun(value: unknown, orchestrator: unkn
     return reject("host session Run has missing, conflicting, or mismatched actor attribution");
   }
   if (!isHostSessionIdentifier(value.nodeId) || !isHarnessId(value.harnessId)
-    || !isHostSessionString(value.model, hostHarnessSessionLimits.identifierBytes, true)
+    || !isHostSessionIdentifier(value.model)
     || !isCanonicalHostSessionWorkspace(value.workspace) || !isHostSessionPrompt(value.prompt)
     || !isOneOf(runStatuses)(value.status) || !isHostSessionPrompt(value.output)
     || !isNonNegativeInteger(value.depth) || !isTimestamp(value.createdAt)

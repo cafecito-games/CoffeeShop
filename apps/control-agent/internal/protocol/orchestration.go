@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"regexp"
 	"slices"
@@ -1768,7 +1769,7 @@ func v6HostSessionHubRule(value any, requireDigest bool) bool {
 }
 
 func decodeHostSessionValue(data []byte, rule v5Rule, target any) (any, error) {
-	if !utf8.Valid(data) {
+	if !utf8.Valid(data) || !hostSessionJSONHasValidUnicodeEscapes(data) {
 		return nil, fmt.Errorf("invalid host session UTF-8")
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
@@ -1777,13 +1778,95 @@ func decodeHostSessionValue(data []byte, rule v5Rule, target any) (any, error) {
 	if err := decoder.Decode(&value); err != nil {
 		return nil, err
 	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return nil, fmt.Errorf("invalid trailing host session JSON")
+	}
+	value = normalizeHostSessionJSONNumbers(value)
 	if !rule(value) {
 		return nil, fmt.Errorf("invalid or unknown host session fields")
 	}
-	if err := json.Unmarshal(data, target); err != nil {
+	normalized, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(normalized, target); err != nil {
 		return nil, err
 	}
 	return value, nil
+}
+
+// encoding/json replaces lone UTF-16 surrogate escapes with U+FFFD. Reject them before decoding
+// so Go applies the same Unicode scalar-value contract as JavaScript instead of changing identity
+// fields or command-digest inputs.
+func hostSessionJSONHasValidUnicodeEscapes(data []byte) bool {
+	inString := false
+	for index := 0; index < len(data); index++ {
+		switch data[index] {
+		case '"':
+			inString = !inString
+		case '\\':
+			if !inString {
+				continue
+			}
+			index++
+			if index >= len(data) || data[index] != 'u' {
+				continue
+			}
+			code, ok := hostSessionJSONHexQuad(data, index+1)
+			if !ok {
+				return false
+			}
+			index += 4
+			if code >= 0xd800 && code <= 0xdbff {
+				if index+6 >= len(data) || data[index+1] != '\\' || data[index+2] != 'u' {
+					return false
+				}
+				low, ok := hostSessionJSONHexQuad(data, index+3)
+				if !ok || low < 0xdc00 || low > 0xdfff {
+					return false
+				}
+				index += 6
+			} else if code >= 0xdc00 && code <= 0xdfff {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func hostSessionJSONHexQuad(data []byte, start int) (uint64, bool) {
+	if start+4 > len(data) {
+		return 0, false
+	}
+	value, err := strconv.ParseUint(string(data[start:start+4]), 16, 16)
+	return value, err == nil
+}
+
+// JavaScript parses JSON numbers as IEEE-754 values before validating safe integers. Normalize the
+// equivalent Go json.Number spellings before closed-rule and struct decoding so 4, 4.0, and 4e0
+// share one semantic value and command digest.
+func normalizeHostSessionJSONNumbers(value any) any {
+	switch typed := value.(type) {
+	case json.Number:
+		numeric, err := typed.Float64()
+		if err == nil && math.Abs(numeric) <= float64(hostSessionMaximumSafeInteger) && numeric == math.Trunc(numeric) {
+			return json.Number(strconv.FormatInt(int64(numeric), 10))
+		}
+		return typed
+	case []any:
+		for index, item := range typed {
+			typed[index] = normalizeHostSessionJSONNumbers(item)
+		}
+		return typed
+	case map[string]any:
+		for key, item := range typed {
+			typed[key] = normalizeHostSessionJSONNumbers(item)
+		}
+		return typed
+	default:
+		return value
+	}
 }
 
 func canonicalHostSessionJSON(value any) ([]byte, error) {
