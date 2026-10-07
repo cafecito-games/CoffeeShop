@@ -1,0 +1,27 @@
+{
+  "version": "0.147.0",
+  "tag": "rust-v0.147.0",
+  "commit": "be6e8eac029b183056b7e4402879f15d2c85f61b",
+  "transport": "stdio-jsonl",
+  "clientMethods": [
+    "initialize",
+    "thread/list",
+    "thread/read",
+    "thread/items/list",
+    "thread/start",
+    "thread/resume",
+    "turn/start",
+    "turn/steer",
+    "turn/interrupt"
+  ],
+  "serverRequests": [
+    "item/commandExecution/requestApproval",
+    "item/fileChange/requestApproval"
+  ],
+  "historyModes": ["legacy", "paginated"],
+  "writableHistoryMode": "paginated",
+  "activeWriterError": {
+    "code": -32600,
+    "messageTemplate": "thread <requested-id> already has an active writer"
+  }
+}

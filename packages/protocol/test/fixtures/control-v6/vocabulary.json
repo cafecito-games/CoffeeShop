@@ -67,6 +67,7 @@
     "system",
     "summary"
   ],
+  "hostHarnessSessionHistoryOrder": "newest-first",
   "runtimeActorKinds": [
     "agent",
     "instance",
@@ -147,10 +148,13 @@
     "promptBytes": 65536,
     "operationCapabilities": 16,
     "sessionsPerInventoryPage": 64,
-    "pagesPerGeneration": 64,
-    "sessionsPerGeneration": 4096,
+    "pagesPerGeneration": 8,
+    "sessionsPerGeneration": 512,
+    "sessionsGlobal": 2048,
     "historyItemsPerPage": 100,
     "historyItemTextBytes": 32768,
-    "historyCursorBytes": 512
+    "historyCursorBytes": 512,
+    "historyReadsPerNode": 4,
+    "historyResponseWaitMilliseconds": 16000
   }
 }

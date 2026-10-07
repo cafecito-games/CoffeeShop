@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Copy } from "@phosphor-icons/react";
+import { ArrowSquareOut, Copy } from "@phosphor-icons/react";
 import type { HarnessId, HarnessSessionBinding, HarnessTransport, Run, SessionBindingStatus } from "@coffee-shop/protocol";
 
 /** A vendor session an operator can continue outside Coffee Shop, on the node that owns it. */
@@ -11,6 +11,8 @@ export interface ProviderSessionReference {
   workspace: string;
   nodeId: string;
   runId: string;
+  /** Explicit Hub-authored correlation only; never derived from provider identity. */
+  hostHarnessSessionId?: string;
   /** Present for ACP sessions, which Coffee Shop may itself resume while idle. */
   bindingStatus?: SessionBindingStatus;
   updatedAt: string;
@@ -18,11 +20,12 @@ export interface ProviderSessionReference {
 
 export function providerSessionForRun(run: Run, sessionBindings: HarnessSessionBinding[]): ProviderSessionReference | undefined {
   const binding = run.sessionBindingId ? sessionBindings.find((item) => item.id === run.sessionBindingId) : undefined;
-  if (binding) return fromBinding(binding);
+  if (binding) return fromBinding(binding, run.hostHarnessSessionId);
   if (!run.providerSessionId) return undefined;
   return {
     key: `run:${run.id}`, harnessId: run.harnessId, transport: "native-cli", providerSessionId: run.providerSessionId,
-    workspace: run.workspace, nodeId: run.nodeId, runId: run.id, updatedAt: run.finishedAt ?? run.startedAt ?? run.createdAt
+    workspace: run.workspace, nodeId: run.nodeId, runId: run.id, hostHarnessSessionId: run.hostHarnessSessionId,
+    updatedAt: run.finishedAt ?? run.startedAt ?? run.createdAt
   };
 }
 
@@ -30,7 +33,10 @@ export function providerSessionForRun(run: Run, sessionBindings: HarnessSessionB
 export function providerSessionsForAgent(agentId: string, runs: Run[], sessionBindings: HarnessSessionBinding[], limit = 5): ProviderSessionReference[] {
   const references = new Map<string, ProviderSessionReference>();
   for (const binding of sessionBindings) {
-    if (binding.agentId === agentId) references.set(binding.providerSessionId, fromBinding(binding));
+    if (binding.agentId === agentId) {
+      const correlated = runs.find((run) => run.sessionBindingId === binding.id && run.hostHarnessSessionId !== undefined);
+      references.set(binding.providerSessionId, fromBinding(binding, correlated?.hostHarnessSessionId));
+    }
   }
   for (const run of runs) {
     if (run.agentId !== agentId || !run.providerSessionId || references.has(run.providerSessionId)) continue;
@@ -40,10 +46,11 @@ export function providerSessionsForAgent(agentId: string, runs: Run[], sessionBi
   return [...references.values()].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)).slice(0, limit);
 }
 
-function fromBinding(binding: HarnessSessionBinding): ProviderSessionReference {
+function fromBinding(binding: HarnessSessionBinding, hostHarnessSessionId?: string): ProviderSessionReference {
   return {
     key: `binding:${binding.id}`, harnessId: binding.harnessId, transport: binding.transport, providerSessionId: binding.providerSessionId,
-    workspace: binding.workspace, nodeId: binding.nodeId, runId: binding.lastRunId, bindingStatus: binding.status, updatedAt: binding.updatedAt
+    workspace: binding.workspace, nodeId: binding.nodeId, runId: binding.lastRunId, bindingStatus: binding.status,
+    hostHarnessSessionId, updatedAt: binding.updatedAt
   };
 }
 
@@ -67,7 +74,7 @@ export function resumeCommand(reference: ProviderSessionReference): string | und
 
 const harnessLabels: Record<HarnessId, string> = { "claude-cli": "Claude Code", "codex-cli": "Codex", shell: "Shell", "ag-ui": "AG-UI" };
 
-export function ProviderSessionCard({ reference, nodeName }: { reference: ProviderSessionReference; nodeName: string }) {
+export function ProviderSessionCard({ reference, nodeName, onOpenHostSession }: { reference: ProviderSessionReference; nodeName: string; onOpenHostSession?: (id: string) => void }) {
   const [copied, setCopied] = useState<"" | "copied" | "failed">("");
   const command = resumeCommand(reference);
   const resumableByCoffeeShop = reference.bindingStatus === "active" || reference.bindingStatus === "idle";
@@ -97,6 +104,7 @@ export function ProviderSessionCard({ reference, nodeName }: { reference: Provid
           <Copy size={13} /> {copied === "copied" ? "Copied" : copied === "failed" ? "Copy failed — select the command" : "Copy command"}
         </button>
       )}
+      {reference.hostHarnessSessionId && onOpenHostSession && <button className="provider-session-copy" onClick={() => onOpenHostSession(reference.hostHarnessSessionId!)}><ArrowSquareOut size={13} /> View in Sessions</button>}
       {resumableByCoffeeShop && <p className="provider-session-note">Coffee Shop may still resume this session. Stop the hub or finish the thread before continuing it yourself.</p>}
     </div>
   );

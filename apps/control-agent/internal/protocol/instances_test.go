@@ -77,7 +77,9 @@ func instanceFixtureProducer() map[string]any {
 		// ActiveRuns is a pointer, so the fixture carried three top-level keys and passed the v5
 		// validator, while Outbound's non-pointer ActiveRuns put a fourth key on every real frame
 		// and a v5 hub refused it. A fixture must come from the producer it claims to represent.
-		"register": Outbound{Type: "register", ProtocolVersion: Version, Node: &ComputeNode{
+		// This fixture remains the historical v5 producer contract; the current v6 producer and its
+		// interactive profile are covered by host_sessions_test.go.
+		"register": Outbound{Type: "register", ProtocolVersion: "5", Node: &ComputeNode{
 			ID: a.NodeID, Name: "Build Mac", Kind: "local", Platform: "darwin/arm64", Status: "online", LastSeen: instanceAt,
 			ActiveRuns: 0, Concurrency: 2, InstanceCapacity: instancePointer(4), ActiveInstances: instancePointer(1),
 			WorkspaceRoots: []string{"/workspace"}, Harnesses: []HarnessProfile{{ID: "claude-cli", Label: "Claude", Description: "Local account", Available: true, AuthMode: "local-subscription", Models: []string{"fable"}}}, Version: "0.1.0",

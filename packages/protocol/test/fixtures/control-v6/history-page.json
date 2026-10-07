@@ -5,11 +5,19 @@
   "requestId": "request-history",
   "items": [
     {
-      "id": "history-one",
+      "id": "history-newest",
       "kind": "assistant",
       "text": "Prior answer",
       "providerTurnId": "provider-turn-zero",
       "at": "2026-09-30T11:59:00Z",
+      "truncated": false
+    },
+    {
+      "id": "history-older",
+      "kind": "user",
+      "text": "Earlier question",
+      "providerTurnId": "provider-turn-minus-one",
+      "at": "2026-09-30T11:58:00Z",
       "truncated": false
     }
   ],

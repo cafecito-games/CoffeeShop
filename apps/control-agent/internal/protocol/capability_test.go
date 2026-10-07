@@ -301,6 +301,9 @@ func TestLooksSecretLikeMatchesTheNarrowDenylist(t *testing.T) {
 		"AKIAIOSFODNN7EXAMPLE",
 		"glpat-abcdefghij1234",
 		"Bearer abcdefghijklmnop",
+		"Bearer 𝟏𝟐𝟑𝟒𝟓𝟔𝟕𝟖𝟗𝟎",
+		"bearer x Authorization: bearer abcdefghijklmnop",
+		"bearer bearer 0123456789",
 		"-----BEGIN RSA PRIVATE KEY-----",
 		"build failed: token sk-abcdefghij1234567890 was rejected",
 	} {
@@ -311,6 +314,14 @@ func TestLooksSecretLikeMatchesTheNarrowDenylist(t *testing.T) {
 		"git version 2.43.0",
 		"gpu",
 		"cafecito-ios",
+		"Bearer\u00a0authentication-flow",
+		"Bearer\vauthentication-flow",
+		"Bearer 𝟏𝟐𝟑𝟒𝟓",
+		"ſk-0123456789",
+		"sk-012345678K",
+		"skeleton-app",
+		"skylake-workstation",
+		"pk-payments-service",
 	} {
 		require.False(t, LooksSecretLike(clean), "%q must not be flagged", clean)
 	}

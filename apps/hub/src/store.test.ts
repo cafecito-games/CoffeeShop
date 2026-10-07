@@ -5,10 +5,24 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
-import { recordSourceKey, runSourceKey, threadOrchestrator, threadOwnerAgentId } from "@coffee-shop/protocol";
+import {
+  hostHarnessSessionLimits,
+  recordSourceKey,
+  runSourceKey,
+  threadOrchestrator,
+  threadOwnerAgentId
+} from "@coffee-shop/protocol";
 import { submitTasks, updateTask } from "./coordination.js";
 import { sendTaskMessage } from "./mailbox.js";
-import { assertPersistedHarnessState, newEvent, Store, type State } from "./store.js";
+import { HostSessionInventoryAuthority } from "./hostSessionInventory.js";
+import { hostSessionTestComplete, hostSessionTestNode, hostSessionTestObservation, hostSessionTestPage } from "./hostSessionTestSupport.js";
+import {
+  assertPersistedHarnessState,
+  hostSessionHistoryStorageLimits,
+  newEvent,
+  Store,
+  type State
+} from "./store.js";
 
 test("starts empty, persists state atomically, and loads it again", async () => {
   const directory = await mkdtemp(join(tmpdir(), "coffee-shop-store-"));
@@ -155,6 +169,127 @@ test("stores artifact bytes outside the JSON snapshot", async () => {
   await store.writeArtifactContent("artifact-empty", Buffer.alloc(0));
   assert.equal((await store.readArtifactContent("artifact-empty")).length, 0, "ordinary empty artifacts remain supported");
   assert.doesNotMatch(await readFile(path, "utf8"), /artifact body/);
+});
+
+test("host-session persistence defaults only absence and rejects malformed or broken present state without rewriting", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "coffee-shop-host-session-store-"));
+  const path = join(directory, "state.json");
+  const first = new Store(path);
+  await first.load();
+  await first.transact((state) => { state.nodes.push(hostSessionTestNode); });
+  const current = JSON.parse(await readFile(path, "utf8")) as Record<string, any>;
+
+  const legacy = structuredClone(current);
+  delete legacy.hostHarnessSessions;
+  delete legacy.hostSessionInventoryGenerations;
+  delete legacy.hostSessionHistories;
+  const legacyBytes = JSON.stringify(legacy);
+  await writeFile(path, legacyBytes);
+  const legacyStore = new Store(path);
+  await legacyStore.load();
+  assert.deepEqual(legacyStore.snapshot().hostHarnessSessions, []);
+  assert.equal(await readFile(path, "utf8"), legacyBytes, "absence-only defaults do not rewrite legacy JSON");
+
+  const rejects = async (mutate: (state: Record<string, any>) => void, reason: RegExp) => {
+    const candidate = structuredClone(current);
+    mutate(candidate);
+    const bytes = JSON.stringify(candidate);
+    await writeFile(path, bytes);
+    await assert.rejects(new Store(path).load(), reason);
+    assert.equal(await readFile(path, "utf8"), bytes, "invalid host-session state remains untouched");
+  };
+  await rejects((state) => { state.hostHarnessSessions = null; }, /host-session collection is malformed/);
+  await rejects((state) => {
+    state.hostHarnessSessions = [
+      { ...hostSessionTestObservation(), attachmentEpoch: 0 },
+      { ...hostSessionTestObservation(), hostHarnessSessionId: "host-session-two", attachmentEpoch: 0 }
+    ];
+  }, /repeats provider identity/);
+  await rejects((state) => {
+    state.hostHarnessSessions = [{ ...hostSessionTestObservation(), nodeId: "unknown-node", attachmentEpoch: 0 }];
+  }, /unknown node/);
+  await rejects((state) => {
+    state.hostSessionInventoryGenerations = [{ nodeId: "unknown-node", generation: 1, digest: "0".repeat(64), completedAt: "2026-10-06T12:00:00Z" }];
+  }, /generation 0 is invalid/);
+  await rejects((state) => {
+    state.hostHarnessSessions = [{ ...hostSessionTestObservation(), attachmentEpoch: 0 }];
+    state.hostSessionHistories = [{
+      hostHarnessSessionId: "host-session-missing", nodeId: "node-one", harnessId: "codex-cli",
+      providerSessionId: "provider-thread-one", workspace: "/workspace/project", revision: 1,
+      items: [], truncated: false, omitted: false, observedAt: "2026-10-06T12:00:00Z", receipts: []
+    }];
+  }, /broken session relationship/);
+  await rejects((state) => {
+    state.hostHarnessSessions = [{ ...hostSessionTestObservation(), attachmentEpoch: 0 }];
+    state.hostSessionHistories = [{
+      hostHarnessSessionId: "host-session-one", nodeId: "node-one", harnessId: "codex-cli",
+      providerSessionId: "provider-thread-one", workspace: "/workspace/project", revision: 0,
+      items: [], truncated: false, omitted: false, observedAt: "2026-10-06T12:00:00Z", receipts: []
+    }];
+  }, /history 0 is malformed/);
+  await rejects((state) => {
+    state.hostHarnessSessions = [{ ...hostSessionTestObservation(), attachmentEpoch: 0 }];
+    state.hostSessionHistories = [{
+      hostHarnessSessionId: "host-session-one", nodeId: "node-one", harnessId: "codex-cli",
+      providerSessionId: "provider-thread-one", workspace: "/workspace/project", revision: 1,
+      items: [], truncated: false, omitted: false, observedAt: "2026-10-06T12:00:00Z",
+      receipts: [{ requestId: "history-request-one", cursor: "x".repeat(hostHarnessSessionLimits.historyCursorBytes + 1), digest: "0".repeat(64) }]
+    }];
+  }, /invalid receipt/);
+  await rejects((state) => {
+    state.hostHarnessSessions = Array(hostHarnessSessionLimits.sessionsGlobal + 1).fill(null);
+  }, /exceeds global capacity/);
+  await rejects((state) => {
+    state.hostSessionInventoryBytes += 1;
+  }, /inventory extent is malformed/);
+  await rejects((state) => { state.hostSessionInventoryRevision = -1; }, /inventory revision is malformed/);
+  await rejects((state) => {
+    state.hostSessionHistories = Array.from({ length: hostSessionHistoryStorageLimits.records + 1 }, () => ({}));
+  }, /history collection exceeds capacity/);
+  await rejects((state) => {
+    state.hostSessionHistories = [{ oversized: "x".repeat(hostSessionHistoryStorageLimits.bytes) }];
+  }, /history collection exceeds capacity/);
+  await rejects((state) => {
+    state.hostHarnessSessions = Array.from({ length: hostHarnessSessionLimits.sessionsPerGeneration + 1 }, (_, index) => ({
+      ...hostSessionTestObservation(), hostHarnessSessionId: `host-session-${index}`,
+      providerSessionId: `provider-session-${index}`, attachmentEpoch: 0
+    })).sort((left, right) => left.hostHarnessSessionId < right.hostHarnessSessionId ? -1 : 1);
+  }, /exceeds capacity for node node-one/);
+  await rejects((state) => {
+    state.hostHarnessSessions = [{ ...hostSessionTestObservation(), attachmentEpoch: 0, endpoint: "http:\/\/localhost:9999" }];
+  }, /undeclared fields/);
+});
+
+test("reopening current SQLite host-session state performs no persistence write", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "coffee-shop-host-session-sqlite-"));
+  const databasePath = join(directory, "coffee-shop.sqlite");
+  const legacyJsonPath = join(directory, "absent.json");
+  const first = new Store({ databasePath, legacyJsonPath });
+  await first.load();
+  await first.transact((state) => { state.nodes.push(hostSessionTestNode); });
+  const authority = new HostSessionInventoryAuthority(first);
+  const connection = { supportsCapability: true, isCurrent: () => true, nodeId: "node-one", generation: 1 };
+  await authority.receive(connection, hostSessionTestPage());
+  await authority.receive(connection, hostSessionTestComplete());
+
+  const marker = "2000-01-01T00:00:00.000Z";
+  const probe = new DatabaseSync(databasePath);
+  const before = probe.prepare("SELECT state_json FROM hub_state WHERE singleton = 1").get() as { state_json: string };
+  probe.prepare("UPDATE hub_state SET updated_at = ? WHERE singleton = 1").run(marker);
+  probe.close();
+
+  const reopened = new Store({ databasePath, legacyJsonPath });
+  await reopened.load();
+  assert.equal(reopened.snapshot().hostHarnessSessions?.[0]?.hostHarnessSessionId, "host-session-one");
+  assert.deepEqual(reopened.clientSnapshot().hostHarnessSessions, [],
+    "network snapshots advertise v6 without embedding the paginated inventory");
+  assert.ok(Buffer.byteLength(JSON.stringify(reopened.clientSnapshot()), "utf8") < 1_000_000,
+    "host-session inventory cannot make a network snapshot exceed its fixed projection budget");
+  const after = new DatabaseSync(databasePath);
+  const row = after.prepare("SELECT state_json, updated_at FROM hub_state WHERE singleton = 1").get() as { state_json: string; updated_at: string };
+  assert.equal(row.state_json, before.state_json);
+  assert.equal(row.updated_at, marker);
+  after.close();
 });
 
 test("migrates an active legacy run into an active durable thread", async () => {

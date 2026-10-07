@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import {
   Pulse as Activity, ArrowLeft, ArrowRight, Broadcast, Check, CircleNotch, Command,
   Coffee, Cpu, FolderOpen, Gear, GitBranch, MagnifyingGlass, PaperPlaneTilt, Plus, ShieldWarning,
-  Robot, SlidersHorizontal, TerminalWindow, UsersThree, WarningCircle, X, LockKey, Stack, Copy
+  Robot, SlidersHorizontal, TerminalWindow, UsersThree, WarningCircle, X, LockKey, Stack, Copy, ClockCounterClockwise
 } from "@phosphor-icons/react";
 import {
   isActiveRunStatus, threadOwnerAgentId, type Agent, type AgentState, type ApprovalRequest, type Artifact, type ChatMessage,
@@ -38,8 +38,10 @@ import {
   type TemplateChanges
 } from "./templates/TemplatesView.js";
 import { StableActions, type StableActionResponse } from "./stableActions.js";
+import { SessionsView } from "./sessions/SessionsView.js";
+import { nonSessionsLocationSearch, parseSessionsLocation, removeOneTimeToken, sessionsLocationSearch } from "./sessions/sessionLocation.js";
 
-type View = "instances" | "templates" | "agents" | "threads" | "activity" | "orchestration" | "projects" | "compute" | "settings";
+type View = "instances" | "templates" | "agents" | "threads" | "sessions" | "activity" | "orchestration" | "projects" | "compute" | "settings";
 
 const statusLabels: Record<AgentState, string> = { idle: "Idle", thinking: "Thinking", working: "Working", waiting: "Waiting", blocked: "Blocked", done: "Done" };
 const connectionLabels: Record<ConnectionStatus, string> = {
@@ -50,7 +52,7 @@ const connectionLabels: Record<ConnectionStatus, string> = {
   "authentication-required": "Authentication required"
 };
 const queryToken = new URLSearchParams(location.search).get("token");
-if (queryToken) { localStorage.setItem("coffee-shop-token", queryToken); history.replaceState({}, "", location.pathname); }
+if (queryToken) { localStorage.setItem("coffee-shop-token", queryToken); history.replaceState({}, "", `${location.pathname}${removeOneTimeToken(location.search)}`); }
 const accessToken = localStorage.getItem("coffee-shop-token") ?? "";
 const apiFetch = (path: string, init: RequestInit = {}) => fetch(path, { ...init, headers: { ...(accessToken ? { authorization: `Bearer ${accessToken}` } : {}), ...init.headers } });
 
@@ -189,13 +191,14 @@ function Message({ message, agent, onInspectRun }: { message: ChatMessage; agent
   );
 }
 
-function Inspector({ agent, nodes, sessions, onClose, onSave, onReconcile, canMutate }: {
+function Inspector({ agent, nodes, sessions, onClose, onSave, onReconcile, onOpenHostSession, canMutate }: {
   agent: Agent;
   nodes: ComputeNode[];
   sessions: ProviderSessionReference[];
   onClose: () => void;
   onSave: (payload: AgentConfigurationPayload) => Promise<Agent>;
   onReconcile: () => void;
+  onOpenHostSession: (id: string) => void;
   canMutate: boolean;
 }) {
   const [editing, setEditing] = useState(false);
@@ -232,7 +235,7 @@ function Inspector({ agent, nodes, sessions, onClose, onSave, onReconcile, canMu
               <div className="section-label"><span>Sessions</span><small>resume outside Coffee Shop</small></div>
               {sessions.length === 0
                 ? <p className="provider-session-empty">No provider sessions recorded yet.</p>
-                : sessions.map((reference) => <ProviderSessionCard key={reference.key} reference={reference} nodeName={nodes.find((item) => item.id === reference.nodeId)?.name ?? reference.nodeId} />)}
+                : sessions.map((reference) => <ProviderSessionCard key={reference.key} reference={reference} nodeName={nodes.find((item) => item.id === reference.nodeId)?.name ?? reference.nodeId} onOpenHostSession={onOpenHostSession} />)}
             </section>
             <section className="prompt-section"><div className="section-label"><span>Purpose</span><small>system prompt</small></div><p>{agent.systemPrompt}</p></section>
             <footer><div><i className={node?.status === "online" || node?.status === "busy" ? "online-dot" : "offline-dot"} /><span>{node?.status ?? "offline"}</span></div><small>Credentials stay on {node?.name ?? "the compute node"}</small></footer>
@@ -243,7 +246,7 @@ function Inspector({ agent, nodes, sessions, onClose, onSave, onReconcile, canMu
   );
 }
 
-function RunInspector({ selectedRunId, run, runs, threads, artifacts, artifactPreviews, agents, nodes, runActivity, approvals, sessionBindings, onClose, onInspectRun, canMutate }: {
+function RunInspector({ selectedRunId, run, runs, threads, artifacts, artifactPreviews, agents, nodes, runActivity, approvals, sessionBindings, onClose, onInspectRun, onOpenHostSession, canMutate }: {
   selectedRunId: string;
   run?: Run;
   runs: Run[];
@@ -257,6 +260,7 @@ function RunInspector({ selectedRunId, run, runs, threads, artifacts, artifactPr
   sessionBindings: HarnessSessionBinding[];
   onClose: () => void;
   onInspectRun: (id: string) => void;
+  onOpenHostSession: (id: string) => void;
   canMutate: boolean;
 }) {
   const [confirming, setConfirming] = useState(false);
@@ -337,7 +341,7 @@ function RunInspector({ selectedRunId, run, runs, threads, artifacts, artifactPr
           <section className="run-text" aria-live="polite"><h3>Output</h3><pre>{run.output || (isActiveRunStatus(run.status) ? "Output is not available yet." : "No output was produced.")}</pre></section>
           <section className="run-text"><h3>Error</h3><pre>{run.error ?? "No error reported."}</pre></section>
           <RunActivityPanel activity={activity} transportSelection={run.transportSelection} sessionBinding={sessionBinding} approvals={runApprovals} />
-          {providerSession && <section className="run-text"><h3>Provider session</h3><ProviderSessionCard reference={providerSession} nodeName={node?.name ?? run.nodeId} /></section>}
+          {providerSession && <section className="run-text"><h3>Provider session</h3><ProviderSessionCard reference={providerSession} nodeName={node?.name ?? run.nodeId} onOpenHostSession={onOpenHostSession} /></section>}
           {children.length > 0 && <section className="run-related"><h3>Delegated tasks</h3>{children.map((child) => <button key={child.id} onClick={() => onInspectRun(child.id)}><span>{actorLabel(child, agents)}</span><small>{runStatusLabels[child.status]}</small></button>)}</section>}
           {runArtifacts.length > 0 && <section className="run-related"><h3>Artifacts</h3>{runArtifacts.map((artifact) => {
             const preview = previewByArtifact.get(artifact.id);
@@ -363,7 +367,7 @@ function FreshnessNotice({ connection, onRetry }: { connection: ConnectionStatus
   return <div className="freshness-notice" role="status"><WarningCircle size={15} /><span><strong>{connectionLabels[connection]}</strong>{waiting ? "Waiting for a validated live snapshot." : "Showing last known data. Changes are disabled until the live snapshot is restored."}</span>{!waiting && <button onClick={onRetry} aria-label="Retry connection">Retry</button>}</div>;
 }
 
-function BottomNav({ view, onView, pendingApprovalCount, legacy }: { view: View; onView: (view: View) => void; pendingApprovalCount: number; legacy: boolean }) {
+function BottomNav({ view, onView, pendingApprovalCount, legacy, sessionsAvailable }: { view: View; onView: (view: View) => void; pendingApprovalCount: number; legacy: boolean; sessionsAvailable: boolean }) {
   const items: [View, typeof Robot, string][] = legacy ? [
     ["agents", Robot, "Legacy"], ["threads", FolderOpen, "Threads"], ["activity", Activity, "Activity"],
     ["orchestration", ShieldWarning, "Orchestrate"], ["projects", GitBranch, "Projects"], ["compute", Cpu, "Compute"], ["settings", Gear, "Settings"]
@@ -371,7 +375,8 @@ function BottomNav({ view, onView, pendingApprovalCount, legacy }: { view: View;
     ["instances", Stack, "Instances"], ["templates", Copy, "Templates"], ["threads", FolderOpen, "Threads"],
     ["activity", Activity, "Activity"], ["orchestration", ShieldWarning, "Orchestrate"], ["projects", GitBranch, "Projects"], ["compute", Cpu, "Compute"], ["settings", Gear, "Settings"]
   ];
-  return <nav className="bottom-nav">{items.map(([key, Icon, label]) => (
+  if (sessionsAvailable) items.splice(legacy ? 2 : 3, 0, ["sessions", ClockCounterClockwise, "Sessions"]);
+  return <nav className="bottom-nav" aria-label="Primary">{items.map(([key, Icon, label]) => (
     <button key={key} aria-label={label} className={view === key ? "active" : ""} onClick={() => onView(key)}>
       <Icon size={21} weight={view === key ? "fill" : "regular"} />
       <span aria-hidden="true">{label}</span>
@@ -393,7 +398,9 @@ function CoffeeShopApp() {
   useViewportMetrics();
   const { snapshot, status: connection, canMutate, retry } = useHubConnection(accessToken);
   const legacySnapshot = snapshot.instances === undefined;
-  const [view, setView] = useState<View>("instances");
+  const initialSessionLocation = parseSessionsLocation(location.search);
+  const [view, setView] = useState<View>(initialSessionLocation.view ?? "instances");
+  const [selectedHostSessionId, setSelectedHostSessionId] = useState(initialSessionLocation.sessionId);
   const [selectedId, setSelectedId] = useState<string>();
   const [selectedInstanceId, setSelectedInstanceId] = useState<string>();
   const [selectedTemplateId, setSelectedTemplateId] = useState<string>();
@@ -508,7 +515,36 @@ function CoffeeShopApp() {
     setSelectedId(undefined);
     setOpenThreadId(thread.id);
   }
-  function switchView(next: View) { setView(next); setOpenThreadId(undefined); if (next !== "agents") setSelectedId(undefined); }
+  function switchView(next: View) {
+    if (next === "sessions") history.pushState({}, "", `${location.pathname}${sessionsLocationSearch(location.search, selectedHostSessionId)}`);
+    else if (view === "sessions" || parseSessionsLocation(location.search).view === "sessions") history.pushState({}, "", `${location.pathname}${nonSessionsLocationSearch(location.search)}`);
+    setView(next); setOpenThreadId(undefined); if (next !== "agents") setSelectedId(undefined);
+  }
+  function selectHostSession(id?: string, options?: { replace?: boolean }) {
+    setSelectedHostSessionId(id);
+    history[options?.replace ? "replaceState" : "pushState"]({}, "", `${location.pathname}${sessionsLocationSearch(location.search, id)}`);
+  }
+  function openHostSession(id: string) {
+    setSelectedHostSessionId(id);
+    setView("sessions");
+    setSelectedRunId(undefined);
+    setInspectorOpen(false);
+    history.pushState({}, "", `${location.pathname}${sessionsLocationSearch(location.search, id)}`);
+  }
+  useEffect(() => {
+    const onPopState = () => {
+      const next = parseSessionsLocation(location.search);
+      if (next.view === "sessions") { setView("sessions"); setSelectedHostSessionId(next.sessionId); }
+      else if (view === "sessions") { setView(legacySnapshot ? "agents" : "instances"); setSelectedHostSessionId(undefined); }
+    };
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, [legacySnapshot, view]);
+  useEffect(() => {
+    if (view !== "sessions") return;
+    const normalized = sessionsLocationSearch(location.search, selectedHostSessionId);
+    if (location.search !== normalized) history.replaceState({}, "", `${location.pathname}${normalized}`);
+  }, [view, selectedHostSessionId]);
   async function createInstance(payload: CreateInstancePayload) {
     setInstanceMutationBusy(true);
     try {
@@ -630,6 +666,7 @@ function CoffeeShopApp() {
         {effectiveView === "templates" && <TemplateDetail template={selectedTemplate} canMutate={canMutate} onEdit={() => setEditingTemplate("edit")} onDelete={() => setDeletingTemplate(true)} onBack={() => setSelectedTemplateId(undefined)} />}
         {effectiveView === "threads" && openThread && <ThreadConversation thread={openThread} snapshot={snapshot} canMutate={canMutate && !legacySnapshot} apiFetch={apiFetch} onBack={() => setOpenThreadId(undefined)} onInspectRun={setSelectedRunId} onReviewApproval={setReviewingApprovalId} onSetStatus={setThreadStatus} />}
         {effectiveView === "threads" && !openThread && <ThreadsView threads={snapshot.threads ?? []} runs={snapshot.runs} artifacts={snapshot.artifacts ?? []} artifactPreviews={snapshot.artifactPreviews} agents={snapshot.agents} instances={snapshot.instances} orchestratorClients={orchestratorClients} orchestratorAttachments={orchestratorAttachments} canMutate={canMutate} apiFetch={apiFetch} onCreate={() => setCreatingHostedThread(true)} onOpen={openThreadConversation} onInspectRun={setSelectedRunId} onSetStatus={setThreadStatus} />}
+        {effectiveView === "sessions" && <SessionsView snapshot={snapshot} connection={connection} apiFetch={apiFetch} selectedId={selectedHostSessionId} onSelect={selectHostSession} onOpenThread={(id) => { setOpenThreadId(id); switchView("threads"); }} onInspectRun={setSelectedRunId} />}
         {effectiveView === "activity" && <ActivityView events={snapshot.events} agents={snapshot.agents} onInspectRun={setSelectedRunId} />}
         {effectiveView === "orchestration" && (
           <OrchestrationView
@@ -652,15 +689,16 @@ function CoffeeShopApp() {
         {effectiveView === "projects" && <ProjectsView profiles={snapshot.projectProfiles ?? []} canMutate={canMutate} apiFetch={apiFetch} />}
         {effectiveView === "settings" && <SettingsView connection={connection} nodes={snapshot.nodes} generatedAt={snapshot.generatedAt} orchestratorClients={orchestratorClients} canMutate={canMutate} apiFetch={apiFetch} />}
       </div>
-      {legacySnapshot && selected && inspectorOpen && <Inspector agent={selected} nodes={snapshot.nodes} sessions={providerSessionsForAgent(selected.id, snapshot.runs, snapshot.sessionBindings ?? [])} onClose={() => setInspectorOpen(false)} onSave={updateAgent} onReconcile={retry} canMutate={false} />}
+      {legacySnapshot && selected && inspectorOpen && <Inspector agent={selected} nodes={snapshot.nodes} sessions={providerSessionsForAgent(selected.id, snapshot.runs, snapshot.sessionBindings ?? [])} onClose={() => setInspectorOpen(false)} onSave={updateAgent} onReconcile={retry} onOpenHostSession={openHostSession} canMutate={false} />}
       {reviewingApproval && <ApprovalDialog approval={reviewingApproval} agents={snapshot.agents} nodes={snapshot.nodes} runs={snapshot.runs} tasks={snapshot.tasks ?? []} orchestratorClients={orchestratorClients} canMutate={canMutate} onClose={() => setReviewingApprovalId(undefined)} apiFetch={apiFetch} />}
-      {selectedRunId && <RunInspector selectedRunId={selectedRunId} run={snapshot.runs.find((run) => run.id === selectedRunId)} runs={snapshot.runs} threads={snapshot.threads ?? []} artifacts={snapshot.artifacts ?? []} artifactPreviews={snapshot.artifactPreviews} agents={snapshot.agents} nodes={snapshot.nodes} runActivity={snapshot.runActivity ?? []} approvals={snapshot.approvals ?? []} sessionBindings={snapshot.sessionBindings ?? []} onClose={() => setSelectedRunId(undefined)} onInspectRun={setSelectedRunId} canMutate={canMutate} />}
+      {selectedRunId && <RunInspector selectedRunId={selectedRunId} run={snapshot.runs.find((run) => run.id === selectedRunId)} runs={snapshot.runs} threads={snapshot.threads ?? []} artifacts={snapshot.artifacts ?? []} artifactPreviews={snapshot.artifactPreviews} agents={snapshot.agents} nodes={snapshot.nodes} runActivity={snapshot.runActivity ?? []} approvals={snapshot.approvals ?? []} sessionBindings={snapshot.sessionBindings ?? []} onClose={() => setSelectedRunId(undefined)} onInspectRun={setSelectedRunId} onOpenHostSession={openHostSession} canMutate={canMutate} />}
       <nav className="desktop-nav" aria-label="Primary">
         <div className="rail-brand" aria-label="Coffee Shop"><Coffee size={21} /></div>
         {legacySnapshot
           ? <button aria-label="Legacy agents" className={effectiveView === "agents" ? "active" : ""} onClick={() => switchView("agents")}><Robot size={18} /><span>Legacy agents</span></button>
           : <><button aria-label="Instances" className={effectiveView === "instances" ? "active" : ""} onClick={() => switchView("instances")}><Stack size={18} /><span>Instances</span></button><button aria-label="Templates" className={effectiveView === "templates" ? "active" : ""} onClick={() => switchView("templates")}><Copy size={18} /><span>Templates</span></button></>}
         <button aria-label="Threads" className={effectiveView === "threads" ? "active" : ""} onClick={() => switchView("threads")}><FolderOpen size={18} /><span>Threads</span></button>
+        {snapshot.hostHarnessSessions !== undefined && <button aria-label="Sessions" className={effectiveView === "sessions" ? "active" : ""} onClick={() => switchView("sessions")}><ClockCounterClockwise size={18} /><span>Sessions</span></button>}
         <button aria-label="Activity" className={effectiveView === "activity" ? "active" : ""} onClick={() => switchView("activity")}><Activity size={18} /><span>Activity</span></button>
         <button aria-label="Orchestration" className={effectiveView === "orchestration" ? "active" : ""} onClick={() => switchView("orchestration")}><ShieldWarning size={18} /><span>Orchestrate</span>{pendingApprovalCount > 0 && <span className="unread">{pendingApprovalCount}</span>}</button>
         <button aria-label="Compute" className={effectiveView === "compute" ? "active" : ""} onClick={() => switchView("compute")}><Cpu size={18} /><span>Compute</span></button>
@@ -668,7 +706,7 @@ function CoffeeShopApp() {
         <button aria-label="Settings" className={effectiveView === "settings" ? "active" : ""} onClick={() => switchView("settings")}><Gear size={18} /><span>Settings</span></button>
         <div className="rail-user">CS</div>
       </nav>
-      <BottomNav view={effectiveView} onView={switchView} pendingApprovalCount={pendingApprovalCount} legacy={legacySnapshot} />
+      <BottomNav view={effectiveView} onView={switchView} pendingApprovalCount={pendingApprovalCount} legacy={legacySnapshot} sessionsAvailable={snapshot.hostHarnessSessions !== undefined} />
       {creatingInstance && <CreateInstanceDialog threads={snapshot.threads ?? []} templates={snapshot.templates ?? []} nodes={snapshot.nodes} canMutate={canMutate} onClose={() => setCreatingInstance(false)} onOpenThreads={() => switchView("threads")} onCreate={createInstance} />}
       {creatingHostedThread && <HostedThreadDialog nodes={snapshot.nodes} templates={snapshot.templates ?? []} projectProfiles={snapshot.projectProfiles ?? []} canMutate={canMutate} onClose={() => setCreatingHostedThread(false)} onCreate={createHostedThread} />}
       {releasingInstanceId && selectedInstance?.id === releasingInstanceId && <ReleaseInstanceDialog instance={selectedInstance} canMutate={canMutate} onClose={() => setReleasingInstanceId(undefined)} onRelease={(mode) => releaseInstance(selectedInstance, mode)} />}

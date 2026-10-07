@@ -51,12 +51,22 @@ var LabelOrAcceleratorPattern = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
  * probe stdout/stderr, where a token can appear embedded in a longer line rather than as the
  * entire string.
  */
-var secretLikeTokenPattern = regexp.MustCompile(`(?i)\b(sk|pk|ghp|gho|ghu|ghs|ghr|xox[abp]|AKIA|glpat)-?[A-Za-z0-9_-]{10,}\b`)
-var bearerHeaderPattern = regexp.MustCompile(`(?i)\bBearer\s+\S{10,}`)
+var secretLikeTokenPattern = regexp.MustCompile(`(^|[^A-Za-z0-9_])((sk-[a-z0-9_-]{10,})|(pk_(test|live)_[a-z0-9_-]{10,})|((ghp|gho|ghu|ghs|ghr)_[a-z0-9_-]{10,})|(xox[abp]-[a-z0-9_-]{10,})|(akia[a-z0-9_-]{10,})|(glpat-[a-z0-9_-]{10,}))($|[^A-Za-z0-9_])`)
+var bearerHeaderPattern = regexp.MustCompile(`(^|[^A-Za-z0-9_])bearer[ \t\n\f\r]+[^ \t\n\f\r]{10,}`)
+
+func asciiLower(text string) string {
+	return strings.Map(func(character rune) rune {
+		if character >= 'A' && character <= 'Z' {
+			return character + ('a' - 'A')
+		}
+		return character
+	}, text)
+}
 
 func LooksSecretLike(text string) bool {
-	return secretLikeTokenPattern.MatchString(text) ||
-		bearerHeaderPattern.MatchString(text) ||
+	folded := asciiLower(text)
+	return secretLikeTokenPattern.MatchString(folded) ||
+		bearerHeaderPattern.MatchString(folded) ||
 		(strings.Contains(text, "-----BEGIN") && strings.Contains(text, "PRIVATE KEY"))
 }
 

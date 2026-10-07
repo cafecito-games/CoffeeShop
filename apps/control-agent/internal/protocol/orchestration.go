@@ -85,6 +85,7 @@ var (
 	HostHarnessSessionCommandDispositions = []string{"recorded", "replayed"}
 	HostHarnessSessionCommandOutcomes     = []string{"succeeded", "rejected", "uncertain"}
 	HostHarnessSessionHistoryKinds        = []string{"user", "assistant", "system", "summary"}
+	HostHarnessSessionHistoryOrder        = "newest-first"
 	RuntimeActorKinds                     = []string{"agent", "instance", "host-session"}
 	ThreadOrchestratorKinds               = []string{"agent", "external", "instance", "host-session"}
 	RunStatuses                           = []string{"queued", "running", "completed", "failed", "cancelled"}
@@ -110,24 +111,27 @@ var (
 )
 
 type HostHarnessSessionLimitSet struct {
-	IdentifierBytes          int `json:"identifierBytes"`
-	WorkspaceBytes           int `json:"workspaceBytes"`
-	DiagnosticBytes          int `json:"diagnosticBytes"`
-	PromptBytes              int `json:"promptBytes"`
-	OperationCapabilities    int `json:"operationCapabilities"`
-	SessionsPerInventoryPage int `json:"sessionsPerInventoryPage"`
-	PagesPerGeneration       int `json:"pagesPerGeneration"`
-	SessionsPerGeneration    int `json:"sessionsPerGeneration"`
-	HistoryItemsPerPage      int `json:"historyItemsPerPage"`
-	HistoryItemTextBytes     int `json:"historyItemTextBytes"`
-	HistoryCursorBytes       int `json:"historyCursorBytes"`
+	IdentifierBytes                 int `json:"identifierBytes"`
+	WorkspaceBytes                  int `json:"workspaceBytes"`
+	DiagnosticBytes                 int `json:"diagnosticBytes"`
+	PromptBytes                     int `json:"promptBytes"`
+	OperationCapabilities           int `json:"operationCapabilities"`
+	SessionsPerInventoryPage        int `json:"sessionsPerInventoryPage"`
+	PagesPerGeneration              int `json:"pagesPerGeneration"`
+	SessionsPerGeneration           int `json:"sessionsPerGeneration"`
+	SessionsGlobal                  int `json:"sessionsGlobal"`
+	HistoryItemsPerPage             int `json:"historyItemsPerPage"`
+	HistoryItemTextBytes            int `json:"historyItemTextBytes"`
+	HistoryCursorBytes              int `json:"historyCursorBytes"`
+	HistoryReadsPerNode             int `json:"historyReadsPerNode"`
+	HistoryResponseWaitMilliseconds int `json:"historyResponseWaitMilliseconds"`
 }
 
 var HostHarnessSessionLimits = HostHarnessSessionLimitSet{
 	IdentifierBytes: 256, WorkspaceBytes: 4096, DiagnosticBytes: 2000, PromptBytes: 65536,
-	OperationCapabilities: 16, SessionsPerInventoryPage: 64, PagesPerGeneration: 64,
-	SessionsPerGeneration: 4096, HistoryItemsPerPage: 100, HistoryItemTextBytes: 32768,
-	HistoryCursorBytes: 512,
+	OperationCapabilities: 16, SessionsPerInventoryPage: 64, PagesPerGeneration: 8,
+	SessionsPerGeneration: 512, SessionsGlobal: 2048, HistoryItemsPerPage: 100, HistoryItemTextBytes: 32768,
+	HistoryCursorBytes: 512, HistoryReadsPerNode: 4, HistoryResponseWaitMilliseconds: 16000,
 }
 
 func CanTransitionHostHarnessSession(from, to string) bool {
@@ -2503,7 +2507,7 @@ func ValidateHostHarnessSessionObservationTransition(previous, next HostHarnessS
 		}
 		return nil
 	}
-	if !CanTransitionHostHarnessSession(previous.Status, next.Status) {
+	if previous.Status != next.Status && !CanTransitionHostHarnessSession(previous.Status, next.Status) {
 		return fmt.Errorf("host session status transition is not legal")
 	}
 	previousTime, _ := time.Parse(time.RFC3339Nano, previous.UpdatedAt)
@@ -2601,14 +2605,15 @@ func ValidateHostHarnessSessionInventoryTransition(previous, next HostHarnessSes
 		}
 		return nil
 	}
-	if next.Generation != previous.Generation+1 {
-		return fmt.Errorf("host session inventory generation has a gap")
-	}
 	oldByID := make(map[string]HostHarnessSessionObservation, len(previous.Sessions))
 	oldByProvider := make(map[string]string, len(previous.Sessions))
 	for _, session := range previous.Sessions {
 		oldByID[session.HostHarnessSessionID] = session
 		oldByProvider[hostSessionProviderIdentity(session)] = session.HostHarnessSessionID
+	}
+	newIDs := make(map[string]bool, len(next.Sessions))
+	for _, session := range next.Sessions {
+		newIDs[session.HostHarnessSessionID] = true
 	}
 	for _, session := range next.Sessions {
 		if old, found := oldByID[session.HostHarnessSessionID]; found {
@@ -2616,7 +2621,7 @@ func ValidateHostHarnessSessionInventoryTransition(previous, next HostHarnessSes
 				return fmt.Errorf("host session inventory contains an invalid observation transition")
 			}
 		}
-		if priorID, found := oldByProvider[hostSessionProviderIdentity(session)]; found && priorID != session.HostHarnessSessionID {
+		if priorID, found := oldByProvider[hostSessionProviderIdentity(session)]; found && priorID != session.HostHarnessSessionID && newIDs[priorID] {
 			return fmt.Errorf("provider identity maps to a different host session")
 		}
 	}

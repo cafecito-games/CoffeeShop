@@ -204,7 +204,7 @@ test("project profiles are rejected for every structural failure", () => {
     ["secret-like token in name", { ...valid, name: "sk-abcdef1234567890" }],
     ["secret-like token nested in requirements", {
       ...valid,
-      requirements: { ...valid.requirements, hard: { ...valid.requirements.hard, labels: ["ghp-abcdef1234567890"] } }
+      requirements: { ...valid.requirements, hard: { ...valid.requirements.hard, labels: ["ghp_abcdef1234567890"] } }
     }],
     ["non-object", null],
     ["array", []]
@@ -224,6 +224,9 @@ test("containsSecretLikeValue matches the narrow denylist without heuristic scan
     "AKIAIOSFODNN7EXAMPLE",
     "glpat-abcdefghij1234",
     "Bearer abcdefghijklmnop",
+    "Bearer 𝟏𝟐𝟑𝟒𝟓𝟔𝟕𝟖𝟗𝟎",
+    "bearer x Authorization: bearer abcdefghijklmnop",
+    "bearer bearer 0123456789",
     "-----BEGIN RSA PRIVATE KEY-----",
     "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END-----"
   ]) {
@@ -235,11 +238,14 @@ test("containsSecretLikeValue matches the narrow denylist without heuristic scan
     "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
     "claude-cli",
     "Xcode 16.4",
-    "BEGIN", "PRIVATE", "bearer token please"
+    "BEGIN", "PRIVATE", "bearer token please",
+    "Bearer\u00a0authentication-flow", "Bearer\vauthentication-flow", "Bearer 𝟏𝟐𝟑𝟒𝟓",
+    "ſk-0123456789", "sk-012345678K",
+    "skeleton-app", "skylake-workstation", "pk-payments-service"
   ]) {
     assert.equal(containsSecretLikeValue(clean), false, `${clean} must not be flagged`);
   }
-  assert.equal(containsSecretLikeValue({ nested: { deeper: ["gho-abcdefghij1234"] } }), true);
+  assert.equal(containsSecretLikeValue({ nested: { deeper: ["gho_abcdefghij1234"] } }), true);
   assert.equal(containsSecretLikeValue({ nested: { deeper: ["plain text"] } }), false);
   assert.equal(containsSecretLikeValue(42), false);
 });

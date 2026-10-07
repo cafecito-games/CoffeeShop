@@ -24,6 +24,7 @@ const (
 	recordDirectoryVariable  = "COFFEE_SHOP_FAKE_RECORD_DIRECTORY"
 	sessionDirectoryVariable = "COFFEE_SHOP_FAKE_SESSION_DIRECTORY"
 	gateDirectoryVariable    = "COFFEE_SHOP_FAKE_GATE_DIRECTORY"
+	codexWorkspaceVariable   = "COFFEE_SHOP_FAKE_CODEX_WORKSPACE"
 )
 
 // ObservedEnvironment lists the variables whose presence, never their value, each process records

@@ -1,0 +1,109 @@
+.sessions-view { height: 100%; padding: 32px 36px 88px; overflow: auto; background: var(--surface); }
+.sessions-header { max-width: 1180px; margin: 0 auto 24px; display: flex; align-items: end; justify-content: space-between; gap: 24px; }
+.session-eyebrow { color: var(--accent); font: 600 var(--font-size-8) "DM Mono", monospace; letter-spacing: .09em; text-transform: uppercase; }
+.sessions-header h1, .session-detail-header h1 { margin: 6px 0 4px; font-size: 30px; font-weight: 600; letter-spacing: -.04em; }
+.sessions-header p, .session-detail-header p { margin: 0; color: var(--muted); font-size: var(--font-size-10); }
+.sessions-count { display: flex; align-items: baseline; gap: 6px; color: var(--muted); font: var(--font-size-9) "DM Mono", monospace; }
+.sessions-count strong { color: var(--text); font-size: 24px; }
+.sessions-live-region { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); }
+.sessions-stale { max-width: 1180px; margin: 0 auto 12px; padding: 10px 12px; border: 1px solid rgba(223,163,76,.25); border-radius: 8px; display: flex; align-items: center; gap: 8px; color: var(--accent); background: var(--accent-soft); font-size: var(--font-size-9); }
+.sessions-stale strong { margin-right: 5px; }
+.sessions-toolbar { max-width: 1180px; margin: 0 auto 18px; display: grid; gap: 10px; }
+.sessions-search { width: min(360px,100%); height: 38px; padding: 0 11px; border: 1px solid var(--line); border-radius: 7px; display: flex; align-items: center; gap: 8px; color: var(--faint); background: var(--bg); }
+.sessions-search:focus-within { border-color: var(--line-strong); }
+.sessions-search input { width: 100%; border: 0; outline: 0; color: var(--text); background: transparent; font-size: var(--font-size-9); }
+.sessions-filters { display: flex; flex-wrap: wrap; gap: 6px; }
+.session-filter { position: relative; }
+.session-filter summary { min-height: 30px; padding: 0 9px; border: 1px solid var(--line); border-radius: 6px; display: inline-flex; align-items: center; gap: 6px; color: var(--muted); background: var(--surface-2); font-size: var(--font-size-8); cursor: pointer; list-style: none; white-space: nowrap; }
+.session-filter summary::-webkit-details-marker { display: none; }
+.session-filter[open] summary { border-color: var(--line-strong); color: var(--text); }
+.session-filter > div { position: absolute; z-index: 8; top: calc(100% + 5px); left: 0; min-width: 180px; max-width: 360px; padding: 4px; border: 1px solid var(--line-strong); border-radius: 7px; display: grid; background: #151816; box-shadow: 0 8px 24px rgba(0,0,0,.28); }
+.session-filter button { min-height: 30px; padding: 0 8px; overflow: hidden; border: 0; border-radius: 5px; color: var(--secondary); background: transparent; font-size: var(--font-size-8); text-align: left; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+.session-filter button:hover { color: var(--text); background: var(--surface-3); }
+.sessions-list { max-width: 1180px; margin: 0 auto; border-block: 1px solid var(--line); }
+.sessions-list-head, .session-row { display: grid; grid-template-columns: minmax(240px,1.7fr) minmax(130px,.8fr) minmax(150px,.9fr) 150px; align-items: center; gap: 20px; }
+.sessions-list-head { min-height: 34px; color: var(--faint); font: 600 var(--font-size-7) "DM Mono", monospace; letter-spacing: .08em; text-transform: uppercase; }
+.session-row-shell { position: relative; border-top: 1px solid var(--line); }
+.session-row { width: 100%; min-height: 82px; padding: 14px 0; border: 0; color: var(--secondary); background: transparent; text-align: left; cursor: pointer; transition: background 150ms cubic-bezier(.25,1,.5,1), padding 150ms cubic-bezier(.25,1,.5,1); }
+.session-row-slot { position: absolute; right: 0; top: 50%; z-index: 1; transform: translateY(-50%); }
+.session-row:hover { padding-inline: 12px; background: var(--surface-2); }
+.session-row > span { min-width: 0; display: grid; gap: 5px; }
+.session-row strong { overflow: hidden; color: var(--text); font-size: var(--font-size-10); font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.session-row small { overflow: hidden; color: var(--muted); font-size: var(--font-size-8); text-overflow: ellipsis; white-space: nowrap; }
+.session-row code { overflow: hidden; color: var(--faint); font-size: var(--font-size-8); text-overflow: ellipsis; white-space: nowrap; }
+.session-row time { color: var(--faint); font-size: var(--font-size-8); }
+.session-status { display: inline-flex; width: fit-content; align-items: center; gap: 6px; color: var(--secondary); font: 600 var(--font-size-8) "DM Mono", monospace; text-transform: capitalize; }
+.session-status i { width: 6px; height: 6px; border-radius: 50%; background: var(--faint); }
+.status-running i, .status-awaiting-approval i { background: var(--accent); }
+.status-idle i { background: var(--success); }
+.status-active-elsewhere i, .status-failed i { background: var(--danger); }
+.sessions-empty, .sessions-unavailable { height: 100%; display: grid; place-content: center; justify-items: center; color: var(--muted); text-align: center; }
+.sessions-empty { max-width: 1180px; min-height: 260px; margin: 0 auto; border-block: 1px solid var(--line); }
+.sessions-empty h2, .sessions-unavailable h1 { margin: 12px 0 5px; color: var(--text); font-size: var(--font-size-15); }
+.sessions-empty p, .sessions-unavailable p { max-width: 380px; margin: 0; font-size: var(--font-size-9); line-height: 1.6; }
+.session-selected { padding-top: 0; }
+.session-detail { max-width: 940px; margin: 0 auto; }
+.session-detail-header { position: sticky; z-index: 4; top: 0; min-height: 150px; padding: 24px 0; border-bottom: 1px solid var(--line); display: grid; grid-template-columns: 110px minmax(0,1fr) auto; align-items: start; gap: 20px; background: rgba(13,15,14,.96); backdrop-filter: blur(14px); }
+.session-back { min-height: 32px; padding: 0; border: 0; display: inline-flex; align-items: center; gap: 6px; color: var(--muted); background: transparent; font-size: var(--font-size-9); cursor: pointer; }
+.session-back:hover { color: var(--text); }
+.session-state-strip { min-height: 46px; padding: 0 4px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 18px; color: var(--muted); font-size: var(--font-size-8); text-transform: capitalize; }
+.session-stale { margin-left: auto; display: inline-flex; align-items: center; gap: 5px; color: var(--accent); }
+.session-facts { padding: 24px 0; border-bottom: 1px solid var(--line); }
+.session-facts dl { margin: 0; display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); column-gap: 32px; }
+.session-facts dl > div { min-width: 0; min-height: 46px; padding: 8px 0; border-bottom: 1px solid var(--line); display: grid; grid-template-columns: 130px minmax(0,1fr); align-items: baseline; gap: 12px; }
+.session-facts dt { color: var(--faint); font: var(--font-size-8) "DM Mono", monospace; }
+.session-facts dd { min-width: 0; margin: 0; overflow-wrap: anywhere; color: var(--secondary); font-size: var(--font-size-9); }
+.session-facts code { color: var(--secondary); }
+.tabular { font-family: "DM Mono", monospace; font-variant-numeric: tabular-nums; }
+.session-section { padding: 24px 0; border-bottom: 1px solid var(--line); }
+.session-section-heading { margin-bottom: 14px; display: flex; align-items: center; justify-content: space-between; color: var(--muted); }
+.session-section-heading span { color: var(--faint); font: 600 var(--font-size-7) "DM Mono", monospace; letter-spacing: .08em; text-transform: uppercase; }
+.session-section-heading h2 { margin: 4px 0 0; color: var(--text); font-size: var(--font-size-13); letter-spacing: -.02em; }
+.session-operation-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.session-operation-list span { padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; color: var(--secondary); background: var(--surface-2); font: var(--font-size-8) "DM Mono", monospace; }
+.session-operation-list em { color: var(--muted); font-size: var(--font-size-9); font-style: normal; }
+.session-caption { margin: 10px 0 0; color: var(--faint); font-size: var(--font-size-8); line-height: 1.6; }
+.session-linked-records { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 8px; }
+.session-linked-records button { min-height: 54px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 7px; display: grid; grid-template-columns: auto minmax(0,1fr) auto; align-items: center; gap: 10px; color: var(--muted); background: var(--surface-2); text-align: left; cursor: pointer; }
+.session-linked-records button:hover { border-color: var(--line-strong); color: var(--accent); }
+.session-linked-records button span { min-width: 0; display: grid; gap: 3px; overflow: hidden; color: var(--secondary); font-size: var(--font-size-9); text-overflow: ellipsis; white-space: nowrap; }
+.session-linked-records small { color: var(--faint); font: var(--font-size-7) "DM Mono", monospace; text-transform: uppercase; }
+.session-empty-inline, .session-loading, .session-unavailable { margin: 0; color: var(--muted); font-size: var(--font-size-9); line-height: 1.6; }
+.session-unavailable { color: var(--danger); }
+.session-history-item { padding: 14px 0 14px 14px; border-top: 1px solid var(--line); border-left: 1px solid var(--line-strong); }
+.session-history-item header { margin-bottom: 7px; display: flex; align-items: center; justify-content: space-between; color: var(--faint); }
+.session-history-item strong { color: var(--secondary); font: 600 var(--font-size-7) "DM Mono", monospace; letter-spacing: .07em; text-transform: uppercase; }
+.session-history-item time, .session-history-item small { color: var(--faint); font-size: var(--font-size-7); }
+.session-history-item p { margin: 0; color: #c9c6bd; font-size: var(--font-size-10); line-height: 1.7; white-space: pre-wrap; overflow-wrap: anywhere; }
+.history-summary p { color: var(--muted); }
+.session-truncation { margin-top: 12px; padding: 9px 11px; border: 1px solid rgba(223,163,76,.24); border-radius: 7px; display: flex; align-items: center; gap: 7px; color: var(--accent); background: var(--accent-soft); font-size: var(--font-size-8); }
+
+@media (max-width: 1120px) {
+  .sessions-list-head, .session-row { grid-template-columns: minmax(220px,1.4fr) minmax(130px,.8fr) minmax(150px,.9fr); }
+  .sessions-list-head span:last-child, .session-row time { display: none; }
+}
+
+@media (max-width: 720px) {
+  .sessions-view { padding: calc(20px + env(safe-area-inset-top)) 18px calc(88px + env(safe-area-inset-bottom)); }
+  .sessions-header { align-items: start; }
+  .sessions-header h1, .session-detail-header h1 { font-size: 25px; }
+  .sessions-filters { flex-wrap: nowrap; margin-inline: -18px; padding-inline: 18px; overflow-x: auto; scrollbar-width: none; }
+  .session-filter > div { position: fixed; top: auto; right: 12px; bottom: calc(70px + env(safe-area-inset-bottom)); left: 12px; max-width: none; }
+  .sessions-list-head { display: none; }
+  .session-row { min-height: 116px; padding: 16px 0; grid-template-columns: 1fr auto; gap: 12px; }
+  .session-row:hover { padding-inline: 8px; }
+  .session-row > span:nth-child(2) { grid-column: 1; }
+  .session-row > span:nth-child(3) { grid-column: 2; grid-row: 1 / span 2; align-self: center; justify-items: end; }
+  .session-selected { padding-top: 0; }
+  .session-detail-header { min-height: 0; padding: calc(16px + env(safe-area-inset-top)) 0 18px; grid-template-columns: 1fr; gap: 12px; }
+  .session-detail-header .session-back { order: -1; }
+  .session-state-strip { flex-wrap: wrap; gap: 8px 14px; }
+  .session-stale { width: 100%; margin-left: 0; }
+  .session-facts dl { grid-template-columns: 1fr; }
+  .session-facts dl > div { grid-template-columns: 112px minmax(0,1fr); }
+  .session-linked-records { grid-template-columns: 1fr; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .session-row { transition: none; }
+}

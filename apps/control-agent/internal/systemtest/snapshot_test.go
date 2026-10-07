@@ -23,12 +23,14 @@ type snapshot struct {
 	OrchestratorInboxes []orchestratorInbox  `json:"orchestratorInboxes"`
 	Approvals           []approval           `json:"approvals"`
 	// Orchestrator credentials as published: the secret hash is hub-only and never appears here.
-	OrchestratorClients     []orchestratorClient     `json:"orchestratorClients"`
-	OrchestratorAttachments []orchestratorAttachment `json:"orchestratorAttachments"`
-	WorkspaceLeases         []workspaceLease         `json:"workspaceLeases"`
-	RunActivity             []map[string]any         `json:"runActivity"`
-	Events                  []timelineEvent          `json:"events"`
-	ComponentInventories    []componentInventory     `json:"componentInventories"`
+	OrchestratorClients          []orchestratorClient          `json:"orchestratorClients"`
+	OrchestratorAttachments      []orchestratorAttachment      `json:"orchestratorAttachments"`
+	WorkspaceLeases              []workspaceLease              `json:"workspaceLeases"`
+	RunActivity                  []map[string]any              `json:"runActivity"`
+	Events                       []timelineEvent               `json:"events"`
+	ComponentInventories         []componentInventory          `json:"componentInventories"`
+	HostHarnessSessions          []protocol.HostHarnessSession `json:"hostHarnessSessions"`
+	HostSessionInventoryRevision int64                         `json:"hostSessionInventoryRevision"`
 }
 
 // Aliases deliberately decode the producer through the exact Go wire contract. This keeps the
@@ -45,6 +47,7 @@ type agent struct {
 type computeNode struct {
 	ID               string           `json:"id"`
 	Status           string           `json:"status"`
+	LastSeen         string           `json:"lastSeen"`
 	Version          string           `json:"version"`
 	Platform         string           `json:"platform"`
 	ActiveRuns       int              `json:"activeRuns"`

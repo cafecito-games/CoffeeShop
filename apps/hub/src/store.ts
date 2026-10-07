@@ -25,6 +25,7 @@ import {
   isOrchestratorAttachmentStatus,
   isOrchestratorClientScope,
   instanceLimits,
+  hostHarnessSessionLimits,
   orchestrationCollections,
   previewBundleArtifactKind,
   previewBundleLimits,
@@ -34,11 +35,15 @@ import {
   validateArtifact,
   validateArtifactPreviewRecord,
   validateComponentInventoryReport,
+  validateHostHarnessSession,
+  validateHostSessionControlMessage,
   validateProjectProfile,
   withOrchestrationDefaults,
   type ArtifactPreviewFailureCode,
   type ArtifactPreviewRecord,
   type ChatMessage,
+  type HostHarnessSession,
+  type HostHarnessSessionHistoryItem,
   type OrchestratorClient,
   type ProjectProfile,
   type Run,
@@ -251,6 +256,50 @@ interface HubOnlyState {
   previewProcessingReceipts?: PreviewProcessingReceipt[];
   /** One-time external upload capabilities. Plaintext tokens are never stored. */
   artifactUploadGrants?: ArtifactUploadGrantRecord[];
+  /** Last complete inventory generation per node; staging is deliberately memory-only. */
+  hostSessionInventoryGenerations?: HostSessionInventoryGenerationRecord[];
+  /** Cached exact JSON extent for the high-frequency host-session update path. */
+  hostSessionInventoryBytes?: number;
+  hostSessionInventoryRecords?: number;
+  /** Imported provider history remains off the global Snapshot and is served only by REST. */
+  hostSessionHistories?: StoredHostSessionHistory[];
+}
+
+export interface HostSessionInventoryGenerationRecord {
+  nodeId: string;
+  generation: number;
+  digest: string;
+  completedAt: string;
+  /** Retention removed committed evidence; preserve projections but force the next replay to apply. */
+  invalidated?: true;
+  /** Hub-owned absence projections. Their revisions remain Barista-authored. */
+  offlineProjections?: Array<{
+    hostHarnessSessionId: string;
+    revision: number;
+    originalStatus: HostHarnessSession["status"];
+    originalUpdatedAt: string;
+  }>;
+}
+
+export interface HostSessionHistoryReceipt {
+  requestId: string;
+  cursor?: string;
+  digest: string;
+}
+
+export interface StoredHostSessionHistory {
+  hostHarnessSessionId: string;
+  nodeId: string;
+  harnessId: string;
+  providerSessionId: string;
+  workspace: string;
+  revision: number;
+  items: HostHarnessSessionHistoryItem[];
+  nextCursor?: string;
+  truncated: boolean;
+  omitted: boolean;
+  observedAt: string;
+  receipts: HostSessionHistoryReceipt[];
 }
 
 /** The persisted state. `orchestratorClients` holds the stored records, secret hash included. */
@@ -293,7 +342,195 @@ const emptyState = (): State => withOrchestrationDefaults({
   orchestratorClients: [],
   orchestratorAttachments: [],
   projectProfiles: [],
-  componentInventories: []
+  componentInventories: [],
+  hostHarnessSessions: [],
+  hostSessionInventoryGenerations: [],
+  hostSessionHistories: [],
+  hostSessionInventoryRevision: 0,
+  hostSessionInventoryBytes: 2,
+  hostSessionInventoryRecords: 0
+});
+
+/** Adds only fields genuinely absent from pre-v6 state; present malformed values are asserted. */
+export function addHostSessionDefaults(state: State) {
+  let changed = false;
+  if (state.hostHarnessSessions === undefined) { state.hostHarnessSessions = []; changed = true; }
+  if (state.hostSessionInventoryGenerations === undefined) { state.hostSessionInventoryGenerations = []; changed = true; }
+  if (state.hostSessionHistories === undefined) { state.hostSessionHistories = []; changed = true; }
+  if (state.hostSessionInventoryRevision === undefined) { state.hostSessionInventoryRevision = 0; changed = true; }
+  if (state.hostSessionInventoryBytes === undefined || state.hostSessionInventoryRecords === undefined) {
+    state.hostSessionInventoryBytes = Buffer.byteLength(JSON.stringify(state.hostHarnessSessions), "utf8");
+    state.hostSessionInventoryRecords = state.hostHarnessSessions.length;
+    changed = true;
+  }
+  return changed;
+}
+
+export const hostSessionInventoryStorageLimits = { bytes: 32 * 1024 * 1024 } as const;
+export const hostSessionHistoryStorageLimits = { records: 64, bytes: 1024 * 1024 } as const;
+export const hostSessionHistoryReceiptLimit = 64;
+
+const exactKeys = (value: object, expected: readonly string[]) =>
+  JSON.stringify(Object.keys(value).sort()) === JSON.stringify([...expected].sort());
+
+export function assertPersistedHostSessionState(state: State) {
+  if (!Array.isArray(state.hostHarnessSessions)) throw new Error("Persisted host-session collection is malformed");
+  if (!Array.isArray(state.hostSessionInventoryGenerations)) throw new Error("Persisted host-session generation collection is malformed");
+  if (!Array.isArray(state.hostSessionHistories)) throw new Error("Persisted host-session history collection is malformed");
+  if (!Number.isSafeInteger(state.hostSessionInventoryRevision) || state.hostSessionInventoryRevision! < 0) {
+    throw new Error("Persisted host-session inventory revision is malformed");
+  }
+  if (state.hostHarnessSessions.length > hostHarnessSessionLimits.sessionsGlobal) {
+    throw new Error("Persisted host-session collection exceeds global capacity");
+  }
+  if (state.hostSessionHistories.length > hostSessionHistoryStorageLimits.records
+    || Buffer.byteLength(JSON.stringify(state.hostSessionHistories), "utf8") > hostSessionHistoryStorageLimits.bytes) {
+    throw new Error("Persisted host-session history collection exceeds capacity");
+  }
+  const nodeIds = new Set(state.nodes.map((node) => node.id));
+  const sessionIds = new Set<string>();
+  const sessionsById = new Map<string, HostHarnessSession>();
+  const providerIdentities = new Set<string>();
+  const sessionsByNode = new Map<string, number>();
+  const threadsById = new Map((state.threads ?? []).map((thread) => [thread.id, thread]));
+  const runsById = new Map(state.runs.map((run) => [run.id, run]));
+  for (const [index, candidate] of state.hostHarnessSessions.entries()) {
+    const validated = validateHostHarnessSession(candidate);
+    if (!validated.ok) throw new Error(`Persisted host session ${index} is invalid: ${validated.reason}`);
+    if (!nodeIds.has(validated.value.nodeId)) throw new Error(`Persisted host session ${index} names an unknown node`);
+    if (sessionIds.has(validated.value.hostHarnessSessionId)) throw new Error(`Persisted host session ${index} repeats session identity`);
+    if (index > 0 && state.hostHarnessSessions[index - 1]!.hostHarnessSessionId >= validated.value.hostHarnessSessionId) {
+      throw new Error("Persisted host-session collection is not in canonical order");
+    }
+    const providerIdentity = [validated.value.nodeId, validated.value.harnessId, validated.value.workspace, validated.value.providerSessionId].join("\u0000");
+    if (providerIdentities.has(providerIdentity)) throw new Error(`Persisted host session ${index} repeats provider identity`);
+    sessionIds.add(validated.value.hostHarnessSessionId);
+    sessionsById.set(validated.value.hostHarnessSessionId, validated.value);
+    providerIdentities.add(providerIdentity);
+    const nodeSessionCount = (sessionsByNode.get(validated.value.nodeId) ?? 0) + 1;
+    if (nodeSessionCount > hostHarnessSessionLimits.sessionsPerGeneration) {
+      throw new Error(`Persisted host-session collection exceeds capacity for node ${validated.value.nodeId}`);
+    }
+    sessionsByNode.set(validated.value.nodeId, nodeSessionCount);
+    if (validated.value.attachedThreadId !== undefined) {
+      const thread = threadsById.get(validated.value.attachedThreadId);
+      if (!thread || thread.orchestrator?.kind !== "host-session" || thread.orchestrator.hostHarnessSessionId !== validated.value.hostHarnessSessionId) {
+        throw new Error(`Persisted host session ${index} has a broken attached thread relationship`);
+      }
+    }
+    if (validated.value.activeRunId !== undefined) {
+      const run = runsById.get(validated.value.activeRunId);
+      if (!run || run.hostHarnessSessionId !== validated.value.hostHarnessSessionId) {
+        throw new Error(`Persisted host session ${index} has a broken active Run relationship`);
+      }
+    }
+  }
+  const inventoryBytes = Buffer.byteLength(JSON.stringify(state.hostHarnessSessions), "utf8");
+  if (inventoryBytes > hostSessionInventoryStorageLimits.bytes) {
+    throw new Error("Persisted host-session collection exceeds byte capacity");
+  }
+  const generations = new Set<string>();
+  for (const [index, marker] of state.hostSessionInventoryGenerations.entries()) {
+    if (typeof marker !== "object" || marker === null || Array.isArray(marker)
+      || !exactKeys(marker, ["nodeId", "generation", "digest", "completedAt", "invalidated", "offlineProjections"]
+        .filter((key) => (key !== "offlineProjections" || marker.offlineProjections !== undefined)
+          && (key !== "invalidated" || marker.invalidated !== undefined)))
+      || typeof marker.nodeId !== "string" || !nodeIds.has(marker.nodeId) || generations.has(marker.nodeId)
+      || (marker.invalidated !== undefined && marker.invalidated !== true)
+      || !Number.isSafeInteger(marker.generation) || marker.generation < 1
+      || typeof marker.digest !== "string" || !/^[0-9a-f]{64}$/.test(marker.digest)
+      || !isTimestamp(marker.completedAt)) throw new Error(`Persisted host-session generation ${index} is invalid`);
+    if (marker.offlineProjections !== undefined) {
+      const projected = new Set<string>();
+      if (!Array.isArray(marker.offlineProjections)) throw new Error(`Persisted host-session generation ${index} is invalid`);
+      for (const projection of marker.offlineProjections) {
+        if (typeof projection !== "object" || projection === null || Array.isArray(projection)
+          || !exactKeys(projection, ["hostHarnessSessionId", "revision", "originalStatus", "originalUpdatedAt"])
+          || typeof projection.hostHarnessSessionId !== "string" || projected.has(projection.hostHarnessSessionId)
+          || !Number.isSafeInteger(projection.revision) || projection.revision < 1
+          || typeof projection.originalStatus !== "string" || projection.originalStatus === "offline"
+          || projection.originalStatus === "closed" || projection.originalStatus === "failed"
+          || !isTimestamp(projection.originalUpdatedAt)) {
+          throw new Error(`Persisted host-session generation ${index} has an invalid offline projection`);
+        }
+        const session = sessionsById.get(projection.hostHarnessSessionId);
+        if (!session || session.nodeId !== marker.nodeId || session.status !== "offline" || session.revision !== projection.revision) {
+          throw new Error(`Persisted host-session generation ${index} has a broken offline projection`);
+        }
+        const original = validateHostHarnessSession({
+          ...session, status: projection.originalStatus, updatedAt: projection.originalUpdatedAt
+        });
+        if (!original.ok) throw new Error(`Persisted host-session generation ${index} has an invalid offline projection`);
+        projected.add(projection.hostHarnessSessionId);
+      }
+    }
+    generations.add(marker.nodeId);
+  }
+  const histories = new Set<string>();
+  for (const [index, history] of state.hostSessionHistories.entries()) {
+    if (typeof history !== "object" || history === null || Array.isArray(history)
+      || !exactKeys(history, ["hostHarnessSessionId", "nodeId", "harnessId", "providerSessionId", "workspace", "revision", "items", "nextCursor", "truncated", "omitted", "observedAt", "receipts"].filter((key) => key !== "nextCursor" || history.nextCursor !== undefined))
+      || histories.has(history.hostHarnessSessionId) || !Number.isSafeInteger(history.revision) || history.revision < 1
+      || typeof history.truncated !== "boolean" || typeof history.omitted !== "boolean" || !isTimestamp(history.observedAt)
+      || !Array.isArray(history.receipts) || history.receipts.length > hostSessionHistoryReceiptLimit) {
+      throw new Error(`Persisted host-session history ${index} is malformed`);
+    }
+    const session = sessionsById.get(history.hostHarnessSessionId);
+    if (!session || session.nodeId !== history.nodeId || session.harnessId !== history.harnessId
+      || session.providerSessionId !== history.providerSessionId || session.workspace !== history.workspace
+      || history.revision > session.revision) throw new Error(`Persisted host-session history ${index} has a broken session relationship`);
+    const historyFrame = validateHostSessionControlMessage({
+      type: "host-session.history.page", nodeId: history.nodeId, hostHarnessSessionId: history.hostHarnessSessionId,
+      requestId: "persisted-history-check", items: history.items,
+      ...(history.nextCursor === undefined ? {} : { nextCursor: history.nextCursor }),
+      truncated: history.truncated, at: history.observedAt
+    }, "6");
+    if (!historyFrame.ok) throw new Error(`Persisted host-session history ${index} is invalid: ${historyFrame.reason}`);
+    const receiptIds = new Set<string>();
+    for (const receipt of history.receipts) {
+      const correlation = typeof receipt === "object" && receipt !== null && !Array.isArray(receipt)
+        ? validateHostSessionControlMessage({
+          type: "host-session.history.page", nodeId: history.nodeId,
+          hostHarnessSessionId: history.hostHarnessSessionId, requestId: receipt.requestId,
+          items: [], ...(receipt.cursor === undefined ? {} : { nextCursor: receipt.cursor }),
+          truncated: false, at: history.observedAt
+        }, "6")
+        : undefined;
+      if (typeof receipt !== "object" || receipt === null || Array.isArray(receipt)
+        || !exactKeys(receipt, ["requestId", "cursor", "digest"].filter((key) => key !== "cursor" || receipt.cursor !== undefined))
+        || !correlation?.ok || receiptIds.has(receipt.requestId)
+        || typeof receipt.digest !== "string" || !/^[0-9a-f]{64}$/.test(receipt.digest)) {
+        throw new Error(`Persisted host-session history ${index} has an invalid receipt`);
+      }
+      receiptIds.add(receipt.requestId);
+    }
+    histories.add(history.hostHarnessSessionId);
+  }
+  if (!Number.isSafeInteger(state.hostSessionInventoryBytes) || state.hostSessionInventoryBytes !== inventoryBytes
+    || !Number.isSafeInteger(state.hostSessionInventoryRecords)
+    || state.hostSessionInventoryRecords !== state.hostHarnessSessions.length) {
+    throw new Error("Persisted host-session inventory extent is malformed");
+  }
+}
+
+export const publicHostHarnessSession = (session: HostHarnessSession): HostHarnessSession => ({
+  hostHarnessSessionId: session.hostHarnessSessionId,
+  nodeId: session.nodeId,
+  harnessId: session.harnessId,
+  providerSessionId: session.providerSessionId,
+  workspace: session.workspace,
+  source: session.source,
+  status: session.status,
+  controlMode: session.status === "offline" ? "observe" : session.controlMode,
+  operations: session.status === "offline" ? [] : [...session.operations],
+  revision: session.revision,
+  ...(session.status === "offline" || session.providerTurnId === undefined ? {} : { providerTurnId: session.providerTurnId }),
+  ...(session.summary === undefined ? {} : { summary: session.summary }),
+  createdAt: session.createdAt,
+  updatedAt: session.updatedAt,
+  ...(session.attachedThreadId === undefined ? {} : { attachedThreadId: session.attachedThreadId }),
+  ...(session.activeRunId === undefined ? {} : { activeRunId: session.activeRunId }),
+  attachmentEpoch: session.attachmentEpoch
 });
 
 /** Adds the informational inventory collection to states written before component reporting. */
@@ -1224,6 +1461,7 @@ export class Store {
     addArtifactPreviewDefaults(loaded);
     const addedArtifactUploadGrants = addArtifactUploadGrantDefaults(loaded);
     const addedComponentInventories = addComponentInventoryDefaults(loaded);
+    addHostSessionDefaults(loaded);
     if (this.sqlite) loaded.projectProfiles ??= [];
     const addedApprovalResolvers = addApprovalResolverDefaults(loaded);
     assertPersistedTaskState(loaded);
@@ -1252,6 +1490,7 @@ export class Store {
     assertPersistedArtifactPreviewState(loaded);
     assertPersistedArtifactUploadGrantState(loaded);
     assertPersistedComponentInventories(loaded);
+    assertPersistedHostSessionState(loaded);
     /*
      * The legacy import runs after every assertion, so it never writes on top of state the hub could
      * not interpret, and it is decided from its own persisted records rather than from a timestamp:
@@ -1278,7 +1517,7 @@ export class Store {
     }
   }
 
-  snapshot(now = new Date().toISOString()): Snapshot {
+  private projectedSnapshot(now: string, includeHostHarnessSessions: boolean): Snapshot {
     const {
       taskSubmissions: _taskSubmissions, taskUpdates: _taskUpdates, taskEventJournal: _taskEventJournal, taskEventStreams: _taskEventStreams,
       harnessEventStreams: _harnessEventStreams, harnessEvents: _harnessEvents, runTranscripts: _runTranscripts,
@@ -1289,6 +1528,11 @@ export class Store {
       hostedThreadCreationReceipts: _hostedThreadCreationReceipts,
       previewRegistrationReceipts: _previewRegistrationReceipts, previewProcessingReceipts: _previewProcessingReceipts,
       artifactUploadGrants: _artifactUploadGrants,
+      hostHarnessSessions,
+      hostSessionInventoryGenerations: _hostSessionInventoryGenerations,
+      hostSessionInventoryBytes: _hostSessionInventoryBytes,
+      hostSessionInventoryRecords: _hostSessionInventoryRecords,
+      hostSessionHistories: _hostSessionHistories,
       projectProfilesImported: _projectProfilesImported, orchestratorClients, artifactPreviews, ...published
     } = this.state;
     return structuredClone({
@@ -1300,8 +1544,21 @@ export class Store {
           accessState: artifactPreviewAccessState(preview, now)
         }))
       }),
+      ...(hostHarnessSessions === undefined ? {} : {
+        hostHarnessSessions: includeHostHarnessSessions ? hostHarnessSessions.map(publicHostHarnessSession) : []
+      }),
       generatedAt: now
     });
+  }
+
+  /** Full public projections for server-side decisions and compatibility tests. */
+  snapshot(now = new Date().toISOString()): Snapshot {
+    return this.projectedSnapshot(now, true);
+  }
+
+  /** Bounded network snapshot; the empty collection signals v6 and inventory is read through its paginated route. */
+  clientSnapshot(now = new Date().toISOString()): Snapshot {
+    return this.projectedSnapshot(now, false);
   }
 
   /** Synchronous read of committed state; the view must not retain or mutate what it receives. */

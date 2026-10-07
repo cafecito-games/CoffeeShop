@@ -2,6 +2,7 @@ import { createServer } from "node:http";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { setTimeout as delay } from "node:timers/promises";
 import cors from "cors";
 import express from "express";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
@@ -78,6 +79,17 @@ import {
   runPreviewExpiryMaintenance
 } from "./previewDelivery.js";
 import { retainedHarnessEvents } from "./harnessEvents.js";
+import { HostSessionHistoryAuthority } from "./hostSessionHistory.js";
+import { HostSessionHistoryRefresher } from "./hostSessionHistoryRefresh.js";
+import {
+  hostSessionOutcomeChangesClientSnapshot,
+  hostSessionOutcomeRequiresResync,
+  HostSessionInventoryAuthority,
+  projectNodeHostSessionsOffline,
+  type HostSessionInventoryConnection,
+  type HostSessionInventoryOutcome
+} from "./hostSessionInventory.js";
+import { registerHostSessionReadRoutes } from "./hostSessionReadRoutes.js";
 import { expireDueApprovals, receiveApprovalUndeliverable, receiveHarnessEvent, reconcileApprovals, resolveApproval } from "./harnessGateway.js";
 import { createRedactor } from "./redaction.js";
 import { dispatchMessageFor, runSchedulingPass, type SchedulingContext, type SchedulingPassResult } from "./scheduler.js";
@@ -100,6 +112,7 @@ const controlKeepaliveMilliseconds = 15_000;
 const liveControlAgents = { has: (nodeId: string) => controlAgents.has(nodeId) };
 const clients = new Set<WebSocket>();
 const store = new Store();
+const hostSessionHistory = new HostSessionHistoryAuthority(store);
 const artifactStorage = new PreviewStorage(store.storageRootDirectory());
 const token = process.env.COFFEE_SHOP_TOKEN;
 const port = Number(process.env.PORT ?? 8787);
@@ -117,9 +130,16 @@ app.use(previewRetryJsonErrorHandler);
 app.use(operatorCredentialGuard(token));
 
 const broadcast = () => {
-  const payload = JSON.stringify({ type: "snapshot", data: store.snapshot() });
+  const payload = JSON.stringify({ type: "snapshot", data: store.clientSnapshot() });
   for (const socket of clients) if (socket.readyState === WebSocket.OPEN) socket.send(payload);
 };
+const hostSessionInventory = new HostSessionInventoryAuthority(store, {
+  onUpdateBatchCommitted: broadcast,
+  onDeferredCapacityMayFit: (nodeId) => {
+    controlAgents.current(nodeId)?.socket.close(1011, "host-session resync required");
+  },
+  onPostCommitError: (error) => console.error("host-session post-commit callback failed", error)
+});
 const previewServer = previewDeliveryConfiguration.enabled
   ? createServer(createPreviewDeliveryApp({
     store,
@@ -142,6 +162,12 @@ orchestratorClientRevocations.onOrchestratorClientRevoked((clientId) => {
 });
 
 const sendToControlAgent = (nodeId: string, message: HubToControlAgent) => controlAgents.send(nodeId, message);
+const interactiveConnection = (connection: ControlConnection<WebSocket>): HostSessionInventoryConnection => ({
+  supportsCapability: supportsControlCapability(connection.protocolVersion, "interactive-sessions"),
+  isCurrent: () => controlAgents.isCurrent(connection),
+  nodeId: connection.nodeId,
+  generation: connection.generation
+});
 /** Instance commands reach only the node's current, synced, protocol-v5 connection. */
 const sendInstanceCommand = (nodeId: string, message: InstanceHubMessage) => controlAgents.sendInstanceCommand(nodeId, message);
 /** Lease cleanup requests wait for the reconnect barrier so Barista's replayed reports land first. */
@@ -288,8 +314,24 @@ async function queueRun(agent: Agent, prompt: string, options: { threadId: strin
   return run;
 }
 
+const hostSessionHistoryRefresher = new HostSessionHistoryRefresher({
+  store,
+  authority: hostSessionHistory,
+  connectionFor: (nodeId) => {
+    const connection = controlAgents.current(nodeId);
+    return connection && supportsControlCapability(connection.protocolVersion, "interactive-sessions")
+      ? interactiveConnection(connection)
+      : undefined;
+  },
+  send: sendToControlAgent,
+  newId,
+  wait: delay
+});
+registerHostSessionReadRoutes(app, store, {
+  refreshHistory: async (hostHarnessSessionId) => { await hostSessionHistoryRefresher.refresh(hostHarnessSessionId); }
+});
 app.get("/api/health", (_req, res) => res.json({ ok: true, service: "coffee-shop-control-plane", controlAgents: controlAgents.size }));
-app.get("/api/snapshot", (_req, res) => res.json(store.snapshot()));
+app.get("/api/snapshot", (_req, res) => res.json(store.clientSnapshot()));
 
 /*
  * A run's chronological transcript, for conversation views. It is served per run rather than in
@@ -499,7 +541,8 @@ app.post("/api/runs/:id/cancel", async (req, res) => {
 app.get("/api/workspace-leases", (req, res) => {
   const filters = ["status", "nodeId", "runId", "taskId"] as const;
   const query = Object.fromEntries(filters.map((key) => [key, typeof req.query[key] === "string" ? req.query[key] : undefined]));
-  const leases = (store.snapshot().workspaceLeases ?? []).filter((lease) => filters.every((key) => query[key] === undefined || lease[key] === query[key]));
+  const leases = store.read((state) => structuredClone((state.workspaceLeases ?? [])
+    .filter((lease) => filters.every((key) => query[key] === undefined || lease[key] === query[key]))));
   res.json({ leases });
 });
 
@@ -644,7 +687,7 @@ const templateMutationBody = (body: unknown) => {
 };
 
 app.get("/api/agent-templates", (_req, res) => {
-  res.json({ templates: store.snapshot().templates ?? [] });
+  res.json({ templates: store.read((state) => structuredClone(state.templates ?? [])) });
 });
 
 app.post("/api/agent-templates", async (req, res) => {
@@ -685,13 +728,13 @@ app.get("/api/approvals", (req, res) => {
   const status = typeof req.query.status === "string" ? req.query.status : undefined;
   const runId = typeof req.query.runId === "string" ? req.query.runId : undefined;
   const threadId = typeof req.query.threadId === "string" ? req.query.threadId : undefined;
-  const approvals = (store.snapshot().approvals ?? []).filter((approval) =>
-    (!status || approval.status === status) && (!runId || approval.runId === runId) && (!threadId || approval.threadId === threadId));
+  const approvals = store.read((state) => structuredClone((state.approvals ?? []).filter((approval) =>
+    (!status || approval.status === status) && (!runId || approval.runId === runId) && (!threadId || approval.threadId === threadId))));
   res.json({ approvals });
 });
 
 app.get("/api/approvals/:id", (req, res) => {
-  const approval = store.snapshot().approvals?.find((item) => item.id === req.params.id);
+  const approval = store.read((state) => structuredClone(state.approvals?.find((item) => item.id === req.params.id)));
   if (!approval) return res.status(404).json({ error: "Approval not found" });
   res.json({ approval });
 });
@@ -720,7 +763,8 @@ app.get("/api/runs/:id/events", (req, res) => {
   const after = Number(req.query.after ?? 0);
   if (!Number.isSafeInteger(after) || after < 0) return res.status(400).json({ error: "after must be a non-negative integer" });
   const events = store.read((state) => structuredClone(retainedHarnessEvents(state, req.params.id, after)));
-  res.json({ events: events.map((record) => record.event), activity: store.snapshot().runActivity?.find((item) => item.runId === req.params.id) });
+  const activity = store.read((state) => structuredClone(state.runActivity?.find((item) => item.runId === req.params.id)));
+  res.json({ events: events.map((record) => record.event), activity });
 });
 
 app.put("/api/artifacts/:id/content", async (req, res) => {
@@ -768,7 +812,7 @@ app.put("/api/artifacts/:id/content", async (req, res) => {
 });
 
 app.get("/api/artifacts/:id/content", async (req, res) => {
-  const artifact = store.snapshot().artifacts?.find((item) => item.id === req.params.id && item.uploaded);
+  const artifact = store.read((state) => structuredClone(state.artifacts?.find((item) => item.id === req.params.id && item.uploaded)));
   if (!artifact) return res.status(404).json({ error: "Artifact not found" });
   try {
     res.type(artifact.mediaType).send(await artifactStorage.readArtifact(artifact.id));
@@ -860,8 +904,8 @@ app.get("/api/project-readiness", (req, res) => {
   const profile = store.read((state) => state.projectProfiles?.find((item) => item.id === projectId));
   if (!profile) return res.status(404).json({ error: "Project profile not found" });
   const nowIso = new Date().toISOString();
-  const readiness = store.snapshot().nodes.map((node) =>
-    computeNodeProjectReadiness(node, getNodeCapabilityReport(node.id), profile, nowIso));
+  const readiness = store.read((state) => state.nodes.map((node) =>
+    computeNodeProjectReadiness(node, getNodeCapabilityReport(node.id), profile, nowIso)));
   res.json({ profile: { id: profile.id, name: profile.name }, readiness });
 });
 
@@ -892,7 +936,7 @@ wss.on("connection", (socket, request) => {
   const url = new URL(request.url ?? "/", `http://${request.headers.host}`);
   if (url.pathname === "/events") {
     clients.add(socket);
-    socket.send(JSON.stringify({ type: "snapshot", data: store.snapshot() }));
+    socket.send(JSON.stringify({ type: "snapshot", data: store.clientSnapshot() }));
     socket.on("close", () => clients.delete(socket));
     return;
   }
@@ -929,7 +973,7 @@ wss.on("connection", (socket, request) => {
     return connection !== undefined && controlAgents.isCurrent(connection);
   };
   const dispatchQueuedRuns = async (connection: ControlConnection<WebSocket>, activeRunIds: readonly string[] = []) => {
-    const queued = queuedRunsForNode(store.snapshot(), nodeId, activeRunIds, protocolVersion);
+    const queued = queuedRunsForNode(store.clientSnapshot(), nodeId, activeRunIds, protocolVersion);
     for (const run of queued) {
       if (connection.deliveredRunIds.has(run.id)) continue;
       let permitted = false;
@@ -982,6 +1026,12 @@ wss.on("connection", (socket, request) => {
         if (!registration.ok) return socket.close(1002, "invalid v5 registration");
       }
       nodeId = message.node.id;
+      const previousConnection = controlAgents.connectionFor(socket);
+      if (previousConnection) {
+        const previousInteractive = interactiveConnection(previousConnection);
+        hostSessionInventory.discard(previousInteractive);
+        hostSessionHistory.discard(previousInteractive);
+      }
       controlAgents.register(nodeId, socket, protocolVersion);
       // Acknowledges the registration: Barista replays its queued lifecycle messages only after this,
       // so nothing it queued is ever written to a socket the hub refused.
@@ -1182,14 +1232,75 @@ wss.on("connection", (socket, request) => {
       requestScheduling();
       return;
     } else if (isHostSessionControlMessage(message)) {
-      const validated = validateHostSessionControlMessage(decoded, protocolVersion);
-      if (!validated.ok || !nodeId || !isCurrentSocket() || validated.value.nodeId !== nodeId) {
-        console.warn(`withheld invalid or unauthenticated ${decodedType} frame`);
+      if (!nodeId || !isCurrentSocket()) {
+        console.warn(`withheld unauthenticated ${decodedType} frame`);
         return;
       }
-      // #159/#160 own durable inventory and command application. Until those consumers exist, a
-      // valid v6 frame is deliberately withheld rather than falling through to run lifecycle state.
-      console.warn(`withheld ${decodedType} from ${nodeId}: interactive-session state is not enabled`);
+      const current = controlAgents.connectionFor(socket);
+      if (!current) {
+        console.warn(`withheld unregistered ${decodedType} frame from ${nodeId}`);
+        return;
+      }
+      const connection = interactiveConnection(current);
+      const validated = validateHostSessionControlMessage(decoded, protocolVersion);
+      if (!validated.ok) {
+        hostSessionHistory.rejectMalformed(connection, decoded);
+        console.warn(`withheld invalid ${decodedType} frame from ${nodeId}`);
+        return;
+      }
+      if (validated.value.nodeId !== nodeId) {
+        console.warn(`withheld mismatched ${decodedType} frame from ${nodeId}`);
+        return;
+      }
+      const inventoryMessage = validated.value.type === "host-session.inventory.page"
+        || validated.value.type === "host-session.inventory.complete"
+        || validated.value.type === "host-session.update";
+      const settleOutcome = (outcome: HostSessionInventoryOutcome) => {
+        if (outcome.kind === "rejected") {
+          console.warn(redactor.redact(`rejected ${decodedType} from ${nodeId}: ${outcome.reason}`));
+          if (hostSessionOutcomeRequiresResync(validated.value, outcome)) {
+            socket.close(1011, "host-session resync required");
+          }
+          return;
+        }
+        if (outcome.kind === "capacity") {
+          console.warn(redactor.redact(`deferred ${decodedType} from ${nodeId}: ${outcome.reason}`));
+          return;
+        }
+        if (outcome.kind === "older") console.warn(`ignored older ${decodedType} from ${nodeId}`);
+        if (validated.value.type !== "host-session.update"
+          && hostSessionOutcomeChangesClientSnapshot(validated.value, outcome)) broadcast();
+      };
+      if (validated.value.type === "host-session.update") {
+        const immediate = hostSessionInventory.deferUpdate(
+          connection,
+          validated.value,
+          settleOutcome,
+          (error) => {
+            if (isCurrentSocket()) socket.close(1011, "host-session resync required");
+            console.error("host-session update persistence failed", error);
+          }
+        );
+        settleOutcome(immediate);
+        return;
+      }
+      let outcome: HostSessionInventoryOutcome | undefined;
+      try {
+        if (validated.value.type === "host-session.history.page") {
+          outcome = await hostSessionHistory.receive(connection, validated.value);
+        } else if (inventoryMessage) {
+          outcome = await hostSessionInventory.receive(connection, validated.value);
+        }
+      } catch (error) {
+        if (inventoryMessage) socket.close(1011, "host-session resync required");
+        throw error;
+      }
+      if (!outcome) {
+        // #160 owns command acknowledgements/results and host-session harness events.
+        console.warn(`withheld ${decodedType} from ${nodeId}: host-session mutation authority is not enabled`);
+        return;
+      }
+      settleOutcome(outcome);
       return;
     } else if (message.type.startsWith("run.")) {
       const runId = message.runId;
@@ -1251,9 +1362,20 @@ wss.on("connection", (socket, request) => {
     clearInterval(keepalive);
     socketClosed.abort();
     if (!nodeId) return;
-    if (!controlAgents.release(socket)) return;
+    const closingConnection = controlAgents.connectionFor(socket);
+    if (closingConnection) {
+      const closingInteractive = interactiveConnection(closingConnection);
+      hostSessionInventory.discard(closingInteractive);
+      hostSessionHistory.discard(closingInteractive);
+    }
+    const released = controlAgents.release(socket);
+    if (!released) return;
     forgetCapabilityPackReadiness(nodeId);
-    await store.transact((state) => { const node = state.nodes.find((item) => item.id === nodeId); if (node) { node.status = "offline"; node.activeRuns = 0; } });
+    await store.transact((state) => {
+      const node = state.nodes.find((item) => item.id === nodeId);
+      if (node) { node.status = "offline"; node.activeRuns = 0; }
+      projectNodeHostSessionsOffline(state, nodeId);
+    });
     broadcast();
     requestScheduling();
   });
@@ -1278,7 +1400,14 @@ if (store.read((state) => !state.projectProfilesImported && (state.projectProfil
     console.log(`imported ${projectProfilesResult.profiles.length} project profile(s) from ${projectProfilesPath}`);
   }
 }
-await store.transact((state) => markDisconnectedNodesOffline(state, liveControlAgents) || false);
+await store.transact((state) => {
+  const nodesChanged = markDisconnectedNodesOffline(state, liveControlAgents);
+  let sessionsChanged = false;
+  for (const node of state.nodes) {
+    if (node.status === "offline" && projectNodeHostSessionsOffline(state, node.id)) sessionsChanged = true;
+  }
+  return nodesChanged || sessionsChanged;
+});
 // No bridge connection survives a restart, so no attachment persisted by the previous process may.
 await store.transact((state) => detachEveryAttachmentInState(state, new Date().toISOString()).length > 0);
 requestScheduling();

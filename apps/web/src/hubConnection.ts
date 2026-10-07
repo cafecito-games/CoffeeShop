@@ -7,6 +7,7 @@ import {
   workspaceRetentionReasons, orchestratorAttachmentStatuses, orchestratorClientScopes, validateAgentInstance,
   validateAgentTemplate, validateArtifact, validateArtifactPreview, validateInstanceAllocation, validateProjectProfile,
   validateComponentInventoryReport, validateEffectiveCapabilityPack, sameArtifactSource,
+  hostHarnessSessionLimits, validateHostHarnessSession,
   type ArtifactPreview, type Snapshot
 } from "@coffee-shop/protocol";
 
@@ -568,6 +569,29 @@ function componentInventoryCollectionCorrelates(value: Record<string, unknown>) 
   return true;
 }
 
+function hostSessionCollectionCorrelates(value: Record<string, unknown>) {
+  if (value.hostHarnessSessions === undefined) return true;
+  if (!Array.isArray(value.hostHarnessSessions) || value.hostHarnessSessions.length > hostHarnessSessionLimits.sessionsGlobal) return false;
+  const nodes = new Set(Array.isArray(value.nodes) ? value.nodes.filter(isObject).map((node) => node.id) : []);
+  const threads = new Set(Array.isArray(value.threads) ? value.threads.filter(isObject).map((thread) => thread.id) : []);
+  const runs = new Map(Array.isArray(value.runs) ? value.runs.filter(isObject).map((run) => [run.id, run]) : []);
+  const identities = new Set<string>();
+  const providers = new Set<string>();
+  for (const candidate of value.hostHarnessSessions) {
+    const validated = validateHostHarnessSession(candidate);
+    if (!validated.ok || !nodes.has(validated.value.nodeId) || identities.has(validated.value.hostHarnessSessionId)) return false;
+    const provider = `${validated.value.nodeId}\u0000${validated.value.harnessId}\u0000${validated.value.workspace}\u0000${validated.value.providerSessionId}`;
+    if (providers.has(provider) || (validated.value.attachedThreadId !== undefined && !threads.has(validated.value.attachedThreadId))) return false;
+    if (validated.value.activeRunId !== undefined) {
+      const run = runs.get(validated.value.activeRunId);
+      if (!run || run.hostHarnessSessionId !== validated.value.hostHarnessSessionId) return false;
+    }
+    identities.add(validated.value.hostHarnessSessionId);
+    providers.add(provider);
+  }
+  return true;
+}
+
 export function isSnapshot(value: unknown): value is Snapshot {
   const v5Absent = isObject(value) && value.instances === undefined && value.allocations === undefined && value.templates === undefined;
   const v5Present = isObject(value)
@@ -588,6 +612,9 @@ export function isSnapshot(value: unknown): value is Snapshot {
       || isArrayOf(value.artifactPreviews, (preview) => validateArtifactPreview(preview, value.generatedAt).ok))
     && previewCollectionCorrelates(value)
     && componentInventoryCollectionCorrelates(value)
+    && hostSessionCollectionCorrelates(value)
+    && (value.hostSessionInventoryRevision === undefined
+      || (Number.isSafeInteger(value.hostSessionInventoryRevision) && (value.hostSessionInventoryRevision as number) >= 0))
     && (value.tasks === undefined || isArrayOf(value.tasks, isTask))
     && (value.taskMessages === undefined || isArrayOf(value.taskMessages, isTaskMessage))
     && (value.taskMessageAcknowledgements === undefined || isArrayOf(value.taskMessageAcknowledgements, isTaskMessageAcknowledgement))
