@@ -28,10 +28,10 @@ func (testWriteCloser) Close() error { return nil }
 func TestOutboundFrameAtTheTwoMiBBoundaryIsRejected(t *testing.T) {
 	var destination bytes.Buffer
 	connection := &client{stdin: testWriteCloser{&destination}, pending: make(map[int64]chan rpcResult), done: make(chan struct{})}
-	require.Error(t, connection.write(strings.Repeat("a", maxFrameBytes-2)))
+	require.Error(t, connection.write(strings.Repeat("a", maxOutboundFrameBytes-2)))
 	require.Empty(t, destination.Bytes())
-	require.NoError(t, connection.write(strings.Repeat("a", maxFrameBytes-3)))
-	require.Len(t, destination.Bytes(), maxFrameBytes)
+	require.NoError(t, connection.write(strings.Repeat("a", maxOutboundFrameBytes-3)))
+	require.Len(t, destination.Bytes(), maxOutboundFrameBytes)
 }
 
 func TestDriverDiscoversBoundedAuthorizedThreadsAndReadsHistory(t *testing.T) {
@@ -173,9 +173,14 @@ func TestProtocolSkewAndPaginationFailClosed(t *testing.T) {
 		})
 	}
 
+	t.Setenv("FAKE_CODEX_MODE", "large-initialize")
+	largeDriver, err := New(context.Background(), Config{Binary: fakeAppServerBinary(t), Version: SupportedVersion, Verify: func() error { return nil }, WorkspaceRoots: []string{workspace}})
+	require.NoError(t, err)
+	largeDriver.Shutdown()
+
 	t.Setenv("FAKE_CODEX_MODE", "repeat-cursor")
 	driver := newFakeAppServerDriver(t, workspace)
-	_, err := driver.Discover(context.Background(), hostsession.DiscoverRequest{Limit: 8})
+	_, err = driver.Discover(context.Background(), hostsession.DiscoverRequest{Limit: 8})
 	require.ErrorContains(t, err, "pagination")
 	driver.Shutdown()
 
@@ -1241,14 +1246,18 @@ func TestCodexAppServerHelperProcess(t *testing.T) {
 				}
 			}
 			if os.Getenv("FAKE_CODEX_MODE") == "oversize-initialize" {
-				_, _ = os.Stdout.Write(append([]byte(`{"id":1,"result":{"padding":"`), append(make([]byte, maxFrameBytes), []byte(`"}}\n`)...)...))
+				_, _ = os.Stdout.Write(append([]byte(`{"id":1,"result":{"padding":"`), append(make([]byte, maxInboundFrameBytes), []byte(`"}}\n`)...)...))
 				os.Exit(0)
 			}
 			if os.Getenv("FAKE_CODEX_MODE") == "unknown-response" {
 				_ = encoder.Encode(map[string]any{"id": 999, "result": map[string]any{}})
 				continue
 			}
-			result = map[string]any{"userAgent": "codex-cli/0.147.0", "codexHome": filepath.Join(workspace, ".codex"), "platformFamily": "unix", "platformOs": "linux"}
+			initializeResult := map[string]any{"userAgent": "codex-cli/0.147.0", "codexHome": filepath.Join(workspace, ".codex"), "platformFamily": "unix", "platformOs": "linux"}
+			if os.Getenv("FAKE_CODEX_MODE") == "large-initialize" {
+				initializeResult["padding"] = strings.Repeat("x", maxOutboundFrameBytes)
+			}
+			result = initializeResult
 		case "thread/list":
 			var params struct {
 				Cursor string `json:"cursor"`

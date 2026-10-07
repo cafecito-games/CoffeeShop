@@ -18,10 +18,11 @@ import (
 )
 
 const (
-	SupportedVersion = "0.147.0"
-	maxListPages     = 64
-	maxProviderID    = 256
-	maxSummaryBytes  = 1024
+	SupportedVersion     = "0.147.0"
+	maxListPages         = 64
+	maxProviderID        = 256
+	maxSummaryBytes      = 1024
+	providerListPageSize = 16
 )
 
 var allCapabilities = hostsession.NewCapabilitySet(
@@ -166,7 +167,7 @@ func (driver *Driver) Discover(ctx context.Context, request hostsession.Discover
 	seenIDs := map[string]bool{}
 	result := make([]hostsession.DriverSession, 0, limit)
 	for page := 0; page < maxListPages; page++ {
-		params := map[string]any{"limit": limit}
+		params := map[string]any{"limit": min(providerListPageSize, limit-len(result))}
 		if cursor != "" {
 			params["cursor"] = cursor
 		}

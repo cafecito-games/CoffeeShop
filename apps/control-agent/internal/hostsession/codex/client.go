@@ -15,7 +15,8 @@ import (
 	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/protocol"
 )
 
-const maxFrameBytes = 2 << 20
+const maxInboundFrameBytes = 8 << 20
+const maxOutboundFrameBytes = 2 << 20
 const rpcTimeout = 30 * time.Second
 
 type rpcError struct {
@@ -129,7 +130,7 @@ func startClient(ctx context.Context, config clientConfig) (*client, error) {
 
 func (client *client) readLoop(reader io.Reader) {
 	scanner := bufio.NewScanner(reader)
-	scanner.Buffer(make([]byte, 64*1024), maxFrameBytes)
+	scanner.Buffer(make([]byte, 64*1024), maxInboundFrameBytes)
 	for scanner.Scan() {
 		line := append([]byte(nil), scanner.Bytes()...)
 		var envelope rpcEnvelope
@@ -243,7 +244,7 @@ func (client *client) respond(id json.RawMessage, result any) error {
 
 func (client *client) write(value any) error {
 	encoded, err := json.Marshal(value)
-	if err != nil || len(encoded) >= maxFrameBytes {
+	if err != nil || len(encoded) >= maxOutboundFrameBytes {
 		return errors.New("encode codex app-server frame")
 	}
 	client.writeMu.Lock()
