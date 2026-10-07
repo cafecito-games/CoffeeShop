@@ -532,6 +532,7 @@
       ]
     }
   ],
+  "hostSessionInventoryRevision": 0,
   "tasks": [
     {
       "id": "task_mul73pcf_000qvg",
@@ -660,5 +661,6 @@
     }
   ],
   "artifactPreviews": [],
+  "hostHarnessSessions": [],
   "generatedAt": "2026-09-28T12:10:00.000Z"
 }

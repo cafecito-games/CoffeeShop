@@ -41,7 +41,7 @@ func TestACPDriverKillsProcessTreeAfterCancellationGrace(t *testing.T) {
 
 func TestACPDriverShutdownIsBoundedWhenAnEscapedDescendantHoldsStdio(t *testing.T) {
 	runner, record := fakeAdapterDriver(t, "escaped-stdio-holder", 200*time.Millisecond)
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	finished := make(chan error, 1)
 	go func() {
@@ -52,6 +52,10 @@ func TestACPDriverShutdownIsBoundedWhenAnEscapedDescendantHoldsStdio(t *testing.
 		})
 		finished <- err
 	}()
+	require.Eventually(t, func() bool {
+		return len(acptest.DescendantPIDs(t, record)) == 1
+	}, 10*time.Second, 25*time.Millisecond, "escaped stdio holder did not start")
+	cancel()
 	select {
 	case err := <-finished:
 		require.Error(t, err)

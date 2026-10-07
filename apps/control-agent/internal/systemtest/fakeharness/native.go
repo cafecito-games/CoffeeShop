@@ -36,6 +36,9 @@ type nativeHost struct {
 }
 
 func runNative(recorder *recorder, role string, arguments []string) int {
+	if role == "codex" && len(arguments) == 3 && arguments[0] == "app-server" && arguments[1] == "--listen" && arguments[2] == "stdio://" {
+		return runCodexAppServer(recorder)
+	}
 	if len(arguments) == 1 && arguments[0] == "--version" {
 		version := nativeVersion(role)
 		recorder.write(map[string]any{"event": "native-version", "version": version})

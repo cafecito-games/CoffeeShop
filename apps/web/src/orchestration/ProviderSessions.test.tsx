@@ -1,6 +1,7 @@
 import type { HarnessSessionBinding, Run } from "@coffee-shop/protocol";
 import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import userEvent from "@testing-library/user-event";
+import { describe, expect, it, vi } from "vitest";
 import { ProviderSessionCard, providerSessionForRun, providerSessionsForAgent, resumeCommand } from "./ProviderSessions.js";
 
 function run(overrides: Partial<Run>): Run {
@@ -53,5 +54,18 @@ describe("provider sessions", () => {
     expect(screen.getByText("Resume on Espresso")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Copy resume command for 01a0c870-cc2d" })).toBeInTheDocument();
     expect(screen.getByText(/Coffee Shop may still resume this session/)).toBeInTheDocument();
+  });
+
+  it("shows a Sessions link only for an explicit host-session correlation", async () => {
+    const user = userEvent.setup();
+    const onOpenHostSession = vi.fn();
+    const explicit = providerSessionForRun(run({ providerSessionId: "native-one", hostHarnessSessionId: "host-session-one" }), [])!;
+    const { rerender } = render(<ProviderSessionCard reference={explicit} nodeName="Espresso" onOpenHostSession={onOpenHostSession} />);
+    await user.click(screen.getByRole("button", { name: "View in Sessions" }));
+    expect(onOpenHostSession).toHaveBeenCalledWith("host-session-one");
+
+    rerender(<ProviderSessionCard reference={{ ...explicit, hostHarnessSessionId: undefined }} nodeName="Espresso" onOpenHostSession={onOpenHostSession} />);
+    expect(screen.queryByRole("button", { name: "View in Sessions" })).not.toBeInTheDocument();
+    expect(resumeCommand(explicit)).toBe("cd '/srv/brew-kit' && claude --resume native-one");
   });
 });

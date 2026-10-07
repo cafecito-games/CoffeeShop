@@ -52,6 +52,7 @@ func TestHostSessionVocabulariesAndLimitsMatchLanguageNeutralFixture(t *testing.
 		HostHarnessSessionCommandDispositions []string                   `json:"hostHarnessSessionCommandDispositions"`
 		HostHarnessSessionCommandOutcomes     []string                   `json:"hostHarnessSessionCommandOutcomes"`
 		HostHarnessSessionHistoryKinds        []string                   `json:"hostHarnessSessionHistoryKinds"`
+		HostHarnessSessionHistoryOrder        string                     `json:"hostHarnessSessionHistoryOrder"`
 		RuntimeActorKinds                     []string                   `json:"runtimeActorKinds"`
 		ThreadOrchestratorKinds               []string                   `json:"threadOrchestratorKinds"`
 		HostSessionHubMessageTypes            []string                   `json:"hostSessionHubMessageTypes"`
@@ -70,6 +71,7 @@ func TestHostSessionVocabulariesAndLimitsMatchLanguageNeutralFixture(t *testing.
 	require.Equal(t, vocabulary.HostHarnessSessionCommandDispositions, HostHarnessSessionCommandDispositions)
 	require.Equal(t, vocabulary.HostHarnessSessionCommandOutcomes, HostHarnessSessionCommandOutcomes)
 	require.Equal(t, vocabulary.HostHarnessSessionHistoryKinds, HostHarnessSessionHistoryKinds)
+	require.Equal(t, vocabulary.HostHarnessSessionHistoryOrder, HostHarnessSessionHistoryOrder)
 	require.Equal(t, vocabulary.RuntimeActorKinds, RuntimeActorKinds)
 	require.Equal(t, vocabulary.ThreadOrchestratorKinds, ThreadOrchestratorKinds)
 	require.Equal(t, vocabulary.HostSessionHubMessageTypes, HostSessionHubMessageTypes)
@@ -276,6 +278,12 @@ func TestHostSessionObservationTransitionsAndInventoryFailClosed(t *testing.T) {
 	next.Status = "running"
 	next.UpdatedAt = "2026-09-30T12:01:00Z"
 	require.NoError(t, ValidateHostHarnessSessionObservationTransition(previous, next))
+	sameStatus := previous
+	sameStatus.Revision = 2
+	sameStatus.ControlMode = "full"
+	sameStatus.Operations = []string{"attach", "close", "detach", "interrupt", "read-history", "resolve-approval", "start-turn", "steer"}
+	sameStatus.UpdatedAt = "2026-09-30T12:01:00Z"
+	require.NoError(t, ValidateHostHarnessSessionObservationTransition(previous, sameStatus))
 	next.Status = "awaiting-approval"
 	require.Error(t, ValidateHostHarnessSessionObservationTransition(previous, next))
 	terminal := previous
@@ -294,7 +302,7 @@ func TestHostSessionObservationTransitionsAndInventoryFailClosed(t *testing.T) {
 	require.Error(t, err)
 
 	nextPage := page
-	nextPage.Generation = generation.Generation + 2
+	nextPage.Generation = generation.Generation + 20
 	nextPage.Sessions = append([]HostHarnessSessionObservation(nil), page.Sessions...)
 	nextPage.Sessions[0].Revision++
 	nextPage.Sessions[0].Status = "running"
@@ -303,7 +311,16 @@ func TestHostSessionObservationTransitionsAndInventoryFailClosed(t *testing.T) {
 	nextComplete.Generation = nextPage.Generation
 	nextGeneration, err := ValidateHostHarnessSessionInventoryGeneration([]HostSessionControlMessage{nextPage}, nextComplete)
 	require.NoError(t, err)
-	require.Error(t, ValidateHostHarnessSessionInventoryTransition(generation, nextGeneration), "generation gaps fail closed")
+	require.NoError(t, ValidateHostHarnessSessionInventoryTransition(generation, nextGeneration), "generation values need only increase")
+	replacementPage := nextPage
+	replacementPage.Generation++
+	replacementPage.Sessions = append([]HostHarnessSessionObservation(nil), nextPage.Sessions...)
+	replacementPage.Sessions[0].HostHarnessSessionID = "host-session-replacement"
+	replacementComplete := nextComplete
+	replacementComplete.Generation = replacementPage.Generation
+	replacementGeneration, err := ValidateHostHarnessSessionInventoryGeneration([]HostSessionControlMessage{replacementPage}, replacementComplete)
+	require.NoError(t, err)
+	require.NoError(t, ValidateHostHarnessSessionInventoryTransition(generation, replacementGeneration), "an omitted provider identity may receive a fresh host-session id")
 }
 
 func TestHostSessionInventoryAndHistoryCollectionLimits(t *testing.T) {

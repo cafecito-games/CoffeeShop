@@ -89,12 +89,16 @@ test("host-session limits and legal transitions match the language-neutral contr
     promptBytes: 65536,
     operationCapabilities: 16,
     sessionsPerInventoryPage: 64,
-    pagesPerGeneration: 64,
-    sessionsPerGeneration: 4096,
+    pagesPerGeneration: 8,
+    sessionsPerGeneration: 512,
+    sessionsGlobal: 2048,
     historyItemsPerPage: 100,
     historyItemTextBytes: 32768,
-    historyCursorBytes: 512
+    historyCursorBytes: 512,
+    historyReadsPerNode: 4,
+    historyResponseWaitMilliseconds: 16000
   });
+  assert.equal(protocol.hostHarnessSessionHistoryOrder, "newest-first");
   const expected = {
     idle: ["running", "active-elsewhere", "offline", "closed", "failed"],
     running: ["awaiting-approval", "idle", "active-elsewhere", "offline", "closed", "failed"],
@@ -352,11 +356,22 @@ test("complete inventory generations validate atomically across page replay, gap
   const next = protocol.validateHostHarnessSessionInventoryGeneration([nextPage], nextComplete);
   assert.equal(next.ok, true);
   assert.equal(protocol.validateHostHarnessSessionInventoryTransition(previous, next.value).ok, true);
-  const gapPage = { ...nextPage, generation: 6 };
-  const gapComplete = { ...nextComplete, generation: 6 };
-  const gap = protocol.validateHostHarnessSessionInventoryGeneration([gapPage], gapComplete);
-  assert.equal(gap.ok, true);
-  assert.equal(protocol.validateHostHarnessSessionInventoryTransition(previous, gap.value).ok, false);
+  const replacementPage = {
+    ...nextPage,
+    generation: 50,
+    sessions: [observation({ hostHarnessSessionId: "host-session-replacement" })]
+  };
+  const replacementComplete = { ...nextComplete, generation: 50 };
+  const replacement = protocol.validateHostHarnessSessionInventoryGeneration([replacementPage], replacementComplete);
+  assert.equal(replacement.ok, true);
+  assert.equal(protocol.validateHostHarnessSessionInventoryTransition(previous, replacement.value).ok, true,
+    "an omitted provider identity may be rediscovered under a fresh host-session id");
+  const laterPage = { ...nextPage, generation: 50 };
+  const laterComplete = { ...nextComplete, generation: 50 };
+  const laterGeneration = protocol.validateHostHarnessSessionInventoryGeneration([laterPage], laterComplete);
+  assert.equal(laterGeneration.ok, true);
+  assert.equal(protocol.validateHostHarnessSessionInventoryTransition(previous, laterGeneration.value).ok, true,
+    "generation values are monotonic, not necessarily contiguous");
 });
 
 test("inventory and history collection limits accept the exact boundary and reject one over", () => {
@@ -587,6 +602,8 @@ test("checked-in v6 fixtures are exact language-neutral producer bytes", () => {
     assert.equal(valid.ok, true, `${name}: ${valid.ok ? "" : valid.reason}`);
     assert.equal(JSON.stringify(valid.value, null, 2) + "\n", bytes, `${name} bytes`);
   }
+  assert.deepEqual(readFixture("history-page").items.map((item) => item.id), ["history-newest", "history-older"],
+    "the shared history fixture is newest-first");
   const profileBytes = readFixtureBytes("interactive-profile");
   const profile = protocol.validateHostHarnessSessionInteractiveProfile(JSON.parse(profileBytes));
   assert.equal(profile.ok, true);
@@ -604,6 +621,7 @@ test("checked-in v6 fixtures are exact language-neutral producer bytes", () => {
     hostHarnessSessionCommandDispositions: protocol.hostHarnessSessionCommandDispositions,
     hostHarnessSessionCommandOutcomes: protocol.hostHarnessSessionCommandOutcomes,
     hostHarnessSessionHistoryKinds: protocol.hostHarnessSessionHistoryKinds,
+    hostHarnessSessionHistoryOrder: protocol.hostHarnessSessionHistoryOrder,
     runtimeActorKinds: protocol.runtimeActorKinds,
     threadOrchestratorKinds: protocol.threadOrchestratorKinds,
     hostSessionHubMessageTypes: protocol.hostSessionHubMessageTypes,
@@ -687,6 +705,8 @@ test("unsupported, rejected, and uncertain close never manufacture a closed sess
   assert.equal(protocol.validateHostSessionControlMessage({ ...succeeded, outcome: "uncertain", session: open }, "6").ok, true);
   assert.equal(protocol.canOperateHostHarnessSession(observation(), "close"), true);
   assert.equal(protocol.canOperateHostHarnessSession(observation({ operations: ["attach"] }), "close"), false);
+  assert.equal(protocol.canOperateHostHarnessSession(observation({ status: "offline" }), "attach"), false);
+  assert.equal(protocol.canOperateHostHarnessSession(observation({ status: "offline" }), "close"), false);
   assert.equal(protocol.canOperateHostHarnessSession(observation({ status: "closed" }), "close"), false);
   assert.equal(protocol.canOperateHostHarnessSession(observation({ status: "failed" }), "close"), false);
 });

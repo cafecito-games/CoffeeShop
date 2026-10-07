@@ -9,6 +9,7 @@ import (
 	"maps"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"slices"
 	"strings"
 	"syscall"
@@ -18,6 +19,8 @@ import (
 	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/config"
 	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/controlplane"
 	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/harness"
+	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/hostsession"
+	codexsession "github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/hostsession/codex"
 	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/protocol"
 	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/readiness"
 	"github.com/cafecito-games/CoffeeShop/apps/control-agent/internal/setup"
@@ -144,6 +147,57 @@ func run(args []string) int {
 		log.Printf("no supported harnesses found; install and authenticate Claude Code or Codex before starting Barista")
 		return 1
 	}
+	hostDrivers := []hostsession.Driver{}
+	if candidate, available := managed["codex-cli"]; available && candidate.Version == codexsession.SupportedVersion {
+		codexDriver, codexErr := codexsession.New(ctx, codexsession.Config{
+			Binary: candidate.Binary, Version: candidate.Version, Verify: candidate.Verify,
+			WorkspaceRoots: cfg.WorkspaceRoots, StateRoot: filepath.Join(cfg.DataRoot, "host-sessions", "codex-runtime"),
+			ApprovalPolicy: cfg.ApprovalPolicies.For("codex-cli"),
+		})
+		if codexErr != nil {
+			log.Printf("interactive Codex sessions unavailable: codex-protocol-incompatible")
+		} else {
+			hostDrivers = append(hostDrivers, codexDriver)
+		}
+	}
+	hostSessions, err := hostsession.Open(hostsession.Config{
+		DataRoot: cfg.DataRoot, NodeID: cfg.NodeID, WorkspaceRoots: cfg.WorkspaceRoots, Drivers: hostDrivers,
+	})
+	if err != nil {
+		// Interactive supervision is optional to legacy one-shot execution. A construction failure
+		// withholds every interactive profile without taking the daemon or its v1-v5 behavior down.
+		log.Printf("interactive host sessions unavailable: local supervision could not initialize")
+		hostSessions = nil
+	} else if !hostSessions.Usable() {
+		log.Print(hostSessions.Diagnostic())
+	}
+	if hostSessions != nil && hostSessions.Usable() {
+		for harnessID := range hostSessions.InteractiveProfiles() {
+			discoveryContext, cancelDiscovery := context.WithTimeout(ctx, 30*time.Second)
+			_, discoveryErr := hostSessions.Discover(discoveryContext, harnessID)
+			cancelDiscovery()
+			if discoveryErr != nil {
+				log.Printf("interactive %s session discovery unavailable", harnessID)
+			}
+		}
+		if discovered, snapshotErr := hostSessions.RecoverySnapshot(); snapshotErr == nil {
+			for _, session := range discovered {
+				reconcileContext, cancelReconcile := context.WithTimeout(ctx, 30*time.Second)
+				_, reconcileErr := hostSessions.Reconcile(reconcileContext, session.HostHarnessSessionID)
+				cancelReconcile()
+				if reconcileErr != nil {
+					log.Printf("interactive %s session reconciliation unavailable", session.HarnessID)
+				}
+			}
+		}
+	}
+	if hostSessions != nil {
+		defer func() {
+			shutdownContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = hostSessions.Shutdown(shutdownContext)
+		}()
+	}
 	log.Printf("discovered harnesses: %s", strings.Join(available, ", "))
 	log.Printf("allowed workspace roots: %s", strings.Join(cfg.WorkspaceRoots, ", "))
 	if cfg.InstanceCapacity == 0 {
@@ -223,7 +277,8 @@ func run(args []string) int {
 	}
 	client := controlplane.NewClient(cfg, node, runner, buildCapabilityReport).
 		WithComponentInventory(buildComponentInventory).
-		WithCapabilityPackReadiness(buildCapabilityPackReadiness)
+		WithCapabilityPackReadiness(buildCapabilityPackReadiness).
+		WithHostSessions(hostSessions)
 	if err := client.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		log.Printf("Barista stopped: %v", err)
 		return 1

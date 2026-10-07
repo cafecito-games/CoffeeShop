@@ -10,8 +10,8 @@ import (
 // and for session resume where its adapter negotiated it, and rejects anything else rather than
 // degrading execution to an older version's behavior. Version 5 adds resident-instance
 // supervision: Barista provisions, dispatches against, and releases allocations negotiated
-// through the instance messages.
-const Version = "5"
+// through the instance messages. Version 6 adds independently supervised interactive sessions.
+const Version = "6"
 
 type HarnessProfile struct {
 	ID          string                `json:"id"`

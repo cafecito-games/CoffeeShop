@@ -138,6 +138,7 @@
   "orchestratorAttachments": [],
   "projectProfiles": [],
   "componentInventories": [],
+  "hostSessionInventoryRevision": 0,
   "tasks": [],
   "taskMessages": [],
   "taskMessageAcknowledgements": [],
@@ -163,5 +164,6 @@
       "accessState": "eligible"
     }
   ],
+  "hostHarnessSessions": [],
   "generatedAt": "2026-09-27T12:04:00.000Z"
 }

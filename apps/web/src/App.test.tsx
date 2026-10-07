@@ -1,4 +1,4 @@
-import type { Agent, AgentInstance, AgentTemplate, ComputeNode, InstanceAllocation, Run, RunStatus, Snapshot, Thread } from "@coffee-shop/protocol";
+import type { Agent, AgentInstance, AgentTemplate, ComputeNode, HostHarnessSession, InstanceAllocation, Run, RunStatus, Snapshot, Thread } from "@coffee-shop/protocol";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -81,6 +81,7 @@ function prepareBrowser(status: ConnectionStatus = "connected") {
   mocks.retry.mockReset();
   currentSnapshot = structuredClone(testSnapshot);
   vi.stubGlobal("fetch", vi.fn());
+  window.history.replaceState({}, "", "/");
   const storage = new Map<string, string>();
   vi.stubGlobal("localStorage", {
     getItem: (key: string) => storage.get(key) ?? null,
@@ -91,6 +92,64 @@ function prepareBrowser(status: ConnectionStatus = "connected") {
     get length() { return storage.size; }
   });
 }
+
+describe("Sessions navigation", () => {
+  beforeEach(() => prepareBrowser());
+
+  const hostSession = {
+    hostHarnessSessionId: "host-session-one", nodeId: "node-one", harnessId: "codex-cli",
+    providerSessionId: "provider-private", workspace: "/workspace", source: "provider-history" as const,
+    status: "idle" as const, controlMode: "resume" as const, operations: ["attach", "read-history"], revision: 1,
+    attachmentEpoch: 0, summary: "Existing work", createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z"
+  } satisfies HostHarnessSession;
+
+  it("deep-links with only the Coffee Shop session identity", async () => {
+    currentSnapshot.hostHarnessSessions = [hostSession];
+    const { default: App } = await import("./App.js");
+    render(<App />);
+    fireEvent.click(screen.getAllByRole("button", { name: "Sessions" })[0]);
+    fireEvent.click(screen.getByRole("button", { name: /Existing work/ }));
+    expect(location.search).toBe("?view=sessions&session=host-session-one");
+    expect(location.search).not.toContain("provider-private");
+    expect(location.search).not.toContain("workspace");
+  }, 30_000);
+
+  it("normalizes unsafe initial state and follows popstate without a router", async () => {
+    currentSnapshot.hostHarnessSessions = [hostSession];
+    window.history.replaceState({}, "", "/?theme=dark&view=sessions&session=host-session-one&providerSessionId=leak");
+    vi.mocked(fetch).mockImplementation(async (input) => {
+      const path = String(input);
+      if (path.endsWith("/history")) return new Response(JSON.stringify({
+        hostHarnessSessionId: hostSession.hostHarnessSessionId, nodeId: hostSession.nodeId, harnessId: hostSession.harnessId,
+        providerSessionId: hostSession.providerSessionId, workspace: hostSession.workspace, revision: hostSession.revision,
+        items: [], stale: false, truncated: false, omitted: false
+      }), { status: 200, headers: { "content-type": "application/json" } });
+      return new Response(JSON.stringify({ session: hostSession, links: {} }), { status: 200, headers: { "content-type": "application/json" } });
+    });
+    const { default: App } = await import("./App.js");
+    render(<App />);
+    expect(await screen.findByRole("heading", { name: "Existing work" })).toBeInTheDocument();
+    await waitFor(() => expect(location.search).toBe("?theme=dark&view=sessions&session=host-session-one"));
+
+    window.history.pushState({}, "", "/?theme=dark");
+    fireEvent(window, new PopStateEvent("popstate"));
+    await waitFor(() => expect(screen.queryByRole("heading", { name: "Existing work" })).not.toBeInTheDocument());
+    expect(document.querySelector('button[aria-label="Legacy agents"].active')).not.toBeNull();
+    window.history.pushState({}, "", "/?theme=dark&view=sessions&session=host-session-one");
+    fireEvent(window, new PopStateEvent("popstate"));
+    expect(await screen.findByRole("heading", { name: "Existing work" })).toBeInTheDocument();
+  }, 30_000);
+
+  it("replaces a malformed session hint without fetching it", async () => {
+    currentSnapshot.hostHarnessSessions = [hostSession];
+    window.history.replaceState({}, "", "/?theme=dark&view=sessions&session=bad%0Avalue&cursor=private");
+    const { default: App } = await import("./App.js");
+    render(<App />);
+    expect(await screen.findByRole("heading", { name: "Sessions" })).toBeInTheDocument();
+    await waitFor(() => expect(location.search).toBe("?theme=dark&view=sessions"));
+    expect(fetch).not.toHaveBeenCalled();
+  }, 30_000);
+});
 
 const thread: Thread = {
   id: "thread-one", title: "User contact information form", objective: "Create a contact form", summary: "Ready for follow-up",

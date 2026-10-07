@@ -31,6 +31,7 @@ type Client struct {
 	buildCapabilityReport        func(context.Context) protocol.NodeCapabilityReport
 	buildComponentInventory      func(context.Context) protocol.ComponentInventoryReport
 	buildCapabilityPackReadiness func(context.Context) protocol.CapabilityPackReadinessReport
+	hostSessions                 *hostSessionTransport
 	workspaces                   *workspace.Manager
 	// leaseConfirmationTimeout bounds how long a leased run waits for the hub to confirm its
 	// active lease; zero means defaultLeaseConfirmationTimeout.
@@ -40,6 +41,7 @@ type Client struct {
 
 	connectionMu     sync.Mutex
 	connection       *websocket.Conn
+	hostSessionReady bool
 	outbox           [][]byte
 	outboxEvents     int
 	outboxEventBytes int
@@ -94,7 +96,33 @@ func (client *Client) WithCapabilityPackReadiness(build func(context.Context) pr
 	return client
 }
 
+// WithHostSessions installs the provider-neutral interactive-session core. Capability
+// advertisement is derived only from a completely usable core and its validated driver profiles.
+func (client *Client) WithHostSessions(core hostSessionCore) *Client {
+	if core == nil || !core.Usable() {
+		if core != nil && core.Diagnostic() != "" {
+			log.Print(core.Diagnostic())
+		}
+		return client
+	}
+	profiles := core.InteractiveProfiles()
+	for index := range client.node.Harnesses {
+		profile, found := profiles[client.node.Harnesses[index].ID]
+		if !found || profile.Validate() != nil {
+			continue
+		}
+		copy := profile
+		client.node.Harnesses[index].InteractiveSessions = &copy
+	}
+	client.hostSessions = newHostSessionTransport(core, client.node.ID, client)
+	return client
+}
+
 func (client *Client) Run(ctx context.Context) error {
+	if client.hostSessions != nil {
+		client.hostSessions.start(ctx)
+		defer client.hostSessions.shutdown()
+	}
 	if err := client.bridge.Start(ctx); err != nil {
 		return err
 	}
@@ -164,16 +192,23 @@ func (client *Client) runOnce(ctx context.Context) (bool, error) {
 		if err != nil {
 			return true, err
 		}
+		if client.hostSessions != nil {
+			hostMessage, hostErr := protocol.DecodeHostSessionHubMessage(data, protocol.Version)
+			if hostErr == nil {
+				go client.hostSessions.handle(ctx, hostMessage)
+				continue
+			}
+		}
 		message, err := protocol.DecodeInbound(data)
 		if err != nil {
 			// The legacy decoder refuses every v5 instance message rather than reinterpreting it;
 			// only the v5 decoder may accept one, and it re-validates the whole payload.
 			instanceMessage, instanceErr := protocol.DecodeInstanceHubMessage(data, protocol.Version)
-			if instanceErr != nil {
-				log.Printf("ignore invalid control-plane message: %v", err)
+			if instanceErr == nil {
+				client.handleInstanceMessage(ctx, instanceMessage)
 				continue
 			}
-			client.handleInstanceMessage(ctx, instanceMessage)
+			log.Printf("ignore invalid control-plane message")
 			continue
 		}
 		if message.Type == "hub.rpc.response" {
@@ -188,6 +223,7 @@ func (client *Client) attach(ctx context.Context, connection *websocket.Conn) er
 	client.connectionMu.Lock()
 	defer client.connectionMu.Unlock()
 	client.connection = connection
+	client.hostSessionReady = false
 	registrationNode := client.node
 	registrationNode.ActiveRuns = client.activeRuns()
 	activeInstances := client.activeInstanceCount()
@@ -201,6 +237,31 @@ func (client *Client) attach(ctx context.Context, connection *websocket.Conn) er
 	if err := awaitRegistrationAcknowledgement(ctx, connection); err != nil {
 		client.connection = nil
 		return err
+	}
+	if client.hostSessions != nil {
+		frames, outcomeIDs, inventoryErr := client.hostSessions.authoritativeFrames()
+		if inventoryErr != nil {
+			log.Printf("interactive host-session inventory not reported")
+		} else {
+			for _, frame := range frames {
+				if err := writeBytes(ctx, connection, frame); err != nil {
+					client.connection = nil
+					client.hostSessions.markDirty()
+					return err
+				}
+			}
+			for _, frame := range client.hostSessions.takePendingAfterSnapshot() {
+				if err := writeBytes(ctx, connection, frame); err != nil {
+					client.connection = nil
+					client.hostSessions.markDirty()
+					return err
+				}
+			}
+			for _, commandID := range outcomeIDs {
+				client.hostSessions.core.AcknowledgeOutcome(commandID)
+			}
+			client.hostSessionReady = true
+		}
 	}
 	if client.buildComponentInventory != nil {
 		report := client.buildComponentInventory(ctx)
@@ -259,7 +320,55 @@ func (client *Client) detach(connection *websocket.Conn) {
 	defer client.connectionMu.Unlock()
 	if client.connection == connection {
 		client.connection = nil
+		client.hostSessionReady = false
 		client.failPending(&mcpserver.ToolError{Code: "hub_unavailable", Message: "The control plane disconnected; retry with the same idempotency key", Retryable: true})
+	}
+}
+
+func (client *Client) sendHostSession(message protocol.HostSessionControlMessage) bool {
+	return client.sendHostSessionFrame(message, true)
+}
+
+func (client *Client) sendTrackedHostSession(message protocol.HostSessionControlMessage) bool {
+	return client.sendHostSessionFrame(message, false)
+}
+
+func (client *Client) sendHostSessionFrame(message protocol.HostSessionControlMessage, bufferWhenDisconnected bool) bool {
+	if client.hostSessions == nil {
+		return false
+	}
+	data, err := encodeHostSessionFrame(message)
+	if err != nil {
+		client.hostSessions.markDirty()
+		log.Printf("interactive host-session frame was not serializable")
+		return false
+	}
+	client.connectionMu.Lock()
+	defer client.connectionMu.Unlock()
+	if client.connection == nil || !client.hostSessionReady {
+		if bufferWhenDisconnected {
+			client.hostSessions.buffer(data)
+		}
+		return false
+	}
+	writeContext, cancel := context.WithTimeout(context.Background(), writeTimeout)
+	defer cancel()
+	if err := writeBytes(writeContext, client.connection, data); err != nil {
+		client.connection = nil
+		client.hostSessionReady = false
+		client.hostSessions.markDirty()
+		return false
+	}
+	return true
+}
+
+func (client *Client) requestHostSessionResync() {
+	client.connectionMu.Lock()
+	client.hostSessionReady = false
+	connection := client.connection
+	client.connectionMu.Unlock()
+	if connection != nil {
+		_ = connection.Close(websocket.StatusInternalError, "host-session resync required")
 	}
 }
 

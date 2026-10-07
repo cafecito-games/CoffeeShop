@@ -526,3 +526,33 @@ sha256sum "$HOME/.cache/coffee-shop-system/issue-111/evidence/"*.png
 The evidence hook is opt-in, writes nothing to the repository, and fails if the built PWA or either
 local browser tool is absent. Ordinary `task system:test:preview`, `task system:test`, and CI do not
 depend on a browser installation.
+
+The Sessions read surface has a separate account-free evidence producer. It intercepts only the
+local built PWA's snapshot/detail/history reads with strictly synthetic provider identities and
+paths, covers empty, inventory, active, observe-only/active-elsewhere, stale, and truncated states,
+and captures each at desktop and mobile widths with reduced motion enabled:
+
+Host-session records remain durable Hub authority, but WebSocket and `/api/snapshot` payloads carry
+only an empty v6 capability marker plus `hostSessionInventoryRevision`. The Sessions view re-lists
+through the authorized 64-record keyset route only when that revision changes. The immutable
+Coffee Shop session ID is the continuation key, so a reader keeps making progress while unrelated
+status updates advance the diagnostic revision. The Hub coalesces rapid session deltas into bounded
+25 ms persistence batches and emits one client snapshot per committed batch. Pending deltas are
+bounded to 64 per connection and 512 across the Hub. A complete inventory that cannot fit is
+deferred without immediately closing the Barista control connection. Deltas for already-known
+sessions continue to apply; unknown records and later revision gaps remain deferred. The Hub records
+the exact record, byte, and per-node deficit. Only after later commits create enough corresponding
+headroom does it close that deferred node once, so its normal reconnect publishes a fresh complete
+generation; smaller fluctuations cannot create a reconnect loop. Hub retention bounds serialized
+inventory to 32 MiB and imported history to 1 MiB, in addition to the protocol's record and item
+limits, so unrelated state transactions and browser snapshots cannot grow with unbounded provider
+history.
+
+```sh
+task frontend:build
+node scripts/capture-sessions-evidence.mjs docs/screenshots
+sha256sum docs/screenshots/sessions-*.png
+```
+
+The script requires `playwright` and `chromium` on `PATH` (or their paths in `PLAYWRIGHT` and
+`CHROMIUM`) and never contacts a Hub, Barista, provider account, or external network.

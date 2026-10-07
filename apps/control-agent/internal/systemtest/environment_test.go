@@ -41,6 +41,7 @@ var (
 	baristaBinary          string
 	adapterBinaries        map[string]string
 	managedHarnessBinaries map[string]string
+	managedCodexBinary     string
 	nativeDirectory        string
 )
 
@@ -103,6 +104,12 @@ func prepare(m *testing.M) (int, error) {
 		return 0, fmt.Errorf("build versioned fake harness: %v\n%s", err, combined)
 	}
 	managedHarnessBinaries["2.0.15"] = versionB
+	managedCodexBinary = filepath.Join(buildDirectory, "fakeharness-codex-0.147.0")
+	codexVersionCommand := exec.Command("go", "build", "-ldflags", "-X 'main.codexNativeVersion=codex-cli 0.147.0'", "-o", managedCodexBinary, "./internal/systemtest/fakeharness")
+	codexVersionCommand.Dir = controlAgent
+	if combined, err := codexVersionCommand.CombinedOutput(); err != nil {
+		return 0, fmt.Errorf("build pinned Codex fake harness: %v\n%s", err, combined)
+	}
 	adapterDirectory := filepath.Join(buildDirectory, "adapters")
 	nativeDirectory = filepath.Join(buildDirectory, "native")
 	adapterBinaries = map[string]string{"codex-cli": filepath.Join(adapterDirectory, "codex-acp"), "claude-cli": filepath.Join(adapterDirectory, "claude-agent-acp")}
@@ -1024,6 +1031,7 @@ func (node *baristaNode) start() {
 		"COFFEE_SHOP_FAKE_RECORD_DIRECTORY=" + node.environment.records,
 		"COFFEE_SHOP_FAKE_SESSION_DIRECTORY=" + node.sessions,
 		"COFFEE_SHOP_FAKE_GATE_DIRECTORY=" + node.environment.gates,
+		"COFFEE_SHOP_FAKE_CODEX_WORKSPACE=" + node.root,
 		"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=" + filepath.Join(node.home, ".gitconfig"),
 	}
 	for name, value := range providerCanaries {

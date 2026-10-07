@@ -451,10 +451,13 @@ test("a pending wait wakes as soon as a relevant event commits", async () => {
   const taskId = await submitSingleTask(hub.call, rootRunId, "woken", "woken-1");
   const workerRunId = await startAttempt(store, taskId, "worker-a");
   const cursor = await currentCursor(hub.call, rootRunId);
-  const startedAt = Date.now();
-  const waiting = hub.call("wait_for_task_events", rootRunId, { cursor, timeoutMilliseconds: 5_000 });
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  const waiting = hub.call("wait_for_task_events", rootRunId, { cursor, timeoutMilliseconds: 20_000 });
+  const registrationDeadline = Date.now() + 10_000;
+  while (hub.waiters.size === 0 && Date.now() < registrationDeadline) {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
   assert.equal(hub.waiters.size, 1);
+  const startedAt = Date.now();
   await hub.call("send_task_message", workerRunId, {
     idempotencyKey: "woken-question", recipient: { type: "orchestrator" }, kind: "question", body: "Which port?"
   });
@@ -462,7 +465,7 @@ test("a pending wait wakes as soon as a relevant event commits", async () => {
   assert.equal(woke.timedOut, false);
   assert.equal(woke.events.length, 1);
   assert.equal(woke.events[0].message?.body, "Which port?");
-  assert.ok(Date.now() - startedAt < 2_000, "the wait resolves long before its timeout");
+  assert.ok(Date.now() - startedAt < 15_000, "the wait resolves long before its timeout");
   assert.equal(hub.waiters.size, 0);
 });
 

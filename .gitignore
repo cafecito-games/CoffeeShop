@@ -1,5 +1,6 @@
 node_modules
 .task
+.grafo/
 bin
 dist
 .DS_Store

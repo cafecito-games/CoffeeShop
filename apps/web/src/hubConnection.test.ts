@@ -631,6 +631,20 @@ describe("HubConnection", () => {
     expect(test.timers.size).toBe(1);
   });
 
+  it("validates host sessions as one correlated snapshot collection", () => {
+    const session = {
+      hostHarnessSessionId: "host-session-one", nodeId: "node-one", harnessId: "codex-cli",
+      providerSessionId: "provider-one", workspace: "/workspace", source: "provider-history",
+      status: "idle", controlMode: "resume", operations: ["attach", "read-history"], revision: 1,
+      attachmentEpoch: 0, createdAt: "2026-10-06T10:00:00Z", updatedAt: "2026-10-06T10:00:00Z"
+    };
+    const valid = { ...snapshot("2026-10-06T10:00:00Z"), nodes: [inventoryNode], hostHarnessSessions: [session] };
+    expect(isSnapshot(valid)).toBe(true);
+    expect(isSnapshot({ ...valid, hostHarnessSessions: [session, session] })).toBe(false);
+    expect(isSnapshot({ ...valid, hostHarnessSessions: [{ ...session, endpoint: "stdio://private" }] })).toBe(false);
+    expect(isSnapshot({ ...valid, hostHarnessSessions: [{ ...session, workspace: "/workspace", summary: "Authorization: Bearer SECRET_CANARY" }] })).toBe(false);
+  });
+
   it("ignores superseded fetches and callbacks and cleans up on stop", async () => {
     const first = deferred<Response>();
     const second = deferred<Response>();

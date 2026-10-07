@@ -445,6 +445,8 @@ export interface Snapshot {
   sessionBindings?: HarnessSessionBinding[];
   /** Version-6 durable host-session projection; absence is the only pre-v6 migration default. */
   hostHarnessSessions?: HostHarnessSession[];
+  /** Monotonic revision for the paginated host-session inventory; unrelated snapshots keep it stable. */
+  hostSessionInventoryRevision?: number;
   /** Per-thread orchestrator inbox delivery state; see `OrchestratorInbox`. */
   orchestratorInboxes?: OrchestratorInbox[];
   /** Public view of the minted orchestrator credentials; never carries a secret or its hash. */
@@ -1209,6 +1211,8 @@ export const isHostHarnessSessionCommandOutcome = isOneOf(hostHarnessSessionComm
 export const hostHarnessSessionHistoryKinds = ["user", "assistant", "system", "summary"] as const;
 export type HostHarnessSessionHistoryKind = typeof hostHarnessSessionHistoryKinds[number];
 export const isHostHarnessSessionHistoryKind = isOneOf(hostHarnessSessionHistoryKinds);
+/** History pages and their items are newest-first; cursors continue toward older provider items. */
+export const hostHarnessSessionHistoryOrder = "newest-first" as const;
 
 export const hostHarnessSessionLimits = {
   identifierBytes: 256,
@@ -1217,11 +1221,14 @@ export const hostHarnessSessionLimits = {
   promptBytes: 65_536,
   operationCapabilities: 16,
   sessionsPerInventoryPage: 64,
-  pagesPerGeneration: 64,
-  sessionsPerGeneration: 4_096,
+  pagesPerGeneration: 8,
+  sessionsPerGeneration: 512,
+  sessionsGlobal: 2_048,
   historyItemsPerPage: 100,
   historyItemTextBytes: 32_768,
-  historyCursorBytes: 512
+  historyCursorBytes: 512,
+  historyReadsPerNode: 4,
+  historyResponseWaitMilliseconds: 16_000
 } as const;
 
 export const hostHarnessSessionTransitions: Readonly<Record<HostHarnessSessionStatus, readonly HostHarnessSessionStatus[]>> = {
@@ -1241,6 +1248,7 @@ export const canTransitionHostHarnessSession = (from: HostHarnessSessionStatus, 
 export function canOperateHostHarnessSession(value: unknown, operation: HostHarnessSessionOperation): boolean {
   const session = validateHostHarnessSessionObservation(value);
   if (!session.ok || !isHostHarnessSessionOperation(operation) || !session.value.operations.includes(operation)) return false;
+  if (session.value.status === "offline") return false;
   return operation !== "close" || (session.value.status !== "closed" && session.value.status !== "failed");
 }
 
@@ -2026,6 +2034,7 @@ const isHostSessionString = (value: unknown, limit: number, nonEmpty = false): v
   typeof value === "string" && hasValidUnicode(value) && byteLength(value) <= limit && (!nonEmpty || value.length > 0);
 const isHostSessionIdentifier = (value: unknown): value is string =>
   isHostSessionString(value, hostHarnessSessionLimits.identifierBytes, true) && !containsSecretLikeValue(value);
+export const isHostHarnessSessionId = (value: unknown): value is HostHarnessSessionId => isHostSessionIdentifier(value);
 const isHostSessionDiagnostic = (value: unknown): value is string =>
   isHostSessionString(value, hostHarnessSessionLimits.diagnosticBytes) && !containsSecretLikeValue(value);
 const isHostSessionPrompt = (value: unknown): value is string =>
@@ -2033,7 +2042,7 @@ const isHostSessionPrompt = (value: unknown): value is string =>
 const isPositiveSafeInteger = (value: unknown): value is number => isNonNegativeInteger(value) && value > 0;
 
 const isCanonicalHostSessionWorkspace = (value: unknown): value is string => {
-  if (!isHostSessionString(value, hostHarnessSessionLimits.workspaceBytes, true) || containsSecretLikeValue(value)
+  if (!isHostSessionString(value, hostHarnessSessionLimits.workspaceBytes, true)
     || /[\u0000-\u001f]/.test(value)) return false;
   let path = value;
   if (/^[A-Za-z]:[\\/]/.test(path)) path = path.slice(2).replaceAll("\\", "/");
@@ -2109,7 +2118,7 @@ export function validateHostHarnessSessionObservationTransition(
     return canonicalHostSessionJSON(oldValue.value) === canonicalHostSessionJSON(newValue.value)
       ? accept(newValue.value) : reject("host session revision replay changed payload");
   }
-  if (!canTransitionHostHarnessSession(oldValue.value.status, newValue.value.status)) return reject("host session status transition is not legal");
+  if (oldValue.value.status !== newValue.value.status && !canTransitionHostHarnessSession(oldValue.value.status, newValue.value.status)) return reject("host session status transition is not legal");
   if (Date.parse(newValue.value.updatedAt) < Date.parse(oldValue.value.updatedAt)) return reject("host session timestamp regressed");
   return accept(newValue.value);
 }
@@ -2267,7 +2276,7 @@ export function validateHostSessionHubMessage(value: unknown, version: ControlPr
   return accept(value as unknown as HostSessionHubMessage);
 }
 
-const validateHostSessionHistoryItem = (value: unknown): value is HostHarnessSessionHistoryItem => isRecord(value)
+export const validateHostHarnessSessionHistoryItem = (value: unknown): value is HostHarnessSessionHistoryItem => isRecord(value)
   && hasOnlyKeys(value, ["id", "kind", "text", "providerTurnId", "at", "truncated"])
   && isHostSessionIdentifier(value.id) && isHostHarnessSessionHistoryKind(value.kind)
   && isHostSessionString(value.text, hostHarnessSessionLimits.historyItemTextBytes) && !containsSecretLikeValue(value.text)
@@ -2322,7 +2331,7 @@ export function validateHostSessionControlMessage(value: unknown, version: Contr
       if (!hasOnlyKeys(value, ["type", "nodeId", "hostHarnessSessionId", "requestId", "items", "nextCursor", "truncated", "at"])
         || !isHostSessionIdentifier(value.hostHarnessSessionId) || !isHostSessionIdentifier(value.requestId)
         || !Array.isArray(value.items) || value.items.length > hostHarnessSessionLimits.historyItemsPerPage
-        || !value.items.every(validateHostSessionHistoryItem)
+        || !value.items.every(validateHostHarnessSessionHistoryItem)
         || new Set(value.items.map((item: HostHarnessSessionHistoryItem) => item.id)).size !== value.items.length
         || !isOptional(value.nextCursor, (cursor) => isHostSessionString(cursor, hostHarnessSessionLimits.historyCursorBytes, true) && !containsSecretLikeValue(cursor))
         || typeof value.truncated !== "boolean" || !isTimestamp(value.at)) return reject("host session history page is malformed");
@@ -2443,11 +2452,11 @@ export function validateHostHarnessSessionInventoryTransition(
     return canonicalHostSessionJSON(oldValue.value) === canonicalHostSessionJSON(newValue.value)
       ? accept(newValue.value) : reject("host session inventory generation replay changed payload");
   }
-  if (newValue.value.generation !== oldValue.value.generation + 1) return reject("host session inventory generation has a gap");
   const oldByID = new Map(oldValue.value.sessions.map((session) => [session.hostHarnessSessionId, session]));
   const oldByProvider = new Map(oldValue.value.sessions.map((session) => [
     [session.nodeId, session.harnessId, session.workspace, session.providerSessionId].join("\u0000"), session.hostHarnessSessionId
   ]));
+  const newIDs = new Set(newValue.value.sessions.map((session) => session.hostHarnessSessionId));
   for (const session of newValue.value.sessions) {
     const previousSession = oldByID.get(session.hostHarnessSessionId);
     if (previousSession !== undefined && !validateHostHarnessSessionObservationTransition(previousSession, session).ok) {
@@ -2455,7 +2464,9 @@ export function validateHostHarnessSessionInventoryTransition(
     }
     const provider = [session.nodeId, session.harnessId, session.workspace, session.providerSessionId].join("\u0000");
     const priorID = oldByProvider.get(provider);
-    if (priorID !== undefined && priorID !== session.hostHarnessSessionId) return reject("provider identity maps to a different host session");
+    if (priorID !== undefined && priorID !== session.hostHarnessSessionId && newIDs.has(priorID)) {
+      return reject("provider identity maps to a different host session");
+    }
   }
   return accept(newValue.value);
 }
@@ -3266,13 +3277,15 @@ function validateRequirementSet(value: unknown, path: string): Validation<Requir
  * scans free-form evidence diagnostics and raw probe output, where a token can appear embedded in
  * a longer line rather than as the entire string.
  */
-const secretLikeTokenPattern = /\b(sk|pk|ghp|gho|ghu|ghs|ghr|xox[abp]|AKIA|glpat)-?[A-Za-z0-9_-]{10,}\b/i;
-const bearerHeaderPattern = /\bBearer\s+\S{10,}/i;
+const secretLikeTokenPattern = /(^|[^A-Za-z0-9_])((sk-[a-z0-9_-]{10,})|(pk_(test|live)_[a-z0-9_-]{10,})|((ghp|gho|ghu|ghs|ghr)_[a-z0-9_-]{10,})|(xox[abp]-[a-z0-9_-]{10,})|(akia[a-z0-9_-]{10,})|(glpat-[a-z0-9_-]{10,}))($|[^A-Za-z0-9_])/;
+const bearerHeaderPattern = /(^|[^A-Za-z0-9_])bearer[ \t\n\f\r]+[^ \t\n\f\r]{10,}/u;
+const asciiLower = (value: string) => value.replace(/[A-Z]/g, (character) => character.toLowerCase());
 
 export function containsSecretLikeValue(value: unknown): boolean {
   if (typeof value === "string") {
-    return secretLikeTokenPattern.test(value)
-      || bearerHeaderPattern.test(value)
+    const folded = asciiLower(value);
+    return secretLikeTokenPattern.test(folded)
+      || bearerHeaderPattern.test(folded)
       || (value.includes("-----BEGIN") && value.includes("PRIVATE KEY"));
   }
   if (Array.isArray(value)) return value.some((entry) => containsSecretLikeValue(entry));
