@@ -22,7 +22,7 @@ func TestClientCloseTerminatesProviderProcessGroupChildren(t *testing.T) {
 	t.Setenv("FAKE_CODEX_MODE", "spawn-child")
 	t.Setenv("FAKE_CODEX_CHILD_PID", pidPath)
 	connection, err := startClient(context.Background(), clientConfig{
-		binary: fakeAppServerBinary(t), verify: func() error { return nil }, stateRoot: t.TempDir(),
+		binary: fakeAppServerBinary(t), verify: func() error { return nil },
 	})
 	require.NoError(t, err)
 	pidBytes, err := os.ReadFile(pidPath)

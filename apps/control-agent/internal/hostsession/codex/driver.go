@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -19,10 +18,11 @@ import (
 )
 
 const (
-	SupportedVersion = "0.147.0"
-	maxListPages     = 64
-	maxProviderID    = 256
-	maxSummaryBytes  = 1024
+	SupportedVersion     = "0.147.0"
+	maxListPages         = 64
+	maxProviderID        = 256
+	maxSummaryBytes      = 1024
+	providerListPageSize = 16
 )
 
 var allCapabilities = hostsession.NewCapabilitySet(
@@ -41,7 +41,6 @@ type Config struct {
 	Version        string
 	Verify         func() error
 	WorkspaceRoots []string
-	StateRoot      string
 	ApprovalPolicy string
 }
 
@@ -133,7 +132,7 @@ func New(ctx context.Context, config Config) (*Driver, error) {
 	if config.ApprovalPolicy == "" {
 		config.ApprovalPolicy = protocol.ApprovalPolicyManual
 	}
-	if config.Version != SupportedVersion || config.Binary == "" || !filepath.IsAbs(config.Binary) || config.Verify == nil || !filepath.IsAbs(config.StateRoot) {
+	if config.Version != SupportedVersion || config.Binary == "" || !filepath.IsAbs(config.Binary) || config.Verify == nil {
 		return nil, errors.New("codex-protocol-incompatible")
 	}
 	if _, valid := policyFor(config.ApprovalPolicy); !valid {
@@ -142,13 +141,7 @@ func New(ctx context.Context, config Config) (*Driver, error) {
 	if err := config.Verify(); err != nil {
 		return nil, errors.New("codex-protocol-incompatible")
 	}
-	if err := os.MkdirAll(config.StateRoot, 0o700); err != nil {
-		return nil, errors.New("codex-protocol-incompatible")
-	}
-	if err := cleanupStaleRuntimes(config.StateRoot); err != nil {
-		return nil, errors.New("codex-protocol-incompatible")
-	}
-	probe, err := startClient(ctx, clientConfig{binary: config.Binary, verify: config.Verify, stateRoot: config.StateRoot})
+	probe, err := startClient(ctx, clientConfig{binary: config.Binary, verify: config.Verify})
 	if err != nil {
 		return nil, errors.New("codex-protocol-incompatible")
 	}
@@ -173,9 +166,8 @@ func (driver *Driver) Discover(ctx context.Context, request hostsession.Discover
 	seenCursors := map[string]bool{}
 	seenIDs := map[string]bool{}
 	result := make([]hostsession.DriverSession, 0, limit)
-	truncated := false
 	for page := 0; page < maxListPages; page++ {
-		params := map[string]any{"limit": limit}
+		params := map[string]any{"limit": min(providerListPageSize, limit-len(result))}
 		if cursor != "" {
 			params["cursor"] = cursor
 		}
@@ -187,10 +179,6 @@ func (driver *Driver) Discover(ctx context.Context, request hostsession.Discover
 			return hostsession.DiscoverPage{}, errors.New("codex-list-failed")
 		}
 		for _, thread := range response.Data {
-			if len(result) == limit {
-				truncated = true
-				break
-			}
 			if !validProviderID(thread.ID) || seenIDs[thread.ID] {
 				return hostsession.DiscoverPage{}, errors.New("codex-protocol-incompatible")
 			}
@@ -198,10 +186,16 @@ func (driver *Driver) Discover(ctx context.Context, request hostsession.Discover
 			session, valid := driver.observation(thread, "provider-history")
 			if valid {
 				result = append(result, session)
+				if len(result) == limit {
+					// Discover returns one bounded generation, not a provider pagination surface.
+					// Reaching the requested limit is therefore a successful complete result for
+					// this call even when Codex has older threads beyond the retained window.
+					return hostsession.DiscoverPage{Sessions: result}, nil
+				}
 			}
 		}
-		if truncated || response.NextCursor == nil || *response.NextCursor == "" {
-			return hostsession.DiscoverPage{Sessions: result, Truncated: truncated}, nil
+		if response.NextCursor == nil || *response.NextCursor == "" {
+			return hostsession.DiscoverPage{Sessions: result}, nil
 		}
 		if seenCursors[*response.NextCursor] || *response.NextCursor == cursor {
 			return hostsession.DiscoverPage{}, errors.New("codex-pagination-invalid")
@@ -660,28 +654,12 @@ func (driver *Driver) ReleaseClaim(providerSessionID string) {
 	driver.release(providerSessionID)
 }
 
-func cleanupStaleRuntimes(stateRoot string) error {
-	entries, err := os.ReadDir(stateRoot)
-	if err != nil {
-		return err
-	}
-	for _, entry := range entries {
-		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "process-") {
-			continue
-		}
-		if err := os.RemoveAll(filepath.Join(stateRoot, entry.Name())); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func (driver *Driver) ephemeral(ctx context.Context) (*client, error) {
-	return startClient(ctx, clientConfig{binary: driver.config.Binary, verify: driver.config.Verify, stateRoot: driver.config.StateRoot})
+	return startClient(ctx, clientConfig{binary: driver.config.Binary, verify: driver.config.Verify})
 }
 
 func (driver *Driver) newLiveClient(ctx context.Context, live *liveSession) (*client, error) {
-	return startClient(ctx, clientConfig{binary: driver.config.Binary, verify: driver.config.Verify, stateRoot: driver.config.StateRoot,
+	return startClient(ctx, clientConfig{binary: driver.config.Binary, verify: driver.config.Verify,
 		lifetime: context.Background(),
 		onNotification: func(method string, params json.RawMessage) error {
 			return live.deliver(providerMessage{method: method, params: params})
