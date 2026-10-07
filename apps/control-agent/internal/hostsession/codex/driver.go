@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -41,7 +40,6 @@ type Config struct {
 	Version        string
 	Verify         func() error
 	WorkspaceRoots []string
-	StateRoot      string
 	ApprovalPolicy string
 }
 
@@ -133,7 +131,7 @@ func New(ctx context.Context, config Config) (*Driver, error) {
 	if config.ApprovalPolicy == "" {
 		config.ApprovalPolicy = protocol.ApprovalPolicyManual
 	}
-	if config.Version != SupportedVersion || config.Binary == "" || !filepath.IsAbs(config.Binary) || config.Verify == nil || !filepath.IsAbs(config.StateRoot) {
+	if config.Version != SupportedVersion || config.Binary == "" || !filepath.IsAbs(config.Binary) || config.Verify == nil {
 		return nil, errors.New("codex-protocol-incompatible")
 	}
 	if _, valid := policyFor(config.ApprovalPolicy); !valid {
@@ -142,13 +140,7 @@ func New(ctx context.Context, config Config) (*Driver, error) {
 	if err := config.Verify(); err != nil {
 		return nil, errors.New("codex-protocol-incompatible")
 	}
-	if err := os.MkdirAll(config.StateRoot, 0o700); err != nil {
-		return nil, errors.New("codex-protocol-incompatible")
-	}
-	if err := cleanupStaleRuntimes(config.StateRoot); err != nil {
-		return nil, errors.New("codex-protocol-incompatible")
-	}
-	probe, err := startClient(ctx, clientConfig{binary: config.Binary, verify: config.Verify, stateRoot: config.StateRoot})
+	probe, err := startClient(ctx, clientConfig{binary: config.Binary, verify: config.Verify})
 	if err != nil {
 		return nil, errors.New("codex-protocol-incompatible")
 	}
@@ -660,28 +652,12 @@ func (driver *Driver) ReleaseClaim(providerSessionID string) {
 	driver.release(providerSessionID)
 }
 
-func cleanupStaleRuntimes(stateRoot string) error {
-	entries, err := os.ReadDir(stateRoot)
-	if err != nil {
-		return err
-	}
-	for _, entry := range entries {
-		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "process-") {
-			continue
-		}
-		if err := os.RemoveAll(filepath.Join(stateRoot, entry.Name())); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func (driver *Driver) ephemeral(ctx context.Context) (*client, error) {
-	return startClient(ctx, clientConfig{binary: driver.config.Binary, verify: driver.config.Verify, stateRoot: driver.config.StateRoot})
+	return startClient(ctx, clientConfig{binary: driver.config.Binary, verify: driver.config.Verify})
 }
 
 func (driver *Driver) newLiveClient(ctx context.Context, live *liveSession) (*client, error) {
-	return startClient(ctx, clientConfig{binary: driver.config.Binary, verify: driver.config.Verify, stateRoot: driver.config.StateRoot,
+	return startClient(ctx, clientConfig{binary: driver.config.Binary, verify: driver.config.Verify,
 		lifetime: context.Background(),
 		onNotification: func(method string, params json.RawMessage) error {
 			return live.deliver(providerMessage{method: method, params: params})

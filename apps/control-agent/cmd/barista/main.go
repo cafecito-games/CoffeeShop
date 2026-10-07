@@ -9,7 +9,6 @@ import (
 	"maps"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"slices"
 	"strings"
 	"syscall"
@@ -151,7 +150,7 @@ func run(args []string) int {
 	if candidate, available := managed["codex-cli"]; available && candidate.Version == codexsession.SupportedVersion {
 		codexDriver, codexErr := codexsession.New(ctx, codexsession.Config{
 			Binary: candidate.Binary, Version: candidate.Version, Verify: candidate.Verify,
-			WorkspaceRoots: cfg.WorkspaceRoots, StateRoot: filepath.Join(cfg.DataRoot, "host-sessions", "codex-runtime"),
+			WorkspaceRoots: cfg.WorkspaceRoots,
 			ApprovalPolicy: cfg.ApprovalPolicies.For("codex-cli"),
 		})
 		if codexErr != nil {

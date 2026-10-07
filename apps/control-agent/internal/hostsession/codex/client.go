@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"os"
 	"os/exec"
 	"sync"
 	"sync/atomic"
@@ -49,7 +48,6 @@ type client struct {
 	nextID  atomic.Int64
 	done    chan struct{}
 	err     error
-	scratch string
 	cleanup sync.Once
 
 	onNotification func(string, json.RawMessage) error
@@ -60,7 +58,6 @@ type client struct {
 type clientConfig struct {
 	binary         string
 	verify         func() error
-	stateRoot      string
 	onNotification func(string, json.RawMessage) error
 	onRequest      func(json.RawMessage, string, json.RawMessage) error
 	onClose        func(error)
@@ -68,37 +65,33 @@ type clientConfig struct {
 }
 
 func startClient(ctx context.Context, config clientConfig) (*client, error) {
-	if config.binary == "" || config.verify == nil || config.stateRoot == "" {
+	if config.binary == "" || config.verify == nil {
 		return nil, errors.New("managed codex executable is unavailable")
 	}
 	if err := config.verify(); err != nil {
 		return nil, errors.New("managed codex executable no longer verifies")
 	}
-	scratch, err := os.MkdirTemp(config.stateRoot, "process-")
-	if err != nil {
-		return nil, errors.New("prepare codex app-server runtime")
-	}
 	command := exec.Command(config.binary, "app-server", "--listen", "stdio://")
 	configureProcess(command)
-	command.Env = append(os.Environ(), "CODEX_SQLITE_HOME="+scratch)
+	// Preserve Codex's configured state location. A fresh CODEX_SQLITE_HOME makes the App Server
+	// rebuild the operator's complete rollout index before it can answer initialize; on a mature
+	// account that can exceed the bounded startup probe by minutes. SQLite is provider state, not
+	// Coffee Shop's writer-ownership authority: thread/resume remains the exact writer claim.
 	stdin, err := command.StdinPipe()
 	if err != nil {
-		_ = os.RemoveAll(scratch)
 		return nil, errors.New("start codex app-server")
 	}
 	stdout, err := command.StdoutPipe()
 	if err != nil {
-		_ = os.RemoveAll(scratch)
 		return nil, errors.New("start codex app-server")
 	}
 	command.Stderr = io.Discard
 	if err := command.Start(); err != nil {
-		_ = os.RemoveAll(scratch)
 		return nil, errors.New("start codex app-server")
 	}
 	result := &client{
 		cmd: command, stdin: stdin, pending: make(map[int64]chan rpcResult),
-		done: make(chan struct{}), scratch: scratch, onNotification: config.onNotification, onRequest: config.onRequest, onClose: config.onClose,
+		done: make(chan struct{}), onNotification: config.onNotification, onRequest: config.onRequest, onClose: config.onClose,
 	}
 	go result.readLoop(stdout)
 	lifetime := config.lifetime
@@ -301,7 +294,6 @@ func (client *client) cleanupProcess() {
 			_ = terminateProcess(client.cmd)
 			<-wait
 		}
-		_ = os.RemoveAll(client.scratch)
 	})
 }
 

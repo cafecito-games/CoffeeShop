@@ -144,12 +144,12 @@ func TestAdoptionNeverContendsWithThisDriversExistingWriter(t *testing.T) {
 
 func TestDriverRequiresTheSetupPinnedVersionAndCanonicalWorkspace(t *testing.T) {
 	binary := fakeAppServerBinary(t)
-	_, err := New(context.Background(), Config{Binary: binary, Version: "0.146.0", Verify: func() error { return nil }, WorkspaceRoots: []string{t.TempDir()}, StateRoot: t.TempDir()})
+	_, err := New(context.Background(), Config{Binary: binary, Version: "0.146.0", Verify: func() error { return nil }, WorkspaceRoots: []string{t.TempDir()}})
 	require.ErrorContains(t, err, "codex-protocol-incompatible")
 
 	workspace := t.TempDir()
 	t.Setenv("FAKE_CODEX_WORKSPACE", filepath.Join(workspace, "missing"))
-	driver, err := New(context.Background(), Config{Binary: binary, Version: SupportedVersion, Verify: func() error { return nil }, WorkspaceRoots: []string{workspace}, StateRoot: t.TempDir()})
+	driver, err := New(context.Background(), Config{Binary: binary, Version: SupportedVersion, Verify: func() error { return nil }, WorkspaceRoots: []string{workspace}})
 	require.NoError(t, err)
 	defer driver.Shutdown()
 	page, err := driver.Discover(context.Background(), hostsession.DiscoverRequest{Limit: 8})
@@ -162,7 +162,7 @@ func TestProtocolSkewAndPaginationFailClosed(t *testing.T) {
 	for _, mode := range []string{"oversize-initialize", "unknown-response"} {
 		t.Run(mode, func(t *testing.T) {
 			t.Setenv("FAKE_CODEX_MODE", mode)
-			_, err := New(context.Background(), Config{Binary: fakeAppServerBinary(t), Version: SupportedVersion, Verify: func() error { return nil }, WorkspaceRoots: []string{workspace}, StateRoot: t.TempDir()})
+			_, err := New(context.Background(), Config{Binary: fakeAppServerBinary(t), Version: SupportedVersion, Verify: func() error { return nil }, WorkspaceRoots: []string{workspace}})
 			require.ErrorContains(t, err, "codex-protocol-incompatible")
 		})
 	}
@@ -375,9 +375,8 @@ func TestProviderEventsRemainFIFOAndCompletionCannotOvertakeDeltas(t *testing.T)
 
 func TestUnexpectedAppServerExitMarksLiveSessionUncertain(t *testing.T) {
 	workspace := t.TempDir()
-	stateRoot := t.TempDir()
 	t.Setenv("FAKE_CODEX_MODE", "exit-after-turn-start")
-	driver := newFakeAppServerDriverAtRoot(t, workspace, stateRoot, protocol.ApprovalPolicyManual)
+	driver := newFakeAppServerDriverWithPolicy(t, workspace, protocol.ApprovalPolicyManual)
 	defer driver.Shutdown()
 	created, err := driver.Create(context.Background(), hostsession.SessionRequest{Workspace: workspace, Source: "coffee-shop-managed"})
 	require.NoError(t, err)
@@ -403,10 +402,6 @@ func TestUnexpectedAppServerExitMarksLiveSessionUncertain(t *testing.T) {
 		t.Fatal("unexpected provider exit was not observed")
 	}
 	require.Eventually(t, func() bool { return driver.lookupLive(created.ProviderSessionID) == nil }, time.Second, 10*time.Millisecond)
-	require.Eventually(t, func() bool {
-		entries, readErr := os.ReadDir(stateRoot)
-		return readErr == nil && len(entries) == 0
-	}, time.Second, 10*time.Millisecond)
 	refreshed, err := driver.Refresh(context.Background(), hostsession.SessionRequest{ProviderSessionID: created.ProviderSessionID, Workspace: workspace, Source: created.Source})
 	require.NoError(t, err)
 	require.Equal(t, "idle", refreshed.Status)
@@ -418,16 +413,17 @@ func TestUnexpectedAppServerExitMarksLiveSessionUncertain(t *testing.T) {
 	require.Equal(t, "full", resumed.ControlMode)
 }
 
-func TestDriverRemovesStaleProcessRuntimesBeforeStartup(t *testing.T) {
+func TestDriverPreservesTheProviderSQLiteHome(t *testing.T) {
 	workspace := t.TempDir()
-	stateRoot := t.TempDir()
-	stale := filepath.Join(stateRoot, "process-stale")
-	require.NoError(t, os.MkdirAll(stale, 0o700))
-	require.NoError(t, os.WriteFile(filepath.Join(stale, "state"), []byte("stale"), 0o600))
-	driver := newFakeAppServerDriverAtRoot(t, workspace, stateRoot, protocol.ApprovalPolicyManual)
+	sqliteHome := t.TempDir()
+	reported := filepath.Join(t.TempDir(), "sqlite-home")
+	t.Setenv("CODEX_SQLITE_HOME", sqliteHome)
+	t.Setenv("FAKE_CODEX_SQLITE_HOME_LOG", reported)
+	driver := newFakeAppServerDriverWithPolicy(t, workspace, protocol.ApprovalPolicyManual)
 	driver.Shutdown()
-	_, err := os.Stat(stale)
-	require.ErrorIs(t, err, os.ErrNotExist)
+	actual, err := os.ReadFile(reported)
+	require.NoError(t, err)
+	require.Equal(t, sqliteHome, string(actual))
 }
 
 func TestFailedTurnReturnsSessionToIdleAndAllowsAnotherTurn(t *testing.T) {
@@ -1141,12 +1137,12 @@ func TestRealPinnedAppServerWriterContention(t *testing.T) {
 	rollout := filepath.Join(rolloutDirectory, "rollout-2026-10-06T12-00-00-"+threadID+".jsonl")
 	require.NoError(t, os.WriteFile(rollout, []byte(meta+"\n"+user+"\n"+event+"\n"), 0o600))
 	verify := func() error { return nil }
-	primary, err := startClient(context.Background(), clientConfig{binary: binary, verify: verify, stateRoot: t.TempDir()})
+	primary, err := startClient(context.Background(), clientConfig{binary: binary, verify: verify})
 	require.NoError(t, err)
 	var first threadResponse
 	require.NoError(t, primary.call(context.Background(), "thread/resume", map[string]any{"threadId": threadID}, &first))
 	require.Equal(t, threadID, first.Thread.ID)
-	secondary, err := startClient(context.Background(), clientConfig{binary: binary, verify: verify, stateRoot: t.TempDir()})
+	secondary, err := startClient(context.Background(), clientConfig{binary: binary, verify: verify})
 	require.NoError(t, err)
 	var conflict threadResponse
 	err = secondary.call(context.Background(), "thread/resume", map[string]any{"threadId": threadID}, &conflict)
@@ -1167,15 +1163,10 @@ func newFakeAppServerDriver(t *testing.T, workspace string) *Driver {
 
 func newFakeAppServerDriverWithPolicy(t *testing.T, workspace, policy string) *Driver {
 	t.Helper()
-	return newFakeAppServerDriverAtRoot(t, workspace, t.TempDir(), policy)
-}
-
-func newFakeAppServerDriverAtRoot(t *testing.T, workspace, stateRoot, policy string) *Driver {
-	t.Helper()
 	t.Setenv("FAKE_CODEX_WORKSPACE", workspace)
 	driver, err := New(context.Background(), Config{
 		Binary: fakeAppServerBinary(t), Version: SupportedVersion, Verify: func() error { return nil },
-		WorkspaceRoots: []string{workspace}, StateRoot: stateRoot, ApprovalPolicy: policy,
+		WorkspaceRoots: []string{workspace}, ApprovalPolicy: policy,
 	})
 	require.NoError(t, err)
 	return driver
@@ -1232,6 +1223,11 @@ func TestCodexAppServerHelperProcess(t *testing.T) {
 		var rpcErr any
 		switch request.Method {
 		case "initialize":
+			if path := os.Getenv("FAKE_CODEX_SQLITE_HOME_LOG"); path != "" {
+				if os.WriteFile(path, []byte(os.Getenv("CODEX_SQLITE_HOME")), 0o600) != nil {
+					os.Exit(2)
+				}
+			}
 			if os.Getenv("FAKE_CODEX_MODE") == "spawn-child" {
 				child := exec.Command("sleep", "60")
 				if child.Start() != nil || os.WriteFile(os.Getenv("FAKE_CODEX_CHILD_PID"), []byte(strconv.Itoa(child.Process.Pid)), 0o600) != nil {
