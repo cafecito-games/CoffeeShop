@@ -165,7 +165,6 @@ func (driver *Driver) Discover(ctx context.Context, request hostsession.Discover
 	seenCursors := map[string]bool{}
 	seenIDs := map[string]bool{}
 	result := make([]hostsession.DriverSession, 0, limit)
-	truncated := false
 	for page := 0; page < maxListPages; page++ {
 		params := map[string]any{"limit": limit}
 		if cursor != "" {
@@ -179,10 +178,6 @@ func (driver *Driver) Discover(ctx context.Context, request hostsession.Discover
 			return hostsession.DiscoverPage{}, errors.New("codex-list-failed")
 		}
 		for _, thread := range response.Data {
-			if len(result) == limit {
-				truncated = true
-				break
-			}
 			if !validProviderID(thread.ID) || seenIDs[thread.ID] {
 				return hostsession.DiscoverPage{}, errors.New("codex-protocol-incompatible")
 			}
@@ -190,10 +185,16 @@ func (driver *Driver) Discover(ctx context.Context, request hostsession.Discover
 			session, valid := driver.observation(thread, "provider-history")
 			if valid {
 				result = append(result, session)
+				if len(result) == limit {
+					// Discover returns one bounded generation, not a provider pagination surface.
+					// Reaching the requested limit is therefore a successful complete result for
+					// this call even when Codex has older threads beyond the retained window.
+					return hostsession.DiscoverPage{Sessions: result}, nil
+				}
 			}
 		}
-		if truncated || response.NextCursor == nil || *response.NextCursor == "" {
-			return hostsession.DiscoverPage{Sessions: result, Truncated: truncated}, nil
+		if response.NextCursor == nil || *response.NextCursor == "" {
+			return hostsession.DiscoverPage{Sessions: result}, nil
 		}
 		if seenCursors[*response.NextCursor] || *response.NextCursor == cursor {
 			return hostsession.DiscoverPage{}, errors.New("codex-pagination-invalid")

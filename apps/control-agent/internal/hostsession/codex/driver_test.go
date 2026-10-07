@@ -47,6 +47,12 @@ func TestDriverDiscoversBoundedAuthorizedThreadsAndReadsHistory(t *testing.T) {
 	require.Equal(t, "observe", page.Sessions[1].ControlMode)
 	require.Equal(t, []string{"read-history"}, page.Sessions[1].Operations)
 
+	bounded, err := driver.Discover(context.Background(), hostsession.DiscoverRequest{Limit: 1})
+	require.NoError(t, err)
+	require.Len(t, bounded.Sessions, 1)
+	require.False(t, bounded.Truncated)
+	require.Empty(t, bounded.NextCursor)
+
 	history, err := driver.ReadHistory(context.Background(), hostsession.ReadHistoryRequest{Session: page.Sessions[0], Limit: 10})
 	require.NoError(t, err)
 	require.Len(t, history.Items, 2)
