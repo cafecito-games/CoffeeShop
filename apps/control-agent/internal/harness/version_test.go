@@ -17,7 +17,7 @@ import (
 
 // realVendorVersionOutputFixtures names, per harness, the checked-in capture of that harness's own
 // released CLI printing `--version` on the implementation machine (`@anthropic-ai/claude-code`
-// 2.1.231 and `@openai/codex` 0.147.0). The files live beside internal/setup's tests because the
+// 2.1.231 and `@openai/codex` 0.162.1). The files live beside internal/setup's tests because the
 // managed probe is the side that compares them against a manifest pin; they are read from there
 // rather than transcribed here so there is exactly one copy of the producer's bytes.
 var realVendorVersionOutputFixtures = map[string]string{

@@ -38,7 +38,7 @@ func runCodexAppServer(recorder *recorder) int {
 		switch request.Method {
 		case "initialize":
 			result = map[string]any{
-				"userAgent": "codex-cli/0.147.0", "codexHome": filepath.Join(os.Getenv("HOME"), ".codex"),
+				"userAgent": "codex-cli/0.162.1", "codexHome": filepath.Join(os.Getenv("HOME"), ".codex"),
 				"platformFamily": "unix", "platformOs": "linux",
 			}
 		case "thread/list":
@@ -113,7 +113,7 @@ func fakeCodexThread(id, workspace, historyMode string, turns []any) map[string]
 		turns = []any{}
 	}
 	return map[string]any{
-		"id": id, "cwd": workspace, "cliVersion": "0.147.0", "historyMode": historyMode,
+		"id": id, "cwd": workspace, "cliVersion": "0.162.1", "historyMode": historyMode,
 		"preview": "Synthetic existing Codex thread", "createdAt": 1, "updatedAt": 2,
 		"ephemeral": false, "source": "cli", "status": map[string]any{"type": "notLoaded"}, "turns": turns,
 	}

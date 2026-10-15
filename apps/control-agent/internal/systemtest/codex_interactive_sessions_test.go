@@ -22,7 +22,7 @@ func writeCodexSystemManifest(t *testing.T, directory string) string {
 		"manifestVersion": "2",
 		"components": []any{map[string]any{
 			"id": "codex-cli", "kind": "harness", "harnessId": "codex-cli", "provider": "openai",
-			"label": "System-test Codex CLI", "version": "0.147.0",
+			"label": "System-test Codex CLI", "version": "0.162.1",
 			"platforms": map[string]any{runtime.GOOS + "-" + runtime.GOARCH: map[string]any{
 				"kind": "manual", "executablePath": "bin/codex",
 			}},
@@ -50,7 +50,7 @@ func installCodexSystemHarness(t *testing.T, node *baristaNode, manifest string)
 		"--manual-checksum", "codex-cli="+fileSHA256(t, managedCodexBinary)), "install pinned Codex fixture")
 	requireSetupSuccess(t, runSetupCommand(t, node.home, nil,
 		"setup", "activate", "--data-root", node.dataRoot, "--manifest", manifest,
-		"--kind", "harness", "--id", "codex-cli", "--version", "0.147.0"), "activate pinned Codex fixture")
+		"--kind", "harness", "--id", "codex-cli", "--version", "0.162.1"), "activate pinned Codex fixture")
 }
 
 // TestCodexInteractiveSessionInventoryAndHistory crosses the real Barista/Hub protocol-v6

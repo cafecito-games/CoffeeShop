@@ -59,22 +59,22 @@ Authentication is a **separate operator action after installation**, never part 
 
 ### `codex-cli` — Codex
 
-* Pin: `@openai/codex` **0.147.0**, provider `openai`, licence Apache-2.0.
-* Sources consulted, all retrieved **2026-09-25**:
+* Pin: `@openai/codex` **0.162.1**, provider `openai`, licence Apache-2.0.
+* Sources consulted, all retrieved **2026-10-14**:
   * the vendor package's own `package.json` and `README.md` as installed on the implementation machine, for the version, the licence, the documented installation mechanisms, and the release-asset names;
-  * OpenAI's own release channel for the pinned tag, `https://github.com/openai/codex/releases/tag/rust-v0.147.0`, read through `gh api repos/openai/codex/releases/tags/rust-v0.147.0`, which reports each asset's `size` and `digest`;
+  * OpenAI's own release channel for the pinned tag, `https://github.com/openai/codex/releases/tag/rust-v0.162.1`, read through `gh api repos/openai/codex/releases/tags/rust-v0.162.1`, which reports each asset's `size` and `digest`;
   * <https://developers.openai.com/codex> for authentication.
 * Decision: **`archive` on all four platforms.** Every clause of step 1 was checked, and each one was verified by downloading the asset rather than by trusting the listing:
 
   | step-1 clause | how it was verified |
   | --- | --- |
-  | versioned URL | the asset path carries the release tag `rust-v0.147.0`. GitHub does permit an asset to be replaced on an existing release, so the URL alone is not the guarantee — the pinned `sha256` is: substituted bytes fail verification and install nothing. |
+  | versioned URL | the asset path carries the release tag `rust-v0.162.1`. GitHub does permit an asset to be replaced on an existing release, so the URL alone is not the guarantee — the pinned `sha256` is: substituted bytes fail verification and install nothing. |
   | obtainable, reviewable SHA-256 | the release API reports `digest: sha256:…` per asset; each one was re-derived locally with `sha256sum` on the downloaded bytes and matched exactly. |
   | exact byte size | the release API reports `size` per asset; each matched the downloaded file's own size exactly. All four are well under `MaximumDownloadBytes` (512 MiB). |
   | `.tar.gz` or `.zip` container | all four assets are `.tar.gz`. |
   | one stable relative path inside | `tar -tzf` on each archive lists **exactly one entry**, named for the platform with no directory component — matching the vendor README's own statement that "each archive contains a single entry with the platform baked into the name". That bare name is the entry's `executablePath`, so the installed file is named after its platform rather than `codex`; nothing depends on the executable's filename. |
   | terms permit automated download | Apache-2.0 (`package.json` `license`). |
-  | normalized version string | `0.147.0`. The extracted `codex-x86_64-unknown-linux-musl` entry was run directly and printed `codex-cli 0.147.0`, exiting 0 — so the pinned version is the version the pinned bytes report, which is exactly what activation re-checks. |
+  | normalized version string | `0.162.1`. The extracted `codex-x86_64-unknown-linux-musl` entry was run directly and printed `codex-cli 0.162.1`, exiting 0 — so the pinned version is the version the pinned bytes report, which is exactly what activation re-checks. |
 
   The pins, exactly as they appear in `components.json`, so the manifest can be reviewed against
   this record without reading the JSON. Re-derive any of them with
@@ -82,18 +82,18 @@ Authentication is a **separate operator action after installation**, never part 
   (`-f` matters: without it a rate-limited or renamed asset makes curl write GitHub's error
   body to stdout and exit 0, so you would hash the error page and not notice):
 
-* `darwin-amd64` — `https://github.com/openai/codex/releases/download/rust-v0.147.0/codex-x86_64-apple-darwin.tar.gz`
-  * `sizeBytes` `95851149`
-  * `sha256` `36e782f71d8164cc37c2b89c64948f2180e9a2f8456b27e660da75bc6b5574e2`
-* `darwin-arm64` — `https://github.com/openai/codex/releases/download/rust-v0.147.0/codex-aarch64-apple-darwin.tar.gz`
-  * `sizeBytes` `87984231`
-  * `sha256` `75984b81f92a71b0c0f4b3b5cad80e5c57177e4d8c8b4b1e13db703b20dc4358`
-* `linux-amd64` — `https://github.com/openai/codex/releases/download/rust-v0.147.0/codex-x86_64-unknown-linux-musl.tar.gz`
-  * `sizeBytes` `98970270`
-  * `sha256` `0246e2e773834e07f0fb5249ed6ebad12e4591e608f8c7bb97dd6a9690544c36`
-* `linux-arm64` — `https://github.com/openai/codex/releases/download/rust-v0.147.0/codex-aarch64-unknown-linux-musl.tar.gz`
-  * `sizeBytes` `91607658`
-  * `sha256` `eb677c80f666b1ab8b4b1d083b66e8d614b1281d960bb6f9fd8ca98f58b38b90`
+* `darwin-amd64` — `https://github.com/openai/codex/releases/download/rust-v0.162.1/codex-x86_64-apple-darwin.tar.gz`
+  * `sizeBytes` `107055460`
+  * `sha256` `d68e39d8f62639f33f7d00656554cb9c3ef7809e664a3827e62ab3ace3c21b21`
+* `darwin-arm64` — `https://github.com/openai/codex/releases/download/rust-v0.162.1/codex-aarch64-apple-darwin.tar.gz`
+  * `sizeBytes` `98104184`
+  * `sha256` `b293a0fcdd871900a44c0a4f40a1aa401b31e02854f790ebdb8bd5d1177fd1fe`
+* `linux-amd64` — `https://github.com/openai/codex/releases/download/rust-v0.162.1/codex-x86_64-unknown-linux-musl.tar.gz`
+  * `sizeBytes` `111350218`
+  * `sha256` `86f268d81b898f3e144c5ecff2ad2fda2c5802e042d6195b72538fe0fa125057`
+* `linux-arm64` — `https://github.com/openai/codex/releases/download/rust-v0.162.1/codex-aarch64-unknown-linux-musl.tar.gz`
+  * `sizeBytes` `103595962`
+  * `sha256` `bf3ca2719f1143b1440fbd85c149379e696c782c50ad7991f8bfcec60b2600c1`
 
 * **`--allowed-host` is required.** `https://github.com/.../releases/download/...` answers with a redirect to `release-assets.githubusercontent.com`, and Barista refuses every redirect not named by `--allowed-host` — an empty allowlist rejects all of them, which is the fail-closed default. So an apply that installs this entry needs both hosts:
 
@@ -102,11 +102,12 @@ Authentication is a **separate operator action after installation**, never part 
   barista setup apply --plan plan.json \
     --allowed-host github.com \
     --allowed-host release-assets.githubusercontent.com
-  barista setup activate --kind harness --id codex-cli --version 0.147.0
+  barista setup activate --kind harness --id codex-cli --version 0.162.1
   ```
 
   No `--manual-artifact` or `--manual-checksum` is needed for this entry. Barista downloads the archive once, hashes it while writing, refuses it on any digest or size mismatch, and extracts only the single declared entry. Re-verify the host list against the redirect if GitHub changes it; a changed redirect target fails closed rather than downloading from somewhere unexpected.
 * Why the other documented mechanisms are not used: `curl -fsSL https://chatgpt.com/codex/install.sh | sh` is a bootstrap script, and `npm install -g @openai/codex` / `brew install --cask codex` are package managers. Barista runs none of them at any point. The npm platform package is also a poor fit for a managed install on its own terms: it lays the binary out as `package/vendor/<target-triple>/bin/codex` beside auxiliary sandbox resources (`codex-resources/bwrap`, `codex-resources/zsh`) that a one-executable managed install does not carry. The release archive entry is the vendor's own single self-contained file, which is why it is the pinned artifact.
+* Surfaces that changed at this pin, both re-verified by running the pinned `linux-amd64` entry: the skills instruction block now renders a root table (``- `r0` = `/abs/skills/root` ``) and gives each listed skill a locator relative to one of those aliases, with every root's symbolic links resolved, where 0.147.0 printed one absolute path per entry; and `$HOME/.agents/skills` is a second discovery root, resolved from HOME independently of `CODEX_HOME`. `internal/harness/codex_capabilitypack.go` reads the table and enumerates that root, and the recordings under `internal/harness/testdata` are this version's own output. Everything else the projection rests on held: no skills or plugin root flag on `codex exec`, the same `skills.roots` refusal, recursive discovery of the managed subtree, both entries listed for a colliding name with no visible precedence, and keying by the name a SKILL.md's own metadata declares.
 * Authentication: run `codex` once on the node and choose "Sign in with ChatGPT", or configure an API key per <https://developers.openai.com/codex>. The credential stays in Codex's own local storage; Barista installs, copies, and forwards none of it.
 
 ## ACP adapter entries

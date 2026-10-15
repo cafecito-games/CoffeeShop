@@ -1,4 +1,4 @@
-// Package codex integrates the setup-verified Codex 0.147.0 App Server with the
+// Package codex integrates the setup-verified Codex 0.162.1 App Server with the
 // provider-neutral host-session supervisor. Provider RPC shapes do not escape this package.
 package codex
 
@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	SupportedVersion     = "0.147.0"
+	SupportedVersion     = "0.162.1"
 	maxListPages         = 64
 	maxProviderID        = 256
 	maxSummaryBytes      = 1024

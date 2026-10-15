@@ -62,7 +62,7 @@ func TestDriverDiscoversBoundedAuthorizedThreadsAndReadsHistory(t *testing.T) {
 }
 
 func TestPinnedContractFixtureAndWritableVersionEligibility(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join("testdata", "protocol-0.147.0.json"))
+	data, err := os.ReadFile(filepath.Join("testdata", "protocol-0.162.1.json"))
 	require.NoError(t, err)
 	var fixture struct {
 		Version              string   `json:"version"`
@@ -80,8 +80,8 @@ func TestPinnedContractFixtureAndWritableVersionEligibility(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(data, &fixture))
 	require.Equal(t, SupportedVersion, fixture.Version)
-	require.Equal(t, "rust-v0.147.0", fixture.Tag)
-	require.Equal(t, "be6e8eac029b183056b7e4402879f15d2c85f61b", fixture.Commit)
+	require.Equal(t, "rust-v0.162.1", fixture.Tag)
+	require.Equal(t, "092d3acd6bec3e3a14bdc7e7a2810ab628ab759d", fixture.Commit)
 	require.Equal(t, "stdio-jsonl", fixture.Transport)
 	require.Equal(t, []string{"initialize", "thread/list", "thread/read", "thread/items/list", "thread/start", "thread/resume", "turn/start", "turn/steer", "turn/interrupt"}, fixture.ClientMethods)
 	require.Equal(t, []string{"item/commandExecution/requestApproval", "item/fileChange/requestApproval"}, fixture.ServerRequests)
@@ -1142,7 +1142,7 @@ func TestRealPinnedAppServerWriterContention(t *testing.T) {
 	threadID := "018f0000-0000-7000-8000-000000000001"
 	rolloutDirectory := filepath.Join(codexHome, "sessions", "2026", "10", "06")
 	require.NoError(t, os.MkdirAll(rolloutDirectory, 0o700))
-	meta := fmt.Sprintf(`{"timestamp":"2026-10-06T12:00:00Z","type":"session_meta","payload":{"session_id":%q,"id":%q,"timestamp":"2026-10-06T12:00:00Z","cwd":%q,"originator":"codex","cli_version":"0.147.0","source":"cli","model_provider":"openai","base_instructions":null,"dynamic_tools":null,"history_mode":"paginated"},"ordinal":0}`, threadID, threadID, workspace)
+	meta := fmt.Sprintf(`{"timestamp":"2026-10-06T12:00:00Z","type":"session_meta","payload":{"session_id":%q,"id":%q,"timestamp":"2026-10-06T12:00:00Z","cwd":%q,"originator":"codex","cli_version":"0.162.1","source":"cli","model_provider":"openai","base_instructions":null,"dynamic_tools":null,"history_mode":"paginated"},"ordinal":0}`, threadID, threadID, workspace)
 	user := `{"timestamp":"2026-10-06T12:00:00Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"synthetic account-free fixture"}]},"ordinal":1}`
 	event := `{"timestamp":"2026-10-06T12:00:00Z","type":"event_msg","payload":{"type":"user_message","message":"synthetic account-free fixture","kind":"plain"},"ordinal":2}`
 	rollout := filepath.Join(rolloutDirectory, "rollout-2026-10-06T12-00-00-"+threadID+".jsonl")
@@ -1253,7 +1253,7 @@ func TestCodexAppServerHelperProcess(t *testing.T) {
 				_ = encoder.Encode(map[string]any{"id": 999, "result": map[string]any{}})
 				continue
 			}
-			initializeResult := map[string]any{"userAgent": "codex-cli/0.147.0", "codexHome": filepath.Join(workspace, ".codex"), "platformFamily": "unix", "platformOs": "linux"}
+			initializeResult := map[string]any{"userAgent": "codex-cli/0.162.1", "codexHome": filepath.Join(workspace, ".codex"), "platformFamily": "unix", "platformOs": "linux"}
 			if os.Getenv("FAKE_CODEX_MODE") == "large-initialize" {
 				initializeResult["padding"] = strings.Repeat("x", maxOutboundFrameBytes)
 			}

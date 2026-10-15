@@ -119,7 +119,7 @@ The compiled-in managed component manifest (`apps/control-agent/internal/setup/m
 - `codex-acp` (`@agentclientprotocol/codex-acp`) **1.12.0**, harness `codex-cli`, `"kind": "acp-adapter"`;
 - `claude-acp` (`@agentclientprotocol/claude-agent-acp`) **0.79.0**, harness `claude-cli`, `"kind": "acp-adapter"`;
 - `claude-cli` (`@anthropic-ai/claude-code`) **2.1.231**, `"kind": "harness"` (see [managed harnesses](#installing-and-activating-managed-harnesses));
-- `codex-cli` (`@openai/codex`) **0.147.0**, `"kind": "harness"`, and the one entry with a real pinned `archive` distribution.
+- `codex-cli` (`@openai/codex`) **0.162.1**, `"kind": "harness"`, and the one entry with a real pinned `archive` distribution.
 
 An ACP adapter installs at `<data-root>/adapters/<harnessId>/<componentId>/<version>/<executablePath>` — unchanged from the adapter-only schema, so an existing install is never relocated — and a harness component at `<data-root>/harnesses/<harnessId>/<componentId>/<version>/<executablePath>`.
 
@@ -170,7 +170,7 @@ barista setup plan --data-root <path> --out plan.json
 barista setup apply --plan plan.json \
   --allowed-host github.com \
   --allowed-host release-assets.githubusercontent.com
-barista setup activate --kind harness --id codex-cli --version 0.147.0
+barista setup activate --kind harness --id codex-cli --version 0.162.1
 barista doctor            # activeVersion, rollbackVersion, provenance, authReadiness
 ```
 
