@@ -22,7 +22,7 @@ import (
 // implementation machine, captured by redirecting each CLI's own output to the file:
 //
 //	claude --version > testdata/claude-cli-version-output.txt   # @anthropic-ai/claude-code 2.1.231
-//	codex  --version > testdata/codex-cli-version-output.txt    # @openai/codex 0.147.0
+//	codex  --version > testdata/codex-cli-version-output.txt    # @openai/codex 0.162.1
 //
 // They are the producer for every version-agreement assertion here: the probe is proven against what
 // the vendor binaries actually print, not against a hand-typed approximation of it. Each fixture's

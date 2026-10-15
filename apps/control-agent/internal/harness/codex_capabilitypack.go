@@ -8,16 +8,24 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
 )
 
-// codexSkillsDirectory is the single segment beneath the Codex configuration home that Codex 0.147.0
+// codexSkillsDirectory is the single segment beneath the Codex configuration home that Codex 0.162.1
 // — exactly the pinned version — discovers skills under. Verified from the shipped binary's own
 // strings, which name `$CODEX_HOME/skills`, `${CODEX_HOME:-$HOME/.codex}/skills`, and `~/.codex/skills`
 // as the discovery roots, and confirmed by running the binary (see codexManagedSkillsAdapter).
 const codexSkillsDirectory = "skills"
+
+// codexAgentsDirectory is the HOME-level cross-agent segment Codex 0.162.1 discovers a second,
+// CODEX_HOME-independent skills root under (`$HOME/.agents/skills`). Confirmed by running the binary
+// against a HOME that carried one skill there and nothing else: the root was reported and the skill
+// was offered. Barista never projects into it; it is enumerated only so a name offered from there is
+// seen as the collision it is.
+const codexAgentsDirectory = ".agents"
 
 // codexHomeVariable and homeVariable are how Codex resolves its own configuration home, in that
 // order. Barista reads them from the environment the child will actually launch with so the
@@ -39,9 +47,9 @@ const packDiscoveryTimeout = 60 * time.Second
 const maximumInventoryBytes = 4 << 20
 
 // codexManagedSkillsAdapter drives the managed Barista-owned subtree beneath the Codex configuration
-// home's own skills root, because Codex 0.147.0 offers no session-only skill surface at all.
+// home's own skills root, because Codex 0.162.1 offers no session-only skill surface at all.
 //
-// Surface verification, against the installed codex-cli 0.147.0 — exactly the pinned version:
+// Surface verification, against the installed codex-cli 0.162.1 — exactly the pinned version:
 //
 //   - `codex exec --help` exposes no skills or plugin root flag;
 //   - `codex exec --strict-config -c 'skills.roots=["/tmp/x"]' 'hi'` fails with
@@ -49,8 +57,11 @@ const maximumInventoryBytes = 4 << 20
 //     so there is no configuration key either;
 //   - `codex plugin` (add/list/marketplace/remove) is marketplace-snapshot based and mutates local
 //     configuration, so it is not a run-scoped projection surface;
-//   - the only discovery roots the binary names are `$CODEX_HOME/skills` and `<project>/.codex/skills`,
-//     and the project root is rejected because it would dirty the operator's git working tree.
+//   - the discovery roots the binary names are `$CODEX_HOME/skills`, `$HOME/.agents/skills`, and
+//     `<project>/.codex/skills`. Only the first is projected into: the project root is rejected
+//     because it would dirty the operator's git working tree, and the HOME-level cross-agent root is
+//     shared with every other agent on the machine, so Barista enumerates it for collisions and
+//     writes nothing there.
 //
 // Nesting and precedence were both read from real output rather than assumed. With a skill at
 // `$CODEX_HOME/skills/coffee-shop-barista/<id>/SKILL.md`, `codex debug prompt-input 'hi'` lists it,
@@ -60,12 +71,18 @@ const maximumInventoryBytes = 4 << 20
 // pack-required run with a collision is refused rather than served an operator's skill under a Coffee
 // Shop skill's name.
 //
+// That same output is also where this version's skill locators changed shape: instead of one absolute
+// path per entry, the rendering declares a root table whose rows read "- `r0` = `/abs/skills/root`"
+// and gives each entry a locator relative to one of those aliases, with every root's symbolic links
+// already resolved. codexResolvedSkillPaths reads the table rather than the entry, so the
+// confirmation still compares absolute path against absolute path.
+//
 // The same command established that Codex keys a skill by the name its SKILL.md metadata declares,
 // not by the directory it occupies — the opposite of Claude. A directory named `dirname-alpha` whose
 // metadata declared `name: frontmatter-beta` was listed as `frontmatter-beta`.
 func codexManagedSkillsAdapter() packActivationAdapter {
 	return packActivationAdapter{
-		Surface: "$CODEX_HOME/skills/" + ManagedProjectionDirectory + " (managed, verified on codex-cli 0.147.0)",
+		Surface: "$CODEX_HOME/skills/" + ManagedProjectionDirectory + " (managed, verified on codex-cli 0.162.1)",
 		Shape:   ProjectionManaged,
 		Project: projectCodexManagedSkills,
 		Confirm: confirmCodexSkillDiscovery,
@@ -87,6 +104,18 @@ func codexSkillsRoot(environment []string) (string, error) {
 		return "", errors.New("the Codex configuration home is not an absolute path")
 	}
 	return filepath.Join(filepath.Clean(home), codexSkillsDirectory), nil
+}
+
+// codexAgentsSkillsRoot resolves the HOME-level cross-agent skills root the child will also read
+// skills from, exactly as Codex resolves it: from HOME alone, independently of CODEX_HOME. An absent
+// or relative HOME yields no root rather than a guessed one — the child resolves none either, so
+// there is nothing there to collide with.
+func codexAgentsSkillsRoot(environment []string) string {
+	home := environmentValue(environment, homeVariable)
+	if home == "" || !filepath.IsAbs(home) {
+		return ""
+	}
+	return filepath.Join(filepath.Clean(home), codexAgentsDirectory, codexSkillsDirectory)
 }
 
 func environmentValue(environment []string, name string) string {
@@ -141,7 +170,7 @@ func projectCodexManagedSkillsUnder(parent, root, established string, projection
 	slices.Sort(declared)
 	projection.SkillNames = declared
 
-	collisions, err := codexSkillCollisions(parent, root, declared)
+	collisions, err := codexSkillCollisions(parent, root, declared, projectionContext.Environment)
 	if err != nil {
 		return nil, err
 	}
@@ -188,15 +217,31 @@ func establishManagedProjection(parent, root string, pack ActivePack, establishe
 
 // codexSkillCollisions records every projected skill name Codex already offers from outside the
 // managed subtree, with the effective winner precedence verification established. For codex-cli
-// 0.147.0 that winner is unconfirmable — the CLI lists both colliding entries with no
+// 0.162.1 that winner is unconfirmable — the CLI lists both colliding entries with no
 // de-duplication and no visible precedence — so the winner is left empty and the caller treats the
 // run as unconfirmed discovery. Precedence is never assumed from ordering.
-func codexSkillCollisions(parent, root string, projected []string) ([]SkillCollision, error) {
-	offered, err := foreignSkillNames(parent, []string{root, managedTemporarySibling(parent)}, func(_ string, content []byte) string {
-		return frontMatterName(content)
-	})
+//
+// Both of the child's own HOME-resolvable discovery roots are enumerated, because a name offered from
+// either one is a name the run would be served under: the Codex skills root the projection lives in,
+// and the HOME-level cross-agent root Barista never writes to. A root that does not exist offers
+// nothing and is not an error; a root that cannot be read is, because an unreadable name is a name
+// Barista cannot prove does not collide.
+func codexSkillCollisions(parent, root string, projected []string, environment []string) ([]SkillCollision, error) {
+	excluded := []string{root, managedTemporarySibling(parent)}
+	offered, err := codexOfferedSkillNames(parent, excluded)
 	if err != nil {
-		return nil, packUnavailablef("the Codex skills root could not be enumerated for skill name collisions, so precedence is unconfirmed: %s", err.Error())
+		return nil, err
+	}
+	if agents := codexAgentsSkillsRoot(environment); agents != "" && filepath.Clean(agents) != filepath.Clean(parent) {
+		alsoOffered, agentsErr := codexOfferedSkillNames(agents, excluded)
+		if agentsErr != nil {
+			return nil, agentsErr
+		}
+		for name, path := range alsoOffered {
+			if _, seen := offered[name]; !seen {
+				offered[name] = path
+			}
+		}
 	}
 	collisions := make([]SkillCollision, 0, len(projected))
 	for _, name := range projected {
@@ -207,22 +252,85 @@ func codexSkillCollisions(parent, root string, projected []string) ([]SkillColli
 	return collisions, nil
 }
 
+// codexOfferedSkillNames enumerates one of the child's discovery roots by the name each document's
+// own metadata declares, because that is the key Codex offers a skill under.
+func codexOfferedSkillNames(root string, excluded []string) (map[string]string, error) {
+	offered, err := foreignSkillNames(root, excluded, func(_ string, content []byte) string {
+		return frontMatterName(content)
+	})
+	if err != nil {
+		return nil, packUnavailablef("the Codex skills root at %s could not be enumerated for skill name collisions, so precedence is unconfirmed: %s", root, err.Error())
+	}
+	return offered, nil
+}
+
 // confirmCodexSkillDiscovery asks the same executable the run will launch which skills it resolved,
-// using its own offline prompt-input rendering, and requires every projected SKILL.md's absolute
-// path to appear. Matching on the path rather than the name is what proves the file Barista wrote is
-// the file Codex resolved.
+// using its own offline prompt-input rendering, and requires every projected SKILL.md to appear as a
+// locator that resolves to the absolute path Barista wrote. Matching on the path rather than the name
+// is what proves the file Barista wrote is the file Codex resolved.
 func confirmCodexSkillDiscovery(ctx context.Context, projectionContext packProjectionContext, projection *PackProjection) error {
 	output, err := runVendorInventory(ctx, projectionContext, []string{"debug", "prompt-input", "list the available skills"})
 	if err != nil {
 		return packUnavailablef("the Codex CLI could not be asked whether it resolved the projected capability pack skills, so pack discovery is unconfirmed: %s", err.Error())
 	}
+	resolved := codexResolvedSkillPaths(output)
 	for _, skill := range projectionContext.Pack.Manifest.Skills {
 		path := filepath.Join(projection.Root, filepath.FromSlash(skill.Path))
-		if !strings.Contains(output, path) {
+		if _, found := resolved[codexCanonicalPath(path)]; !found {
 			return packUnavailablef("the Codex CLI did not resolve the projected capability pack skill at %s, so pack discovery is unconfirmed", path)
 		}
 	}
 	return nil
+}
+
+// codexSkillRootAliasPattern matches one row of the skill-root table codex-cli 0.162.1 renders above
+// its skill list, which binds a short alias to one absolute root: "- `r0` = `/abs/skills/root`". It is
+// deliberately not line-anchored: the rendering reaches Barista inside the CLI's own JSON, where the
+// row's line breaks are escaped rather than real.
+var codexSkillRootAliasPattern = regexp.MustCompile("- `([^`]+)` = `([^`]+)`")
+
+// codexSkillLocatorPattern matches the source locator each listed skill carries, which is either a
+// root-relative "(file: r0/a/b/SKILL.md)" or, for other locator kinds, something this confirmation
+// cannot resolve to a filesystem path and therefore does not count.
+var codexSkillLocatorPattern = regexp.MustCompile(`\(file: ([^)]+)\)`)
+
+// codexResolvedSkillPaths reads the rendering's own root table and reports the canonical absolute
+// path of every skill file it says it resolved. A locator whose alias the table does not bind, or
+// which resolves to no absolute path, is skipped rather than guessed at: it proves no skill was
+// resolved, which is exactly how an absent one is treated.
+func codexResolvedSkillPaths(output string) map[string]struct{} {
+	roots := map[string]string{}
+	for _, row := range codexSkillRootAliasPattern.FindAllStringSubmatch(output, -1) {
+		if filepath.IsAbs(row[2]) {
+			roots[row[1]] = row[2]
+		}
+	}
+	resolved := map[string]struct{}{}
+	for _, entry := range codexSkillLocatorPattern.FindAllStringSubmatch(output, -1) {
+		locator := strings.TrimSpace(entry[1])
+		if filepath.IsAbs(locator) {
+			resolved[codexCanonicalPath(locator)] = struct{}{}
+			continue
+		}
+		alias, relative, separated := strings.Cut(locator, "/")
+		root, bound := roots[alias]
+		if !separated || !bound {
+			continue
+		}
+		resolved[codexCanonicalPath(filepath.Join(root, filepath.FromSlash(relative)))] = struct{}{}
+	}
+	return resolved
+}
+
+// codexCanonicalPath spells a path the way codex-cli 0.162.1 reports its skill roots: with symbolic
+// links resolved. Both sides of the comparison pass through here, so a projection reached through a
+// symlinked path is still recognized as the one the CLI named. A path that cannot be resolved — it
+// may not exist, which is itself the answer — keeps its lexical spelling.
+func codexCanonicalPath(path string) string {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved
+	}
+	return filepath.Clean(path)
 }
 
 // runVendorInventory runs one vendor inventory command against the executable this run will launch.

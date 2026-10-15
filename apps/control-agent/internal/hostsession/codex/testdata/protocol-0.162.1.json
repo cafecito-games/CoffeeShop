@@ -1,7 +1,7 @@
 {
-  "version": "0.147.0",
-  "tag": "rust-v0.147.0",
-  "commit": "be6e8eac029b183056b7e4402879f15d2c85f61b",
+  "version": "0.162.1",
+  "tag": "rust-v0.162.1",
+  "commit": "092d3acd6bec3e3a14bdc7e7a2810ab628ab759d",
   "transport": "stdio-jsonl",
   "clientMethods": [
     "initialize",

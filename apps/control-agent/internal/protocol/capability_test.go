@@ -190,7 +190,7 @@ func TestExtractNormalizedVersionIsTheOneAnswerForReportedVersions(t *testing.T)
 	}{
 		// The two captures below are the exact bytes the released Claude Code and Codex CLIs print.
 		{output: "2.1.231 (Claude Code)\n", expected: "2.1.231"},
-		{output: "codex-cli 0.147.0\n", expected: "0.147.0"},
+		{output: "codex-cli 0.162.1\n", expected: "0.162.1"},
 		{output: "claude 2.1.3 (Claude Code)", expected: "2.1.3"},
 		{output: "0.2", expected: "0.2"},
 		// Malformed, absent, and prose-only outputs all resolve to "" — never to a partial version.

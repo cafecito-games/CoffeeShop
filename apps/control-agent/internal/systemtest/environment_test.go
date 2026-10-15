@@ -104,8 +104,8 @@ func prepare(m *testing.M) (int, error) {
 		return 0, fmt.Errorf("build versioned fake harness: %v\n%s", err, combined)
 	}
 	managedHarnessBinaries["2.0.15"] = versionB
-	managedCodexBinary = filepath.Join(buildDirectory, "fakeharness-codex-0.147.0")
-	codexVersionCommand := exec.Command("go", "build", "-ldflags", "-X 'main.codexNativeVersion=codex-cli 0.147.0'", "-o", managedCodexBinary, "./internal/systemtest/fakeharness")
+	managedCodexBinary = filepath.Join(buildDirectory, "fakeharness-codex-0.162.1")
+	codexVersionCommand := exec.Command("go", "build", "-ldflags", "-X 'main.codexNativeVersion=codex-cli 0.162.1'", "-o", managedCodexBinary, "./internal/systemtest/fakeharness")
 	codexVersionCommand.Dir = controlAgent
 	if combined, err := codexVersionCommand.CombinedOutput(); err != nil {
 		return 0, fmt.Errorf("build pinned Codex fake harness: %v\n%s", err, combined)

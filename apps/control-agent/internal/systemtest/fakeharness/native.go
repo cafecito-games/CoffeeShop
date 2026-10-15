@@ -102,9 +102,17 @@ func nativeSkillInventory(role string, arguments []string) (string, bool) {
 			home = filepath.Join(os.Getenv("HOME"), ".codex")
 		}
 		root := filepath.Join(home, "skills")
-		paths := skillDocumentPaths(root)
-		encoded, _ := json.Marshal(map[string]any{"skills": paths})
-		return string(encoded) + "\n", true
+		// The pinned Codex version renders a root table and names every resolved skill by a locator
+		// relative to one of its aliases, so the fake reports the projection it read that way too.
+		listing := "### Skill roots\n- `r0` = `" + root + "`\n### Available skills\n"
+		for _, path := range skillDocumentPaths(root) {
+			relative, err := filepath.Rel(root, path)
+			if err != nil {
+				continue
+			}
+			listing += "- " + filepath.Base(filepath.Dir(path)) + ": projected (file: " + filepath.ToSlash(filepath.Join("r0", relative)) + ")\n"
+		}
+		return listing, true
 	case "claude":
 		if len(arguments) != 5 || arguments[0] != "--plugin-dir" || arguments[2] != "plugin" || arguments[3] != "details" {
 			return "", false

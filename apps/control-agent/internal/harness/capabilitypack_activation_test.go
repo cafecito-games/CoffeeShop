@@ -55,19 +55,28 @@ func packFixture(t *testing.T) (ActivePack, []byte) {
 // TestDiscoveryConfirmersAcceptRealVendorOutput instead.
 func confirmingInventory(roots ...string) func(context.Context, string, []string) (string, error) {
 	return func(context.Context, string, []string) (string, error) {
-		var paths, names []string
-		for _, root := range roots {
+		var table, locators, names []string
+		for index, root := range roots {
+			alias := fmt.Sprintf("r%d", index)
+			table = append(table, fmt.Sprintf("- `%s` = `%s`", alias, root))
 			filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 				if err != nil || entry.IsDir() || entry.Name() != "SKILL.md" {
 					return nil
 				}
-				paths = append(paths, path)
+				relative, relativeErr := filepath.Rel(root, path)
+				if relativeErr != nil {
+					return nil
+				}
+				// The pinned Codex version names a resolved skill by a locator relative to one of the
+				// roots it declares, so the stand-in reports them that way too.
+				locators = append(locators, fmt.Sprintf("- %s: recorded (file: %s)", filepath.Base(filepath.Dir(path)), filepath.ToSlash(filepath.Join(alias, relative))))
 				names = append(names, filepath.Base(filepath.Dir(path)))
 				return nil
 			})
 		}
 		slices.Sort(names)
-		return fmt.Sprintf("Skills (%d)  %s\n%s\n", len(names), strings.Join(names, ", "), strings.Join(paths, "\n")), nil
+		return fmt.Sprintf("Skills (%d)  %s\n### Skill roots\n%s\n### Available skills\n%s\n",
+			len(names), strings.Join(names, ", "), strings.Join(table, "\n"), strings.Join(locators, "\n")), nil
 	}
 }
 
@@ -1112,7 +1121,7 @@ func TestPrecedenceCollisionRecordedAndUnconfirmableRefused(t *testing.T) {
 
 	t.Run("no collision", func(t *testing.T) {
 		_, _, skillsRoot := fakeVendorHome(t)
-		collisions, err := codexSkillCollisions(skillsRoot, filepath.Join(skillsRoot, ManagedProjectionDirectory), []string{"a name nobody offers"})
+		collisions, err := codexSkillCollisions(skillsRoot, filepath.Join(skillsRoot, ManagedProjectionDirectory), []string{"a name nobody offers"}, nil)
 		require.NoError(t, err)
 		require.Empty(t, collisions)
 	})
@@ -1121,7 +1130,7 @@ func TestPrecedenceCollisionRecordedAndUnconfirmableRefused(t *testing.T) {
 		_, _, skillsRoot := fakeVendorHome(t)
 		dataRoot := t.TempDir()
 		// The operator offers a skill under the same name Codex will key a projected skill by, from
-		// outside the managed subtree. Codex 0.147.0 lists both with no visible precedence.
+		// outside the managed subtree. Codex 0.162.1 lists both with no visible precedence.
 		require.NoError(t, os.MkdirAll(filepath.Join(skillsRoot, "their-own"), 0o755))
 		require.NoError(t, os.WriteFile(filepath.Join(skillsRoot, "their-own", "SKILL.md"),
 			[]byte("---\nname: "+names[colliding]+"\ndescription: The operator's own skill of the same name.\n---\n\nBody.\n"), 0o644))
@@ -1350,11 +1359,11 @@ func TestVendorSurfaceFixturesRecordTheVerifiedSurfaces(t *testing.T) {
 	require.Contains(t, string(help), "for this session only")
 	require.Contains(t, string(help), "repeatable")
 
-	// The claim "codex-cli 0.147.0 offers no skills configuration key" is held to the binary's own
+	// The claim "codex-cli 0.162.1 offers no skills configuration key" is held to the binary's own
 	// rejection of one.
 	codexVersion, err := os.ReadFile(filepath.Join("testdata", "codex-cli-version-output.txt"))
 	require.NoError(t, err)
-	require.Contains(t, string(codexVersion), "0.147.0")
+	require.Contains(t, string(codexVersion), "0.162.1")
 	rejection, err := os.ReadFile(filepath.Join("testdata", "codex-cli-skills-config-rejection.txt"))
 	require.NoError(t, err)
 	require.Contains(t, string(rejection), "unknown configuration field `skills.roots`")
@@ -1377,21 +1386,32 @@ func TestDiscoveryConfirmersAcceptRealVendorOutput(t *testing.T) {
 		&PackProjection{Root: "/recorded/root", SkillNames: inventory}))
 
 	// `codex debug prompt-input`, run against a managed projection of this very pack on the installed
-	// 0.147.0, byte-for-byte as the CLI printed it. The recorded projection root is the one the
-	// recording was made under, because the confirmation matches on the exact file paths.
+	// 0.162.1, byte-for-byte as the CLI printed it. This version names each skill by a locator
+	// relative to one of the root aliases the same rendering declares, so the recorded projection root
+	// is recovered through that table — exactly how the confirmation reads it, and the confirmation
+	// still matches on the exact file paths.
 	promptInput, err := os.ReadFile(filepath.Join("testdata", "codex-cli-prompt-input-output.json"))
 	require.NoError(t, err)
 	var rendered []map[string]any
 	require.NoError(t, json.Unmarshal(promptInput, &rendered), "the recording is the CLI's own JSON")
+	resolved := codexResolvedSkillPaths(string(promptInput))
+	require.NotEmpty(t, resolved, "the recording must declare the root table its locators resolve through")
 	recordedRoot := ""
 	for _, skill := range pack.Manifest.Skills {
-		marker := "/" + ManagedProjectionDirectory + "/" + skill.Path
-		index := strings.Index(string(promptInput), marker)
-		require.GreaterOrEqual(t, index, 0, "the recording must name the projected skill %s", skill.ID)
-		start := strings.LastIndex(string(promptInput)[:index], "(file: ") + len("(file: ")
-		recordedRoot = strings.TrimSuffix(string(promptInput)[start:index+len(marker)], "/"+skill.Path)
+		suffix := filepath.Join(ManagedProjectionDirectory, filepath.FromSlash(skill.Path))
+		found := ""
+		for path := range resolved {
+			if strings.HasSuffix(path, string(filepath.Separator)+suffix) {
+				found = strings.TrimSuffix(path, string(filepath.Separator)+filepath.FromSlash(skill.Path))
+			}
+		}
+		require.NotEmpty(t, found, "the recording must name the projected skill %s", skill.ID)
+		if recordedRoot != "" {
+			require.Equal(t, recordedRoot, found, "every projected skill was recorded under one root")
+		}
+		recordedRoot = found
 	}
-	require.NotEmpty(t, recordedRoot)
+	require.True(t, filepath.IsAbs(recordedRoot), "the root table resolves a locator to an absolute path")
 	require.NoError(t, confirmCodexSkillDiscovery(context.Background(),
 		packProjectionContext{Pack: pack, inventory: func(context.Context, string, []string) (string, error) {
 			return string(promptInput), nil
@@ -1405,6 +1425,69 @@ func TestDiscoveryConfirmersAcceptRealVendorOutput(t *testing.T) {
 		}}, &PackProjection{Root: recordedRoot})
 	require.Error(t, err)
 	require.True(t, isPackUnavailable(err))
+}
+
+// TestCodexDiscoveryResolvesLocatorsThroughTheRootTable covers the one thing the pinned version
+// changed about how a resolved skill is named: a locator is relative to an alias the same rendering
+// binds, so the confirmation is only a proof when it reads that table. A locator whose alias nothing
+// binds resolves to no path and confirms nothing, which is how an absent skill is already treated.
+func TestCodexDiscoveryResolvesLocatorsThroughTheRootTable(t *testing.T) {
+	pack, _ := packFixture(t)
+	root := filepath.Join(t.TempDir(), "skills", ManagedProjectionDirectory)
+	listing := "### Skill roots\n- `r0` = `" + filepath.Dir(root) + "`\n### Available skills\n"
+	for _, skill := range pack.Manifest.Skills {
+		listing += "- " + skill.ID + ": recorded (file: r0/" + ManagedProjectionDirectory + "/" + skill.Path + ")\n"
+	}
+	confirm := func(output string) error {
+		return confirmCodexSkillDiscovery(context.Background(),
+			packProjectionContext{Pack: pack, inventory: func(context.Context, string, []string) (string, error) {
+				return output, nil
+			}},
+			&PackProjection{Root: root})
+	}
+	require.NoError(t, confirm(listing))
+
+	// The identical listing with the table withheld names the same files and proves nothing.
+	unbound := listing[strings.Index(listing, "### Available skills"):]
+	err := confirm(unbound)
+	require.Error(t, err)
+	require.True(t, isPackUnavailable(err))
+
+	// An absolute locator, the shape earlier versions printed, is still read as the path it names.
+	absolute := "### Available skills\n"
+	for _, skill := range pack.Manifest.Skills {
+		absolute += "- " + skill.ID + ": recorded (file: " + filepath.Join(root, filepath.FromSlash(skill.Path)) + ")\n"
+	}
+	require.NoError(t, confirm(absolute))
+}
+
+// TestCodexCollisionsCoverTheHomeLevelAgentsRoot holds the second discovery root the pinned version
+// added: a name offered from $HOME/.agents/skills is a name the run would be served under, so it is
+// a collision even though Barista never projects there.
+func TestCodexCollisionsCoverTheHomeLevelAgentsRoot(t *testing.T) {
+	home := t.TempDir()
+	codexHome := filepath.Join(home, ".codex")
+	parent := filepath.Join(codexHome, "skills")
+	root := filepath.Join(parent, ManagedProjectionDirectory)
+	offering := filepath.Join(home, ".agents", "skills", "operator-own")
+	require.NoError(t, os.MkdirAll(root, 0o700))
+	require.NoError(t, os.MkdirAll(offering, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(offering, "SKILL.md"),
+		[]byte("---\nname: shared-skill-name\ndescription: An operator skill offered from the cross-agent root.\n---\n"), 0o600))
+
+	environment := []string{"HOME=" + home}
+	collisions, err := codexSkillCollisions(parent, root, []string{"shared-skill-name"}, environment)
+	require.NoError(t, err)
+	require.Len(t, collisions, 1)
+	require.Equal(t, "shared-skill-name", collisions[0].Name)
+	require.Equal(t, filepath.Join(offering, "SKILL.md"), collisions[0].Offered)
+	require.Empty(t, collisions[0].Winner, "the pinned version shows no confirmable precedence")
+
+	// Without a resolvable HOME there is no cross-agent root to read, and the Codex skills root alone
+	// offers the name nowhere.
+	collisions, err = codexSkillCollisions(parent, root, []string{"shared-skill-name"}, nil)
+	require.NoError(t, err)
+	require.Empty(t, collisions)
 }
 
 func TestProjectionMarkerLoaderAcceptsWhatTheWriterProduces(t *testing.T) {
@@ -1797,7 +1880,7 @@ func TestAdapterSurfacesNameThePinnedVendorVersions(t *testing.T) {
 
 // TestCodexCollisionRecordingShowsNoConfirmablePrecedence is the recording the refuse-on-collision
 // behavior rests on: with the same skill name offered from inside and from outside the managed
-// subtree, codex-cli 0.147.0 lists both entries, so no winner can be confirmed.
+// subtree, codex-cli 0.162.1 lists both entries, so no winner can be confirmed.
 func TestCodexCollisionRecordingShowsNoConfirmablePrecedence(t *testing.T) {
 	recorded, err := os.ReadFile(filepath.Join("testdata", "codex-cli-collision-precedence-output.txt"))
 	require.NoError(t, err)
